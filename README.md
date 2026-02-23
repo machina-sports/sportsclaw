@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.jpg" alt="SportsClaw" width="500">
+</p>
+
 # SportsClaw 🦞
 
 The maximally forkable sports AI agent framework. 
