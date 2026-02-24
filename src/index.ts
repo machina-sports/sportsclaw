@@ -35,12 +35,10 @@ import {
 export { SportsClawEngine } from "./engine.js";
 export {
   TOOL_SPECS,
+  ToolRegistry,
   executePythonBridge,
-  dispatchToolCall,
-  getAllToolSpecs,
-  injectSchema,
-  clearDynamicTools,
 } from "./tools.js";
+export type { ToolCallInput, ToolCallResult } from "./tools.js";
 export {
   fetchSportSchema,
   saveSchema,
@@ -289,6 +287,7 @@ function printHelp(): void {
   console.log("  SPORTSCLAW_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");
   console.log("  TELEGRAM_BOT_TOKEN      Telegram bot token (for listen telegram)");
+  console.log("  ALLOWED_USERS           Comma-separated user IDs for listener whitelist");
 }
 
 // ---------------------------------------------------------------------------

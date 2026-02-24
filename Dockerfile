@@ -28,6 +28,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Create Python virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 WORKDIR /app
 
 # ---------------------------------------------------------------------------
@@ -35,8 +39,7 @@ WORKDIR /app
 # ---------------------------------------------------------------------------
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && \
-    npm install discord.js
+RUN npm ci --omit=dev --include=optional
 
 COPY tsconfig.json ./
 COPY src/ ./src/
@@ -46,7 +49,7 @@ RUN npx tsc
 # Stage 2: Install Python sports-skills package
 # ---------------------------------------------------------------------------
 
-RUN pip3 install --break-system-packages sports-skills 2>/dev/null || \
+RUN pip install sports-skills 2>/dev/null || \
     echo "[sportsclaw] Warning: sports-skills not found on PyPI yet. Install manually."
 
 # ---------------------------------------------------------------------------

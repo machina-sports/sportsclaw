@@ -7,6 +7,7 @@
  * Environment:
  *   DISCORD_BOT_TOKEN    — Your Discord bot token
  *   ANTHROPIC_API_KEY    — Anthropic API key for the engine
+ *   ALLOWED_USERS        — Comma-separated Discord user IDs (optional whitelist)
  *
  * The bot responds to:
  *   - Direct mentions (@SportsClaw <question>)
@@ -14,8 +15,20 @@
  */
 
 import { SportsClawEngine } from "../engine.js";
+import { splitMessage } from "../utils.js";
 
 const PREFIX = "!claw";
+
+/** Parse ALLOWED_USERS env var into a Set of user IDs, or null if unset */
+function getAllowedUsers(): Set<string> | null {
+  const raw = process.env.ALLOWED_USERS;
+  if (!raw) return null;
+  const ids = raw
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return ids.length > 0 ? new Set(ids) : null;
+}
 
 export async function startDiscordListener(): Promise<void> {
   // Dynamic import — discord.js is an optional dependency
@@ -30,6 +43,20 @@ export async function startDiscordListener(): Promise<void> {
 
   const { Client, GatewayIntentBits, Partials } = Discord;
 
+  const allowedUsers = getAllowedUsers();
+  if (allowedUsers) {
+    console.log(
+      `[sportsclaw] User whitelist active: ${allowedUsers.size} user(s) allowed`
+    );
+  }
+
+  const engineConfig = {
+    ...(process.env.SPORTSCLAW_MODEL && {
+      model: process.env.SPORTSCLAW_MODEL,
+    }),
+    ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
+  };
+
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -40,19 +67,19 @@ export async function startDiscordListener(): Promise<void> {
     partials: [Partials.Channel],
   });
 
-  const engine = new SportsClawEngine({
-    ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
-    ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
-  });
-
   client.once("ready", () => {
     console.log(`[sportsclaw] Discord bot connected as ${client.user?.tag}`);
-    console.log(`[sportsclaw] Listening for "${PREFIX}" commands and mentions.`);
+    console.log(
+      `[sportsclaw] Listening for "${PREFIX}" commands and mentions.`
+    );
   });
 
   client.on("messageCreate", async (message) => {
     // Ignore bots
     if (message.author.bot) return;
+
+    // Check user whitelist
+    if (allowedUsers && !allowedUsers.has(message.author.id)) return;
 
     let prompt: string | null = null;
 
@@ -74,7 +101,8 @@ export async function startDiscordListener(): Promise<void> {
       // Show typing indicator
       await message.channel.sendTyping();
 
-      engine.reset();
+      // Fresh engine per request — avoids shared-state race conditions
+      const engine = new SportsClawEngine(engineConfig);
       const response = await engine.run(prompt);
 
       // Discord has a 2000 char limit — split if needed
@@ -85,29 +113,11 @@ export async function startDiscordListener(): Promise<void> {
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[sportsclaw] Discord error: ${errMsg}`);
-      await message.reply("Sorry, I encountered an error processing your request.");
+      await message.reply(
+        "Sorry, I encountered an error processing your request."
+      );
     }
   });
 
   await client.login(process.env.DISCORD_BOT_TOKEN);
-}
-
-/** Split a message into chunks that fit Discord's character limit */
-function splitMessage(text: string, maxLen: number): string[] {
-  if (text.length <= maxLen) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
-      chunks.push(remaining);
-      break;
-    }
-    // Try to split at a newline
-    let splitIdx = remaining.lastIndexOf("\n", maxLen);
-    if (splitIdx <= 0) splitIdx = maxLen;
-    chunks.push(remaining.slice(0, splitIdx));
-    remaining = remaining.slice(splitIdx).trimStart();
-  }
-  return chunks;
 }

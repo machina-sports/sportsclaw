@@ -20,13 +20,7 @@ import {
   type ToolResultBlockParam,
   type TurnResult,
 } from "./types.js";
-import {
-  getAllToolSpecs,
-  injectSchema,
-  clearDynamicTools,
-  dispatchToolCall,
-  type ToolCallInput,
-} from "./tools.js";
+import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { loadAllSchemas } from "./schema.js";
 
 // ---------------------------------------------------------------------------
@@ -64,22 +58,23 @@ export class SportsClawEngine {
   private client: Anthropic;
   private config: Required<SportsClawConfig>;
   private messages: Message[] = [];
+  private registry: ToolRegistry;
 
   constructor(config?: Partial<SportsClawConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
     this.client = new Anthropic();
+    this.registry = new ToolRegistry();
     this.loadDynamicSchemas();
   }
 
   /**
-   * Load all saved sport schemas from disk and inject them into the tool
-   * registry so the LLM can call sport-specific tools directly.
+   * Load all saved sport schemas from disk and inject them into this engine's
+   * tool registry so the LLM can call sport-specific tools directly.
    */
   private loadDynamicSchemas(): void {
-    clearDynamicTools();
     const schemas = loadAllSchemas();
     for (const schema of schemas) {
-      injectSchema(schema);
+      this.registry.injectSchema(schema);
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] loaded schema: ${schema.sport} (${schema.tools.length} tools)`
@@ -93,7 +88,7 @@ export class SportsClawEngine {
     const parts = [BASE_SYSTEM_PROMPT];
 
     // List available tools for the LLM
-    const allSpecs = getAllToolSpecs();
+    const allSpecs = this.registry.getAllToolSpecs();
     const toolNames = allSpecs.map((s) => s.name);
     if (toolNames.length > 1) {
       parts.push(
@@ -112,7 +107,7 @@ export class SportsClawEngine {
 
   /** Anthropic tool definitions in the format the API expects */
   private get tools(): Anthropic.Tool[] {
-    return getAllToolSpecs().map((spec) => ({
+    return this.registry.getAllToolSpecs().map((spec) => ({
       name: spec.name,
       description: spec.description,
       input_schema: spec.input_schema,
@@ -172,7 +167,7 @@ export class SportsClawEngine {
         );
       }
 
-      const result = await dispatchToolCall(
+      const result = await this.registry.dispatchToolCall(
         toolUse.name,
         toolUse.input as ToolCallInput,
         this.config
