@@ -13,7 +13,7 @@ SportsClaw is a lightweight execution loop designed specifically for building re
 Instead of relying on complex abstraction layers, SportsClaw focuses on executing deterministic primitives (`sports-skills`) and strict instructional guardrails to ensure agents report exact, hallucination-free sports information.
 
 ### Inspiration
-SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/anthropics/nanoclaw) and [pi.dev](https://pi.dev) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
+SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/anthropics/nanoclaw), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
 
 ### Core Focus
 * **Sports-First:** Built from the ground up to handle the unique challenges of real-time sports data and betting markets.
