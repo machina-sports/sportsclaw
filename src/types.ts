@@ -4,14 +4,28 @@
  * Shared types for the agent execution loop, tool bridge, and configuration.
  */
 
-import type Anthropic from "@anthropic-ai/sdk";
+import type { ModelMessage } from "ai";
+
+// ---------------------------------------------------------------------------
+// Supported LLM providers
+// ---------------------------------------------------------------------------
+
+export type LLMProvider = "anthropic" | "openai" | "google";
+
+export const DEFAULT_MODELS: Record<LLMProvider, string> = {
+  anthropic: "claude-sonnet-4-20250514",
+  openai: "gpt-4o",
+  google: "gemini-2.5-pro",
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 export interface SportsClawConfig {
-  /** Anthropic model to use (default: claude-sonnet-4-20250514) */
+  /** LLM provider to use (default: anthropic) */
+  provider?: LLMProvider;
+  /** Model ID for the chosen provider (default: depends on provider) */
   model?: string;
   /** Maximum agentic turns before the loop halts (default: 25) */
   maxTurns?: number;
@@ -30,6 +44,7 @@ export interface SportsClawConfig {
 }
 
 export const DEFAULT_CONFIG: Required<SportsClawConfig> = {
+  provider: "anthropic",
   model: "claude-sonnet-4-20250514",
   maxTurns: 25,
   maxTokens: 4096,
@@ -47,7 +62,7 @@ export const DEFAULT_CONFIG: Required<SportsClawConfig> = {
 export interface ToolSpec {
   name: string;
   description: string;
-  input_schema: Anthropic.Tool["input_schema"];
+  input_schema: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,10 +81,7 @@ export interface PythonBridgeResult {
 // Conversation / Turn types
 // ---------------------------------------------------------------------------
 
-export type Message = Anthropic.MessageParam;
-export type ContentBlock = Anthropic.ContentBlock;
-export type ToolUseBlock = Anthropic.ToolUseBlock;
-export type ToolResultBlockParam = Anthropic.ToolResultBlockParam;
+export type Message = ModelMessage;
 
 export interface TurnResult {
   /** Whether the agent has finished (no more tool calls pending) */

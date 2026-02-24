@@ -22,17 +22,32 @@
     "docker:build": "docker build -t sportsclaw .",
     "docker:run": "docker run --rm --env-file .env sportsclaw"
   },
-  "keywords": ["sports", "ai", "agent", "llm", "anthropic", "discord", "telegram"],
+  "keywords": [
+    "sports",
+    "ai",
+    "agent",
+    "llm",
+    "anthropic",
+    "openai",
+    "google",
+    "gemini",
+    "multi-model",
+    "discord",
+    "telegram"
+  ],
   "author": "Machina Sports",
   "license": "MIT",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
-  },
   "optionalDependencies": {
     "discord.js": "^14.16.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.46",
+    "@ai-sdk/google": "^3.0.30",
+    "@ai-sdk/openai": "^3.0.31",
+    "ai": "^6.0.97"
   }
 }

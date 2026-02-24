@@ -27,6 +27,17 @@ import {
   bootstrapDefaultSchemas,
   DEFAULT_SKILLS,
 } from "./schema.js";
+import type { LLMProvider } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Provider ↔ API key env var mapping
+// ---------------------------------------------------------------------------
+
+const PROVIDER_API_KEY_ENV: Record<LLMProvider, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
+};
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -49,6 +60,7 @@ export {
   DEFAULT_SKILLS,
 } from "./schema.js";
 export type {
+  LLMProvider,
   SportsClawConfig,
   ToolSpec,
   PythonBridgeResult,
@@ -186,8 +198,10 @@ async function cmdListen(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("Error: ANTHROPIC_API_KEY environment variable is required.");
+  const provider = (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider;
+  const envVar = PROVIDER_API_KEY_ENV[provider];
+  if (envVar && !process.env[envVar]) {
+    console.error(`Error: ${envVar} environment variable is required for provider "${provider}".`);
     process.exit(1);
   }
 
@@ -226,15 +240,18 @@ async function cmdQuery(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("Error: ANTHROPIC_API_KEY environment variable is required.");
-    console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+  const provider = (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider;
+  const envVar = PROVIDER_API_KEY_ENV[provider];
+  if (envVar && !process.env[envVar]) {
+    console.error(`Error: ${envVar} environment variable is required for provider "${provider}".`);
+    console.error(`Set it with: export ${envVar}=<your-key>`);
     process.exit(1);
   }
 
   await ensureDefaultSchemas();
 
   const engine = new SportsClawEngine({
+    provider,
     ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
     verbose,
@@ -281,8 +298,11 @@ function printHelp(): void {
   console.log("  --help, -h       Show this help message");
   console.log("");
   console.log("Environment:");
-  console.log("  ANTHROPIC_API_KEY       Your Anthropic API key (required for queries)");
-  console.log("  SPORTSCLAW_MODEL        Model override (default: claude-sonnet-4-20250514)");
+  console.log("  SPORTSCLAW_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
+  console.log("  SPORTSCLAW_MODEL        Model override (default: depends on provider)");
+  console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
+  console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
+  console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
   console.log("  PYTHON_PATH             Path to Python interpreter (default: python3)");
   console.log("  SPORTSCLAW_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");

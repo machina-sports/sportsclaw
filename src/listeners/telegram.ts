@@ -6,7 +6,8 @@
  *
  * Environment:
  *   TELEGRAM_BOT_TOKEN   — Your Telegram bot token (from @BotFather)
- *   ANTHROPIC_API_KEY    — Anthropic API key for the engine
+ *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
+ *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
  *   ALLOWED_USERS        — Comma-separated Telegram user IDs (optional whitelist)
  *
  * The bot responds to all text messages sent to it (1:1 or in groups when
@@ -14,7 +15,7 @@
  */
 
 import { SportsClawEngine } from "../engine.js";
-import type { SportsClawConfig } from "../types.js";
+import type { LLMProvider, SportsClawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
 
 const COMMAND_PREFIX = "/claw";
@@ -62,6 +63,7 @@ export async function startTelegramListener(): Promise<void> {
   }
 
   const engineConfig: Partial<SportsClawConfig> = {
+    provider: (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider,
     ...(process.env.SPORTSCLAW_MODEL && {
       model: process.env.SPORTSCLAW_MODEL,
     }),
