@@ -6,7 +6,8 @@
  *
  * Environment:
  *   DISCORD_BOT_TOKEN    — Your Discord bot token
- *   ANTHROPIC_API_KEY    — Anthropic API key for the engine
+ *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
+ *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
  *   ALLOWED_USERS        — Comma-separated Discord user IDs (optional whitelist)
  *
  * The bot responds to:
@@ -15,6 +16,7 @@
  */
 
 import { SportsClawEngine } from "../engine.js";
+import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
 
 const PREFIX = "!claw";
@@ -51,6 +53,7 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   const engineConfig = {
+    provider: (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider,
     ...(process.env.SPORTSCLAW_MODEL && {
       model: process.env.SPORTSCLAW_MODEL,
     }),

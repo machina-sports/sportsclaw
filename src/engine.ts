@@ -1,24 +1,32 @@
 /**
  * SportsClaw Engine — Core Agent Execution Loop
  *
- * A lightweight (~500 line total) agentic loop that:
- *   1. Sends user messages + tool definitions to Claude
- *   2. Intercepts tool_use blocks from the response
- *   3. Executes them via the Python subprocess bridge
- *   4. Feeds tool_result blocks back to Claude
- *   5. Repeats until the model emits end_turn or max turns is reached
+ * A lightweight agentic loop that:
+ *   1. Sends user messages + tool definitions to the LLM
+ *   2. Lets the Vercel AI SDK handle tool execution automatically
+ *   3. Routes tool calls through the Python subprocess bridge
+ *   4. Supports Anthropic, OpenAI, and Google Gemini via a single interface
  *
  * No heavy frameworks. No LangChain. No CrewAI. Just a clean loop.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import {
+  generateText,
+  tool as defineTool,
+  jsonSchema,
+  stepCountIs,
+  type ToolSet,
+} from "ai";
+import { anthropic } from "@ai-sdk/anthropic";
+import { openai } from "@ai-sdk/openai";
+import { google } from "@ai-sdk/google";
+
 import {
   DEFAULT_CONFIG,
+  DEFAULT_MODELS,
+  type LLMProvider,
   type SportsClawConfig,
   type Message,
-  type ToolUseBlock,
-  type ToolResultBlockParam,
-  type TurnResult,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { loadAllSchemas } from "./schema.js";
@@ -50,19 +58,42 @@ function filterDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   return result;
 }
 
+/** Create a Vercel AI SDK model instance for the given provider + model ID */
+function resolveModel(provider: LLMProvider, modelId: string) {
+  switch (provider) {
+    case "anthropic":
+      return anthropic(modelId);
+    case "openai":
+      return openai(modelId);
+    case "google":
+      return google(modelId);
+    default:
+      throw new Error(
+        `Unsupported provider: "${provider}". Use "anthropic", "openai", or "google".`
+      );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
 export class SportsClawEngine {
-  private client: Anthropic;
+  private model: ReturnType<typeof resolveModel>;
   private config: Required<SportsClawConfig>;
   private messages: Message[] = [];
   private registry: ToolRegistry;
 
   constructor(config?: Partial<SportsClawConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
-    this.client = new Anthropic();
+    const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
+
+    // If provider changed but model was not explicitly set, use the provider's default
+    if (config?.provider && !config?.model) {
+      merged.model = DEFAULT_MODELS[merged.provider] ?? DEFAULT_CONFIG.model;
+    }
+
+    this.config = merged;
+    this.model = resolveModel(this.config.provider, this.config.model);
     this.registry = new ToolRegistry();
     this.loadDynamicSchemas();
   }
@@ -105,13 +136,44 @@ export class SportsClawEngine {
     return parts.join("\n");
   }
 
-  /** Anthropic tool definitions in the format the API expects */
-  private get tools(): Anthropic.Tool[] {
-    return this.registry.getAllToolSpecs().map((spec) => ({
-      name: spec.name,
-      description: spec.description,
-      input_schema: spec.input_schema,
-    }));
+  /** Build the Vercel AI SDK tool map from our registry */
+  private buildTools(): ToolSet {
+    const toolMap: ToolSet = {};
+    const config = this.config;
+    const registry = this.registry;
+    const verbose = this.config.verbose;
+
+    for (const spec of registry.getAllToolSpecs()) {
+      toolMap[spec.name] = defineTool({
+        description: spec.description,
+        inputSchema: jsonSchema(spec.input_schema),
+        execute: async (args: Record<string, unknown>) => {
+          if (verbose) {
+            console.error(
+              `[sportsclaw] tool_call: ${spec.name}(${JSON.stringify(args)})`
+            );
+          }
+
+          const result = await registry.dispatchToolCall(
+            spec.name,
+            args as ToolCallInput,
+            config
+          );
+
+          if (verbose) {
+            const preview =
+              result.content.length > 200
+                ? result.content.slice(0, 200) + "..."
+                : result.content;
+            console.error(`[sportsclaw] tool_result: ${preview}`);
+          }
+
+          return result.content;
+        },
+      });
+    }
+
+    return toolMap;
   }
 
   /** Reset conversation history */
@@ -125,116 +187,52 @@ export class SportsClawEngine {
   }
 
   /**
-   * Run a single API call → tool execution → result cycle.
-   * Returns whether the agent is done and any text produced.
-   */
-  private async executeTurn(): Promise<TurnResult> {
-    const response = await this.client.messages.create({
-      model: this.config.model,
-      max_tokens: this.config.maxTokens,
-      system: this.systemPrompt,
-      tools: this.tools,
-      messages: this.messages,
-    });
-
-    // Collect text and tool_use blocks from the response
-    let text = "";
-    const toolUseBlocks: ToolUseBlock[] = [];
-
-    for (const block of response.content) {
-      if (block.type === "text") {
-        text += block.text;
-      } else if (block.type === "tool_use") {
-        toolUseBlocks.push(block);
-      }
-    }
-
-    // Append assistant message to history
-    this.messages.push({ role: "assistant", content: response.content });
-
-    // If no tool calls, we're done
-    if (toolUseBlocks.length === 0) {
-      return { done: true, text, toolCalls: 0 };
-    }
-
-    // Execute each tool call and collect results
-    const toolResults: ToolResultBlockParam[] = [];
-
-    for (const toolUse of toolUseBlocks) {
-      if (this.config.verbose) {
-        console.error(
-          `[sportsclaw] tool_call: ${toolUse.name}(${JSON.stringify(toolUse.input)})`
-        );
-      }
-
-      const result = await this.registry.dispatchToolCall(
-        toolUse.name,
-        toolUse.input as ToolCallInput,
-        this.config
-      );
-
-      if (this.config.verbose) {
-        const preview =
-          result.content.length > 200
-            ? result.content.slice(0, 200) + "..."
-            : result.content;
-        console.error(`[sportsclaw] tool_result: ${preview}`);
-      }
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: toolUse.id,
-        content: result.content,
-        ...(result.isError && { is_error: true }),
-      });
-    }
-
-    // Append tool results as a user message
-    this.messages.push({ role: "user", content: toolResults });
-
-    // Always continue after tool execution so the model can process results
-    return { done: false, text, toolCalls: toolUseBlocks.length };
-  }
-
-  /**
    * Run the full agent loop for a user prompt.
    *
    * Sends the prompt to the LLM, executes any tool calls, and continues
-   * until the model produces a final text response or maxTurns is hit.
+   * until the model produces a final text response or maxSteps is hit.
    *
    * Returns the final assistant text.
    */
   async run(userPrompt: string): Promise<string> {
     this.messages.push({ role: "user", content: userPrompt });
 
-    let totalText = "";
-    let turns = 0;
+    let stepCount = 0;
 
-    while (turns < this.config.maxTurns) {
-      turns++;
-
-      if (this.config.verbose) {
-        console.error(`[sportsclaw] --- turn ${turns} ---`);
-      }
-
-      const result = await this.executeTurn();
-      totalText += result.text;
-
-      if (result.done) {
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.messages,
+      tools: this.buildTools(),
+      stopWhen: stepCountIs(this.config.maxTurns),
+      maxOutputTokens: this.config.maxTokens,
+      onStepFinish: ({ toolCalls }) => {
+        stepCount++;
         if (this.config.verbose) {
           console.error(
-            `[sportsclaw] done after ${turns} turn(s), ${result.toolCalls} tool call(s) this turn`
+            `[sportsclaw] --- step ${stepCount} --- (${toolCalls.length} tool call(s))`
           );
         }
-        return totalText;
-      }
+      },
+    });
+
+    // Append the full response messages to our history for multi-turn support
+    for (const msg of result.response.messages) {
+      this.messages.push(msg as Message);
     }
 
-    // Max turns reached — return what we have
-    console.error(
-      `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
-    );
-    return totalText || "[SportsClaw] Max turns reached without a final response.";
+    if (this.config.verbose) {
+      console.error(`[sportsclaw] done after ${stepCount} step(s)`);
+    }
+
+    if (stepCount >= this.config.maxTurns && !result.text) {
+      console.error(
+        `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
+      );
+      return "[SportsClaw] Max turns reached without a final response.";
+    }
+
+    return result.text || "[SportsClaw] No response generated.";
   }
 
   /**
