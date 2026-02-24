@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import pc from "picocolors";
 import * as p from "@clack/prompts";
 import type { LLMProvider } from "./types.js";
 
@@ -107,6 +108,17 @@ export function applyConfigToEnv(): ResolvedConfig {
 // ---------------------------------------------------------------------------
 
 export async function runConfigFlow(): Promise<CLIConfig> {
+  
+const ASCII_LOGO = `
+   _____                  __       ________               
+  / ___/____  ____  _____/ /______/ ____/ /___ __      __
+  \\__ \\/ __ \\/ __ \\/ ___/ __/ ___/ /   / / __ \`/ | /| / /
+ ___/ / /_/ / /_/ / /  / /_(__  ) /___/ / /_/ /| |/ |/ / 
+/____/ .___/\\____/_/   \\__/____/\\____/_/\\__,_/ |__/|__/  
+    /_/                                                  
+`;
+
+  console.log(pc.bold(pc.blue(ASCII_LOGO)));
   p.intro("SportsClaw Configuration");
 
   const provider = await p.select({
