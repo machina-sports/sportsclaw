@@ -57,6 +57,13 @@ RUN pip3 install --break-system-packages sports-skills 2>/dev/null || \
 ENV SPORTSCLAW_SCHEMA_DIR=/app/.sportsclaw/schemas
 RUN mkdir -p /app/.sportsclaw/schemas
 
+# ---------------------------------------------------------------------------
+# Bootstrap: pre-load all 14 default sport schemas into the image
+# ---------------------------------------------------------------------------
+
+RUN node dist/index.js init --verbose 2>&1 || \
+    echo "[sportsclaw] Warning: schema bootstrap incomplete. Some skills may need manual setup."
+
 # The entrypoint is the sportsclaw CLI
 ENTRYPOINT ["node", "dist/index.js"]
 

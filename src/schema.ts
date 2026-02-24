@@ -26,6 +26,28 @@ import type { SportSchema, SportsClawConfig } from "./types.js";
 import { buildSubprocessEnv } from "./tools.js";
 
 // ---------------------------------------------------------------------------
+// Default skills — the 14 sports-skills that ship with SportsClaw
+// See https://sports-skills.sh
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_SKILLS = [
+  "football-data",
+  "nfl-data",
+  "nba-data",
+  "nhl-data",
+  "mlb-data",
+  "wnba-data",
+  "tennis-data",
+  "cfb-data",
+  "cbb-data",
+  "golf-data",
+  "fastf1",
+  "kalshi",
+  "polymarket",
+  "sports-news",
+] as const;
+
+// ---------------------------------------------------------------------------
 // Schema directory management
 // ---------------------------------------------------------------------------
 
@@ -173,4 +195,57 @@ export function listSchemas(): string[] {
   return readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => f.replace(".json", ""));
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap default schemas
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch and save schemas for all 14 default sports-skills.
+ *
+ * By default, skips skills that already have a schema on disk.
+ * Pass `force: true` to re-fetch everything (useful for upgrades).
+ *
+ * Returns the number of schemas successfully installed (including
+ * previously existing ones that were skipped).
+ */
+export async function bootstrapDefaultSchemas(
+  config?: Partial<SportsClawConfig>,
+  options?: { verbose?: boolean; force?: boolean }
+): Promise<number> {
+  const verbose = options?.verbose ?? false;
+  const force = options?.force ?? false;
+  const existing = new Set(listSchemas());
+  let succeeded = 0;
+
+  for (const skill of DEFAULT_SKILLS) {
+    if (!force && existing.has(skill)) {
+      if (verbose) {
+        console.error(`[sportsclaw] skip: "${skill}" already installed`);
+      }
+      succeeded++;
+      continue;
+    }
+
+    try {
+      if (verbose) {
+        console.error(`[sportsclaw] fetching: ${skill}...`);
+      }
+      const schema = await fetchSportSchema(skill, config);
+      saveSchema(schema);
+      succeeded++;
+      if (verbose) {
+        console.error(
+          `[sportsclaw] installed: ${skill} (${schema.tools.length} tools)`
+        );
+      }
+    } catch {
+      console.error(
+        `[sportsclaw] warning: could not fetch schema for "${skill}"`
+      );
+    }
+  }
+
+  return succeeded;
 }

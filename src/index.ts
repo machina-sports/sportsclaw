@@ -6,6 +6,7 @@
  *   sportsclaw add <sport>       — Inject a sport schema from the Python package
  *   sportsclaw remove <sport>    — Remove a previously added sport schema
  *   sportsclaw list              — List all installed sport schemas
+ *   sportsclaw init              — Bootstrap all 14 default sport schemas
  *   sportsclaw listen <platform> — Start a Discord or Telegram listener
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
@@ -23,6 +24,8 @@ import {
   removeSchema,
   listSchemas,
   getSchemaDir,
+  bootstrapDefaultSchemas,
+  DEFAULT_SKILLS,
 } from "./schema.js";
 
 // ---------------------------------------------------------------------------
@@ -44,6 +47,8 @@ export {
   removeSchema,
   listSchemas,
   loadAllSchemas,
+  bootstrapDefaultSchemas,
+  DEFAULT_SKILLS,
 } from "./schema.js";
 export type {
   SportsClawConfig,
@@ -126,6 +131,53 @@ function cmdList(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw init`
+// ---------------------------------------------------------------------------
+
+async function cmdInit(args: string[]): Promise<void> {
+  const verbose = args.includes("--verbose") || args.includes("-v");
+  const pythonPath = process.env.PYTHON_PATH || "python3";
+
+  console.log(
+    `Bootstrapping ${DEFAULT_SKILLS.length} default sport schemas...`
+  );
+
+  const count = await bootstrapDefaultSchemas(
+    { pythonPath },
+    { verbose, force: true }
+  );
+
+  console.log(
+    `Done. ${count}/${DEFAULT_SKILLS.length} schemas installed in ${getSchemaDir()}`
+  );
+
+  if (count < DEFAULT_SKILLS.length) {
+    console.log(
+      "Some schemas could not be fetched. Ensure sports-skills is up to date:"
+    );
+    console.log("  pip install --upgrade sports-skills");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-bootstrap: ensure default schemas are present on first use
+// ---------------------------------------------------------------------------
+
+async function ensureDefaultSchemas(): Promise<void> {
+  const installed = listSchemas();
+  if (installed.length > 0) return; // schemas already exist
+
+  console.error(
+    "[sportsclaw] No sport schemas found. Bootstrapping defaults..."
+  );
+  const pythonPath = process.env.PYTHON_PATH || "python3";
+  const count = await bootstrapDefaultSchemas({ pythonPath });
+  console.error(
+    `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw listen <platform>`
 // ---------------------------------------------------------------------------
 
@@ -140,6 +192,8 @@ async function cmdListen(args: string[]): Promise<void> {
     console.error("Error: ANTHROPIC_API_KEY environment variable is required.");
     process.exit(1);
   }
+
+  await ensureDefaultSchemas();
 
   if (platform === "discord") {
     if (!process.env.DISCORD_BOT_TOKEN) {
@@ -180,6 +234,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  await ensureDefaultSchemas();
+
   const engine = new SportsClawEngine({
     ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
@@ -210,10 +266,17 @@ function printHelp(): void {
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
-  console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl, nba)");
+  console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
+  console.log("  sportsclaw init                    Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
+  console.log("");
+  console.log("Default skills (auto-loaded on first use):");
+  console.log("  football-data, nfl-data, nba-data, nhl-data, mlb-data, wnba-data,");
+  console.log("  tennis-data, cfb-data, cbb-data, golf-data, fastf1, kalshi,");
+  console.log("  polymarket, sports-news");
+  console.log("  See https://sports-skills.sh for details.");
   console.log("");
   console.log("Options:");
   console.log("  --verbose, -v    Enable verbose logging");
@@ -250,6 +313,8 @@ async function main(): Promise<void> {
       return cmdRemove(subArgs);
     case "list":
       return cmdList();
+    case "init":
+      return cmdInit(subArgs);
     case "listen":
       return cmdListen(subArgs);
     default:
