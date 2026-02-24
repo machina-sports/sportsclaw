@@ -123,10 +123,12 @@ export class ToolRegistry {
       }
 
       const existingIdx = this.dynamicSpecs.findIndex((s) => s.name === tool.name);
+      // Support both Vercel-compatible `parameters` and legacy `input_schema`
+      const schemaObj = tool.parameters ?? tool.input_schema ?? {};
       const spec: ToolSpec = {
         name: tool.name,
         description: tool.description,
-        input_schema: tool.input_schema as ToolSpec["input_schema"],
+        input_schema: schemaObj as ToolSpec["input_schema"],
       };
 
       if (existingIdx >= 0) {

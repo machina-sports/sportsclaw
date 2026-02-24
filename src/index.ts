@@ -279,7 +279,7 @@ async function cmdQuery(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function printHelp(): void {
-  console.log("SportsClaw Engine v0.2.0");
+  console.log("SportsClaw Engine v0.4.0");
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
