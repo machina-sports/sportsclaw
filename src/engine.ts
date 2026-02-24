@@ -7,7 +7,7 @@
  *   3. Routes tool calls through the Python subprocess bridge
  *   4. Supports Anthropic, OpenAI, and Google Gemini via a single interface
  *
- * No heavy frameworks. No LangChain. No CrewAI. Just a clean loop.
+ * No heavy frameworks. Just a clean loop.
  */
 
 import {

@@ -11,7 +11,7 @@ A lean, high-performance sports AI agent framework.
 
 ### What is SportsClaw?
 
-SportsClaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No LangChain. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
+SportsClaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No heavy frameworks. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
 
 ### What can you build with it?
 
@@ -26,7 +26,7 @@ SportsClaw gives you a working sports AI agent in minutes. Here's what people bu
 
 ### Why SportsClaw?
 
-**It skips the framework tax.** Most AI agent frameworks (LangChain, CrewAI, etc.) add thousands of lines of abstraction between your prompt and the data. SportsClaw is ~500 lines of TypeScript. The entire execution loop fits in your head.
+**It skips the framework tax.** Most AI agent frameworks add thousands of lines of abstraction between your prompt and the data. SportsClaw is ~500 lines of TypeScript. The entire execution loop fits in your head.
 
 **Data comes from Python, not the LLM.** SportsClaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
