@@ -11,7 +11,7 @@ A lean, high-performance sports AI agent framework.
 
 ### What is SportsClaw?
 
-SportsClaw is a lightweight execution loop that connects Claude directly to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. No LangChain. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
+SportsClaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No LangChain. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
 
 ### What can you build with it?
 
@@ -30,14 +30,14 @@ SportsClaw gives you a working sports AI agent in minutes. Here's what people bu
 
 **Data comes from Python, not the LLM.** SportsClaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
-**Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` for Claude, but every sports data skill works out of the box — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
+**Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY`) for the reasoning model, but every sports data skill works completely out of the box with zero API keys required for the data layer — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
 
 **Working agent in 5 minutes.** Install, set one env var, run a query:
 
 ```bash
 npm install sportsclaw-engine-core
 pip install sports-skills
-export ANTHROPIC_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 
 sportsclaw "What are today's NFL scores?"
 ```
@@ -55,7 +55,7 @@ const answer = await engine.run("Who leads the Premier League?");
 
 ```bash
 docker build -t sportsclaw .
-docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"
+docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"  # or pass OPENAI_API_KEY / GEMINI_API_KEY
 ```
 
 ### When should you use it?
