@@ -79,3 +79,22 @@ export interface TurnResult {
   /** Number of tool calls executed this turn */
   toolCalls: number;
 }
+
+// ---------------------------------------------------------------------------
+// Schema injection types (Phase 3)
+// ---------------------------------------------------------------------------
+
+/** Schema returned by `python3 -m sports_skills <sport> schema` */
+export interface SportSchema {
+  sport: string;
+  version?: string;
+  tools: SportToolDef[];
+}
+
+/** A single tool definition within a sport schema */
+export interface SportToolDef {
+  name: string;
+  description: string;
+  command: string;
+  input_schema: Record<string, unknown>;
+}

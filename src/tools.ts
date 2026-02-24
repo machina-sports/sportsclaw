@@ -10,10 +10,15 @@
  */
 
 import { execFile } from "node:child_process";
-import type { ToolSpec, PythonBridgeResult, SportsClawConfig } from "./types.js";
+import type {
+  ToolSpec,
+  PythonBridgeResult,
+  SportsClawConfig,
+  SportSchema,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Tool catalogue — these are the tools exposed to the LLM
+// Tool catalogue — these are the built-in tools exposed to the LLM
 // ---------------------------------------------------------------------------
 
 export const TOOL_SPECS: ToolSpec[] = [
@@ -58,6 +63,58 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Dynamic tool registry (Phase 3 — schema injection)
+// ---------------------------------------------------------------------------
+
+/** Tools injected from sport schemas (via `sportsclaw add <sport>`) */
+const dynamicSpecs: ToolSpec[] = [];
+
+/** Maps dynamic tool names → { sport, command } for dispatch routing */
+const routeMap = new Map<string, { sport: string; command: string }>();
+
+/**
+ * Inject a sport schema's tools into the dynamic registry.
+ * Each tool in the schema becomes a first-class tool the LLM can call directly.
+ */
+export function injectSchema(schema: SportSchema): void {
+  for (const tool of schema.tools) {
+    // Avoid duplicates — overwrite if same name exists
+    const existingIdx = dynamicSpecs.findIndex((s) => s.name === tool.name);
+    const spec: ToolSpec = {
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.input_schema as ToolSpec["input_schema"],
+    };
+
+    if (existingIdx >= 0) {
+      dynamicSpecs[existingIdx] = spec;
+    } else {
+      dynamicSpecs.push(spec);
+    }
+
+    routeMap.set(tool.name, { sport: schema.sport, command: tool.command });
+  }
+}
+
+/** Clear all dynamically injected tools (useful for testing) */
+export function clearDynamicTools(): void {
+  dynamicSpecs.length = 0;
+  routeMap.clear();
+}
+
+/** Get all tool specs: built-in + dynamically injected */
+export function getAllToolSpecs(): ToolSpec[] {
+  return [...TOOL_SPECS, ...dynamicSpecs];
+}
+
+/** Get the dispatch route for a dynamically injected tool */
+export function getToolRoute(
+  toolName: string
+): { sport: string; command: string } | undefined {
+  return routeMap.get(toolName);
+}
+
+// ---------------------------------------------------------------------------
 // Input validation
 // ---------------------------------------------------------------------------
 
@@ -78,7 +135,7 @@ function validateIdentifier(value: string, label: string): string | null {
 // Minimal env vars for the subprocess
 // ---------------------------------------------------------------------------
 
-function buildSubprocessEnv(extra?: Record<string, string>): Record<string, string> {
+export function buildSubprocessEnv(extra?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
   const passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV"];
   for (const key of passthrough) {
@@ -203,61 +260,121 @@ export interface ToolCallResult {
 
 /**
  * Dispatch a tool call by name and return the structured result for the LLM.
+ *
+ * Handles both the built-in `sports_query` tool and any dynamically injected
+ * tools from sport schemas.
  */
 export async function dispatchToolCall(
   toolName: string,
   input: ToolCallInput,
   config?: Partial<SportsClawConfig>
 ): Promise<ToolCallResult> {
+  // --- Built-in: generic sports_query tool ---
   if (toolName === "sports_query") {
-    if (!input.sport || !input.command) {
-      return {
-        content: JSON.stringify({ error: "Missing required parameters: sport and command" }),
-        isError: true,
-      };
-    }
+    return handleSportsQuery(input, config);
+  }
 
-    if (!VALID_SPORTS.has(input.sport)) {
-      return {
-        content: JSON.stringify({ error: `Unsupported sport: ${input.sport}. Valid: ${[...VALID_SPORTS].join(", ")}` }),
-        isError: true,
-      };
-    }
-
-    const cmdError = validateIdentifier(input.command, "command");
-    if (cmdError) {
-      return {
-        content: JSON.stringify({ error: cmdError }),
-        isError: true,
-      };
-    }
-
-    const result = await executePythonBridge(
-      input.sport,
-      input.command,
-      input.args,
-      config
-    );
-
-    if (!result.success) {
-      return {
-        content: JSON.stringify({
-          error: result.error,
-          stderr: result.stderr,
-          hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
-        }),
-        isError: true,
-      };
-    }
-
-    return {
-      content: JSON.stringify(result.data),
-      isError: false,
-    };
+  // --- Dynamic: schema-injected tools ---
+  const route = routeMap.get(toolName);
+  if (route) {
+    return handleDynamicTool(route.sport, route.command, input, config);
   }
 
   return {
     content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
     isError: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Handler: built-in sports_query
+// ---------------------------------------------------------------------------
+
+async function handleSportsQuery(
+  input: ToolCallInput,
+  config?: Partial<SportsClawConfig>
+): Promise<ToolCallResult> {
+  if (!input.sport || !input.command) {
+    return {
+      content: JSON.stringify({ error: "Missing required parameters: sport and command" }),
+      isError: true,
+    };
+  }
+
+  if (!VALID_SPORTS.has(input.sport)) {
+    return {
+      content: JSON.stringify({
+        error: `Unsupported sport: ${input.sport}. Valid: ${[...VALID_SPORTS].join(", ")}`,
+      }),
+      isError: true,
+    };
+  }
+
+  const cmdError = validateIdentifier(input.command, "command");
+  if (cmdError) {
+    return {
+      content: JSON.stringify({ error: cmdError }),
+      isError: true,
+    };
+  }
+
+  const result = await executePythonBridge(
+    input.sport,
+    input.command,
+    input.args,
+    config
+  );
+
+  if (!result.success) {
+    return {
+      content: JSON.stringify({
+        error: result.error,
+        stderr: result.stderr,
+        hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
+      }),
+      isError: true,
+    };
+  }
+
+  return {
+    content: JSON.stringify(result.data),
+    isError: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Handler: dynamically injected tools
+// ---------------------------------------------------------------------------
+
+async function handleDynamicTool(
+  sport: string,
+  command: string,
+  input: ToolCallInput,
+  config?: Partial<SportsClawConfig>
+): Promise<ToolCallResult> {
+  // All input fields (except sport/command which come from the route) are args
+  const args: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== undefined && value !== null) {
+      args[key] = value;
+    }
+  }
+
+  const result = await executePythonBridge(sport, command, args, config);
+
+  if (!result.success) {
+    return {
+      content: JSON.stringify({
+        error: result.error,
+        stderr: result.stderr,
+        hint: `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: pip install sports-skills`,
+      }),
+      isError: true,
+    };
+  }
+
+  return {
+    content: JSON.stringify(result.data),
+    isError: false,
   };
 }
