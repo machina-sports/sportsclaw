@@ -121,4 +121,6 @@ export interface SportToolDef {
 export interface RunOptions {
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
+  /** Optional callback invoked when the engine starts a tool or synthesis step. */
+  onSpinnerUpdate?: (msg: string) => void;
 }

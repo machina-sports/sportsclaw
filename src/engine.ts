@@ -154,7 +154,7 @@ export class SportsClawEngine {
   }
 
   /** Build the Vercel AI SDK tool map from our registry */
-  private buildTools(memory?: MemoryManager): ToolSet {
+  private buildTools(memory?: MemoryManager, onSpinnerUpdate?: (msg: string) => void): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
     const registry = this.registry;
@@ -165,6 +165,8 @@ export class SportsClawEngine {
         description: spec.description,
         inputSchema: jsonSchema(spec.input_schema),
         execute: async (args: Record<string, unknown>) => {
+          onSpinnerUpdate?.(`Running ${spec.name}...`);
+
           if (verbose) {
             console.error(
               `[sportsclaw] tool_call: ${spec.name}(${JSON.stringify(args)})`
@@ -282,7 +284,7 @@ export class SportsClawEngine {
       model: this.model,
       system: this.buildSystemPrompt(!!memory),
       messages: this.messages,
-      tools: this.buildTools(memory),
+      tools: this.buildTools(memory, options?.onSpinnerUpdate),
       stopWhen: stepCountIs(this.config.maxTurns),
       maxOutputTokens: this.config.maxTokens,
       onStepFinish: ({ toolCalls }) => {
@@ -291,6 +293,9 @@ export class SportsClawEngine {
           console.error(
             `[sportsclaw] --- step ${stepCount} --- (${toolCalls.length} tool call(s))`
           );
+        }
+        if (toolCalls.length > 0) {
+          options?.onSpinnerUpdate?.("Synthesizing...");
         }
       },
     });

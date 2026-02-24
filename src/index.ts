@@ -17,6 +17,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import * as p from "@clack/prompts";
 import { SportsClawEngine } from "./engine.js";
 import {
   fetchSportSchema,
@@ -264,18 +265,38 @@ async function cmdQuery(args: string[]): Promise<void> {
     verbose,
   });
 
-  try {
-    await engine.runAndPrint(prompt);
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      console.error(`Error: ${error.message}`);
-      if (verbose) {
+  if (verbose) {
+    // Verbose mode: no spinner, raw console.error logs
+    try {
+      await engine.runAndPrint(prompt);
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.error(`Error: ${error.message}`);
         console.error(error.stack);
+      } else {
+        console.error("An unknown error occurred:", error);
       }
-    } else {
-      console.error("An unknown error occurred:", error);
+      process.exit(1);
     }
-    process.exit(1);
+  } else {
+    // Normal mode: show a reasoning spinner
+    const s = p.spinner();
+    s.start("Thinking...");
+    try {
+      const result = await engine.run(prompt, {
+        onSpinnerUpdate: (msg) => s.message(msg),
+      });
+      s.stop("Done.");
+      console.log(result);
+    } catch (error: unknown) {
+      s.stop("Error.");
+      if (error instanceof Error) {
+        console.error(`Error: ${error.message}`);
+      } else {
+        console.error("An unknown error occurred:", error);
+      }
+      process.exit(1);
+    }
   }
 }
 
