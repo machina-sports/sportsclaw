@@ -75,6 +75,20 @@ SportsClaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 > **[sports-skills.sh](https://sports-skills.sh)** — Full documentation for all built-in skills.
 
+### Open-Source to Build, One-Click to Scale
+
+SportsClaw is the exact same engine that powers enterprise customers on [Machina Cloud](https://machina.gg). There is no "lite" version and no "enterprise edition" — the code in this repo is the production engine.
+
+**Build for free, scale when you're ready.** Run SportsClaw locally on your laptop or on a $5/month server. When you outgrow that — more users, more data, higher uptime requirements — deploy to Machina Cloud with a single click. No code changes, no migration, no rewrite.
+
+Deploying to Machina Cloud automatically overrides environment variables to inject:
+
+- **Managed Vector DBs** — Local SQLite is swapped for managed vector databases, giving your agents infinite memory and fast semantic search at any scale.
+- **Licensed Enterprise Data APIs** — Free community APIs (ESPN, public feeds) are replaced with licensed Sportradar and Opta data — the same feeds used by sportsbooks, broadcasters, and pro teams.
+- **Isolated Kubernetes Pods** — Each deployment runs in a fully isolated, auto-scaling Kubernetes pod with a 99.9% uptime SLA. No noisy neighbors, no cold starts.
+
+The local and cloud versions are the same binary. The only difference is what gets injected at runtime.
+
 ### Inspiration
 
 SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/anthropics/nanoclaw), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
