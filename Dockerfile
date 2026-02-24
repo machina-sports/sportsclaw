@@ -1,5 +1,5 @@
 # =============================================================================
-# SportsClaw — Trojan Horse Container (Phase 4)
+# SportsClaw — All-in-One Container (Phase 4)
 #
 # A single container with Node.js (engine) + Python 3 (sports-skills).
 # Developers can run the agent, CLI commands, or chat listeners out of the box.
