@@ -103,12 +103,15 @@ export interface SportSchema {
   tools: SportToolDef[];
 }
 
-/** A single tool definition within a sport schema */
+/** A single tool definition within a sport schema (Vercel AI SDK compatible) */
 export interface SportToolDef {
   name: string;
   description: string;
   command: string;
-  input_schema: Record<string, unknown>;
+  /** Vercel-compatible JSON Schema parameters (output by sports-skills v0.8+) */
+  parameters: Record<string, unknown>;
+  /** @deprecated Legacy field from sports-skills v0.7 — use `parameters` */
+  input_schema?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
