@@ -26,10 +26,12 @@ import {
   DEFAULT_MODELS,
   type LLMProvider,
   type SportsClawConfig,
+  type RunOptions,
   type Message,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { loadAllSchemas } from "./schema.js";
+import { MemoryManager } from "./memory.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -114,8 +116,8 @@ export class SportsClawEngine {
     }
   }
 
-  /** Full system prompt (base + dynamic tool info + user-supplied) */
-  private get systemPrompt(): string {
+  /** Full system prompt (base + dynamic tool info + memory + user-supplied) */
+  private buildSystemPrompt(memoryBlock?: string): string {
     const parts = [BASE_SYSTEM_PROMPT];
 
     // List available tools for the LLM
@@ -129,6 +131,16 @@ export class SportsClawEngine {
       );
     }
 
+    // Inject persistent memory if available
+    if (memoryBlock) {
+      parts.push(
+        "",
+        memoryBlock,
+        "",
+        "You have an `update_context` tool. Call it when the user changes topic or when you need to save important context (active game, current team focus, user preferences) for future conversations."
+      );
+    }
+
     if (this.config.systemPrompt) {
       parts.push("", this.config.systemPrompt);
     }
@@ -137,7 +149,7 @@ export class SportsClawEngine {
   }
 
   /** Build the Vercel AI SDK tool map from our registry */
-  private buildTools(): ToolSet {
+  private buildTools(memory?: MemoryManager): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
     const registry = this.registry;
@@ -173,6 +185,37 @@ export class SportsClawEngine {
       });
     }
 
+    // Add the update_context internal tool when memory is active
+    if (memory) {
+      toolMap["update_context"] = defineTool({
+        description:
+          "Update the user's persistent context snapshot (CONTEXT.md). " +
+          "Call this when the user changes topic, shifts to a different game/team, " +
+          "or when you want to save important state for future conversations. " +
+          "The content should be a concise markdown summary of the current context.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            context: {
+              type: "string",
+              description:
+                "Concise markdown summary of current context: active game, team focus, user intent, key facts.",
+            },
+          },
+          required: ["context"],
+        }),
+        execute: async (args: { context: string }) => {
+          if (verbose) {
+            console.error(
+              `[sportsclaw] update_context: ${args.context.slice(0, 100)}...`
+            );
+          }
+          memory.writeContext(args.context);
+          return "Context updated successfully.";
+        },
+      });
+    }
+
     return toolMap;
   }
 
@@ -192,18 +235,35 @@ export class SportsClawEngine {
    * Sends the prompt to the LLM, executes any tool calls, and continues
    * until the model produces a final text response or maxSteps is hit.
    *
-   * Returns the final assistant text.
+   * @param userPrompt  The user's message
+   * @param options     Optional run options (userId for memory isolation)
+   * @returns The final assistant text.
    */
-  async run(userPrompt: string): Promise<string> {
+  async run(userPrompt: string, options?: RunOptions): Promise<string> {
     this.messages.push({ role: "user", content: userPrompt });
+
+    // --- Memory: read before LLM call ---
+    let memory: MemoryManager | undefined;
+    let memoryBlock = "";
+
+    if (options?.userId) {
+      memory = new MemoryManager(options.userId);
+      memoryBlock = memory.buildMemoryBlock();
+
+      if (this.config.verbose && memoryBlock) {
+        console.error(
+          `[sportsclaw] memory loaded for user ${options.userId} (${memoryBlock.length} chars)`
+        );
+      }
+    }
 
     let stepCount = 0;
 
     const result = await generateText({
       model: this.model,
-      system: this.systemPrompt,
+      system: this.buildSystemPrompt(memoryBlock || undefined),
       messages: this.messages,
-      tools: this.buildTools(),
+      tools: this.buildTools(memory),
       stopWhen: stepCountIs(this.config.maxTurns),
       maxOutputTokens: this.config.maxTokens,
       onStepFinish: ({ toolCalls }) => {
@@ -225,21 +285,36 @@ export class SportsClawEngine {
       console.error(`[sportsclaw] done after ${stepCount} step(s)`);
     }
 
+    const responseText =
+      stepCount >= this.config.maxTurns && !result.text
+        ? "[SportsClaw] Max turns reached without a final response."
+        : result.text || "[SportsClaw] No response generated.";
+
+    // --- Memory: write after LLM reply ---
+    if (memory) {
+      try {
+        memory.appendExchange(userPrompt, responseText);
+      } catch (err) {
+        console.error(
+          `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+
     if (stepCount >= this.config.maxTurns && !result.text) {
       console.error(
         `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
       );
-      return "[SportsClaw] Max turns reached without a final response.";
     }
 
-    return result.text || "[SportsClaw] No response generated.";
+    return responseText;
   }
 
   /**
    * Convenience: run a prompt and print the result to stdout.
    */
-  async runAndPrint(userPrompt: string): Promise<void> {
-    const result = await this.run(userPrompt);
+  async runAndPrint(userPrompt: string, options?: RunOptions): Promise<void> {
+    const result = await this.run(userPrompt, options);
     console.log(result);
   }
 }

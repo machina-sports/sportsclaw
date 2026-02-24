@@ -59,9 +59,11 @@ export {
   bootstrapDefaultSchemas,
   DEFAULT_SKILLS,
 } from "./schema.js";
+export { MemoryManager, getMemoryDir } from "./memory.js";
 export type {
   LLMProvider,
   SportsClawConfig,
+  RunOptions,
   ToolSpec,
   PythonBridgeResult,
   TurnResult,

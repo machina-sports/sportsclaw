@@ -110,3 +110,12 @@ export interface SportToolDef {
   command: string;
   input_schema: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Memory options passed to engine.run()
+// ---------------------------------------------------------------------------
+
+export interface RunOptions {
+  /** User or thread ID for memory isolation. If omitted, memory is disabled. */
+  userId?: string;
+}

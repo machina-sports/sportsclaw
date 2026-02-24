@@ -155,10 +155,13 @@ async function processUpdate(
     }),
   });
 
+  // Use the Telegram user ID for memory isolation
+  const userId = `telegram-${msg.from?.id ?? msg.chat.id}`;
+
   try {
     // Fresh engine per request — avoids shared-state issues
     const engine = new SportsClawEngine(engineConfig);
-    const response = await engine.run(prompt);
+    const response = await engine.run(prompt, { userId });
 
     // Telegram has a 4096 char limit — split if needed
     const chunks = splitMessage(response, 4096);
