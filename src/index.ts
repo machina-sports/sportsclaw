@@ -28,16 +28,13 @@ import {
   DEFAULT_SKILLS,
 } from "./schema.js";
 import type { LLMProvider } from "./types.js";
-
-// ---------------------------------------------------------------------------
-// Provider ↔ API key env var mapping
-// ---------------------------------------------------------------------------
-
-const PROVIDER_API_KEY_ENV: Record<LLMProvider, string> = {
-  anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
-  google: "GOOGLE_GENERATIVE_AI_API_KEY",
-};
+import {
+  loadConfig,
+  saveConfig,
+  resolveConfig,
+  applyConfigToEnv,
+  runConfigFlow,
+} from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -60,6 +57,14 @@ export {
   DEFAULT_SKILLS,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
+export {
+  loadConfig,
+  saveConfig,
+  resolveConfig,
+  applyConfigToEnv,
+  runConfigFlow,
+} from "./config.js";
+export type { CLIConfig, ResolvedConfig } from "./config.js";
 export type {
   LLMProvider,
   SportsClawConfig,
@@ -83,7 +88,7 @@ async function cmdAdd(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const pythonPath = process.env.PYTHON_PATH || "python3";
+  const { pythonPath } = resolveConfig();
   console.log(`Fetching schema for "${sport}"...`);
 
   try {
@@ -148,7 +153,7 @@ function cmdList(): void {
 
 async function cmdInit(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
-  const pythonPath = process.env.PYTHON_PATH || "python3";
+  const { pythonPath } = resolveConfig();
 
   console.log(
     `Bootstrapping ${DEFAULT_SKILLS.length} default sport schemas...`
@@ -182,7 +187,7 @@ async function ensureDefaultSchemas(): Promise<void> {
   console.error(
     "[sportsclaw] No sport schemas found. Bootstrapping defaults..."
   );
-  const pythonPath = process.env.PYTHON_PATH || "python3";
+  const { pythonPath } = resolveConfig();
   const count = await bootstrapDefaultSchemas({ pythonPath });
   console.error(
     `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
@@ -200,11 +205,10 @@ async function cmdListen(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const provider = (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider;
-  const envVar = PROVIDER_API_KEY_ENV[provider];
-  if (envVar && !process.env[envVar]) {
-    console.error(`Error: ${envVar} environment variable is required for provider "${provider}".`);
-    process.exit(1);
+  const resolved = applyConfigToEnv();
+  if (!resolved.apiKey) {
+    await runConfigFlow();
+    applyConfigToEnv();
   }
 
   await ensureDefaultSchemas();
@@ -242,20 +246,21 @@ async function cmdQuery(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  const provider = (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider;
-  const envVar = PROVIDER_API_KEY_ENV[provider];
-  if (envVar && !process.env[envVar]) {
-    console.error(`Error: ${envVar} environment variable is required for provider "${provider}".`);
-    console.error(`Set it with: export ${envVar}=<your-key>`);
-    process.exit(1);
+  // Merge config file + env vars (env wins), push into process.env
+  let resolved = applyConfigToEnv();
+
+  // No API key anywhere → interactive setup
+  if (!resolved.apiKey) {
+    await runConfigFlow();
+    resolved = applyConfigToEnv();
   }
 
   await ensureDefaultSchemas();
 
   const engine = new SportsClawEngine({
-    provider,
+    provider: resolved.provider,
     ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
-    ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
+    pythonPath: resolved.pythonPath,
     verbose,
   });
 
@@ -279,10 +284,11 @@ async function cmdQuery(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function printHelp(): void {
-  console.log("SportsClaw Engine v0.4.0");
+  console.log("SportsClaw Engine v0.4.1");
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
+  console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
@@ -299,6 +305,10 @@ function printHelp(): void {
   console.log("  --verbose, -v    Enable verbose logging");
   console.log("  --help, -h       Show this help message");
   console.log("");
+  console.log("Configuration:");
+  console.log("  Config file: ~/.sportsclaw/config.json (created by `sportsclaw config`)");
+  console.log("  Environment variables override config file values.");
+  console.log("");
   console.log("Environment:");
   console.log("  SPORTSCLAW_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
   console.log("  SPORTSCLAW_MODEL        Model override (default: depends on provider)");
@@ -313,13 +323,32 @@ function printHelp(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw config` — interactive configuration wizard
+// ---------------------------------------------------------------------------
+
+async function cmdConfig(): Promise<void> {
+  await runConfigFlow();
+}
+
+// ---------------------------------------------------------------------------
 // Main — route subcommands
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  if (args.includes("--help") || args.includes("-h")) {
+    printHelp();
+    process.exit(0);
+  }
+
+  // No arguments: show help, or trigger config if no API key configured
+  if (args.length === 0) {
+    const resolved = resolveConfig();
+    if (!resolved.apiKey) {
+      await runConfigFlow();
+      applyConfigToEnv();
+    }
     printHelp();
     process.exit(0);
   }
@@ -328,6 +357,8 @@ async function main(): Promise<void> {
   const subArgs = args.slice(1);
 
   switch (subcommand) {
+    case "config":
+      return cmdConfig();
     case "add":
       return cmdAdd(subArgs);
     case "remove":
