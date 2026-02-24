@@ -335,9 +335,14 @@ function buildArgs(
       if (value === undefined || value === null) continue;
       const keyError = validateIdentifier(key, "argument key");
       if (keyError) continue;
-      const strValue =
-        typeof value === "object" ? JSON.stringify(value) : String(value);
-      cliArgs.push(`--${key}`, strValue);
+      
+      if (typeof value === "boolean") {
+        if (value) cliArgs.push(`--${key}`);
+      } else {
+        const strValue =
+          typeof value === "object" ? JSON.stringify(value) : String(value);
+        cliArgs.push(`--${key}=${strValue}`);
+      }
     }
   }
 

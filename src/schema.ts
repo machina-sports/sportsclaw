@@ -31,20 +31,20 @@ import { buildSubprocessEnv } from "./tools.js";
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_SKILLS = [
-  "football-data",
-  "nfl-data",
-  "nba-data",
-  "nhl-data",
-  "mlb-data",
-  "wnba-data",
-  "tennis-data",
-  "cfb-data",
-  "cbb-data",
-  "golf-data",
-  "fastf1",
+  "football",
+  "nfl",
+  "nba",
+  "nhl",
+  "mlb",
+  "wnba",
+  "tennis",
+  "cfb",
+  "cbb",
+  "golf",
+  "f1",
   "kalshi",
   "polymarket",
-  "sports-news",
+  "news",
 ] as const;
 
 // ---------------------------------------------------------------------------
