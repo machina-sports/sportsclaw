@@ -77,7 +77,11 @@ SportsClaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 ### Inspiration
 
-SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/anthropics/nanoclaw), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
+SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
+
+### Questions?
+
+Join the community on Discord to discuss SportsClaw, sports-skills, and building AI agents for sports: [Join the Machina Sports Discord](https://discord.gg/CU5KmQWHD9)
 
 ---
 *Built by the [Machina Sports](https://machina.gg) team.*
