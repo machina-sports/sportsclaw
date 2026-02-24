@@ -1,0 +1,263 @@
+/**
+ * SportsClaw Engine — Tool Definitions & Python Subprocess Bridge
+ *
+ * This module defines the tools the LLM can call and implements the core
+ * "Python bridge" — the mechanism that intercepts tool calls and executes
+ * them via `python3 -m sports_skills <sport> <command> [--args ...]`.
+ *
+ * Design principle: The TypeScript layer ORCHESTRATES; the Python layer EXECUTES.
+ * Zero TS-to-Python rewriting is required.
+ */
+
+import { execFile } from "node:child_process";
+import type { ToolSpec, PythonBridgeResult, SportsClawConfig } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Tool catalogue — these are the tools exposed to the LLM
+// ---------------------------------------------------------------------------
+
+export const TOOL_SPECS: ToolSpec[] = [
+  {
+    name: "sports_query",
+    description: [
+      "Execute a sports data query via the sports-skills Python package.",
+      "This tool fetches live and historical sports data including scores,",
+      "standings, schedules, odds, play-by-play, stats, and more.",
+      "",
+      "Supported sports: nfl, nba, mlb, nhl, soccer, f1, mma, tennis, cfb, cbb.",
+      "",
+      "Examples of sport + command pairs:",
+      '  sport="nfl", command="scores"          → current/recent NFL scores',
+      '  sport="nfl", command="standings"        → NFL standings',
+      '  sport="nba", command="schedule"         → NBA schedule',
+      '  sport="soccer", command="standings", args={"league": "premier_league"}',
+      '  sport="f1", command="race_results", args={"year": 2025, "round": 1}',
+      "",
+      "Pass any extra parameters as key-value pairs in the `args` object.",
+    ].join("\n"),
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        sport: {
+          type: "string",
+          description: "The sport to query (e.g. nfl, nba, mlb, nhl, soccer, f1).",
+        },
+        command: {
+          type: "string",
+          description: "The specific command/action to execute (e.g. scores, standings, schedule).",
+        },
+        args: {
+          type: "object",
+          description: "Optional key-value arguments passed to the command.",
+          additionalProperties: true,
+        },
+      },
+      required: ["sport", "command"],
+    },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+const VALID_SPORTS = new Set([
+  "nfl", "nba", "mlb", "nhl", "soccer", "f1", "mma", "tennis", "cfb", "cbb",
+]);
+
+const SAFE_IDENTIFIER = /^[a-zA-Z0-9_]+$/;
+
+function validateIdentifier(value: string, label: string): string | null {
+  if (!SAFE_IDENTIFIER.test(value)) {
+    return `Invalid ${label}: must contain only alphanumeric characters and underscores`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal env vars for the subprocess
+// ---------------------------------------------------------------------------
+
+function buildSubprocessEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  const passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV"];
+  for (const key of passthrough) {
+    if (process.env[key]) {
+      env[key] = process.env[key]!;
+    }
+  }
+  if (extra) {
+    Object.assign(env, extra);
+  }
+  return env;
+}
+
+// ---------------------------------------------------------------------------
+// Python Subprocess Bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the CLI arguments for invoking sports-skills.
+ *
+ * Invocation pattern:
+ *   python3 -m sports_skills <sport> <command> [--key value ...]
+ */
+function buildArgs(
+  sport: string,
+  command: string,
+  args?: Record<string, unknown>
+): string[] {
+  const cliArgs = ["-m", "sports_skills", sport, command];
+
+  if (args) {
+    for (const [key, value] of Object.entries(args)) {
+      if (value === undefined || value === null) continue;
+      const keyError = validateIdentifier(key, "argument key");
+      if (keyError) continue;
+      const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+      cliArgs.push(`--${key}`, strValue);
+    }
+  }
+
+  return cliArgs;
+}
+
+/**
+ * Execute a sports-skills command via an async child process.
+ *
+ * Returns a structured result with stdout parsed as JSON when possible.
+ */
+export function executePythonBridge(
+  sport: string,
+  command: string,
+  args?: Record<string, unknown>,
+  config?: Partial<SportsClawConfig>
+): Promise<PythonBridgeResult> {
+  const pythonPath = config?.pythonPath ?? "python3";
+  const cliArgs = buildArgs(sport, command, args);
+  const timeout = config?.timeout ?? 30_000;
+
+  if (config?.verbose) {
+    console.error(`[sportsclaw] exec: ${pythonPath} ${cliArgs.join(" ")}`);
+  }
+
+  return new Promise((resolve) => {
+    execFile(
+      pythonPath,
+      cliArgs,
+      {
+        encoding: "utf-8",
+        timeout,
+        maxBuffer: 10 * 1024 * 1024, // 10 MB
+        env: buildSubprocessEnv(config?.env),
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          // execFile error covers spawn failures and non-zero exits
+          resolve({
+            success: false,
+            error: error.message,
+            stdout: stdout || undefined,
+            stderr: stderr || undefined,
+          });
+          return;
+        }
+
+        const trimmed = (stdout ?? "").trim();
+        if (!trimmed) {
+          resolve({
+            success: true,
+            data: null,
+            stdout: "",
+          });
+          return;
+        }
+
+        try {
+          const data = JSON.parse(trimmed);
+          resolve({ success: true, data });
+        } catch {
+          // Not JSON — return raw stdout
+          resolve({ success: true, data: trimmed, stdout: trimmed });
+        }
+      }
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tool dispatcher — routes tool calls to the right handler
+// ---------------------------------------------------------------------------
+
+export interface ToolCallInput {
+  sport?: string;
+  command?: string;
+  args?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ToolCallResult {
+  content: string;
+  isError: boolean;
+}
+
+/**
+ * Dispatch a tool call by name and return the structured result for the LLM.
+ */
+export async function dispatchToolCall(
+  toolName: string,
+  input: ToolCallInput,
+  config?: Partial<SportsClawConfig>
+): Promise<ToolCallResult> {
+  if (toolName === "sports_query") {
+    if (!input.sport || !input.command) {
+      return {
+        content: JSON.stringify({ error: "Missing required parameters: sport and command" }),
+        isError: true,
+      };
+    }
+
+    if (!VALID_SPORTS.has(input.sport)) {
+      return {
+        content: JSON.stringify({ error: `Unsupported sport: ${input.sport}. Valid: ${[...VALID_SPORTS].join(", ")}` }),
+        isError: true,
+      };
+    }
+
+    const cmdError = validateIdentifier(input.command, "command");
+    if (cmdError) {
+      return {
+        content: JSON.stringify({ error: cmdError }),
+        isError: true,
+      };
+    }
+
+    const result = await executePythonBridge(
+      input.sport,
+      input.command,
+      input.args,
+      config
+    );
+
+    if (!result.success) {
+      return {
+        content: JSON.stringify({
+          error: result.error,
+          stderr: result.stderr,
+          hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
+        }),
+        isError: true,
+      };
+    }
+
+    return {
+      content: JSON.stringify(result.data),
+      isError: false,
+    };
+  }
+
+  return {
+    content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
+    isError: true,
+  };
+}
