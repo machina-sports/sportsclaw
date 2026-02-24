@@ -100,13 +100,16 @@ export async function startDiscordListener(): Promise<void> {
 
     if (!prompt) return;
 
+    // Use the Discord user ID for memory isolation
+    const userId = `discord-${message.author.id}`;
+
     try {
       // Show typing indicator
       await message.channel.sendTyping();
 
       // Fresh engine per request — avoids shared-state race conditions
       const engine = new SportsClawEngine(engineConfig);
-      const response = await engine.run(prompt);
+      const response = await engine.run(prompt, { userId });
 
       // Discord has a 2000 char limit — split if needed
       const chunks = splitMessage(response, 2000);
