@@ -20,7 +20,8 @@ import {
   type ToolResultBlockParam,
   type TurnResult,
 } from "./types.js";
-import { TOOL_SPECS, dispatchToolCall, type ToolCallInput } from "./tools.js";
+import { ToolRegistry, type ToolCallInput } from "./tools.js";
+import { loadAllSchemas } from "./schema.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -30,11 +31,9 @@ const BASE_SYSTEM_PROMPT = `You are SportsClaw, a high-performance sports AI age
 
 Your core directives:
 1. ACCURACY FIRST — Never guess or hallucinate scores, stats, or odds. If the tool returns data, report it exactly. If a tool call fails, say so honestly.
-2. USE TOOLS — When the user asks about live scores, standings, schedules, odds, or any sports data, ALWAYS use the sports_query tool. Do not make up data from training knowledge when live data is available.
+2. USE TOOLS — When the user asks about live scores, standings, schedules, odds, or any sports data, ALWAYS use the available tools. Do not make up data from training knowledge when live data is available.
 3. BE CONCISE — Sports fans want quick, clear answers. Lead with the data, add context after.
-4. CITE THE SOURCE — When reporting data from a tool call, mention it came from live data.
-
-You have access to the sports_query tool which connects to the sports-skills data engine supporting: NFL, NBA, MLB, NHL, Soccer, F1, MMA, Tennis, College Football, and College Basketball.`;
+4. CITE THE SOURCE — When reporting data from a tool call, mention it came from live data.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,23 +58,56 @@ export class SportsClawEngine {
   private client: Anthropic;
   private config: Required<SportsClawConfig>;
   private messages: Message[] = [];
+  private registry: ToolRegistry;
 
   constructor(config?: Partial<SportsClawConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
     this.client = new Anthropic();
+    this.registry = new ToolRegistry();
+    this.loadDynamicSchemas();
   }
 
-  /** Full system prompt (base + user-supplied) */
-  private get systemPrompt(): string {
-    if (this.config.systemPrompt) {
-      return `${BASE_SYSTEM_PROMPT}\n\n${this.config.systemPrompt}`;
+  /**
+   * Load all saved sport schemas from disk and inject them into this engine's
+   * tool registry so the LLM can call sport-specific tools directly.
+   */
+  private loadDynamicSchemas(): void {
+    const schemas = loadAllSchemas();
+    for (const schema of schemas) {
+      this.registry.injectSchema(schema);
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] loaded schema: ${schema.sport} (${schema.tools.length} tools)`
+        );
+      }
     }
-    return BASE_SYSTEM_PROMPT;
+  }
+
+  /** Full system prompt (base + dynamic tool info + user-supplied) */
+  private get systemPrompt(): string {
+    const parts = [BASE_SYSTEM_PROMPT];
+
+    // List available tools for the LLM
+    const allSpecs = this.registry.getAllToolSpecs();
+    const toolNames = allSpecs.map((s) => s.name);
+    if (toolNames.length > 1) {
+      parts.push(
+        "",
+        `Available tools: ${toolNames.join(", ")}`,
+        "Use the most specific tool available for each query."
+      );
+    }
+
+    if (this.config.systemPrompt) {
+      parts.push("", this.config.systemPrompt);
+    }
+
+    return parts.join("\n");
   }
 
   /** Anthropic tool definitions in the format the API expects */
   private get tools(): Anthropic.Tool[] {
-    return TOOL_SPECS.map((spec) => ({
+    return this.registry.getAllToolSpecs().map((spec) => ({
       name: spec.name,
       description: spec.description,
       input_schema: spec.input_schema,
@@ -135,7 +167,7 @@ export class SportsClawEngine {
         );
       }
 
-      const result = await dispatchToolCall(
+      const result = await this.registry.dispatchToolCall(
         toolUse.name,
         toolUse.input as ToolCallInput,
         this.config

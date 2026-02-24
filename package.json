@@ -1,6 +1,6 @@
 {
   "name": "sportsclaw-engine-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lean, high-performance sports AI agent framework. ~500 lines of TypeScript.",
   "type": "module",
   "main": "dist/index.js",
@@ -16,13 +16,20 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "dev": "tsc && node dist/index.js",
+    "listen:discord": "tsc && node dist/index.js listen discord",
+    "listen:telegram": "tsc && node dist/index.js listen telegram",
+    "docker:build": "docker build -t sportsclaw .",
+    "docker:run": "docker run --rm --env-file .env sportsclaw"
   },
-  "keywords": ["sports", "ai", "agent", "llm", "anthropic"],
+  "keywords": ["sports", "ai", "agent", "llm", "anthropic", "discord", "telegram"],
   "author": "Machina Sports",
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "optionalDependencies": {
+    "discord.js": "^14.16.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
