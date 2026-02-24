@@ -344,8 +344,18 @@ async function main(): Promise<void> {
   }
 }
 
+import { realpathSync } from "node:fs";
+
 // Run if executed directly
-const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+let isMain = false;
+try {
+  const fileUrlPath = fileURLToPath(import.meta.url);
+  const realArgv1 = realpathSync(process.argv[1]);
+  const realFileUrlPath = realpathSync(fileUrlPath);
+  isMain = realArgv1 === realFileUrlPath;
+} catch (e) {
+  isMain = process.argv[1] === fileURLToPath(import.meta.url);
+}
 
 if (isMain) {
   main();
