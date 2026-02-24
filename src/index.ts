@@ -12,6 +12,7 @@
  *   const answer = await engine.run("What are today's NBA scores?");
  */
 
+import { fileURLToPath } from "node:url";
 import { SportsClawEngine } from "./engine.js";
 
 // ---------------------------------------------------------------------------
@@ -64,8 +65,8 @@ async function main(): Promise<void> {
   }
 
   const engine = new SportsClawEngine({
-    model: process.env.SPORTSCLAW_MODEL || undefined,
-    pythonPath: process.env.PYTHON_PATH || undefined,
+    ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
+    ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
     verbose,
   });
 
@@ -85,9 +86,7 @@ async function main(): Promise<void> {
 }
 
 // Run if executed directly
-const isMain =
-  process.argv[1]?.endsWith("index.js") ||
-  process.argv[1]?.endsWith("index.ts");
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 
 if (isMain) {
   main();

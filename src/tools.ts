@@ -9,7 +9,7 @@
  * Zero TS-to-Python rewriting is required.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import type { ToolSpec, PythonBridgeResult, SportsClawConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,41 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+const VALID_SPORTS = new Set([
+  "nfl", "nba", "mlb", "nhl", "soccer", "f1", "mma", "tennis", "cfb", "cbb",
+]);
+
+const SAFE_IDENTIFIER = /^[a-zA-Z0-9_]+$/;
+
+function validateIdentifier(value: string, label: string): string | null {
+  if (!SAFE_IDENTIFIER.test(value)) {
+    return `Invalid ${label}: must contain only alphanumeric characters and underscores`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal env vars for the subprocess
+// ---------------------------------------------------------------------------
+
+function buildSubprocessEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  const passthrough = ["PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV"];
+  for (const key of passthrough) {
+    if (process.env[key]) {
+      env[key] = process.env[key]!;
+    }
+  }
+  if (extra) {
+    Object.assign(env, extra);
+  }
+  return env;
+}
+
+// ---------------------------------------------------------------------------
 // Python Subprocess Bridge
 // ---------------------------------------------------------------------------
 
@@ -77,7 +112,10 @@ function buildArgs(
   if (args) {
     for (const [key, value] of Object.entries(args)) {
       if (value === undefined || value === null) continue;
-      cliArgs.push(`--${key}`, String(value));
+      const keyError = validateIdentifier(key, "argument key");
+      if (keyError) continue;
+      const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+      cliArgs.push(`--${key}`, strValue);
     }
   }
 
@@ -85,7 +123,7 @@ function buildArgs(
 }
 
 /**
- * Execute a sports-skills command via a synchronous child process.
+ * Execute a sports-skills command via an async child process.
  *
  * Returns a structured result with stdout parsed as JSON when possible.
  */
@@ -94,48 +132,57 @@ export function executePythonBridge(
   command: string,
   args?: Record<string, unknown>,
   config?: Partial<SportsClawConfig>
-): PythonBridgeResult {
+): Promise<PythonBridgeResult> {
   const pythonPath = config?.pythonPath ?? "python3";
   const cliArgs = buildArgs(sport, command, args);
+  const timeout = config?.timeout ?? 30_000;
 
   if (config?.verbose) {
     console.error(`[sportsclaw] exec: ${pythonPath} ${cliArgs.join(" ")}`);
   }
 
-  const result = spawnSync(pythonPath, cliArgs, {
-    encoding: "utf-8",
-    timeout: 30_000,
-    maxBuffer: 10 * 1024 * 1024, // 10 MB
-    env: { ...process.env, ...config?.env },
+  return new Promise((resolve) => {
+    execFile(
+      pythonPath,
+      cliArgs,
+      {
+        encoding: "utf-8",
+        timeout,
+        maxBuffer: 10 * 1024 * 1024, // 10 MB
+        env: buildSubprocessEnv(config?.env),
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          // execFile error covers spawn failures and non-zero exits
+          resolve({
+            success: false,
+            error: error.message,
+            stdout: stdout || undefined,
+            stderr: stderr || undefined,
+          });
+          return;
+        }
+
+        const trimmed = (stdout ?? "").trim();
+        if (!trimmed) {
+          resolve({
+            success: true,
+            data: null,
+            stdout: "",
+          });
+          return;
+        }
+
+        try {
+          const data = JSON.parse(trimmed);
+          resolve({ success: true, data });
+        } catch {
+          // Not JSON — return raw stdout
+          resolve({ success: true, data: trimmed, stdout: trimmed });
+        }
+      }
+    );
   });
-
-  // Process exited with an error
-  if (result.error) {
-    return {
-      success: false,
-      error: `Failed to spawn process: ${result.error.message}`,
-      stderr: result.stderr ?? undefined,
-    };
-  }
-
-  if (result.status !== 0) {
-    return {
-      success: false,
-      error: `Process exited with code ${result.status}`,
-      stdout: result.stdout ?? undefined,
-      stderr: result.stderr ?? undefined,
-    };
-  }
-
-  // Try to parse stdout as JSON
-  const stdout = (result.stdout ?? "").trim();
-  try {
-    const data = JSON.parse(stdout);
-    return { success: true, data };
-  } catch {
-    // Not JSON — return raw stdout
-    return { success: true, data: stdout, stdout };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,22 +196,43 @@ export interface ToolCallInput {
   [key: string]: unknown;
 }
 
+export interface ToolCallResult {
+  content: string;
+  isError: boolean;
+}
+
 /**
- * Dispatch a tool call by name and return the string result for the LLM.
+ * Dispatch a tool call by name and return the structured result for the LLM.
  */
-export function dispatchToolCall(
+export async function dispatchToolCall(
   toolName: string,
   input: ToolCallInput,
   config?: Partial<SportsClawConfig>
-): string {
+): Promise<ToolCallResult> {
   if (toolName === "sports_query") {
     if (!input.sport || !input.command) {
-      return JSON.stringify({
-        error: "Missing required parameters: sport and command",
-      });
+      return {
+        content: JSON.stringify({ error: "Missing required parameters: sport and command" }),
+        isError: true,
+      };
     }
 
-    const result = executePythonBridge(
+    if (!VALID_SPORTS.has(input.sport)) {
+      return {
+        content: JSON.stringify({ error: `Unsupported sport: ${input.sport}. Valid: ${[...VALID_SPORTS].join(", ")}` }),
+        isError: true,
+      };
+    }
+
+    const cmdError = validateIdentifier(input.command, "command");
+    if (cmdError) {
+      return {
+        content: JSON.stringify({ error: cmdError }),
+        isError: true,
+      };
+    }
+
+    const result = await executePythonBridge(
       input.sport,
       input.command,
       input.args,
@@ -172,16 +240,24 @@ export function dispatchToolCall(
     );
 
     if (!result.success) {
-      // Provide a helpful message so the LLM can tell the user
-      return JSON.stringify({
-        error: result.error,
-        stderr: result.stderr,
-        hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
-      });
+      return {
+        content: JSON.stringify({
+          error: result.error,
+          stderr: result.stderr,
+          hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
+        }),
+        isError: true,
+      };
     }
 
-    return JSON.stringify(result.data);
+    return {
+      content: JSON.stringify(result.data),
+      isError: false,
+    };
   }
 
-  return JSON.stringify({ error: `Unknown tool: ${toolName}` });
+  return {
+    content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
+    isError: true,
+  };
 }

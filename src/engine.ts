@@ -37,6 +37,21 @@ Your core directives:
 You have access to the sports_query tool which connects to the sports-skills data engine supporting: NFL, NBA, MLB, NHL, Soccer, F1, MMA, Tennis, College Football, and College Basketball.`;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Filter out undefined values so they don't override defaults during merge */
+function filterDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const result: Partial<T> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      (result as Record<string, unknown>)[key] = value;
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -46,7 +61,7 @@ export class SportsClawEngine {
   private messages: Message[] = [];
 
   constructor(config?: Partial<SportsClawConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
     this.client = new Anthropic();
   }
 
@@ -84,7 +99,7 @@ export class SportsClawEngine {
   private async executeTurn(): Promise<TurnResult> {
     const response = await this.client.messages.create({
       model: this.config.model,
-      max_tokens: 4096,
+      max_tokens: this.config.maxTokens,
       system: this.systemPrompt,
       tools: this.tools,
       messages: this.messages,
@@ -120,7 +135,7 @@ export class SportsClawEngine {
         );
       }
 
-      const resultStr = dispatchToolCall(
+      const result = await dispatchToolCall(
         toolUse.name,
         toolUse.input as ToolCallInput,
         this.config
@@ -128,28 +143,25 @@ export class SportsClawEngine {
 
       if (this.config.verbose) {
         const preview =
-          resultStr.length > 200
-            ? resultStr.slice(0, 200) + "..."
-            : resultStr;
+          result.content.length > 200
+            ? result.content.slice(0, 200) + "..."
+            : result.content;
         console.error(`[sportsclaw] tool_result: ${preview}`);
       }
 
       toolResults.push({
         type: "tool_result",
         tool_use_id: toolUse.id,
-        content: resultStr,
+        content: result.content,
+        ...(result.isError && { is_error: true }),
       });
     }
 
     // Append tool results as a user message
     this.messages.push({ role: "user", content: toolResults });
 
-    // The model still needs to process tool results, so we're not done
-    return {
-      done: response.stop_reason === "end_turn",
-      text,
-      toolCalls: toolUseBlocks.length,
-    };
+    // Always continue after tool execution so the model can process results
+    return { done: false, text, toolCalls: toolUseBlocks.length };
   }
 
   /**
@@ -174,7 +186,7 @@ export class SportsClawEngine {
       }
 
       const result = await this.executeTurn();
-      totalText = result.text || totalText;
+      totalText += result.text;
 
       if (result.done) {
         if (this.config.verbose) {
