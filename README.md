@@ -43,6 +43,12 @@ export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 sportsclaw "What are today's NFL scores?"
 ```
 
+For an interactive conversation, start chat mode:
+
+```bash
+sportsclaw chat
+```
+
 If your Python environment is out of sync, repair with:
 
 ```bash
