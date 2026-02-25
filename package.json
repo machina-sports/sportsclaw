@@ -1,6 +1,6 @@
 {
   "name": "sportsclaw-engine-core",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "A lean, high-performance sports AI agent framework. ~500 lines of TypeScript.",
   "type": "module",
   "main": "dist/index.js",
