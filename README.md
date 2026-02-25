@@ -29,6 +29,8 @@ sportsclaw gives you a working sports AI agent in minutes. Here's what people bu
 
 **Data comes from Python, not the LLM.** sportsclaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
+**Failure-aware tool loop.** If the same tool call (same tool + same args) fails in a turn, sportsclaw skips repeated retries for that exact call and moves on to other data paths.
+
 **Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY`) for the reasoning model, but every sports data skill works completely out of the box with zero API keys required for the data layer — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
 
 **Working agent in 5 minutes.** Install, set one env var, run a query:
@@ -45,6 +47,15 @@ If your Python environment is out of sync, repair with:
 
 ```bash
 python3 -m pip install --upgrade sports-skills
+```
+
+Optional routing controls (defaults shown):
+
+```bash
+export SPORTSCLAW_ROUTER_STRATEGY=provider_fast
+export SPORTSCLAW_ROUTER_MODEL=<provider-fast-model-id>   # optional override
+export SPORTSCLAW_ROUTING_MAX_SKILLS=2
+export SPORTSCLAW_ROUTING_ALLOW_SPILLOVER=1
 ```
 
 Or use it as a library:

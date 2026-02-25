@@ -24,7 +24,10 @@ import { google } from "@ai-sdk/google";
 import {
   DEFAULT_CONFIG,
   DEFAULT_MODELS,
+  DEFAULT_ROUTER_MODELS,
   type LLMProvider,
+  type RouteDecision,
+  type RouteMeta,
   type sportsclawConfig,
   type RunOptions,
   type Message,
@@ -32,6 +35,7 @@ import {
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { loadAllSchemas } from "./schema.js";
 import { MemoryManager } from "./memory.js";
+import { routePromptToSkills } from "./router.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -43,6 +47,7 @@ Your core directives:
 1. ACCURACY FIRST — Never guess or hallucinate scores, stats, or odds. If the tool returns data, report it exactly. If a tool call fails, say so honestly.
 2. USE TOOLS — When the user asks about live scores, standings, schedules, odds, or any sports data, ALWAYS use the available tools. Do not make up data from training knowledge when live data is available.
 3. BE CONCISE — Sports fans want quick, clear answers. Lead with the data, add context after.
+3b. AFTER TOOLS, ANSWER WITH DATA — If you called data tools successfully, your final reply MUST include concrete findings (numbers, names, dates). Do not reply with only a follow-up question.
 4. CITE THE SOURCE — At the end of your answer, add a small italicized source line naming the actual data providers used. Map skill prefixes to providers:
    football → Transfermarkt & FBref, nfl/nba/nhl/mlb/wnba/cfb/cbb/golf/tennis → ESPN, f1 → FastF1, news → Google News & RSS feeds, kalshi → Kalshi, polymarket → Polymarket.
    Example: *Source: ESPN, Google News (2025-03-15)*. Only list providers you actually called.
@@ -55,7 +60,8 @@ Your core directives:
    Issue all tool calls together. Do NOT call them one at a time.
 8. FAN PROFILE — When you see a Fan Profile in [MEMORY], use it to:
    - Skip lookup steps (use stored team_id/competition_id directly)
-   - Proactively fetch data for high-interest entities on vague queries
+   - Proactively fetch data for high-interest entities only on truly vague queries
+     that do NOT explicitly name a sport, team, league, or player
    - Prioritize high-interest entities over low-interest ones
    - When the user asks "what's new?" or "morning update", fetch current data for their top 3 high-interest entities using parallel tool calls
 9. ALWAYS call update_fan_profile after answering a sports question to record which teams, leagues, players, and sports the user asked about.
@@ -110,12 +116,50 @@ function resolveModel(provider: LLMProvider, modelId: string) {
   }
 }
 
+type ResolvedModel = ReturnType<typeof resolveModel>;
+
+function readModelId(model: ResolvedModel): string {
+  const value = (model as { modelId?: unknown }).modelId;
+  return typeof value === "string" && value.length > 0 ? value : "unknown";
+}
+
+function normalizeArgsForSignature(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeArgsForSignature(item));
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = normalizeArgsForSignature(record[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+function buildToolCallSignature(
+  toolName: string,
+  args: Record<string, unknown>
+): string {
+  let serializedArgs = "";
+  try {
+    serializedArgs = JSON.stringify(normalizeArgsForSignature(args));
+  } catch {
+    serializedArgs = String(args);
+  }
+  return `${toolName}:${serializedArgs}`;
+}
+
 // ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
 export class sportsclawEngine {
-  private model: ReturnType<typeof resolveModel>;
+  private mainModel: ResolvedModel;
+  private routerModel: ResolvedModel;
+  private mainModelId: string;
+  private routerModelId: string;
   private config: Required<sportsclawConfig>;
   private messages: Message[] = [];
   private registry: ToolRegistry;
@@ -123,13 +167,28 @@ export class sportsclawEngine {
   constructor(config?: Partial<sportsclawConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
 
-    // If provider changed but model was not explicitly set, use the provider's default
+    // If provider changed but model was not explicitly set, use provider defaults.
     if (config?.provider && !config?.model) {
       merged.model = DEFAULT_MODELS[merged.provider] ?? DEFAULT_CONFIG.model;
     }
+    if (!config?.routerModelStrategy) {
+      merged.routerModelStrategy = "provider_fast";
+    }
+    if (!config?.routerModel) {
+      merged.routerModel =
+        merged.routerModelStrategy === "same_as_main"
+          ? merged.model
+          : DEFAULT_ROUTER_MODELS[merged.provider];
+    }
+    if (merged.routerModelStrategy === "same_as_main") {
+      merged.routerModel = merged.model;
+    }
 
     this.config = merged;
-    this.model = resolveModel(this.config.provider, this.config.model);
+    this.mainModel = resolveModel(this.config.provider, this.config.model);
+    this.routerModel = resolveModel(this.config.provider, this.config.routerModel);
+    this.mainModelId = readModelId(this.mainModel);
+    this.routerModelId = readModelId(this.routerModel);
     this.registry = new ToolRegistry();
     this.loadDynamicSchemas();
   }
@@ -195,6 +254,45 @@ export class sportsclawEngine {
     return parts.join("\n");
   }
 
+  private async resolveActiveToolsForPrompt(
+    userPrompt: string,
+    toolNames: string[],
+    memoryBlock?: string
+  ): Promise<{ activeTools?: string[]; decision?: RouteDecision; routeMeta?: RouteMeta }> {
+    const installedSkills = this.registry.getInstalledSkills();
+    if (installedSkills.length === 0) return {};
+
+    const routed = await routePromptToSkills({
+      prompt: userPrompt,
+      installedSkills,
+      toolSpecs: this.registry.getAllToolSpecs(),
+      memoryBlock,
+      model: this.routerModel,
+      modelId: this.routerModelId,
+      fallbackModel: this.mainModel,
+      fallbackModelId: this.mainModelId,
+      provider: this.config.provider,
+      config: {
+        routingMode: this.config.routingMode,
+        routingMaxSkills: this.config.routingMaxSkills,
+        routingAllowSpillover: this.config.routingAllowSpillover,
+      },
+    });
+    const decision = routed.decision;
+
+    const selectedSkills = new Set(decision.selectedSkills);
+    const active = toolNames.filter((name) => {
+      if (name.startsWith("update_")) return true;
+      const skill = this.registry.getSkillName(name);
+      return skill ? selectedSkills.has(skill) : false;
+    });
+
+    const hasExternalTool = active.some((name) => !name.startsWith("update_"));
+    return hasExternalTool
+      ? { activeTools: active, decision, routeMeta: routed.meta }
+      : { decision, routeMeta: routed.meta };
+  }
+
   /**
    * Evidence gate pass: when tools failed, rewrite draft response so claims
    * only rely on successful tool outputs.
@@ -208,7 +306,7 @@ export class sportsclawEngine {
     const { userPrompt, draft, failedTools, succeededTools } = params;
     try {
       const res = await generateText({
-        model: this.model,
+        model: this.mainModel,
         system:
           "You are an evidence gate for a sports agent. Remove or rewrite any claim " +
           "that depends on failed tools. Keep only claims supportable by successful tools. " +
@@ -237,8 +335,154 @@ export class sportsclawEngine {
     );
   }
 
+  private isLowSignalResponse(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return true;
+    if (trimmed.length < 90) return true;
+    if (/^_?source:/i.test(trimmed)) return true;
+    return /\b(anything else|anything specific|what specific|drill into|want me to)\b/i.test(
+      trimmed
+    );
+  }
+
+  private hasAnyStepText(steps: Array<{ text?: string }>): boolean {
+    for (const step of steps) {
+      if (typeof step.text === "string" && step.text.trim().length > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private extractTextFromResponseMessages(
+    messages: Array<{ content?: unknown }>
+  ): string | undefined {
+    const chunks: string[] = [];
+    for (const msg of messages) {
+      const content = msg.content;
+      if (typeof content === "string" && content.trim().length > 0) {
+        chunks.push(content.trim());
+        continue;
+      }
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (
+          part &&
+          typeof part === "object" &&
+          "type" in part &&
+          (part as { type?: unknown }).type === "text" &&
+          "text" in part
+        ) {
+          const text = (part as { text?: unknown }).text;
+          if (typeof text === "string" && text.trim().length > 0) {
+            chunks.push(text.trim());
+          }
+        }
+      }
+    }
+    const merged = chunks.join("\n").trim();
+    return merged.length > 0 ? merged : undefined;
+  }
+
+  private summarizeToolOutput(output: unknown): string {
+    const MAX_CHARS = 4_000;
+    let raw = "";
+
+    if (typeof output === "string") {
+      raw = output;
+    } else if (
+      output &&
+      typeof output === "object" &&
+      "content" in output &&
+      typeof (output as { content?: unknown }).content === "string"
+    ) {
+      raw = (output as { content: string }).content;
+    } else {
+      try {
+        raw = JSON.stringify(output);
+      } catch {
+        raw = String(output ?? "");
+      }
+    }
+
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+    if (trimmed.length <= MAX_CHARS) return trimmed;
+    return `${trimmed.slice(0, MAX_CHARS)}\n...[truncated]`;
+  }
+
+  private collectToolOutputSnippets(
+    steps: Array<{
+      toolResults?: Array<{ toolCallId: string; toolName: string; output: unknown }>;
+    }>,
+    successfulToolCallIds: Set<string>
+  ): Array<{ toolName: string; output: string }> {
+    const out: Array<{ toolName: string; output: string }> = [];
+    for (const step of steps) {
+      for (const result of step.toolResults ?? []) {
+        if (!successfulToolCallIds.has(result.toolCallId)) continue;
+        const output = this.summarizeToolOutput(result.output);
+        if (!output) continue;
+        out.push({ toolName: result.toolName, output });
+      }
+    }
+    return out;
+  }
+
+  private async synthesizeFromToolOutputs(params: {
+    userPrompt: string;
+    draft: string;
+    successfulTools: string[];
+    failedTools: string[];
+    toolOutputs: Array<{ toolName: string; output: string }>;
+  }): Promise<string> {
+    const { userPrompt, draft, successfulTools, failedTools, toolOutputs } = params;
+    if (toolOutputs.length === 0) return draft;
+
+    const serialized = toolOutputs
+      .slice(0, 6)
+      .map(
+        (item, idx) =>
+          `Tool ${idx + 1} (${item.toolName}) output:\n${item.output}`
+      )
+      .join("\n\n");
+
+    try {
+      const res = await generateText({
+        model: this.mainModel,
+        system: [
+          "You are a sports answer synthesizer.",
+          "Use only the provided tool outputs.",
+          "Answer the user directly with concrete data points.",
+          "Do not ask a follow-up question.",
+          "If required data is missing, explicitly mark that section unavailable.",
+          "Keep the response concise.",
+        ].join(" "),
+        prompt: [
+          `User request: ${userPrompt}`,
+          `Successful tools: ${successfulTools.join(", ") || "none"}`,
+          `Failed tools: ${failedTools.join(", ") || "none"}`,
+          `Draft response: ${draft}`,
+          "Tool outputs:",
+          serialized,
+        ].join("\n\n"),
+        maxOutputTokens: Math.min(2_048, this.config.maxTokens),
+      });
+
+      const synthesized = res.text?.trim();
+      if (synthesized) return synthesized;
+    } catch {
+      // fall through to original draft
+    }
+
+    return draft;
+  }
+
   /** Build the Vercel AI SDK tool map from our registry */
-  private buildTools(memory?: MemoryManager): ToolSet {
+  private buildTools(
+    memory?: MemoryManager,
+    failedToolSignaturesThisTurn?: Map<string, string>
+  ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
     const registry = this.registry;
@@ -249,6 +493,22 @@ export class sportsclawEngine {
         description: spec.description,
         inputSchema: jsonSchema(spec.input_schema),
         execute: async (args: Record<string, unknown>) => {
+          const signature = buildToolCallSignature(spec.name, args);
+          const priorFailure = failedToolSignaturesThisTurn?.get(signature);
+          if (priorFailure) {
+            const skipReason =
+              `Skipped repeated failing call in same turn for "${spec.name}". ` +
+              `Previous error: ${priorFailure}`;
+            if (verbose) {
+              const signaturePreview =
+                signature.length > 220 ? `${signature.slice(0, 220)}...` : signature;
+              console.error(
+                `[sportsclaw] tool_skip: ${spec.name} signature=${signaturePreview}`
+              );
+            }
+            throw new Error(skipReason);
+          }
+
           if (verbose) {
             console.error(
               `[sportsclaw] tool_call: ${spec.name}(${JSON.stringify(args)})`
@@ -287,6 +547,7 @@ export class sportsclawEngine {
             if (verbose) {
               console.error(`[sportsclaw] tool_error: ${errorMessage.slice(0, 500)}`);
             }
+            failedToolSignaturesThisTurn?.set(signature, errorMessage.slice(0, 500));
 
             throw new Error(errorMessage);
           }
@@ -477,13 +738,35 @@ export class sportsclawEngine {
     const legacyUpdate = options?.onSpinnerUpdate;
     const failedExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
+    const failedToolSignaturesThisTurn = new Map<string, string>();
 
-    const callLLM = () =>
+    const tools = this.buildTools(memory, failedToolSignaturesThisTurn);
+    const routing = await this.resolveActiveToolsForPrompt(
+      userPrompt,
+      Object.keys(tools),
+      memoryBlock
+    );
+    const activeTools = routing.activeTools;
+
+    if (this.config.verbose && routing.decision) {
+      const d = routing.decision;
+      const meta = routing.routeMeta;
+      const skills = d.selectedSkills.length > 0 ? d.selectedSkills.join(", ") : "none";
+      const modelInfo = meta
+        ? `router_model=${meta.modelUsed ?? "none"} primary_router_model=${meta.primaryModelId} fallback=${meta.fallbackUsed ? "yes" : "no"} llm_ok=${meta.llmSucceeded ? "yes" : "no"} llm_ms=${meta.llmDurationMs}`
+        : `router_model=${this.routerModelId}`;
+      console.error(
+        `[sportsclaw] route mode=${d.mode} confidence=${d.confidence.toFixed(2)} skills=${skills} ${modelInfo} reason="${d.reason}"`
+      );
+    }
+
+    const callLLM = (messagesOverride?: Message[]) =>
       generateText({
-        model: this.model,
+        model: this.mainModel,
         system: this.buildSystemPrompt(!!memory),
-        messages: this.messages,
-        tools: this.buildTools(memory),
+        messages: messagesOverride ?? this.messages,
+        tools,
+        ...(activeTools ? { activeTools } : {}),
         abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
         maxOutputTokens: this.config.maxTokens,
@@ -581,6 +864,37 @@ export class sportsclawEngine {
       }
     }
 
+    // Recovery pass: some providers occasionally return empty final text
+    // even when the request is valid. Run one constrained retry with an
+    // explicit directive to produce a concrete answer.
+    if (!result.text?.trim() && !this.hasAnyStepText(result.steps)) {
+      const recoveryMessages: Message[] = [
+        ...this.messages,
+        ...(result.response.messages as Message[]),
+        {
+          role: "user",
+          content:
+            "Recovery instruction: the previous turn returned no final text. " +
+            "Answer the user's request now with concrete data. If tools are needed, call them. " +
+            "Do not return an empty response.",
+        },
+      ];
+      try {
+        const recovered = await callLLM(recoveryMessages);
+        if (
+          recovered.text?.trim() ||
+          this.hasAnyStepText(recovered.steps) ||
+          this.extractTextFromResponseMessages(
+            recovered.response.messages as Array<{ content?: unknown }>
+          )
+        ) {
+          result = recovered;
+        }
+      } catch {
+        // keep the original result path
+      }
+    }
+
     // Append the full response messages to our history for multi-turn support
     for (const msg of result.response.messages) {
       this.messages.push(msg as Message);
@@ -603,15 +917,44 @@ export class sportsclawEngine {
         }
       }
     }
+    if (!finalText) {
+      const extractedText = this.extractTextFromResponseMessages(
+        result.response.messages as Array<{ content?: unknown }>
+      );
+      if (extractedText) {
+        finalText = extractedText;
+      }
+    }
 
     let responseText =
       stepCount >= this.config.maxTurns && !finalText
         ? "[sportsclaw] Max turns reached without a final response."
         : finalText || "[sportsclaw] No response generated.";
 
+    const failures = Array.from(failedExternalTools.values());
+    const successes = Array.from(succeededExternalTools.values());
+    if (successes.length > 0 && this.isLowSignalResponse(responseText)) {
+      const successIds = new Set(succeededExternalTools.keys());
+      const toolOutputs = this.collectToolOutputSnippets(
+        result.steps as Array<{
+          toolResults?: Array<{
+            toolCallId: string;
+            toolName: string;
+            output: unknown;
+          }>;
+        }>,
+        successIds
+      );
+      responseText = await this.synthesizeFromToolOutputs({
+        userPrompt,
+        draft: responseText,
+        successfulTools: successes.map((s) => s.toolName),
+        failedTools: failures.map((f) => f.toolName),
+        toolOutputs,
+      });
+    }
+
     if (failedExternalTools.size > 0) {
-      const failures = Array.from(failedExternalTools.values());
-      const successes = Array.from(succeededExternalTools.values());
       const labels = failures.map((f) => f.toolName).join(", ");
       const warning =
         `⚠️ Partial data: some live tools failed (${labels}). ` +
