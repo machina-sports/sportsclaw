@@ -49,6 +49,45 @@ export const DEFAULT_SKILLS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
+// Human-readable skill descriptions (used in config flow + system prompt)
+// ---------------------------------------------------------------------------
+
+export const SKILL_DESCRIPTIONS: Record<string, string> = {
+  football: "Football (soccer) — Transfermarkt & FBref data across 13 leagues",
+  nfl: "NFL — scores, standings, rosters, play-by-play via ESPN",
+  nba: "NBA — scores, standings, rosters, play-by-play via ESPN",
+  nhl: "NHL — scores, standings, rosters, play-by-play via ESPN",
+  mlb: "MLB — scores, standings, rosters, play-by-play via ESPN",
+  wnba: "WNBA — scores, standings, rosters, play-by-play via ESPN",
+  tennis: "Tennis — ATP & WTA scores, rankings, player profiles via ESPN",
+  cfb: "College Football — NCAA Division I FBS via ESPN",
+  cbb: "College Basketball — NCAA Division I via ESPN",
+  golf: "Golf — PGA Tour, LPGA, DP World Tour via ESPN",
+  f1: "Formula 1 — race results, lap timing, strategy via FastF1",
+  kalshi: "Kalshi — CFTC-regulated prediction markets & event contracts",
+  polymarket: "Polymarket — decentralized prediction markets & odds",
+  news: "Sports News — headlines & articles via RSS feeds & Google News",
+};
+
+// ---------------------------------------------------------------------------
+// Installed vs available diffing
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare schemas on disk against DEFAULT_SKILLS to determine which
+ * sports are installed and which are available but not yet installed.
+ */
+export function getInstalledVsAvailable(): {
+  installed: string[];
+  available: string[];
+} {
+  const installed = listSchemas();
+  const installedSet = new Set(installed);
+  const available = DEFAULT_SKILLS.filter((s) => !installedSet.has(s));
+  return { installed, available };
+}
+
+// ---------------------------------------------------------------------------
 // Schema directory management
 // ---------------------------------------------------------------------------
 

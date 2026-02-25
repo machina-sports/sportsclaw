@@ -33,9 +33,35 @@ import {
   type Message,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
-import { loadAllSchemas } from "./schema.js";
+import {
+  loadAllSchemas,
+  fetchSportSchema,
+  saveSchema,
+  removeSchema,
+  getInstalledVsAvailable,
+  DEFAULT_SKILLS,
+  SKILL_DESCRIPTIONS,
+} from "./schema.js";
+import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
+import type { CLIConfig } from "./config.js";
 import { MemoryManager } from "./memory.js";
 import { routePromptToSkills } from "./router.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// ---------------------------------------------------------------------------
+// Package version (read once at import time)
+// ---------------------------------------------------------------------------
+
+let _packageVersion = "unknown";
+try {
+  const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+  const raw = readFileSync(pkgPath, "utf-8");
+  const parsed = JSON.parse(raw) as { version?: string };
+  if (parsed.version) _packageVersion = parsed.version;
+} catch {
+  // best-effort
+}
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -221,6 +247,38 @@ export class sportsclawEngine {
   /** Full system prompt (base + dynamic tool info + user-supplied) */
   private buildSystemPrompt(hasMemory: boolean): string {
     const parts = [BASE_SYSTEM_PROMPT];
+
+    // --- Self-awareness block ---
+    const { installed, available } = getInstalledVsAvailable();
+    const selfAwareness = [
+      "",
+      "## Self-Awareness",
+      "",
+      `You are sportsclaw v${_packageVersion}, a sports AI agent.`,
+      "",
+      "### Architecture",
+      "- TypeScript harness → Python bridge → sports-skills package",
+      "- Tool invocation: python3 -m sports_skills <sport> <command> [--args]",
+      "",
+      "### Current Configuration",
+      `- Provider: ${this.config.provider}, Model: ${readModelId(this.mainModel)}`,
+      `- Router: ${readModelId(this.routerModel)} (strategy: ${this.config.routerModelStrategy})`,
+      `- Routing: maxSkills=${this.config.routingMaxSkills}, spillover=${this.config.routingAllowSpillover}`,
+      "",
+      `### Installed Sports (${installed.length})`,
+      installed.length > 0 ? installed.join(", ") : "(none)",
+      "",
+      "### Available (not installed)",
+      available.length > 0 ? available.join(", ") : "(all installed)",
+      "",
+      "### Self-Management",
+      "You have tools to inspect and modify your own state:",
+      "- get_agent_config, update_agent_config, install_sport, remove_sport",
+      "",
+      "When the user asks about a sport you DON'T have installed, tell them and",
+      "offer to install it. Always include the disclaimer. User must confirm first.",
+    ];
+    parts.push(...selfAwareness);
 
     // List available tools for the LLM
     const allSpecs = this.registry.getAllToolSpecs();
@@ -582,6 +640,187 @@ export class sportsclawEngine {
         },
       });
     }
+
+    // -----------------------------------------------------------------
+    // Self-management internal tools (always registered)
+    // -----------------------------------------------------------------
+
+    toolMap["get_agent_config"] = defineTool({
+      description:
+        "Return the current agent configuration as JSON. Includes provider, model, " +
+        "router settings, routing parameters, Python path, installed sports, " +
+        "available (uninstalled) sports, and version.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const { installed, available } = getInstalledVsAvailable();
+        return JSON.stringify(
+          {
+            version: _packageVersion,
+            provider: config.provider,
+            model: config.model,
+            routerModel: config.routerModel,
+            routerModelStrategy: config.routerModelStrategy,
+            routingMode: config.routingMode,
+            routingMaxSkills: config.routingMaxSkills,
+            routingAllowSpillover: config.routingAllowSpillover,
+            pythonPath: config.pythonPath,
+            installedSports: installed,
+            availableSports: available,
+          },
+          null,
+          2
+        );
+      },
+    });
+
+    toolMap["update_agent_config"] = defineTool({
+      description:
+        "Update agent configuration. Accepts partial config: model, routerModelStrategy, " +
+        "routerModel, routingMaxSkills, routingAllowSpillover. Changes are saved to " +
+        "~/.sportsclaw/config.json and take effect next session. " +
+        "Does NOT allow changing provider or apiKey (direct users to `sportsclaw config`).",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          model: { type: "string", description: "Main LLM model ID" },
+          routerModelStrategy: {
+            type: "string",
+            enum: ["provider_fast", "same_as_main"],
+            description: "Router model strategy",
+          },
+          routerModel: { type: "string", description: "Explicit router model ID" },
+          routingMaxSkills: {
+            type: "number",
+            description: "Max sport skills to activate per prompt",
+          },
+          routingAllowSpillover: {
+            type: "number",
+            description: "Additional spillover skills for ambiguous prompts",
+          },
+        },
+      }),
+      execute: async (args: Record<string, unknown>) => {
+        const allowedKeys = [
+          "model",
+          "routerModelStrategy",
+          "routerModel",
+          "routingMaxSkills",
+          "routingAllowSpillover",
+        ];
+        const currentConfig = loadConfig();
+        const changes: string[] = [];
+
+        for (const key of allowedKeys) {
+          if (args[key] !== undefined) {
+            (currentConfig as Record<string, unknown>)[key] = args[key];
+            changes.push(`${key}=${JSON.stringify(args[key])}`);
+          }
+        }
+
+        if (changes.length === 0) {
+          return "No valid configuration fields provided.";
+        }
+
+        saveConfig(currentConfig);
+        return `Configuration updated: ${changes.join(", ")}. Changes take effect next session.`;
+      },
+    });
+
+    toolMap["install_sport"] = defineTool({
+      description:
+        "Install a sport schema at runtime. Fetches the schema from the Python " +
+        "sports-skills package and hot-loads tools into the current session. " +
+        "Always show the user the data disclaimer before installing.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          sport: {
+            type: "string",
+            description:
+              "Sport identifier to install (e.g. nfl, nba, football, f1)",
+          },
+        },
+        required: ["sport"],
+      }),
+      execute: async (args: { sport?: string }) => {
+        const sport = args.sport?.trim().toLowerCase();
+        if (!sport) return "Error: sport parameter is required.";
+
+        // Already installed?
+        const { installed } = getInstalledVsAvailable();
+        if (installed.includes(sport)) {
+          return `"${sport}" is already installed (${registry.getInstalledSkills().length} skills active).`;
+        }
+
+        // Known sport?
+        const isDefault = (DEFAULT_SKILLS as readonly string[]).includes(sport);
+        if (!isDefault) {
+          return (
+            `"${sport}" is not a recognized default skill. ` +
+            `Available: ${DEFAULT_SKILLS.join(", ")}. ` +
+            `If this is a custom skill, use \`sportsclaw add ${sport}\` from the CLI.`
+          );
+        }
+
+        try {
+          const schema = await fetchSportSchema(sport, config);
+          saveSchema(schema);
+          registry.injectSchema(schema);
+
+          if (verbose) {
+            console.error(
+              `[sportsclaw] install_sport: hot-loaded ${sport} (${schema.tools.length} tools)`
+            );
+          }
+
+          return (
+            `Installed "${sport}" — ${schema.tools.length} tools now available in this session.\n\n` +
+            `Disclaimer: ${SPORTS_SKILLS_DISCLAIMER}`
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return `Failed to install "${sport}": ${msg}`;
+        }
+      },
+    });
+
+    toolMap["remove_sport"] = defineTool({
+      description:
+        "Remove an installed sport schema. Deletes the schema from disk and " +
+        "unloads its tools from the current session.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          sport: {
+            type: "string",
+            description: "Sport identifier to remove (e.g. nfl, nba)",
+          },
+        },
+        required: ["sport"],
+      }),
+      execute: async (args: { sport?: string }) => {
+        const sport = args.sport?.trim().toLowerCase();
+        if (!sport) return "Error: sport parameter is required.";
+
+        const deleted = removeSchema(sport);
+        if (!deleted) {
+          return `No schema found for "${sport}" — it may not be installed.`;
+        }
+
+        const removedCount = registry.removeSchemaTools(sport);
+        return (
+          `Removed "${sport}" (${removedCount} tools unloaded). ` +
+          `Schema deleted from disk.`
+        );
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Memory tools (registered when memory is active)
+    // -----------------------------------------------------------------
 
     // Add the update_context internal tool when memory is active
     if (memory) {

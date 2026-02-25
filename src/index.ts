@@ -44,6 +44,7 @@ import {
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
+  runSportSelectionFlow,
   ASCII_LOGO,
 } from "./config.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
@@ -68,6 +69,8 @@ export {
   bootstrapDefaultSchemas,
   ensureSportsSkills,
   DEFAULT_SKILLS,
+  SKILL_DESCRIPTIONS,
+  getInstalledVsAvailable,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
 export {
@@ -76,6 +79,8 @@ export {
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
+  runSportSelectionFlow,
+  SPORTS_SKILLS_DISCLAIMER,
 } from "./config.js";
 export type { CLIConfig, ResolvedConfig } from "./config.js";
 export type {
@@ -553,26 +558,33 @@ function cmdList(): void {
 
 async function cmdInit(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
+  const all = args.includes("--all") || args.includes("-a");
   const { pythonPath } = resolveConfig();
 
-  console.log(
-    `Bootstrapping ${DEFAULT_SKILLS.length} default sport schemas...`
-  );
-
-  const count = await bootstrapDefaultSchemas(
-    { pythonPath },
-    { verbose, force: true }
-  );
-
-  console.log(
-    `Done. ${count}/${DEFAULT_SKILLS.length} schemas installed in ${getSchemaDir()}`
-  );
-
-  if (count < DEFAULT_SKILLS.length) {
+  if (all) {
+    // --all flag: install all 14 without prompting (backward-compatible for scripts)
     console.log(
-      "Some schemas could not be fetched. Ensure sports-skills is up to date:"
+      `Bootstrapping ${DEFAULT_SKILLS.length} default sport schemas...`
     );
-    console.log(`  ${buildSportsSkillsRepairCommand(pythonPath)}`);
+
+    const count = await bootstrapDefaultSchemas(
+      { pythonPath },
+      { verbose, force: true }
+    );
+
+    console.log(
+      `Done. ${count}/${DEFAULT_SKILLS.length} schemas installed in ${getSchemaDir()}`
+    );
+
+    if (count < DEFAULT_SKILLS.length) {
+      console.log(
+        "Some schemas could not be fetched. Ensure sports-skills is up to date:"
+      );
+      console.log(`  ${buildSportsSkillsRepairCommand(pythonPath)}`);
+    }
+  } else {
+    // Interactive sport selection
+    await runSportSelectionFlow(pythonPath);
   }
 }
 
@@ -588,13 +600,20 @@ async function ensureDefaultSchemas(): Promise<void> {
   const installed = listSchemas();
   if (installed.length > 0) return; // schemas already exist
 
+  // First-time user: interactive sport selection instead of installing all 14
   console.error(
-    "[sportsclaw] No sport schemas found. Bootstrapping defaults..."
+    "[sportsclaw] No sport schemas found. Let's pick your sports."
   );
-  const count = await bootstrapDefaultSchemas({ pythonPath });
-  console.error(
-    `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
-  );
+  try {
+    await runSportSelectionFlow(pythonPath);
+  } catch {
+    // If interactive flow fails (non-TTY, etc.), fall back to all defaults
+    console.error("[sportsclaw] Sport selection unavailable — installing all defaults...");
+    const count = await bootstrapDefaultSchemas({ pythonPath });
+    console.error(
+      `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +741,6 @@ async function cmdChat(args: string[]): Promise<void> {
 
       const prompt = input.trim();
       if (!prompt) continue;
-      clearPostSubmitEchoLine();
       if (prompt === "exit" || prompt === "quit") {
         p.outro("See you.");
         break;
@@ -730,6 +748,7 @@ async function cmdChat(args: string[]): Promise<void> {
 
       if (verbose) {
         rl.pause();
+        clearPostSubmitEchoLine();
         try {
           const result = await engine.run(prompt, { userId });
           console.log(`\n${renderMarkdown(result)}\n`);
@@ -746,6 +765,9 @@ async function cmdChat(args: string[]): Promise<void> {
         rl.pause();
         const s = p.spinner();
         const cancel = setupEscCancellation();
+        // Clear the echo line AFTER mode switches (rl.pause + raw mode)
+        // so it catches any re-echo caused by the transition.
+        clearPostSubmitEchoLine();
         const tracker = createToolTracker(s, {
           showCancelHint: cancel.showCancelHint,
         });
@@ -885,10 +907,11 @@ function printHelp(): void {
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
-  console.log("  sportsclaw init                    Bootstrap all 14 default sport schemas");
+  console.log("  sportsclaw init                    Interactive sport selection & install");
+  console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
   console.log("");
-  console.log("Default skills (auto-loaded on first use):");
+  console.log("Default skills (selected during first-run config):");
   console.log("  football-data, nfl-data, nba-data, nhl-data, mlb-data, wnba-data,");
   console.log("  tennis-data, cfb-data, cbb-data, golf-data, fastf1, kalshi,");
   console.log("  polymarket, sports-news");

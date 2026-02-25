@@ -17,10 +17,22 @@ import {
   type LLMProvider,
   type sportsclawConfig,
 } from "./types.js";
+import {
+  SKILL_DESCRIPTIONS,
+  DEFAULT_SKILLS,
+  fetchSportSchema,
+  saveSchema,
+  listSchemas,
+} from "./schema.js";
 
 // ---------------------------------------------------------------------------
 // Config shape persisted to disk
 // ---------------------------------------------------------------------------
+
+export const SPORTS_SKILLS_DISCLAIMER =
+  `sportsclaw uses the open-source sports-skills package for live sports data.\n` +
+  `sports-skills is provided "as is" for personal, non-commercial use.\n` +
+  `You are solely responsible for how you use the data it provides.`;
 
 export interface CLIConfig {
   provider?: LLMProvider;
@@ -32,6 +44,7 @@ export interface CLIConfig {
   routingMode?: "soft_lock";
   routingMaxSkills?: number;
   routingAllowSpillover?: number;
+  selectedSports?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +349,15 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     process.exit(0);
   }
 
+  // --- Sport selection ---
+  p.log.warn(SPORTS_SKILLS_DISCLAIMER);
+
+  const sportSelections = await promptSportSelection();
+  if (p.isCancel(sportSelections)) {
+    p.cancel("🚫 Setup cancelled.");
+    process.exit(0);
+  }
+
   const config: CLIConfig = {
     provider: selectedProvider,
     model: model as string,
@@ -343,10 +365,113 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     routerModel: DEFAULT_ROUTER_MODELS[selectedProvider],
     apiKey: finalApiKey,
     pythonPath: (pythonPath as string) || "python3",
+    selectedSports: sportSelections as string[],
   };
 
   saveConfig(config);
   p.outro(`✅ Config saved to ${CONFIG_PATH}`);
 
+  // Install selected sport schemas
+  const resolvedPython = config.pythonPath || "python3";
+  await installSelectedSports(sportSelections as string[], resolvedPython);
+
   return config;
+}
+
+// ---------------------------------------------------------------------------
+// Sport multi-select prompt (reusable)
+// ---------------------------------------------------------------------------
+
+function desc(sport: string): string {
+  return SKILL_DESCRIPTIONS[sport] ?? sport;
+}
+
+async function promptSportSelection(): Promise<string[] | symbol> {
+  const selections = await p.groupMultiselect({
+    message: "🏟️  Which sports do you want to install?",
+    options: {
+      "US Pro": [
+        { value: "nfl", label: "NFL", hint: desc("nfl") },
+        { value: "nba", label: "NBA", hint: desc("nba") },
+        { value: "nhl", label: "NHL", hint: desc("nhl") },
+        { value: "mlb", label: "MLB", hint: desc("mlb") },
+        { value: "wnba", label: "WNBA", hint: desc("wnba") },
+      ],
+      "College": [
+        { value: "cfb", label: "College Football", hint: desc("cfb") },
+        { value: "cbb", label: "College Basketball", hint: desc("cbb") },
+      ],
+      "Global": [
+        { value: "football", label: "Football (Soccer)", hint: desc("football") },
+        { value: "tennis", label: "Tennis", hint: desc("tennis") },
+        { value: "golf", label: "Golf", hint: desc("golf") },
+        { value: "f1", label: "Formula 1", hint: desc("f1") },
+      ],
+      "Markets & News": [
+        { value: "kalshi", label: "Kalshi", hint: desc("kalshi") },
+        { value: "polymarket", label: "Polymarket", hint: desc("polymarket") },
+        { value: "news", label: "Sports News", hint: desc("news") },
+      ],
+    },
+  });
+
+  return selections;
+}
+
+async function installSelectedSports(
+  sports: string[],
+  pythonPath: string
+): Promise<number> {
+  if (sports.length === 0) return 0;
+
+  const s = p.spinner();
+  s.start(`Installing ${sports.length} sport schema(s)...`);
+
+  let installed = 0;
+  for (const sport of sports) {
+    try {
+      const schema = await fetchSportSchema(sport, { pythonPath });
+      saveSchema(schema);
+      installed++;
+    } catch {
+      // Log but continue
+      console.error(`[sportsclaw] warning: could not fetch schema for "${sport}"`);
+    }
+  }
+
+  s.stop(`Installed ${installed}/${sports.length} sport schema(s).`);
+  return installed;
+}
+
+/**
+ * Standalone sport selection flow — usable from ensureDefaultSchemas()
+ * when a first-time user hasn't run `sportsclaw config` yet.
+ */
+export async function runSportSelectionFlow(
+  pythonPath?: string
+): Promise<string[]> {
+  p.log.warn(SPORTS_SKILLS_DISCLAIMER);
+
+  const sportSelections = await promptSportSelection();
+  if (p.isCancel(sportSelections)) {
+    // User cancelled — install all defaults as a safe fallback
+    p.log.info("No selection made — installing all default sports.");
+    return [...DEFAULT_SKILLS];
+  }
+
+  const selected = sportSelections as string[];
+  if (selected.length === 0) {
+    p.log.info("No sports selected — installing all defaults.");
+    return [...DEFAULT_SKILLS];
+  }
+
+  const resolvedPython = pythonPath || "python3";
+  await installSelectedSports(selected, resolvedPython);
+
+  // Persist selections to config
+  const config = loadConfig();
+  config.selectedSports = selected;
+  saveConfig(config);
+
+  return selected;
 }

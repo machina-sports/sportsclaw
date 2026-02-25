@@ -209,6 +209,29 @@ export class ToolRegistry {
   }
 
   /**
+   * Remove all tools belonging to a specific sport from the registry.
+   * Used by the `remove_sport` internal tool for immediate unload.
+   */
+  removeSchemaTools(sport: string): number {
+    let removed = 0;
+    const toRemove: string[] = [];
+    for (const [toolName, route] of this.routeMap.entries()) {
+      if (route.sport === sport) {
+        toRemove.push(toolName);
+      }
+    }
+    for (const toolName of toRemove) {
+      this.routeMap.delete(toolName);
+      const idx = this.dynamicSpecs.findIndex((s) => s.name === toolName);
+      if (idx >= 0) {
+        this.dynamicSpecs.splice(idx, 1);
+      }
+      removed++;
+    }
+    return removed;
+  }
+
+  /**
    * Get all tool specs.
    *
    * When dynamic schemas are loaded, prefer those sport-specific tools and
