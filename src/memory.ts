@@ -1,15 +1,18 @@
 /**
  * sportsclaw — Markdown Persistent Memory (OpenClaw Architecture)
  *
- * A 3-layer memory system using plain .md files:
+ * A 4-file memory system using plain .md files, each with a single purpose:
  *
- *   HOT   → CONTEXT.md   — Current state snapshot (overwritten on context shifts)
- *   WARM  → <date>.md    — Append-only conversation log for today
- *   COLD  → older .md    — Previous days' logs (read-only archive)
+ *   CONTEXT.md       — HOT:  ephemeral state snapshot (overwritten on context shifts)
+ *   SOUL.md          — WARM: agent personality & relationship with this user (evolves)
+ *   FAN_PROFILE.md   — WARM: interest graph — teams, leagues, sports (read-merge-write)
+ *   <date>.md        — WARM/COLD: append-only conversation archive
  *
  * Storage layout:
  *   ~/.sportsclaw/memory/<userId>/CONTEXT.md
- *   ~/.sportsclaw/memory/<userId>/2026-02-23.md
+ *   ~/.sportsclaw/memory/<userId>/SOUL.md
+ *   ~/.sportsclaw/memory/<userId>/FAN_PROFILE.md
+ *   ~/.sportsclaw/memory/<userId>/2026-02-25.md
  *
  * No SQLite. No JSON blobs. Just markdown.
  *
@@ -30,15 +33,24 @@ const MEMORY_BASE =
   join(homedir(), ".sportsclaw", "memory");
 
 const CONTEXT_FILE = "CONTEXT.md";
+const SOUL_FILE = "SOUL.md";
+const FAN_PROFILE_FILE = "FAN_PROFILE.md";
 
-/** Maximum size (in bytes) for CONTEXT.md to prevent unbounded writes */
-const MAX_CONTEXT_BYTES = 32_768; // 32 KB
-
-/** Maximum tail lines injected from today's log */
+/** Maximum tail lines injected from today's log into the memory block */
 const MAX_LOG_LINES = 100;
 
 /** Marker that starts each conversation entry in the daily log */
 const ENTRY_SEPARATOR = "---";
+
+// ---------------------------------------------------------------------------
+// Soul types (only exchange counter is tracked by code — rest is LLM-driven)
+// ---------------------------------------------------------------------------
+
+interface SoulData {
+  born: string;
+  exchanges: number;
+  rest: string; // everything after the header, written freely by the LLM
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -107,18 +119,10 @@ export class MemoryManager {
     return safeRead(join(this.dir, CONTEXT_FILE));
   }
 
-  /**
-   * Overwrite the user's context snapshot.
-   * Enforces a size cap to prevent unbounded writes from LLM output.
-   */
+  /** Overwrite the user's context snapshot */
   async writeContext(content: string): Promise<void> {
     await this.dirReady;
-    const capped =
-      content.length > MAX_CONTEXT_BYTES
-        ? content.slice(0, MAX_CONTEXT_BYTES) +
-          "\n\n<!-- truncated: exceeded 32 KB limit -->"
-        : content;
-    await writeFile(join(this.dir, CONTEXT_FILE), capped, "utf-8");
+    await writeFile(join(this.dir, CONTEXT_FILE), content, "utf-8");
   }
 
   // -------------------------------------------------------------------------
@@ -163,6 +167,79 @@ export class MemoryManager {
   }
 
   // -------------------------------------------------------------------------
+  // WARM layer — SOUL.md (agent personality & relationship)
+  // -------------------------------------------------------------------------
+
+  /** Read the raw soul markdown */
+  async readSoul(): Promise<string> {
+    await this.dirReady;
+    return safeRead(join(this.dir, SOUL_FILE));
+  }
+
+  /** Write the soul file. Content is fully LLM-authored markdown. */
+  async writeSoul(content: string): Promise<void> {
+    await this.dirReady;
+    await writeFile(join(this.dir, SOUL_FILE), content, "utf-8");
+  }
+
+  /** Parse just the header fields (Born/Exchanges) from SOUL.md */
+  parseSoulHeader(raw: string): SoulData {
+    const data: SoulData = { born: new Date().toISOString(), exchanges: 0, rest: "" };
+    if (!raw.trim()) return data;
+
+    const lines = raw.split("\n");
+    const restLines: string[] = [];
+    let pastHeader = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("Born:")) {
+        data.born = trimmed.replace("Born:", "").trim();
+      } else if (trimmed.startsWith("Exchanges:")) {
+        data.exchanges = parseInt(trimmed.replace("Exchanges:", "").trim(), 10) || 0;
+      } else if (trimmed.startsWith("## ") || pastHeader) {
+        pastHeader = true;
+        restLines.push(line);
+      }
+    }
+
+    data.rest = restLines.join("\n");
+    return data;
+  }
+
+  /**
+   * Increment the exchange counter on SOUL.md.
+   * Called post-response — the only thing code touches automatically.
+   * Creates the soul file on first interaction.
+   */
+  async incrementSoulExchanges(): Promise<void> {
+    await this.dirReady;
+    const raw = await this.readSoul();
+    const data = this.parseSoulHeader(raw);
+    data.exchanges++;
+
+    const header = `# Soul\nBorn: ${data.born}\nExchanges: ${data.exchanges}\n`;
+    const content = data.rest ? `${header}\n${data.rest}\n` : header;
+    await writeFile(join(this.dir, SOUL_FILE), content, "utf-8");
+  }
+
+  // -------------------------------------------------------------------------
+  // WARM layer — FAN_PROFILE.md
+  // -------------------------------------------------------------------------
+
+  /** Read the raw fan profile markdown */
+  async readFanProfile(): Promise<string> {
+    await this.dirReady;
+    return safeRead(join(this.dir, FAN_PROFILE_FILE));
+  }
+
+  /** Write the fan profile. Content is fully LLM-authored markdown. */
+  async writeFanProfile(content: string): Promise<void> {
+    await this.dirReady;
+    await writeFile(join(this.dir, FAN_PROFILE_FILE), content, "utf-8");
+  }
+
+  // -------------------------------------------------------------------------
   // Combined read for prompt injection-safe context assembly
   // -------------------------------------------------------------------------
 
@@ -174,15 +251,29 @@ export class MemoryManager {
    * to reduce prompt injection surface area.
    */
   async buildMemoryBlock(): Promise<string> {
-    const context = await this.readContext();
-    const todayLog = await this.readTodayLog();
+    const [context, todayLog, fanProfile, soul] = await Promise.all([
+      this.readContext(),
+      this.readTodayLog(),
+      this.readFanProfile(),
+      this.readSoul(),
+    ]);
 
-    if (!context && !todayLog) return "";
+    if (!context && !todayLog && !fanProfile && !soul) return "";
 
     const parts: string[] = [
       "## Persistent Memory",
       `User ID: ${this.userId}`,
     ];
+
+    // Soul first — shapes how the agent talks
+    if (soul) {
+      parts.push("", "### Soul (SOUL.md)", soul);
+    }
+
+    // Fan profile second — shapes what content to fetch
+    if (fanProfile) {
+      parts.push("", "### Fan Profile (FAN_PROFILE.md)", fanProfile);
+    }
 
     if (context) {
       parts.push("", "### Current Context (CONTEXT.md)", context);

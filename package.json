@@ -41,6 +41,7 @@
     "discord.js": "^14.16.0"
   },
   "devDependencies": {
+    "@types/marked-terminal": "^6.1.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   },
@@ -51,6 +52,8 @@
     "@clack/prompts": "^1.0.1",
     "ai": "^6.0.97",
     "figlet": "^1.10.0",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
     "picocolors": "^1.1.1"
   }
 }
