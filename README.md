@@ -12,7 +12,7 @@ A CLI and bot scaffold that connects any LLM to live sports data via [sports-ski
 
 ### What is sportsclaw?
 
-sportsclaw is a TypeScript CLI and bot scaffold that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models via the [Vercel AI SDK](https://sdk.vercel.ai). ~2,300 lines of TypeScript total, with the core agent loop at ~80 lines.
+sportsclaw is a TypeScript CLI and bot scaffold that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models via the [Vercel AI SDK](https://sdk.vercel.ai). ~5,200 lines of TypeScript total, with the core agent loop at ~80 lines.
 
 ### What can you build with it?
 
@@ -27,7 +27,7 @@ sportsclaw gives you a working sports AI agent in minutes. Here's what people bu
 
 ### Why sportsclaw?
 
-**Readable codebase.** ~2,300 lines of TypeScript built on the Vercel AI SDK. The core agent loop is ~80 lines. Easy to fork, extend, or learn from.
+**Readable codebase.** ~5,200 lines of TypeScript built on the Vercel AI SDK. The core agent loop is ~220 lines. Easy to fork, extend, or learn from.
 
 **Data comes from Python, not the LLM.** sportsclaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
@@ -88,7 +88,7 @@ sportsclaw is built for:
 - **Personal hacking** — You want a sports agent that actually works, not a research project. Get answers from real data in your terminal or a script.
 - **Discord and Telegram communities** — Deploy a bot that your group can ask sports questions. Built-in listeners handle the wiring; you just add your bot token.
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
-- **Learning how agents work** — The core loop is ~80 lines on the Vercel AI SDK. Read it, modify it, extend it.
+- **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
 ### Built-in Sports Data Skills
 
