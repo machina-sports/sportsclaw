@@ -119,10 +119,10 @@ const ASCII_LOGO = `
 `;
 
   console.log(pc.bold(pc.blue(ASCII_LOGO)));
-  p.intro("SportsClaw Configuration");
+  p.intro("🦞 SportsClaw Configuration");
 
   const provider = await p.select({
-    message: "Which LLM provider would you like to use?",
+    message: "⚡ Which LLM provider would you like to use?",
     options: [
       { value: "anthropic", label: "Anthropic", hint: "Claude" },
       { value: "openai", label: "OpenAI", hint: "GPT-4o" },
@@ -131,32 +131,32 @@ const ASCII_LOGO = `
   });
 
   if (p.isCancel(provider)) {
-    p.cancel("Setup cancelled.");
+    p.cancel("🚫 Setup cancelled.");
     process.exit(0);
   }
 
   const envName = PROVIDER_ENV[provider as LLMProvider];
 
   const apiKey = await p.password({
-    message: `Paste your ${envName}:`,
+    message: `🔑 Paste your ${envName}:`,
     validate: (val) => {
       if (!val || val.trim().length === 0) return "API key is required.";
     },
   });
 
   if (p.isCancel(apiKey)) {
-    p.cancel("Setup cancelled.");
+    p.cancel("🚫 Setup cancelled.");
     process.exit(0);
   }
 
   const pythonPath = await p.text({
-    message: "Path to Python interpreter:",
+    message: "🐍 Path to Python interpreter:",
     placeholder: "python3",
     defaultValue: "python3",
   });
 
   if (p.isCancel(pythonPath)) {
-    p.cancel("Setup cancelled.");
+    p.cancel("🚫 Setup cancelled.");
     process.exit(0);
   }
 
@@ -167,7 +167,7 @@ const ASCII_LOGO = `
   };
 
   saveConfig(config);
-  p.outro(`Config saved to ${CONFIG_PATH}`);
+  p.outro(`✅ Config saved to ${CONFIG_PATH}`);
 
   return config;
 }
