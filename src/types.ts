@@ -12,10 +12,79 @@ import type { ModelMessage } from "ai";
 
 export type LLMProvider = "anthropic" | "openai" | "google";
 
+export interface ProviderModelOption {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export interface ProviderModelProfile {
+  defaultModel: string;
+  fastRouterModel: string;
+  selectableModels: ProviderModelOption[];
+}
+
+export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> = {
+  anthropic: {
+    defaultModel: "claude-sonnet-4-5-20250514",
+    fastRouterModel: "claude-sonnet-4-5-20250514",
+    selectableModels: [
+      {
+        value: "claude-sonnet-4-5-20250514",
+        label: "Claude Sonnet 4.5",
+        hint: "recommended",
+      },
+      {
+        value: "claude-opus-4-6",
+        label: "Claude Opus 4.6",
+        hint: "most capable",
+      },
+    ],
+  },
+  openai: {
+    defaultModel: "gpt-5.3-codex",
+    fastRouterModel: "gpt-5.3-codex",
+    selectableModels: [
+      {
+        value: "gpt-5.3-codex",
+        label: "GPT-5.3 Codex",
+        hint: "recommended",
+      },
+    ],
+  },
+  google: {
+    defaultModel: "gemini-3-flash-preview",
+    fastRouterModel: "gemini-3-flash-preview",
+    selectableModels: [
+      {
+        value: "gemini-3-flash-preview",
+        label: "Gemini 3 Flash",
+        hint: "recommended",
+      },
+      {
+        value: "gemini-3-pro-preview",
+        label: "Gemini 3 Pro",
+        hint: "advanced reasoning",
+      },
+      {
+        value: "gemini-3.1-pro-preview",
+        label: "Gemini 3.1 Pro",
+        hint: "most capable",
+      },
+    ],
+  },
+};
+
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  anthropic: "claude-sonnet-4-5-20250514",
-  openai: "gpt-5.3-codex",
-  google: "gemini-3-flash-preview",
+  anthropic: PROVIDER_MODEL_PROFILES.anthropic.defaultModel,
+  openai: PROVIDER_MODEL_PROFILES.openai.defaultModel,
+  google: PROVIDER_MODEL_PROFILES.google.defaultModel,
+};
+
+export const DEFAULT_ROUTER_MODELS: Record<LLMProvider, string> = {
+  anthropic: PROVIDER_MODEL_PROFILES.anthropic.fastRouterModel,
+  openai: PROVIDER_MODEL_PROFILES.openai.fastRouterModel,
+  google: PROVIDER_MODEL_PROFILES.google.fastRouterModel,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +96,10 @@ export interface sportsclawConfig {
   provider?: LLMProvider;
   /** Model ID for the chosen provider (default: depends on provider) */
   model?: string;
+  /** Router model strategy (default: provider_fast) */
+  routerModelStrategy?: "provider_fast" | "same_as_main";
+  /** Explicit router model override (default: provider fast model) */
+  routerModel?: string;
   /** Maximum agentic turns before the loop halts (default: 25) */
   maxTurns?: number;
   /** Maximum tokens for model responses (default: 4096) */
@@ -41,11 +114,19 @@ export interface sportsclawConfig {
   env?: Record<string, string>;
   /** Enable verbose logging (default: false) */
   verbose?: boolean;
+  /** Tool routing mode (default: soft_lock) */
+  routingMode?: "soft_lock";
+  /** Max sport skills to activate for ambiguous prompts (default: 2) */
+  routingMaxSkills?: number;
+  /** Additional spillover skills allowed in focused routing (default: 1) */
+  routingAllowSpillover?: number;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   provider: "anthropic",
-  model: "claude-sonnet-4-5-20250514",
+  model: DEFAULT_MODELS.anthropic,
+  routerModelStrategy: "provider_fast",
+  routerModel: DEFAULT_ROUTER_MODELS.anthropic,
   maxTurns: 25,
   maxTokens: 16_384,
   systemPrompt: "",
@@ -53,6 +134,9 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   timeout: 60_000,
   env: {},
   verbose: false,
+  routingMode: "soft_lock",
+  routingMaxSkills: 2,
+  routingAllowSpillover: 1,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,4 +216,25 @@ export interface RunOptions {
   abortSignal?: AbortSignal;
   /** @deprecated Use onProgress instead */
   onSpinnerUpdate?: (msg: string) => void;
+}
+
+export interface RouteDecision {
+  selectedSkills: string[];
+  mode: "focused" | "ambiguous";
+  confidence: number;
+  reason: string;
+}
+
+export interface RouteMeta {
+  primaryModelId: string;
+  modelUsed: string | null;
+  fallbackUsed: boolean;
+  llmAttempted: boolean;
+  llmSucceeded: boolean;
+  llmDurationMs: number;
+}
+
+export interface RouteOutcome {
+  decision: RouteDecision;
+  meta: RouteMeta;
 }

@@ -46,6 +46,23 @@ function getAllowedUsers(): Set<string> | null {
   return ids.length > 0 ? new Set(ids) : null;
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function parseRouterStrategy(
+  value: string | undefined
+): "provider_fast" | "same_as_main" | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "same_as_main") return "same_as_main";
+  if (normalized === "provider_fast") return "provider_fast";
+  return undefined;
+}
+
 export async function startTelegramListener(): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -63,11 +80,38 @@ export async function startTelegramListener(): Promise<void> {
   }
 
   const engineConfig: Partial<sportsclawConfig> = {
-    provider: (process.env.sportsclaw_PROVIDER || "anthropic") as LLMProvider,
-    ...(process.env.sportsclaw_MODEL && {
-      model: process.env.sportsclaw_MODEL,
+    provider: (
+      process.env.SPORTSCLAW_PROVIDER ||
+      process.env.sportsclaw_PROVIDER ||
+      "anthropic"
+    ) as LLMProvider,
+    ...((process.env.SPORTSCLAW_MODEL || process.env.sportsclaw_MODEL) && {
+      model: process.env.SPORTSCLAW_MODEL || process.env.sportsclaw_MODEL,
+    }),
+    ...((process.env.SPORTSCLAW_ROUTER_MODEL ||
+      process.env.sportsclaw_ROUTER_MODEL) && {
+      routerModel:
+        process.env.SPORTSCLAW_ROUTER_MODEL ||
+        process.env.sportsclaw_ROUTER_MODEL,
+    }),
+    ...((process.env.SPORTSCLAW_ROUTER_STRATEGY ||
+      process.env.sportsclaw_ROUTER_STRATEGY) && {
+      routerModelStrategy:
+        parseRouterStrategy(
+          process.env.SPORTSCLAW_ROUTER_STRATEGY ||
+            process.env.sportsclaw_ROUTER_STRATEGY
+        ),
     }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
+    routingMode: "soft_lock",
+    routingMaxSkills: parsePositiveInt(
+      process.env.SPORTSCLAW_ROUTING_MAX_SKILLS,
+      2
+    ),
+    routingAllowSpillover: parsePositiveInt(
+      process.env.SPORTSCLAW_ROUTING_ALLOW_SPILLOVER,
+      1
+    ),
   };
 
   // Verify the bot token is valid

@@ -20,6 +20,7 @@
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { Marked, type MarkedExtension } from "marked";
@@ -303,11 +304,20 @@ function isAbortError(error: unknown): boolean {
   return String(error).toLowerCase().includes("abort");
 }
 
+function clearPostSubmitEchoLine(): void {
+  if (!process.stdout.isTTY) return;
+  // Some terminals echo the submitted line once more when switching from
+  // readline prompt mode to spinner mode. Clear the current line to keep
+  // a single clean user message in the transcript.
+  process.stdout.write("\x1b[2K\r");
+}
+
 function setupEscCancellation() {
   const abortController = new AbortController();
   const stdin = process.stdin;
   let cancelled = false;
-  let rawModeEnabled = false;
+  const canRawMode = stdin.isTTY && typeof stdin.setRawMode === "function";
+  const wasRaw = canRawMode ? Boolean(stdin.isRaw) : false;
   let listening = false;
 
   const onData = (chunk: Buffer | string) => {
@@ -321,9 +331,8 @@ function setupEscCancellation() {
   if (stdin.isTTY) {
     stdin.on("data", onData);
     listening = true;
-    if (typeof stdin.setRawMode === "function") {
+    if (canRawMode && !wasRaw) {
       stdin.setRawMode(true);
-      rawModeEnabled = true;
     }
     stdin.resume();
   }
@@ -336,11 +345,8 @@ function setupEscCancellation() {
       if (listening) {
         stdin.off("data", onData);
       }
-      if (rawModeEnabled && typeof stdin.setRawMode === "function" && stdin.isRaw) {
+      if (canRawMode && !wasRaw && stdin.isRaw) {
         stdin.setRawMode(false);
-      }
-      if (rawModeEnabled && typeof stdin.pause === "function") {
-        stdin.pause();
       }
     },
   };
@@ -652,7 +658,14 @@ async function cmdChat(args: string[]): Promise<void> {
   const engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
+    ...(resolved.routerModel && { routerModel: resolved.routerModel }),
+    ...(resolved.routerModelStrategy && {
+      routerModelStrategy: resolved.routerModelStrategy,
+    }),
     pythonPath: resolved.pythonPath,
+    routingMode: resolved.routingMode,
+    routingMaxSkills: resolved.routingMaxSkills,
+    routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
   });
 
@@ -687,69 +700,86 @@ async function cmdChat(args: string[]): Promise<void> {
     );
   }
 
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    historySize: 200,
+    removeHistoryDuplicates: false,
+    terminal: true,
+  });
+
   // REPL loop — each turn feeds history back through the same engine instance
-  while (true) {
-    const input = await p.text({
-      message: "You",
-      placeholder: "Ask about any sport...",
-    });
-
-    if (p.isCancel(input)) {
-      p.outro("See you.");
-      break;
-    }
-
-    const prompt = (input as string).trim();
-    if (!prompt) continue;
-    if (prompt === "exit" || prompt === "quit") {
-      p.outro("See you.");
-      break;
-    }
-
-    if (verbose) {
+  try {
+    while (true) {
+      let input: string;
       try {
-        const result = await engine.run(prompt, { userId });
-        console.log(`\n${renderMarkdown(result)}\n`);
-      } catch (error: unknown) {
-        if (error instanceof Error) {
-          console.error(`Error: ${error.message}`);
-        } else {
-          console.error("An unknown error occurred:", error);
-        }
+        console.log("You");
+        input = await rl.question("> ");
+      } catch {
+        p.outro("See you.");
+        break;
       }
-    } else {
-      const s = p.spinner();
-      const cancel = setupEscCancellation();
-      const tracker = createToolTracker(s, {
-        showCancelHint: cancel.showCancelHint,
-      });
-      s.start("Thinking...");
-      tracker.start();
-      try {
-        const result = await engine.run(prompt, {
-          userId,
-          onProgress: tracker.handler,
-          abortSignal: cancel.abortSignal,
+
+      const prompt = input.trim();
+      if (!prompt) continue;
+      clearPostSubmitEchoLine();
+      if (prompt === "exit" || prompt === "quit") {
+        p.outro("See you.");
+        break;
+      }
+
+      if (verbose) {
+        rl.pause();
+        try {
+          const result = await engine.run(prompt, { userId });
+          console.log(`\n${renderMarkdown(result)}\n`);
+        } catch (error: unknown) {
+          if (error instanceof Error) {
+            console.error(`Error: ${error.message}`);
+          } else {
+            console.error("An unknown error occurred:", error);
+          }
+        } finally {
+          rl.resume();
+        }
+      } else {
+        rl.pause();
+        const s = p.spinner();
+        const cancel = setupEscCancellation();
+        const tracker = createToolTracker(s, {
+          showCancelHint: cancel.showCancelHint,
         });
-        s.stop(tracker.doneSummary());
-        console.log(`\n${renderMarkdown(result)}\n`);
-      } catch (error: unknown) {
-        if (cancel.wasCancelled() || isAbortError(error)) {
-          s.stop(tracker.cancelledSummary());
-          console.log("");
-          continue;
+        s.start("Thinking...");
+        tracker.start();
+        try {
+          const result = await engine.run(prompt, {
+            userId,
+            onProgress: tracker.handler,
+            abortSignal: cancel.abortSignal,
+          });
+          s.stop(tracker.doneSummary());
+          console.log(`\n${renderMarkdown(result)}\n`);
+        } catch (error: unknown) {
+          if (cancel.wasCancelled() || isAbortError(error)) {
+            s.stop(tracker.cancelledSummary());
+            console.log("");
+            continue;
+          }
+          s.stop(tracker.errorSummary());
+          if (error instanceof Error) {
+            console.error(`Error: ${error.message}`);
+          } else {
+            console.error("An unknown error occurred:", error);
+          }
+        } finally {
+          tracker.stop();
+          cancel.cleanup();
+          rl.resume();
         }
-        s.stop(tracker.errorSummary());
-        if (error instanceof Error) {
-          console.error(`Error: ${error.message}`);
-        } else {
-          console.error("An unknown error occurred:", error);
-        }
-      } finally {
-        tracker.stop();
-        cancel.cleanup();
       }
     }
+  } finally {
+    rl.close();
   }
 }
 
@@ -781,7 +811,14 @@ async function cmdQuery(args: string[]): Promise<void> {
   const engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
+    ...(resolved.routerModel && { routerModel: resolved.routerModel }),
+    ...(resolved.routerModelStrategy && {
+      routerModelStrategy: resolved.routerModelStrategy,
+    }),
     pythonPath: resolved.pythonPath,
+    routingMode: resolved.routingMode,
+    routingMaxSkills: resolved.routingMaxSkills,
+    routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
   });
 
@@ -868,6 +905,8 @@ function printHelp(): void {
   console.log("Environment:");
   console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
   console.log("  sportsclaw_MODEL        Model override (default: depends on provider)");
+  console.log("  SPORTSCLAW_ROUTER_STRATEGY  Router model strategy: provider_fast or same_as_main");
+  console.log("  SPORTSCLAW_ROUTER_MODEL     Router model override (default: provider fast model)");
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");

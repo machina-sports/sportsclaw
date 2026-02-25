@@ -233,6 +233,15 @@ export class ToolRegistry {
     return this.routeMap.get(toolName)?.sport;
   }
 
+  /** List installed dynamic skills (sports) currently available to the engine */
+  getInstalledSkills(): string[] {
+    const skills = new Set<string>();
+    for (const route of this.routeMap.values()) {
+      skills.add(route.sport);
+    }
+    return Array.from(skills);
+  }
+
   /**
    * Dispatch a tool call by name and return the structured result for the LLM.
    *

@@ -83,7 +83,16 @@ Your core directives:
 12. FAILURE DISCIPLINE — If any requested data tool fails, you MUST:
     - Explicitly mark that section as unavailable.
     - Avoid analysis or conclusions for the failed data dimension.
-    - Continue with other dimensions only if their tools succeeded.`;
+    - Continue with other dimensions only if their tools succeeded.
+13. PLAYER STAT LOOKUPS — When asked about a specific player's stats:
+    a. Use PLAYER-LEVEL tools: get_player_profile, get_player_season_stats, get_event_players_statistics.
+    b. Do NOT substitute team-level tools (get_season_leaders, get_competitions) for player queries.
+    c. If you lack the player's ID, chain SEQUENTIALLY:
+       1. search_team (find team) → get team_id
+       2. get_team_profile (get roster) → find player's espn_athlete_id
+       3. get_player_season_stats (use espn_athlete_id + league_slug) → stats
+    d. The roster includes espn_athlete_id for each player — use it for get_player_season_stats and get_player_profile.
+    e. These lookups are SEQUENTIAL. Do NOT parallelize steps that depend on IDs from prior calls.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
