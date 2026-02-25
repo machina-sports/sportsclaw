@@ -6,6 +6,8 @@
 
 A CLI and bot scaffold that connects any LLM to live sports data via [sports-skills](https://sports-skills.sh).
 
+**[sportsclaw.gg](https://sportsclaw.gg/)** — Official site & docs.
+
 ---
 
 ### What is sportsclaw?
@@ -36,8 +38,7 @@ sportsclaw gives you a working sports AI agent in minutes. Here's what people bu
 **Working agent in 5 minutes.** Install, set one env var, run a query:
 
 ```bash
-npm install sportsclaw-engine-core
-pip install sports-skills
+curl -fsSL https://sportsclaw.gg/install.sh | bash
 export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 
 sportsclaw "What are today's NFL scores?"
