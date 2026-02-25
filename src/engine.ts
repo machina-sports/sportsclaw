@@ -110,15 +110,14 @@ Your core directives:
     - Explicitly mark that section as unavailable.
     - Avoid analysis or conclusions for the failed data dimension.
     - Continue with other dimensions only if their tools succeeded.
-13. PLAYER STAT LOOKUPS — When asked about a specific player's stats:
-    a. Use PLAYER-LEVEL tools: get_player_profile, get_player_season_stats, get_event_players_statistics.
-    b. Do NOT substitute team-level tools (get_season_leaders, get_competitions) for player queries.
-    c. If you lack the player's ID, chain SEQUENTIALLY:
-       1. search_team (find team) → get team_id
-       2. get_team_profile (get roster) → find player's espn_athlete_id
-       3. get_player_season_stats (use espn_athlete_id + league_slug) → stats
-    d. The roster includes espn_athlete_id for each player — use it for get_player_season_stats and get_player_profile.
-    e. These lookups are SEQUENTIAL. Do NOT parallelize steps that depend on IDs from prior calls.`;
+13. PLAYER LOOKUPS — When asked about a specific player:
+    a. If you already have the player's ID (from memory or a prior call), use it directly.
+    b. If you DON'T have the ID, use a discovery tool first:
+       - Rankings, leaderboards, or roster tools typically return player IDs alongside names.
+       - Call the relevant listing tool (e.g. get_rankings, get_team_roster, get_leaderboard),
+         find the player by name, extract their ID, then call the player detail tool.
+    c. These lookups are SEQUENTIAL — don't parallelize steps that depend on IDs from prior calls.
+    d. If no discovery path exists for a sport, say so. Don't guess IDs.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
