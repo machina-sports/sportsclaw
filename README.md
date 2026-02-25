@@ -41,6 +41,12 @@ export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 sportsclaw "What are today's NFL scores?"
 ```
 
+If your Python environment is out of sync, repair with:
+
+```bash
+python3 -m pip install --upgrade sports-skills
+```
+
 Or use it as a library:
 
 ```typescript

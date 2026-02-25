@@ -11,7 +11,7 @@
  *   4. On next engine run, schemas are loaded and injected into the tool registry
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -195,6 +195,134 @@ export function listSchemas(): string[] {
   return readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => f.replace(".json", ""));
+}
+
+// ---------------------------------------------------------------------------
+// Auto-install sports-skills Python package
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the `sports-skills` Python package is installed. If not,
+ * install or repair it automatically via pip.
+ *
+ * Returns true only when both base package and F1 module are importable.
+ */
+export async function ensureSportsSkills(
+  config?: Partial<sportsclawConfig>
+): Promise<boolean> {
+  const pythonPath = config?.pythonPath ?? "python3";
+
+  const canImportBase = (): boolean => {
+    try {
+      execFileSync(pythonPath, ["-c", "import sports_skills"], {
+        timeout: 10_000,
+        stdio: "pipe",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const canImportF1 = (): boolean => {
+    try {
+      execFileSync(
+        pythonPath,
+        ["-c", "from sports_skills import f1\nimport sys\nsys.exit(0 if f1 is not None else 1)"],
+        {
+          timeout: 10_000,
+          stdio: "pipe",
+        }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  let baseReady = canImportBase();
+  let f1Ready = baseReady && canImportF1();
+
+  if (baseReady && f1Ready) {
+    return true;
+  }
+
+  if (baseReady && !f1Ready) {
+    console.error(
+      "[sportsclaw] sports-skills is installed but F1 support is unavailable. Attempting repair..."
+    );
+  } else {
+    console.error("[sportsclaw] sports-skills not found. Installing...");
+  }
+
+  // Determine pip command: prefer pip3 alongside the configured python
+  const pipCandidates = ["pip3", "pip"];
+  let pipPath: string | undefined;
+  for (const pip of pipCandidates) {
+    try {
+      execFileSync(pip, ["--version"], { timeout: 5_000, stdio: "pipe" });
+      pipPath = pip;
+      break;
+    } catch {
+      // try next
+    }
+  }
+
+  if (!pipPath) {
+    // Last resort: python -m pip
+    pipPath = pythonPath;
+  }
+
+  const installAttempts =
+    pipPath === pythonPath
+      ? [
+          ["-m", "pip", "install", "--upgrade", "sports-skills"],
+          ["-m", "pip", "install", "--upgrade", "sports-skills", "--break-system-packages"],
+          ["-m", "pip", "install", "--upgrade", "sports-skills", "--user"],
+        ]
+      : [
+          ["install", "--upgrade", "sports-skills"],
+          ["install", "--upgrade", "sports-skills", "--break-system-packages"],
+          ["install", "--upgrade", "sports-skills", "--user"],
+        ];
+
+  let lastInstallError: unknown;
+  try {
+    for (const installArgs of installAttempts) {
+      try {
+        execFileSync(pipPath, installArgs, {
+          timeout: 120_000,
+          stdio: "inherit",
+        });
+        lastInstallError = undefined;
+        break;
+      } catch (err) {
+        lastInstallError = err;
+      }
+    }
+  } catch (err) {
+    lastInstallError = err;
+  }
+
+  baseReady = canImportBase();
+  f1Ready = baseReady && canImportF1();
+  if (baseReady && f1Ready) {
+    console.error("[sportsclaw] sports-skills installed successfully.");
+    return true;
+  }
+
+  console.error(
+    `[sportsclaw] Failed to ensure sports-skills with F1 support: ${
+      lastInstallError instanceof Error ? lastInstallError.message : lastInstallError
+    }`
+  );
+  console.error(
+    "[sportsclaw] Repair command: python3 -m pip install --upgrade sports-skills"
+  );
+  console.error(
+    "[sportsclaw] If global install is blocked: python3 -m pip install --upgrade --user sports-skills"
+  );
+  return false;
 }
 
 // ---------------------------------------------------------------------------

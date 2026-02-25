@@ -55,7 +55,7 @@ if python3 -m pip --version &> /dev/null; then
     }
 else
     echo -e "${YELLOW}⚠️ Warning: 'pip' not found for python3. You may need to install sports-skills manually:${NC}"
-    echo "python3 -m ensurepip && python3 -m pip install sports-skills"
+    echo "python3 -m ensurepip && python3 -m pip install --upgrade sports-skills"
 fi
 echo -e "${GREEN}✓ Skills installed.${NC}\n"
 

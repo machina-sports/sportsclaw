@@ -159,6 +159,11 @@ export class ToolRegistry {
     return this.routeMap.get(toolName);
   }
 
+  /** Get the skill (sport) name that owns a tool, if any */
+  getSkillName(toolName: string): string | undefined {
+    return this.routeMap.get(toolName)?.sport;
+  }
+
   /**
    * Dispatch a tool call by name and return the structured result for the LLM.
    *
@@ -226,11 +231,14 @@ export class ToolRegistry {
     );
 
     if (!result.success) {
+      const isF1 = input.sport === "f1";
       return {
         content: JSON.stringify({
           error: result.error,
           stderr: result.stderr,
-          hint: "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
+          hint: isF1
+            ? 'F1 support is unavailable. Repair with: python3 -m pip install --upgrade sports-skills'
+            : "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
         }),
         isError: true,
       };
@@ -269,11 +277,15 @@ export class ToolRegistry {
     const result = await executePythonBridge(sport, command, args, config);
 
     if (!result.success) {
+      const hint =
+        sport === "f1"
+          ? "F1 support is unavailable. Repair with: python3 -m pip install --upgrade sports-skills"
+          : `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: pip install sports-skills`;
       return {
         content: JSON.stringify({
           error: result.error,
           stderr: result.stderr,
-          hint: `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: pip install sports-skills`,
+          hint,
         }),
         isError: true,
       };

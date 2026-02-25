@@ -19,6 +19,9 @@
 
 import { fileURLToPath } from "node:url";
 import * as p from "@clack/prompts";
+import pc from "picocolors";
+import { Marked, type MarkedExtension } from "marked";
+import { markedTerminal } from "marked-terminal";
 import { sportsclawEngine } from "./engine.js";
 import { MemoryManager } from "./memory.js";
 import {
@@ -28,15 +31,17 @@ import {
   listSchemas,
   getSchemaDir,
   bootstrapDefaultSchemas,
+  ensureSportsSkills,
   DEFAULT_SKILLS,
 } from "./schema.js";
-import type { LLMProvider } from "./types.js";
+import type { LLMProvider, ToolProgressEvent } from "./types.js";
 import {
   loadConfig,
   saveConfig,
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
+  ASCII_LOGO,
 } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +62,7 @@ export {
   listSchemas,
   loadAllSchemas,
   bootstrapDefaultSchemas,
+  ensureSportsSkills,
   DEFAULT_SKILLS,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
@@ -72,12 +78,152 @@ export type {
   LLMProvider,
   sportsclawConfig,
   RunOptions,
+  ToolProgressEvent,
   ToolSpec,
   PythonBridgeResult,
   TurnResult,
   SportSchema,
   SportToolDef,
 } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Markdown terminal renderer
+// ---------------------------------------------------------------------------
+
+const terminalExt = markedTerminal({
+  strong: pc.bold,
+  em: pc.italic,
+  heading: pc.bold,
+  firstHeading: pc.bold,
+  codespan: pc.yellow,
+  code: pc.yellow,
+  del: pc.strikethrough,
+  link: pc.cyan,
+  href: pc.underline,
+}) as MarkedExtension;
+
+// Patch: marked-terminal's `text` renderer doesn't parse inline tokens
+// (strong, em, etc.) inside non-loose list items. Override it so bold works
+// everywhere, not just in paragraphs.
+const origTextRenderer = (terminalExt as { renderer: Record<string, Function> }).renderer.text;
+(terminalExt as { renderer: Record<string, Function> }).renderer.text = function (
+  this: { parser: { parseInline(tokens: unknown[]): string } },
+  token: string | { tokens?: unknown[]; text: string },
+) {
+  if (typeof token === "object" && token.tokens) {
+    return this.parser.parseInline(token.tokens);
+  }
+  return origTextRenderer.call(this, token);
+};
+
+const md = new Marked(terminalExt);
+
+function renderMarkdown(text: string): string {
+  const rendered = md.parse(text);
+  if (typeof rendered !== "string") return text;
+  // marked-terminal adds a trailing newline; trim to avoid double-spacing
+  return rendered.replace(/\n+$/, "");
+}
+
+// ---------------------------------------------------------------------------
+// Tool progress tracker for spinner display
+// ---------------------------------------------------------------------------
+
+interface ToolState {
+  label: string;
+  skillName?: string;
+  status: "running" | "done" | "failed";
+  durationMs?: number;
+}
+
+/** Format a tool name for display: strip the skill prefix for brevity */
+function toolLabel(toolName: string, skillName?: string): string {
+  if (skillName) {
+    // e.g. "football_get_team_schedule" → "get_team_schedule" when skill is "football"
+    const prefix = skillName.replace(/-/g, "_") + "_";
+    if (toolName.startsWith(prefix)) {
+      return toolName.slice(prefix.length);
+    }
+  }
+  return toolName;
+}
+
+function createToolTracker(spinner: { message(msg?: string): void }) {
+  const tools = new Map<string, ToolState>();
+
+  // @clack spinner renders: `${frame}  ${message}` (icon + 2 spaces)
+  // Subsequent lines in a multi-line message need 3 chars to align.
+  const PAD = "   ";
+
+  function formatLine(t: ToolState, isFirst: boolean): string {
+    const skill = t.skillName ? `sports-skills/${t.skillName}` : "agent";
+    const prefix = isFirst ? "" : PAD;
+    if (t.status === "running") {
+      return `${prefix}${pc.dim("\u25CB")} ${skill}: ${t.label}...`;
+    }
+    const sec = t.durationMs != null ? ` ${(t.durationMs / 1000).toFixed(1)}s` : "";
+    const icon = t.status === "done" ? pc.green("\u2713") : pc.red("\u2717");
+    return `${prefix}${icon} ${skill}: ${t.label}${sec}`;
+  }
+
+  function render() {
+    const entries = Array.from(tools.values());
+    const done = entries.filter(t => t.status !== "running");
+    const running = entries.filter(t => t.status === "running");
+
+    const lines: string[] = [];
+    const all = [...done, ...running];
+    for (let i = 0; i < all.length; i++) {
+      lines.push(formatLine(all[i], i === 0));
+    }
+
+    spinner.message(lines.join("\n"));
+  }
+
+  /** Summary of all tools used — for the spinner stop message */
+  function summary(): string {
+    const entries = Array.from(tools.values());
+    if (entries.length === 0) return "Done.";
+
+    const lines: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const t = entries[i];
+      const sec = t.durationMs != null ? ` ${(t.durationMs / 1000).toFixed(1)}s` : "";
+      const icon = t.status === "done" ? pc.green("\u2713") : t.status === "failed" ? pc.red("\u2717") : "\u2026";
+      const skill = t.skillName ? `sports-skills/${t.skillName}` : "agent";
+      const prefix = i === 0 ? "" : PAD;
+      lines.push(`${prefix}${icon} ${skill}: ${t.label}${sec}`);
+    }
+    return lines.join("\n");
+  }
+
+  const handler = (event: ToolProgressEvent) => {
+    switch (event.type) {
+      case "tool_start":
+        tools.set(event.toolCallId, {
+          label: toolLabel(event.toolName, event.skillName),
+          skillName: event.skillName,
+          status: "running",
+        });
+        render();
+        break;
+      case "tool_finish":
+        tools.set(event.toolCallId, {
+          label: toolLabel(event.toolName, event.skillName),
+          skillName: event.skillName,
+          status: event.success ? "done" : "failed",
+          durationMs: event.durationMs,
+        });
+        render();
+        break;
+      case "synthesizing":
+        spinner.message(tools.size > 0 ? `${tools.size} tools done \u00b7 Synthesizing...` : "Synthesizing...");
+        break;
+    }
+  };
+
+  return { handler, summary };
+}
 
 // ---------------------------------------------------------------------------
 // CLI: `sportsclaw add <sport>`
@@ -184,13 +330,16 @@ async function cmdInit(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function ensureDefaultSchemas(): Promise<void> {
+  // Always preflight sports-skills (including F1) even when schemas already exist.
+  const { pythonPath } = resolveConfig();
+  await ensureSportsSkills({ pythonPath });
+
   const installed = listSchemas();
   if (installed.length > 0) return; // schemas already exist
 
   console.error(
     "[sportsclaw] No sport schemas found. Bootstrapping defaults..."
   );
-  const { pythonPath } = resolveConfig();
   const count = await bootstrapDefaultSchemas({ pythonPath });
   console.error(
     `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
@@ -256,12 +405,41 @@ async function cmdChat(args: string[]): Promise<void> {
 
   const engine = new sportsclawEngine({
     provider: resolved.provider,
-    ...(process.env.sportsclaw_MODEL && { model: process.env.sportsclaw_MODEL }),
+    ...(resolved.model && { model: resolved.model }),
     pythonPath: resolved.pythonPath,
     verbose,
   });
 
+  // Clear screen for a fresh start
+  process.stdout.write("\x1B[2J\x1B[H");
+
+  console.log(pc.bold(pc.blue(ASCII_LOGO)));
   p.intro("sportsclaw chat — type 'exit' or 'quit' to leave");
+
+  // Welcome message — evolves with the relationship
+  const memory = new MemoryManager(userId);
+  const soulRaw = await memory.readSoul();
+  const soul = memory.parseSoulHeader(soulRaw);
+
+  if (soul.exchanges >= 20) {
+    console.log("\nWhat's good. Let's get into it.\n");
+  } else if (soul.exchanges >= 6) {
+    console.log(
+      "\nWelcome back. I know what you're into by now — ask me anything " +
+      "or just say \"what's new\" and I'll catch you up.\n"
+    );
+  } else if (soul.exchanges >= 1) {
+    console.log(
+      "\nGood to see you again. Still getting to know your taste — " +
+      "keep talking to me and I'll get sharper.\n"
+    );
+  } else {
+    console.log(
+      "\nHey! Ask me anything about sports — scores, standings, news, odds, " +
+      "you name it. The more we talk, the more I learn what you care about " +
+      "and how you like it delivered.\n"
+    );
+  }
 
   // REPL loop — each turn feeds history back through the same engine instance
   while (true) {
@@ -285,7 +463,7 @@ async function cmdChat(args: string[]): Promise<void> {
     if (verbose) {
       try {
         const result = await engine.run(prompt, { userId });
-        console.log(`\n${result}\n`);
+        console.log(`\n${renderMarkdown(result)}\n`);
       } catch (error: unknown) {
         if (error instanceof Error) {
           console.error(`Error: ${error.message}`);
@@ -296,15 +474,16 @@ async function cmdChat(args: string[]): Promise<void> {
     } else {
       const s = p.spinner();
       s.start("Thinking...");
+      const tracker = createToolTracker(s);
       try {
         const result = await engine.run(prompt, {
           userId,
-          onSpinnerUpdate: (msg) => s.message(msg),
+          onProgress: tracker.handler,
         });
-        s.stop("Done.");
-        console.log(`\n${result}\n`);
+        s.stop(tracker.summary());
+        console.log(`\n${renderMarkdown(result)}\n`);
       } catch (error: unknown) {
-        s.stop("Error.");
+        s.stop(tracker.summary() || "Error.");
         if (error instanceof Error) {
           console.error(`Error: ${error.message}`);
         } else {
@@ -342,7 +521,7 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   const engine = new sportsclawEngine({
     provider: resolved.provider,
-    ...(process.env.sportsclaw_MODEL && { model: process.env.sportsclaw_MODEL }),
+    ...(resolved.model && { model: resolved.model }),
     pythonPath: resolved.pythonPath,
     verbose,
   });
@@ -350,7 +529,8 @@ async function cmdQuery(args: string[]): Promise<void> {
   if (verbose) {
     // Verbose mode: no spinner, raw console.error logs
     try {
-      await engine.runAndPrint(prompt);
+      const result = await engine.run(prompt);
+      console.log(renderMarkdown(result));
     } catch (error: unknown) {
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
@@ -364,14 +544,15 @@ async function cmdQuery(args: string[]): Promise<void> {
     // Normal mode: show a reasoning spinner
     const s = p.spinner();
     s.start("Thinking...");
+    const tracker = createToolTracker(s);
     try {
       const result = await engine.run(prompt, {
-        onSpinnerUpdate: (msg) => s.message(msg),
+        onProgress: tracker.handler,
       });
-      s.stop("Done.");
-      console.log(result);
+      s.stop(tracker.summary());
+      console.log(renderMarkdown(result));
     } catch (error: unknown) {
-      s.stop("Error.");
+      s.stop(tracker.summary() || "Error.");
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
       } else {
