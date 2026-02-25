@@ -7,6 +7,7 @@
  *   sportsclaw remove <sport>    — Remove a previously added sport schema
  *   sportsclaw list              — List all installed sport schemas
  *   sportsclaw init              — Bootstrap all 14 default sport schemas
+ *   sportsclaw chat              — Start an interactive conversation (REPL)
  *   sportsclaw listen <platform> — Start a Discord or Telegram listener
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
@@ -19,6 +20,7 @@
 import { fileURLToPath } from "node:url";
 import * as p from "@clack/prompts";
 import { sportsclawEngine } from "./engine.js";
+import { MemoryManager } from "./memory.js";
 import {
   fetchSportSchema,
   saveSchema,
@@ -234,6 +236,86 @@ async function cmdListen(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw chat` — persistent REPL conversation
+// ---------------------------------------------------------------------------
+
+async function cmdChat(args: string[]): Promise<void> {
+  const verbose = args.includes("--verbose") || args.includes("-v");
+  const userId = "cli-chat";
+
+  // Merge config file + env vars, push into process.env
+  let resolved = applyConfigToEnv();
+
+  // No API key → interactive setup
+  if (!resolved.apiKey) {
+    await runConfigFlow();
+    resolved = applyConfigToEnv();
+  }
+
+  await ensureDefaultSchemas();
+
+  const engine = new sportsclawEngine({
+    provider: resolved.provider,
+    ...(process.env.sportsclaw_MODEL && { model: process.env.sportsclaw_MODEL }),
+    pythonPath: resolved.pythonPath,
+    verbose,
+  });
+
+  p.intro("sportsclaw chat — type 'exit' or 'quit' to leave");
+
+  // REPL loop — each turn feeds history back through the same engine instance
+  while (true) {
+    const input = await p.text({
+      message: "You",
+      placeholder: "Ask about any sport...",
+    });
+
+    if (p.isCancel(input)) {
+      p.outro("See you.");
+      break;
+    }
+
+    const prompt = (input as string).trim();
+    if (!prompt) continue;
+    if (prompt === "exit" || prompt === "quit") {
+      p.outro("See you.");
+      break;
+    }
+
+    if (verbose) {
+      try {
+        const result = await engine.run(prompt, { userId });
+        console.log(`\n${result}\n`);
+      } catch (error: unknown) {
+        if (error instanceof Error) {
+          console.error(`Error: ${error.message}`);
+        } else {
+          console.error("An unknown error occurred:", error);
+        }
+      }
+    } else {
+      const s = p.spinner();
+      s.start("Thinking...");
+      try {
+        const result = await engine.run(prompt, {
+          userId,
+          onSpinnerUpdate: (msg) => s.message(msg),
+        });
+        s.stop("Done.");
+        console.log(`\n${result}\n`);
+      } catch (error: unknown) {
+        s.stop("Error.");
+        if (error instanceof Error) {
+          console.error(`Error: ${error.message}`);
+        } else {
+          console.error("An unknown error occurred:", error);
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI: default — run a one-shot query
 // ---------------------------------------------------------------------------
 
@@ -309,6 +391,7 @@ function printHelp(): void {
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
+  console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
@@ -380,6 +463,8 @@ async function main(): Promise<void> {
   switch (subcommand) {
     case "config":
       return cmdConfig();
+    case "chat":
+      return cmdChat(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":
