@@ -15,8 +15,8 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>sportsclaw — The Sports AI Agent Framework</title>
-  <meta name="description" content="A lean, high-performance sports AI agent framework. Connects LLMs to live sports data natively via sports-skills.">
+  <title>sportsclaw — Sports AI CLI & Bots</title>
+  <meta name="description" content="A CLI and bot scaffold that connects any LLM to live sports data via sports-skills. Supports Anthropic, OpenAI, and Google. Built-in Discord and Telegram bots.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -522,9 +522,9 @@
 
   <main>
     <section class="hero container">
-      <div class="badge">v0.5.1 Released</div>
-      <h1>The Lean Sports AI Framework</h1>
-      <p>A high-performance execution loop that connects any LLM to deterministic live sports data. No heavy frameworks. No vector DBs. Just a clean TS loop and Python data skills.</p>
+      <div class="badge">v0.5.6 Released</div>
+      <h1>Sports AI in Your Terminal & Group Chat</h1>
+      <p>A CLI and bot scaffold that connects any LLM to live sports data via <a href="https://sports-skills.sh" target="_blank">sports-skills</a>. Ask questions in plain English, get real answers from real data.</p>
 
       <div style="position: relative; display: inline-block;">
         <div id="copy-feedback" class="copy-feedback">Copied!</div>
@@ -572,8 +572,8 @@
     </section>
 
     <section class="architecture-section container">
-      <h2 class="section-title">The Two-Layer Architecture</h2>
-      <p class="section-subtitle">sportsclaw cleanly separates the AI orchestration logic from the underlying sports data connectors.</p>
+      <h2 class="section-title">How It Works</h2>
+      <p class="section-subtitle">sportsclaw is a TypeScript CLI that connects LLMs to <a href="https://sports-skills.sh" target="_blank">sports-skills</a>, a Python package with 14 deterministic sports data connectors.</p>
 
       <div class="ecosystem">
         <div class="eco-box">
@@ -591,11 +591,11 @@
         
         <div class="eco-box">
           <h4>sportsclaw</h4>
-          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">The high-performance AI engine.</p>
+          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">The CLI & bot scaffold.</p>
           <ul class="features-list" style="text-align: left; display: inline-block;">
-            <li>~500 lines of code</li>
             <li>Anthropic, OpenAI, Google</li>
-            <li>Executes parallel tools</li>
+            <li>Interactive setup & config</li>
+            <li>Persistent memory</li>
             <li>Built-in Discord/Telegram bots</li>
           </ul>
         </div>
@@ -605,9 +605,9 @@
         <div class="card">
           <h3>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
-            No Framework Tax
+            Readable Codebase
           </h3>
-          <p>Most AI agent frameworks add thousands of lines of abstraction between your prompt and the data. sportsclaw is ~500 lines of TS. The entire execution loop fits in your head.</p>
+          <p>~2,300 lines of TypeScript built on the Vercel AI SDK. The core agent loop is ~80 lines. Easy to fork, extend, or learn from.</p>
         </div>
         <div class="card">
           <h3>
