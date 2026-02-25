@@ -75,9 +75,9 @@ SportsClaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 > **[sports-skills.sh](https://sports-skills.sh)** — Full documentation for all built-in skills.
 
-### Inspiration
+### Inspiration & Acknowledgements
 
-SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives.
+SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ### Questions?
 
