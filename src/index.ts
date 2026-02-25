@@ -311,10 +311,12 @@ function isAbortError(error: unknown): boolean {
 
 function clearPostSubmitEchoLine(): void {
   if (!process.stdout.isTTY) return;
-  // Some terminals echo the submitted line once more when switching from
-  // readline prompt mode to spinner mode. Clear the current line to keep
-  // a single clean user message in the transcript.
-  process.stdout.write("\x1b[2K\r");
+  // When switching from readline to raw-mode, some terminals re-echo the
+  // submitted input on a NEW line. We need to:
+  //   1. Clear the current (possibly empty) line
+  //   2. Move up one line and clear the re-echoed text
+  //   3. Return the cursor to the start of that line
+  process.stdout.write("\x1b[2K\x1b[1A\x1b[2K\r");
 }
 
 function setupEscCancellation() {
