@@ -248,6 +248,8 @@ export async function ensureSportsSkills(
     return true;
   }
 
+  console.error(`[sportsclaw] Preflight Python interpreter: ${pythonPath}`);
+
   if (baseReady && !f1Ready) {
     console.error(
       "[sportsclaw] sports-skills is installed but F1 support is unavailable. Attempting repair..."

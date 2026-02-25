@@ -108,7 +108,12 @@ export function resolveConfig(): ResolvedConfig {
   const defaultPythonPath = existsSync("/opt/homebrew/bin/python3")
     ? "/opt/homebrew/bin/python3"
     : "python3";
-  const pythonPath = process.env.PYTHON_PATH || file.pythonPath || defaultPythonPath;
+  const configuredPython = process.env.PYTHON_PATH || file.pythonPath;
+  // Migrate generic "python3" configs to Homebrew Python automatically when present.
+  const pythonPath =
+    configuredPython && configuredPython !== "python3"
+      ? configuredPython
+      : defaultPythonPath;
 
   return { provider, model, apiKey, pythonPath };
 }
