@@ -16,6 +16,7 @@ import type {
   sportsclawConfig,
   SportSchema,
 } from "./types.js";
+import { buildSportsSkillsRepairCommand } from "./python.js";
 
 // ---------------------------------------------------------------------------
 // Tool catalogue — these are the built-in tools exposed to the LLM
@@ -198,6 +199,9 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    const pythonPath = config?.pythonPath ?? "python3";
+    const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
+
     if (!input.sport || !input.command) {
       return {
         content: JSON.stringify({
@@ -237,8 +241,8 @@ export class ToolRegistry {
           error: result.error,
           stderr: result.stderr,
           hint: isF1
-            ? 'F1 support is unavailable. Repair with: python3 -m pip install --upgrade sports-skills'
-            : "The sports-skills Python package may not be installed. Install it with: pip install sports-skills",
+            ? `F1 support is unavailable. Repair with: ${repairCmd}`
+            : `The sports-skills Python package may not be installed. Install it with: ${repairCmd}`,
         }),
         isError: true,
       };
@@ -256,6 +260,9 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    const pythonPath = config?.pythonPath ?? "python3";
+    const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
+
     // Defense-in-depth: validate even though injectSchema already checks
     const sportError = validateIdentifier(sport, "sport");
     if (sportError) {
@@ -279,8 +286,8 @@ export class ToolRegistry {
     if (!result.success) {
       const hint =
         sport === "f1"
-          ? "F1 support is unavailable. Repair with: python3 -m pip install --upgrade sports-skills"
-          : `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: pip install sports-skills`;
+          ? `F1 support is unavailable. Repair with: ${repairCmd}`
+          : `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: ${repairCmd}`;
       return {
         content: JSON.stringify({
           error: result.error,

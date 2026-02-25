@@ -43,6 +43,7 @@ import {
   runConfigFlow,
   ASCII_LOGO,
 } from "./config.js";
+import { buildSportsSkillsRepairCommand } from "./python.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -321,7 +322,7 @@ async function cmdInit(args: string[]): Promise<void> {
     console.log(
       "Some schemas could not be fetched. Ensure sports-skills is up to date:"
     );
-    console.log("  pip install --upgrade sports-skills");
+    console.log(`  ${buildSportsSkillsRepairCommand(pythonPath)}`);
   }
 }
 
@@ -600,7 +601,7 @@ function printHelp(): void {
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
-  console.log("  PYTHON_PATH             Path to Python interpreter (default: python3)");
+  console.log("  PYTHON_PATH             Path to Python interpreter (default: auto-detect)");
   console.log("  sportsclaw_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");
   console.log("  TELEGRAM_BOT_TOKEN      Telegram bot token (for listen telegram)");

@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { SportSchema, sportsclawConfig } from "./types.js";
 import { buildSubprocessEnv } from "./tools.js";
+import { buildSportsSkillsRepairCommand } from "./python.js";
 
 // ---------------------------------------------------------------------------
 // Default skills — the 14 sports-skills that ship with sportsclaw
@@ -255,42 +256,59 @@ export async function ensureSportsSkills(
     console.error("[sportsclaw] sports-skills not found. Installing...");
   }
 
-  // Determine pip command: prefer pip3 alongside the configured python
-  const pipCandidates = ["pip3", "pip"];
-  let pipPath: string | undefined;
-  for (const pip of pipCandidates) {
+  const installAttempts: Array<{ bin: string; args: string[] }> = [
+    {
+      bin: pythonPath,
+      args: ["-m", "pip", "install", "--upgrade", "sports-skills"],
+    },
+    {
+      bin: pythonPath,
+      args: [
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "sports-skills",
+        "--break-system-packages",
+      ],
+    },
+    {
+      bin: pythonPath,
+      args: ["-m", "pip", "install", "--upgrade", "sports-skills", "--user"],
+    },
+  ];
+
+  // Fallbacks only if python -m pip is unavailable.
+  for (const pip of ["pip3", "pip"]) {
     try {
       execFileSync(pip, ["--version"], { timeout: 5_000, stdio: "pipe" });
-      pipPath = pip;
+      installAttempts.push(
+        { bin: pip, args: ["install", "--upgrade", "sports-skills"] },
+        {
+          bin: pip,
+          args: [
+            "install",
+            "--upgrade",
+            "sports-skills",
+            "--break-system-packages",
+          ],
+        },
+        {
+          bin: pip,
+          args: ["install", "--upgrade", "sports-skills", "--user"],
+        }
+      );
       break;
     } catch {
       // try next
     }
   }
 
-  if (!pipPath) {
-    // Last resort: python -m pip
-    pipPath = pythonPath;
-  }
-
-  const installAttempts =
-    pipPath === pythonPath
-      ? [
-          ["-m", "pip", "install", "--upgrade", "sports-skills"],
-          ["-m", "pip", "install", "--upgrade", "sports-skills", "--break-system-packages"],
-          ["-m", "pip", "install", "--upgrade", "sports-skills", "--user"],
-        ]
-      : [
-          ["install", "--upgrade", "sports-skills"],
-          ["install", "--upgrade", "sports-skills", "--break-system-packages"],
-          ["install", "--upgrade", "sports-skills", "--user"],
-        ];
-
   let lastInstallError: unknown;
   try {
-    for (const installArgs of installAttempts) {
+    for (const attempt of installAttempts) {
       try {
-        execFileSync(pipPath, installArgs, {
+        execFileSync(attempt.bin, attempt.args, {
           timeout: 120_000,
           stdio: "inherit",
         });
@@ -317,10 +335,13 @@ export async function ensureSportsSkills(
     }`
   );
   console.error(
-    "[sportsclaw] Repair command: python3 -m pip install --upgrade sports-skills"
+    `[sportsclaw] Repair command: ${buildSportsSkillsRepairCommand(pythonPath)}`
   );
   console.error(
-    "[sportsclaw] If global install is blocked: python3 -m pip install --upgrade --user sports-skills"
+    `[sportsclaw] If global install is blocked: ${buildSportsSkillsRepairCommand(
+      pythonPath,
+      true
+    )}`
   );
   return false;
 }

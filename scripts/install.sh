@@ -33,6 +33,13 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+# Prefer Homebrew Python on macOS when available to avoid mixing system Python packages
+PYTHON_BIN="$(command -v python3)"
+if [ -x "/opt/homebrew/bin/python3" ]; then
+    PYTHON_BIN="/opt/homebrew/bin/python3"
+fi
+echo -e "${BLUE}🐍 Using Python: ${PYTHON_BIN}${NC}"
+
 # 2. Install Node Package (Engine)
 echo -e "${BLUE}📦 Installing TypeScript Execution Engine...${NC}"
 npm install -g sportsclaw-engine-core@latest || {
@@ -44,24 +51,24 @@ echo -e "${GREEN}✓ Engine installed.${NC}\n"
 # 3. Install Python Package (Data Skills)
 echo -e "${BLUE}🐍 Installing Python Data Skills...${NC}"
 # Use standard pip, handle external-managed-environments gracefully where possible
-if python3 -m pip --version &> /dev/null; then
+if "${PYTHON_BIN}" -m pip --version &> /dev/null; then
     # Some environments (like modern macOS/Ubuntu) block system-wide pip installs.
     # We try standard first, then fallback to --break-system-packages (safe for pure python libs like ours), then --user
-    python3 -m pip install --upgrade sports-skills 2>/dev/null || \
-    python3 -m pip install --upgrade sports-skills --break-system-packages 2>/dev/null || \
-    python3 -m pip install --upgrade sports-skills --user || {
+    "${PYTHON_BIN}" -m pip install --upgrade sports-skills 2>/dev/null || \
+    "${PYTHON_BIN}" -m pip install --upgrade sports-skills --break-system-packages 2>/dev/null || \
+    "${PYTHON_BIN}" -m pip install --upgrade sports-skills --user || {
         echo -e "${RED}❌ Failed to install Python package.${NC}"
         exit 1
     }
 else
-    echo -e "${YELLOW}⚠️ Warning: 'pip' not found for python3. You may need to install sports-skills manually:${NC}"
-    echo "python3 -m ensurepip && python3 -m pip install --upgrade sports-skills"
+    echo -e "${YELLOW}⚠️ Warning: 'pip' not found for ${PYTHON_BIN}. You may need to install sports-skills manually:${NC}"
+    echo "${PYTHON_BIN} -m ensurepip && ${PYTHON_BIN} -m pip install --upgrade sports-skills"
 fi
 echo -e "${GREEN}✓ Skills installed.${NC}\n"
 
 # 4. Bootstrap Default Schemas
 echo -e "${BLUE}⚙️  Bootstrapping agent memory...${NC}"
-sportsclaw init > /dev/null 2>&1 || true
+PYTHON_PATH="${PYTHON_BIN}" sportsclaw init > /dev/null 2>&1 || true
 echo -e "${GREEN}✓ Agent primed.${NC}\n"
 
 # 5. Success
