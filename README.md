@@ -4,14 +4,13 @@
 
 # sportsclaw 🦞
 
-A lean, high-performance sports AI agent framework.
-~500 lines of TypeScript. Bring your own LLM.
+A CLI and bot scaffold that connects any LLM to live sports data via [sports-skills](https://sports-skills.sh).
 
 ---
 
 ### What is sportsclaw?
 
-sportsclaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No heavy frameworks. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
+sportsclaw is a TypeScript CLI and bot scaffold that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models via the [Vercel AI SDK](https://sdk.vercel.ai). ~2,300 lines of TypeScript total, with the core agent loop at ~80 lines.
 
 ### What can you build with it?
 
@@ -26,7 +25,7 @@ sportsclaw gives you a working sports AI agent in minutes. Here's what people bu
 
 ### Why sportsclaw?
 
-**It skips the framework tax.** Most AI agent frameworks add thousands of lines of abstraction between your prompt and the data. sportsclaw is ~500 lines of TypeScript. The entire execution loop fits in your head.
+**Readable codebase.** ~2,300 lines of TypeScript built on the Vercel AI SDK. The core agent loop is ~80 lines. Easy to fork, extend, or learn from.
 
 **Data comes from Python, not the LLM.** sportsclaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
@@ -65,7 +64,7 @@ sportsclaw is built for:
 - **Personal hacking** — You want a sports agent that actually works, not a research project. Get answers from real data in your terminal or a script.
 - **Discord and Telegram communities** — Deploy a bot that your group can ask sports questions. Built-in listeners handle the wiring; you just add your bot token.
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
-- **Learning how agents work** — The entire engine is ~500 lines. Read it, modify it, extend it. There's no hidden complexity.
+- **Learning how agents work** — The core loop is ~80 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
 ### Built-in Sports Data Skills
 
@@ -77,7 +76,7 @@ sportsclaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 ### Inspiration & Acknowledgements
 
-sportsclaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+sportsclaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw). Built on the [Vercel AI SDK](https://sdk.vercel.ai) for multi-provider LLM support. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ### Questions?
 
