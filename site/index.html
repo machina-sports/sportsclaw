@@ -47,22 +47,49 @@
       --nav-bg: rgba(10, 10, 10, 0.85);
     }
 
+    /* Light theme */
     html.light {
-      --bg: #ffffff;
-      --bg-card: #f8f9fa;
-      --bg-card-hover: #f1f3f5;
-      --border: #e9ecef;
-      --border-hover: #dee2e6;
-      --text: #111827;
-      --text-muted: #6b7280;
-      --text-dim: #9ca3af;
+      --bg: #f8f9fa;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f0f1f2;
+      --border: #e0e0e0;
+      --border-hover: #c8c8c8;
+      --text: #1a1a1a;
+      --text-muted: #555555;
+      --text-dim: #888888;
       --blue: #2563eb;
       --blue-dim: #1d4ed8;
       --blue-muted: rgba(37, 99, 235, 0.08);
       --cyan: #0891b2;
       --cyan-muted: rgba(8, 145, 178, 0.08);
-      --green: #059669;
-      --nav-bg: rgba(255, 255, 255, 0.85);
+      --green: #00a82d;
+      --nav-bg: rgba(248, 249, 250, 0.9);
+    }
+
+    /* System preference: light mode */
+    @media (prefers-color-scheme: light) {
+      html:not(.dark) {
+        --bg: #f8f9fa;
+        --bg-card: #ffffff;
+        --bg-card-hover: #f0f1f2;
+        --border: #e0e0e0;
+        --border-hover: #c8c8c8;
+        --text: #1a1a1a;
+        --text-muted: #555555;
+        --text-dim: #888888;
+        --blue: #2563eb;
+        --blue-dim: #1d4ed8;
+        --blue-muted: rgba(37, 99, 235, 0.08);
+        --cyan: #0891b2;
+        --cyan-muted: rgba(8, 145, 178, 0.08);
+        --green: #00a82d;
+        --nav-bg: rgba(248, 249, 250, 0.9);
+      }
+    }
+
+    html {
+      scroll-behavior: smooth;
+      color-scheme: dark light;
     }
 
     body {
@@ -462,12 +489,7 @@
   <header>
     <div class="container nav-inner">
       <div class="logo">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-          <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-          <line x1="12" y1="22.08" x2="12" y2="12"></line>
-        </svg>
-        sportsclaw<span>.gg</span>
+        <span style="color: var(--green);">❯</span> sportsclaw<span style="color: var(--blue);">.gg</span>
       </div>
       <div class="nav-links">
         <a href="https://sports-skills.sh" class="nav-link" target="_blank">sports-skills.sh</a>
