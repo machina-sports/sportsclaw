@@ -1,5 +1,5 @@
 /**
- * SportsClaw Engine — Schema Injection (Phase 3)
+ * sportsclaw Engine — Schema Injection (Phase 3)
  *
  * Handles fetching sport-specific tool schemas from the Python `sports-skills`
  * package, persisting them to disk, and loading them at engine startup.
@@ -22,11 +22,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { SportSchema, SportsClawConfig } from "./types.js";
+import type { SportSchema, sportsclawConfig } from "./types.js";
 import { buildSubprocessEnv } from "./tools.js";
 
 // ---------------------------------------------------------------------------
-// Default skills — the 14 sports-skills that ship with SportsClaw
+// Default skills — the 14 sports-skills that ship with sportsclaw
 // See https://sports-skills.sh
 // ---------------------------------------------------------------------------
 
@@ -54,7 +54,7 @@ export const DEFAULT_SKILLS = [
 /** Resolve the directory where sport schemas are stored */
 export function getSchemaDir(): string {
   const dir =
-    process.env.SPORTSCLAW_SCHEMA_DIR ||
+    process.env.sportsclaw_SCHEMA_DIR ||
     join(homedir(), ".sportsclaw", "schemas");
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -74,7 +74,7 @@ export function getSchemaDir(): string {
  */
 export function fetchSportSchema(
   sport: string,
-  config?: Partial<SportsClawConfig>
+  config?: Partial<sportsclawConfig>
 ): Promise<SportSchema> {
   const pythonPath = config?.pythonPath ?? "python3";
   const timeout = config?.timeout ?? 30_000;
@@ -211,7 +211,7 @@ export function listSchemas(): string[] {
  * previously existing ones that were skipped).
  */
 export async function bootstrapDefaultSchemas(
-  config?: Partial<SportsClawConfig>,
+  config?: Partial<sportsclawConfig>,
   options?: { verbose?: boolean; force?: boolean }
 ): Promise<number> {
   const verbose = options?.verbose ?? false;

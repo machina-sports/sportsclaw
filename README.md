@@ -1,21 +1,21 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="SportsClaw" width="500">
+  <img src="assets/logo.jpg" alt="sportsclaw" width="500">
 </p>
 
-# SportsClaw 🦞
+# sportsclaw 🦞
 
 A lean, high-performance sports AI agent framework.
 ~500 lines of TypeScript. Bring your own LLM.
 
 ---
 
-### What is SportsClaw?
+### What is sportsclaw?
 
-SportsClaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No heavy frameworks. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
+sportsclaw is a lightweight execution loop that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models. No heavy frameworks. No vector databases. No config sprawl. Just a tight agent loop that calls real data functions and returns exact answers.
 
 ### What can you build with it?
 
-SportsClaw gives you a working sports AI agent in minutes. Here's what people build:
+sportsclaw gives you a working sports AI agent in minutes. Here's what people build:
 
 - **Discord/Telegram bots** — Deploy a sports bot to your server that answers questions like "What are today's NBA scores?" or "Show me the Premier League table" with real data, not hallucinated guesses. Built-in listeners for both platforms.
 - **Fantasy football assistants** — Build a personal agent that pulls player stats, injury reports, matchup data, and news across NFL, NBA, MLB, NHL, and more to help you make lineup decisions.
@@ -24,11 +24,11 @@ SportsClaw gives you a working sports AI agent in minutes. Here's what people bu
 - **Multi-sport news digests** — The `sports-news` skill aggregates headlines across leagues. Build a morning briefing bot that summarizes what happened overnight across the sports you care about.
 - **Custom CLI tools** — Run one-shot queries from your terminal: `sportsclaw "Who leads the Premier League in goals?"` and get a sourced answer in seconds.
 
-### Why SportsClaw?
+### Why sportsclaw?
 
-**It skips the framework tax.** Most AI agent frameworks add thousands of lines of abstraction between your prompt and the data. SportsClaw is ~500 lines of TypeScript. The entire execution loop fits in your head.
+**It skips the framework tax.** Most AI agent frameworks add thousands of lines of abstraction between your prompt and the data. sportsclaw is ~500 lines of TypeScript. The entire execution loop fits in your head.
 
-**Data comes from Python, not the LLM.** SportsClaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
+**Data comes from Python, not the LLM.** sportsclaw calls deterministic Python functions ([`sports-skills`](https://sports-skills.sh)) to fetch scores, standings, and stats. The LLM decides *what* to look up, but the data itself comes from ESPN, FastF1, Kalshi, and other real sources — not from the model's training data. This eliminates hallucinated scores and stats.
 
 **Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY`) for the reasoning model, but every sports data skill works completely out of the box with zero API keys required for the data layer — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
 
@@ -45,9 +45,9 @@ sportsclaw "What are today's NFL scores?"
 Or use it as a library:
 
 ```typescript
-import { SportsClawEngine } from "sportsclaw-engine-core";
+import { sportsclawEngine } from "sportsclaw-engine-core";
 
-const engine = new SportsClawEngine();
+const engine = new sportsclawEngine();
 const answer = await engine.run("Who leads the Premier League?");
 ```
 
@@ -60,16 +60,16 @@ docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"
 
 ### When should you use it?
 
-SportsClaw is built for:
+sportsclaw is built for:
 
 - **Personal hacking** — You want a sports agent that actually works, not a research project. Get answers from real data in your terminal or a script.
 - **Discord and Telegram communities** — Deploy a bot that your group can ask sports questions. Built-in listeners handle the wiring; you just add your bot token.
-- **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. SportsClaw gives you the agent loop and data access so you can focus on the product idea.
+- **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The entire engine is ~500 lines. Read it, modify it, extend it. There's no hidden complexity.
 
 ### Built-in Sports Data Skills
 
-SportsClaw ships with **14 sports data skills** out of the box, powered by [`sports-skills`](https://sports-skills.sh):
+sportsclaw ships with **14 sports data skills** out of the box, powered by [`sports-skills`](https://sports-skills.sh):
 
 `football-data` `nfl-data` `nba-data` `nhl-data` `mlb-data` `wnba-data` `tennis-data` `cfb-data` `cbb-data` `golf-data` `fastf1` `kalshi` `polymarket` `sports-news`
 
@@ -77,11 +77,11 @@ SportsClaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 ### Inspiration & Acknowledgements
 
-SportsClaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+sportsclaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw) — proving that a tight, sub-1000-line agentic loop can outperform bloated orchestration frameworks when paired with well-designed tool primitives. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ### Questions?
 
-Join the community on Discord to discuss SportsClaw, sports-skills, and building AI agents for sports: [Join the Machina Sports Discord](https://discord.gg/CU5KmQWHD9)
+Join the community on Discord to discuss sportsclaw, sports-skills, and building AI agents for sports: [Join the Machina Sports Discord](https://discord.gg/CU5KmQWHD9)
 
 ---
 *Built by the [Machina Sports](https://machina.gg) team.*

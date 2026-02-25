@@ -1,5 +1,5 @@
 /**
- * SportsClaw Engine — Core Agent Execution Loop
+ * sportsclaw Engine — Core Agent Execution Loop
  *
  * A lightweight agentic loop that:
  *   1. Sends user messages + tool definitions to the LLM
@@ -25,7 +25,7 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_MODELS,
   type LLMProvider,
-  type SportsClawConfig,
+  type sportsclawConfig,
   type RunOptions,
   type Message,
 } from "./types.js";
@@ -37,7 +37,7 @@ import { MemoryManager } from "./memory.js";
 // System prompt
 // ---------------------------------------------------------------------------
 
-const BASE_SYSTEM_PROMPT = `You are SportsClaw, a high-performance sports AI agent built by Machina Sports.
+const BASE_SYSTEM_PROMPT = `You are sportsclaw, a high-performance sports AI agent built by Machina Sports.
 
 Your core directives:
 1. ACCURACY FIRST — Never guess or hallucinate scores, stats, or odds. If the tool returns data, report it exactly. If a tool call fails, say so honestly.
@@ -80,13 +80,13 @@ function resolveModel(provider: LLMProvider, modelId: string) {
 // Engine class
 // ---------------------------------------------------------------------------
 
-export class SportsClawEngine {
+export class sportsclawEngine {
   private model: ReturnType<typeof resolveModel>;
-  private config: Required<SportsClawConfig>;
+  private config: Required<sportsclawConfig>;
   private messages: Message[] = [];
   private registry: ToolRegistry;
 
-  constructor(config?: Partial<SportsClawConfig>) {
+  constructor(config?: Partial<sportsclawConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
 
     // If provider changed but model was not explicitly set, use the provider's default
@@ -311,8 +311,8 @@ export class SportsClawEngine {
 
     const responseText =
       stepCount >= this.config.maxTurns && !result.text
-        ? "[SportsClaw] Max turns reached without a final response."
-        : result.text || "[SportsClaw] No response generated.";
+        ? "[sportsclaw] Max turns reached without a final response."
+        : result.text || "[sportsclaw] No response generated.";
 
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {

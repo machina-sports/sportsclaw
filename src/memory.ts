@@ -1,5 +1,5 @@
 /**
- * SportsClaw — Markdown Persistent Memory (OpenClaw Architecture)
+ * sportsclaw — Markdown Persistent Memory (OpenClaw Architecture)
  *
  * A 3-layer memory system using plain .md files:
  *
@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 // ---------------------------------------------------------------------------
 
 const MEMORY_BASE =
-  process.env.SPORTSCLAW_MEMORY_DIR ||
+  process.env.sportsclaw_MEMORY_DIR ||
   join(homedir(), ".sportsclaw", "memory");
 
 const CONTEXT_FILE = "CONTEXT.md";

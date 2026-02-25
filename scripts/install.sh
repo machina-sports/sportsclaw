@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# SportsClaw Auto-Installer
+# sportsclaw Auto-Installer
 # Example usage: curl -fsSL https://sportsclaw.gg/install.sh | bash
 
 set -e
@@ -13,7 +13,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "\n🦞 ${BOLD}Installing SportsClaw...${NC}\n"
+echo -e "\n🦞 ${BOLD}Installing sportsclaw...${NC}\n"
 
 # 1. Dependency Checks
 if ! command -v node &> /dev/null; then

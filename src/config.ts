@@ -1,5 +1,5 @@
 /**
- * SportsClaw Engine — Persistent CLI Configuration
+ * sportsclaw Engine — Persistent CLI Configuration
  *
  * Reads/writes user config from ~/.sportsclaw/config.json.
  * Environment variables always override config file values.
@@ -72,7 +72,7 @@ export interface ResolvedConfig {
 export function resolveConfig(): ResolvedConfig {
   const file = loadConfig();
 
-  const provider = (process.env.SPORTSCLAW_PROVIDER || file.provider || "anthropic") as LLMProvider;
+  const provider = (process.env.sportsclaw_PROVIDER || file.provider || "anthropic") as LLMProvider;
   const envVar = PROVIDER_ENV[provider];
 
   // env var > config-file apiKey (only if provider matches)
@@ -93,8 +93,8 @@ export function applyConfigToEnv(): ResolvedConfig {
   if (resolved.apiKey && !process.env[envVar]) {
     process.env[envVar] = resolved.apiKey;
   }
-  if (!process.env.SPORTSCLAW_PROVIDER) {
-    process.env.SPORTSCLAW_PROVIDER = resolved.provider;
+  if (!process.env.sportsclaw_PROVIDER) {
+    process.env.sportsclaw_PROVIDER = resolved.provider;
   }
   if (!process.env.PYTHON_PATH && resolved.pythonPath !== "python3") {
     process.env.PYTHON_PATH = resolved.pythonPath;
@@ -110,16 +110,16 @@ export function applyConfigToEnv(): ResolvedConfig {
 export async function runConfigFlow(): Promise<CLIConfig> {
   
 const ASCII_LOGO = `
-   _____                  __       ________               
-  / ___/____  ____  _____/ /______/ ____/ /___ __      __
-  \\__ \\/ __ \\/ __ \\/ ___/ __/ ___/ /   / / __ \`/ | /| / /
- ___/ / /_/ / /_/ / /  / /_(__  ) /___/ / /_/ /| |/ |/ / 
-/____/ .___/\\____/_/   \\__/____/\\____/_/\\__,_/ |__/|__/  
-    /_/                                                  
+                     __           __               
+  ___  ____  ____  _____/ /______/ /___ __      __
+ / ___/ __ \\/ __ \\/ ___/ __/ ___/ / __ \`/ | /| / /
+(__  ) /_/ / /_/ / /  / /_(__  ) / /_/ /| |/ |/ / 
+/____/ .___/\\____/_/   \\__/____/_/\\__,_/ |__/|__/  
+    /_/                                            
 `;
 
   console.log(pc.bold(pc.blue(ASCII_LOGO)));
-  p.intro("🦞 SportsClaw Configuration");
+  p.intro("🦞 sportsclaw Configuration");
 
   const provider = await p.select({
     message: "⚡ Which LLM provider would you like to use?",

@@ -1,5 +1,5 @@
 /**
- * SportsClaw Engine — Type Definitions
+ * sportsclaw Engine — Type Definitions
  *
  * Shared types for the agent execution loop, tool bridge, and configuration.
  */
@@ -22,7 +22,7 @@ export const DEFAULT_MODELS: Record<LLMProvider, string> = {
 // Configuration
 // ---------------------------------------------------------------------------
 
-export interface SportsClawConfig {
+export interface sportsclawConfig {
   /** LLM provider to use (default: anthropic) */
   provider?: LLMProvider;
   /** Model ID for the chosen provider (default: depends on provider) */
@@ -43,7 +43,7 @@ export interface SportsClawConfig {
   verbose?: boolean;
 }
 
-export const DEFAULT_CONFIG: Required<SportsClawConfig> = {
+export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   provider: "anthropic",
   model: "claude-sonnet-4-20250514",
   maxTurns: 25,

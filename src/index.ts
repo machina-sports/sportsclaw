@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * SportsClaw Engine — CLI Entry Point
+ * sportsclaw Engine — CLI Entry Point
  *
  * Subcommands:
  *   sportsclaw add <sport>       — Inject a sport schema from the Python package
@@ -11,14 +11,14 @@
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
  * Or import as a library:
- *   import { SportsClawEngine } from "sportsclaw-engine-core";
- *   const engine = new SportsClawEngine();
+ *   import { sportsclawEngine } from "sportsclaw-engine-core";
+ *   const engine = new sportsclawEngine();
  *   const answer = await engine.run("What are today's NBA scores?");
  */
 
 import { fileURLToPath } from "node:url";
 import * as p from "@clack/prompts";
-import { SportsClawEngine } from "./engine.js";
+import { sportsclawEngine } from "./engine.js";
 import {
   fetchSportSchema,
   saveSchema,
@@ -41,7 +41,7 @@ import {
 // Re-exports for library usage
 // ---------------------------------------------------------------------------
 
-export { SportsClawEngine } from "./engine.js";
+export { sportsclawEngine } from "./engine.js";
 export {
   TOOL_SPECS,
   ToolRegistry,
@@ -68,7 +68,7 @@ export {
 export type { CLIConfig, ResolvedConfig } from "./config.js";
 export type {
   LLMProvider,
-  SportsClawConfig,
+  sportsclawConfig,
   RunOptions,
   ToolSpec,
   PythonBridgeResult,
@@ -258,9 +258,9 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   await ensureDefaultSchemas();
 
-  const engine = new SportsClawEngine({
+  const engine = new sportsclawEngine({
     provider: resolved.provider,
-    ...(process.env.SPORTSCLAW_MODEL && { model: process.env.SPORTSCLAW_MODEL }),
+    ...(process.env.sportsclaw_MODEL && { model: process.env.sportsclaw_MODEL }),
     pythonPath: resolved.pythonPath,
     verbose,
   });
@@ -305,7 +305,7 @@ async function cmdQuery(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function printHelp(): void {
-  console.log("SportsClaw Engine v0.4.1");
+  console.log("sportsclaw Engine v0.4.1");
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
@@ -331,13 +331,13 @@ function printHelp(): void {
   console.log("  Environment variables override config file values.");
   console.log("");
   console.log("Environment:");
-  console.log("  SPORTSCLAW_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
-  console.log("  SPORTSCLAW_MODEL        Model override (default: depends on provider)");
+  console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
+  console.log("  sportsclaw_MODEL        Model override (default: depends on provider)");
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
   console.log("  PYTHON_PATH             Path to Python interpreter (default: python3)");
-  console.log("  SPORTSCLAW_SCHEMA_DIR   Custom schema storage directory");
+  console.log("  sportsclaw_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");
   console.log("  TELEGRAM_BOT_TOKEN      Telegram bot token (for listen telegram)");
   console.log("  ALLOWED_USERS           Comma-separated user IDs for listener whitelist");

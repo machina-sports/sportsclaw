@@ -1,5 +1,5 @@
 /**
- * SportsClaw — Shared Utilities
+ * sportsclaw — Shared Utilities
  */
 
 /**

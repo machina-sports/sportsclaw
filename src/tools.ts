@@ -1,5 +1,5 @@
 /**
- * SportsClaw Engine — Tool Definitions & Python Subprocess Bridge
+ * sportsclaw Engine — Tool Definitions & Python Subprocess Bridge
  *
  * This module defines the tools the LLM can call and implements the core
  * "Python bridge" — the mechanism that intercepts tool calls and executes
@@ -13,7 +13,7 @@ import { execFile } from "node:child_process";
 import type {
   ToolSpec,
   PythonBridgeResult,
-  SportsClawConfig,
+  sportsclawConfig,
   SportSchema,
 } from "./types.js";
 
@@ -97,7 +97,7 @@ export interface ToolCallResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Instance-level tool registry. Each SportsClawEngine owns its own registry,
+ * Instance-level tool registry. Each sportsclawEngine owns its own registry,
  * preventing shared mutable state when multiple engines run concurrently.
  */
 export class ToolRegistry {
@@ -168,7 +168,7 @@ export class ToolRegistry {
   async dispatchToolCall(
     toolName: string,
     input: ToolCallInput,
-    config?: Partial<SportsClawConfig>
+    config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
     if (toolName === "sports_query") {
       return this.handleSportsQuery(input, config);
@@ -191,7 +191,7 @@ export class ToolRegistry {
 
   private async handleSportsQuery(
     input: ToolCallInput,
-    config?: Partial<SportsClawConfig>
+    config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
     if (!input.sport || !input.command) {
       return {
@@ -246,7 +246,7 @@ export class ToolRegistry {
     sport: string,
     command: string,
     input: ToolCallInput,
-    config?: Partial<SportsClawConfig>
+    config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
     // Defense-in-depth: validate even though injectSchema already checks
     const sportError = validateIdentifier(sport, "sport");
@@ -358,7 +358,7 @@ export function executePythonBridge(
   sport: string,
   command: string,
   args?: Record<string, unknown>,
-  config?: Partial<SportsClawConfig>
+  config?: Partial<sportsclawConfig>
 ): Promise<PythonBridgeResult> {
   const pythonPath = config?.pythonPath ?? "python3";
   const cliArgs = buildArgs(sport, command, args);

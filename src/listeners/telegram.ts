@@ -1,12 +1,12 @@
 /**
- * SportsClaw — Telegram Listener (Phase 4)
+ * sportsclaw — Telegram Listener (Phase 4)
  *
- * A simple Telegram bot that pipes messages to the SportsClaw engine.
+ * A simple Telegram bot that pipes messages to the sportsclaw engine.
  * Uses the Telegram Bot API directly via fetch — no extra dependencies.
  *
  * Environment:
  *   TELEGRAM_BOT_TOKEN   — Your Telegram bot token (from @BotFather)
- *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
+ *   sportsclaw_PROVIDER  — LLM provider (anthropic, openai, google)
  *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
  *   ALLOWED_USERS        — Comma-separated Telegram user IDs (optional whitelist)
  *
@@ -14,8 +14,8 @@
  * mentioned via /claw <question>).
  */
 
-import { SportsClawEngine } from "../engine.js";
-import type { LLMProvider, SportsClawConfig } from "../types.js";
+import { sportsclawEngine } from "../engine.js";
+import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
 
 const COMMAND_PREFIX = "/claw";
@@ -62,10 +62,10 @@ export async function startTelegramListener(): Promise<void> {
     );
   }
 
-  const engineConfig: Partial<SportsClawConfig> = {
-    provider: (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider,
-    ...(process.env.SPORTSCLAW_MODEL && {
-      model: process.env.SPORTSCLAW_MODEL,
+  const engineConfig: Partial<sportsclawConfig> = {
+    provider: (process.env.sportsclaw_PROVIDER || "anthropic") as LLMProvider,
+    ...(process.env.sportsclaw_MODEL && {
+      model: process.env.sportsclaw_MODEL,
     }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
   };
@@ -121,7 +121,7 @@ export async function startTelegramListener(): Promise<void> {
 async function processUpdate(
   update: TelegramUpdate,
   apiBase: string,
-  engineConfig: Partial<SportsClawConfig>,
+  engineConfig: Partial<sportsclawConfig>,
   allowedUsers: Set<string> | null
 ): Promise<void> {
   const msg = update.message;
@@ -160,7 +160,7 @@ async function processUpdate(
 
   try {
     // Fresh engine per request — avoids shared-state issues
-    const engine = new SportsClawEngine(engineConfig);
+    const engine = new sportsclawEngine(engineConfig);
     const response = await engine.run(prompt, { userId });
 
     // Telegram has a 4096 char limit — split if needed

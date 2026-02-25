@@ -1,21 +1,21 @@
 /**
- * SportsClaw — Discord Listener (Phase 4)
+ * sportsclaw — Discord Listener (Phase 4)
  *
- * A simple Discord bot that pipes messages to the SportsClaw engine.
+ * A simple Discord bot that pipes messages to the sportsclaw engine.
  * Requires the `discord.js` package (optional dependency).
  *
  * Environment:
  *   DISCORD_BOT_TOKEN    — Your Discord bot token
- *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
+ *   sportsclaw_PROVIDER  — LLM provider (anthropic, openai, google)
  *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
  *   ALLOWED_USERS        — Comma-separated Discord user IDs (optional whitelist)
  *
  * The bot responds to:
- *   - Direct mentions (@SportsClaw <question>)
+ *   - Direct mentions (@sportsclaw <question>)
  *   - Messages starting with `!claw <question>`
  */
 
-import { SportsClawEngine } from "../engine.js";
+import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
 
@@ -53,9 +53,9 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   const engineConfig = {
-    provider: (process.env.SPORTSCLAW_PROVIDER || "anthropic") as LLMProvider,
-    ...(process.env.SPORTSCLAW_MODEL && {
-      model: process.env.SPORTSCLAW_MODEL,
+    provider: (process.env.sportsclaw_PROVIDER || "anthropic") as LLMProvider,
+    ...(process.env.sportsclaw_MODEL && {
+      model: process.env.sportsclaw_MODEL,
     }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
   };
@@ -91,7 +91,7 @@ export async function startDiscordListener(): Promise<void> {
       prompt = message.content.slice(PREFIX.length).trim();
     }
 
-    // Check for direct mention: @SportsClaw <question>
+    // Check for direct mention: @sportsclaw <question>
     if (!prompt && client.user && message.mentions.has(client.user)) {
       prompt = message.content
         .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
@@ -108,7 +108,7 @@ export async function startDiscordListener(): Promise<void> {
       await message.channel.sendTyping();
 
       // Fresh engine per request — avoids shared-state race conditions
-      const engine = new SportsClawEngine(engineConfig);
+      const engine = new sportsclawEngine(engineConfig);
       const response = await engine.run(prompt, { userId });
 
       // Discord has a 2000 char limit — split if needed
