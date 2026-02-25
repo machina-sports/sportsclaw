@@ -18,6 +18,66 @@ import type {
 } from "./types.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
 
+type BridgeErrorCode =
+  | "timeout"
+  | "dependency_missing"
+  | "network_dns"
+  | "rate_limited"
+  | "tool_execution_failed";
+
+function classifyBridgeError(
+  error?: string,
+  stderr?: string
+): { errorCode: BridgeErrorCode; hint: string } {
+  const haystack = `${error ?? ""}\n${stderr ?? ""}`.toLowerCase();
+
+  if (haystack.includes("timed out") || haystack.includes("command timed out")) {
+    return {
+      errorCode: "timeout",
+      hint:
+        "The data provider timed out. Retry the same query; if it persists, increase timeout in config.",
+    };
+  }
+  if (
+    haystack.includes("modulenotfounderror") ||
+    haystack.includes("importerror") ||
+    haystack.includes("optional dependency") ||
+    haystack.includes("dependency_missing") ||
+    haystack.includes("requires extra dependencies")
+  ) {
+    return {
+      errorCode: "dependency_missing",
+      hint: "A required dependency is missing in the selected Python environment.",
+    };
+  }
+  if (
+    haystack.includes("enotfound") ||
+    haystack.includes("name resolution") ||
+    haystack.includes("nodename nor servname") ||
+    haystack.includes("getaddrinfo")
+  ) {
+    return {
+      errorCode: "network_dns",
+      hint: "Network/DNS lookup failed while reaching a data source. Verify internet/DNS and retry.",
+    };
+  }
+  if (
+    haystack.includes("429") ||
+    haystack.includes("rate limit") ||
+    haystack.includes("too many requests")
+  ) {
+    return {
+      errorCode: "rate_limited",
+      hint: "The provider rate-limited requests. Wait briefly and retry.",
+    };
+  }
+
+  return {
+    errorCode: "tool_execution_failed",
+    hint: "The tool execution failed. Retry and inspect stderr for details.",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tool catalogue — these are the built-in tools exposed to the LLM
 // ---------------------------------------------------------------------------
@@ -148,9 +208,17 @@ export class ToolRegistry {
     this.routeMap.clear();
   }
 
-  /** Get all tool specs: built-in + dynamically injected */
+  /**
+   * Get all tool specs.
+   *
+   * When dynamic schemas are loaded, prefer those sport-specific tools and
+   * hide the legacy generic `sports_query` tool to reduce ambiguous routing.
+   */
   getAllToolSpecs(): ToolSpec[] {
-    return [...TOOL_SPECS, ...this.dynamicSpecs];
+    if (this.dynamicSpecs.length > 0) {
+      return [...this.dynamicSpecs];
+    }
+    return [...TOOL_SPECS];
   }
 
   /** Get the dispatch route for a dynamically injected tool */
@@ -236,13 +304,18 @@ export class ToolRegistry {
 
     if (!result.success) {
       const isF1 = input.sport === "f1";
+      const classified = classifyBridgeError(result.error, result.stderr);
       return {
         content: JSON.stringify({
           error: result.error,
+          error_code: classified.errorCode,
           stderr: result.stderr,
-          hint: isF1
-            ? `F1 support is unavailable. Repair with: ${repairCmd}`
-            : `The sports-skills Python package may not be installed. Install it with: ${repairCmd}`,
+          hint:
+            classified.errorCode === "dependency_missing"
+              ? isF1
+                ? `F1 support is unavailable. Repair with: ${repairCmd}`
+                : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`
+              : classified.hint,
         }),
         isError: true,
       };
@@ -284,13 +357,17 @@ export class ToolRegistry {
     const result = await executePythonBridge(sport, command, args, config);
 
     if (!result.success) {
+      const classified = classifyBridgeError(result.error, result.stderr);
       const hint =
-        sport === "f1"
-          ? `F1 support is unavailable. Repair with: ${repairCmd}`
-          : `Tool "${command}" for sport "${sport}" failed. Ensure sports-skills is installed: ${repairCmd}`;
+        classified.errorCode === "dependency_missing"
+          ? sport === "f1"
+            ? `F1 support is unavailable. Repair with: ${repairCmd}`
+            : `Tool "${command}" for sport "${sport}" failed due to missing dependency. Repair with: ${repairCmd}`
+          : classified.hint;
       return {
         content: JSON.stringify({
           error: result.error,
+          error_code: classified.errorCode,
           stderr: result.stderr,
           hint,
         }),
@@ -381,51 +458,87 @@ export function executePythonBridge(
 ): Promise<PythonBridgeResult> {
   const pythonPath = config?.pythonPath ?? "python3";
   const cliArgs = buildArgs(sport, command, args);
-  const timeout = config?.timeout ?? 30_000;
+  const timeout = config?.timeout ?? 60_000;
+  const retryTimeout = Math.max(timeout * 2, 90_000);
 
   if (config?.verbose) {
     console.error(`[sportsclaw] exec: ${pythonPath} ${cliArgs.join(" ")}`);
   }
 
-  return new Promise((resolve) => {
-    execFile(
-      pythonPath,
-      cliArgs,
-      {
-        encoding: "utf-8",
-        timeout,
-        maxBuffer: 10 * 1024 * 1024, // 10 MB
-        env: buildSubprocessEnv(config?.env),
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          resolve({
-            success: false,
-            error: error.message,
-            stdout: stdout || undefined,
-            stderr: stderr || undefined,
-          });
-          return;
-        }
+  const runOnce = (attemptTimeout: number) =>
+    new Promise<(PythonBridgeResult & { timedOut?: boolean })>((resolve) => {
+      execFile(
+        pythonPath,
+        cliArgs,
+        {
+          encoding: "utf-8",
+          timeout: attemptTimeout,
+          maxBuffer: 25 * 1024 * 1024, // 25 MB for verbose FastF1 stderr on degraded networks
+          env: buildSubprocessEnv(config?.env),
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            const execErr = error as Error & {
+              signal?: NodeJS.Signals | null;
+              code?: string | number | null;
+            };
+            const timedOut =
+              /timed out/i.test(error.message) ||
+              (execErr.signal === "SIGTERM" && execErr.code === null);
+            resolve({
+              success: false,
+              error: error.message,
+              stdout: stdout || undefined,
+              stderr: stderr || undefined,
+              timedOut,
+            });
+            return;
+          }
 
-        const trimmed = (stdout ?? "").trim();
-        if (!trimmed) {
-          resolve({
-            success: true,
-            data: null,
-            stdout: "",
-          });
-          return;
-        }
+          const trimmed = (stdout ?? "").trim();
+          if (!trimmed) {
+            resolve({
+              success: true,
+              data: null,
+              stdout: "",
+            });
+            return;
+          }
 
-        try {
-          const data = JSON.parse(trimmed);
-          resolve({ success: true, data });
-        } catch {
-          // Not JSON — return raw stdout
-          resolve({ success: true, data: trimmed, stdout: trimmed });
+          try {
+            const data = JSON.parse(trimmed);
+            resolve({ success: true, data });
+          } catch {
+            // Not JSON — return raw stdout
+            resolve({ success: true, data: trimmed, stdout: trimmed });
+          }
         }
-      }
-    );
-  });
+      );
+    });
+
+  return (async () => {
+    const firstAttempt = await runOnce(timeout);
+    if (firstAttempt.success || !firstAttempt.timedOut) {
+      return firstAttempt;
+    }
+
+    if (config?.verbose) {
+      console.error(
+        `[sportsclaw] exec timeout after ${timeout}ms; retrying with ${retryTimeout}ms`
+      );
+    }
+
+    const secondAttempt = await runOnce(retryTimeout);
+    if (secondAttempt.success) {
+      return secondAttempt;
+    }
+
+    // Preserve first timeout context so callers can surface the true cause.
+    return {
+      ...secondAttempt,
+      error:
+        `Command timed out after ${timeout}ms and retry after ${retryTimeout}ms failed. ` +
+        `${secondAttempt.error ?? firstAttempt.error ?? ""}`.trim(),
+    };
+  })();
 }

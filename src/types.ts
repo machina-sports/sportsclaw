@@ -13,9 +13,9 @@ import type { ModelMessage } from "ai";
 export type LLMProvider = "anthropic" | "openai" | "google";
 
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  anthropic: "claude-sonnet-4-20250514",
-  openai: "gpt-4o",
-  google: "gemini-2.5-pro",
+  anthropic: "claude-sonnet-4-5-20250514",
+  openai: "gpt-5.3-codex",
+  google: "gemini-3-flash-preview",
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ export interface sportsclawConfig {
   systemPrompt?: string;
   /** Path to the Python interpreter (default: python3) */
   pythonPath?: string;
-  /** Timeout in ms for Python subprocess calls (default: 30000) */
+  /** Timeout in ms for Python subprocess calls (default: 60000) */
   timeout?: number;
   /** Extra environment variables passed to child processes */
   env?: Record<string, string>;
@@ -45,12 +45,12 @@ export interface sportsclawConfig {
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   provider: "anthropic",
-  model: "claude-sonnet-4-20250514",
+  model: "claude-sonnet-4-5-20250514",
   maxTurns: 25,
-  maxTokens: 4096,
+  maxTokens: 16_384,
   systemPrompt: "",
   pythonPath: "python3",
-  timeout: 30_000,
+  timeout: 60_000,
   env: {},
   verbose: false,
 };
@@ -118,9 +118,18 @@ export interface SportToolDef {
 // Memory options passed to engine.run()
 // ---------------------------------------------------------------------------
 
+export type ToolProgressEvent =
+  | { type: "tool_start"; toolName: string; toolCallId: string; skillName?: string }
+  | { type: "tool_finish"; toolName: string; toolCallId: string; durationMs: number; success: boolean; skillName?: string }
+  | { type: "synthesizing" };
+
 export interface RunOptions {
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
-  /** Optional callback invoked when the engine starts a tool or synthesis step. */
+  /** Structured progress callback for tool execution tracking. */
+  onProgress?: (event: ToolProgressEvent) => void;
+  /** Abort signal for cancelling an in-flight run. */
+  abortSignal?: AbortSignal;
+  /** @deprecated Use onProgress instead */
   onSpinnerUpdate?: (msg: string) => void;
 }

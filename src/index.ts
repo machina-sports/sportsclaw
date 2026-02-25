@@ -18,6 +18,8 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { Marked, type MarkedExtension } from "marked";
@@ -127,6 +129,129 @@ function renderMarkdown(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Update check (chat startup)
+// ---------------------------------------------------------------------------
+
+function parseVersion(version: string): [number, number, number] | null {
+  const cleaned = version.trim().replace(/^v/, "").split("-")[0];
+  const parts = cleaned.split(".");
+  if (parts.length < 1 || parts.length > 3) return null;
+  const nums: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const raw = parts[i] ?? "0";
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n)) return null;
+    nums.push(n);
+  }
+  return [nums[0], nums[1], nums[2]];
+}
+
+function isVersionNewer(latest: string, current: string): boolean {
+  const l = parseVersion(latest);
+  const c = parseVersion(current);
+  if (!l || !c) return false;
+  for (let i = 0; i < 3; i++) {
+    if (l[i] > c[i]) return true;
+    if (l[i] < c[i]) return false;
+  }
+  return false;
+}
+
+async function getCurrentCliVersion(): Promise<string | undefined> {
+  try {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const raw = await readFile(pkgPath, "utf-8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    return parsed.version;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getLatestCliVersion(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      "npm",
+      ["view", "sportsclaw-engine-core", "version", "--json"],
+      {
+        encoding: "utf-8",
+        timeout: 5_000,
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        const out = (stdout ?? "").trim();
+        if (!out) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(out);
+          resolve(typeof parsed === "string" ? parsed : undefined);
+        } catch {
+          resolve(out.replace(/^"|"$/g, ""));
+        }
+      }
+    );
+  });
+}
+
+async function upgradeCliToLatest(): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      "npm",
+      ["install", "-g", "sportsclaw-engine-core@latest"],
+      {
+        encoding: "utf-8",
+        timeout: 180_000,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          resolve({
+            ok: false,
+            error: (stderr || stdout || error.message).trim(),
+          });
+          return;
+        }
+        resolve({ ok: true });
+      }
+    );
+  });
+}
+
+async function maybePromptForCliUpgrade(): Promise<void> {
+  const [currentVersion, latestVersion] = await Promise.all([
+    getCurrentCliVersion(),
+    getLatestCliVersion(),
+  ]);
+
+  if (!currentVersion || !latestVersion) return;
+  if (!isVersionNewer(latestVersion, currentVersion)) return;
+
+  const confirmUpgrade = await p.confirm({
+    message: `Update available: ${currentVersion} → ${latestVersion}. Upgrade now?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmUpgrade) || !confirmUpgrade) return;
+
+  const s = p.spinner();
+  s.start(`Upgrading sportsclaw to ${latestVersion}...`);
+  const result = await upgradeCliToLatest();
+  if (result.ok) {
+    s.stop(`Upgrade complete. Restart chat to use v${latestVersion}.`);
+    return;
+  }
+  s.stop("Upgrade failed.");
+  console.log("Run manually: npm install -g sportsclaw-engine-core@latest");
+  if (result.error) {
+    console.error(result.error);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool progress tracker for spinner display
 // ---------------------------------------------------------------------------
 
@@ -136,6 +261,9 @@ interface ToolState {
   status: "running" | "done" | "failed";
   durationMs?: number;
 }
+
+type TrackerPhase = "thinking" | "tools" | "synthesizing";
+type SpinnerLike = { message(msg?: string): void };
 
 /** Format a tool name for display: strip the skill prefix for brevity */
 function toolLabel(toolName: string, skillName?: string): string {
@@ -149,22 +277,109 @@ function toolLabel(toolName: string, skillName?: string): string {
   return toolName;
 }
 
-function createToolTracker(spinner: { message(msg?: string): void }) {
+function formatElapsed(ms: number): string {
+  const safeMs = Math.max(0, ms);
+  const totalSeconds = Math.floor(safeMs / 1000);
+  if (totalSeconds < 60) {
+    return `${(safeMs / 1000).toFixed(1)}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!error) return false;
+  if (error instanceof Error) {
+    const name = error.name.toLowerCase();
+    const msg = error.message.toLowerCase();
+    return (
+      name.includes("abort") ||
+      name.includes("cancel") ||
+      msg.includes("abort") ||
+      msg.includes("cancel")
+    );
+  }
+  return String(error).toLowerCase().includes("abort");
+}
+
+function setupEscCancellation() {
+  const abortController = new AbortController();
+  const stdin = process.stdin;
+  let cancelled = false;
+  let rawModeEnabled = false;
+  let listening = false;
+
+  const onData = (chunk: Buffer | string) => {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    // Treat only a lone ESC byte as cancellation. Ignore arrow keys/paste sequences.
+    if (buf.length !== 1 || buf[0] !== 0x1b || cancelled) return;
+    cancelled = true;
+    abortController.abort();
+  };
+
+  if (stdin.isTTY) {
+    stdin.on("data", onData);
+    listening = true;
+    if (typeof stdin.setRawMode === "function") {
+      stdin.setRawMode(true);
+      rawModeEnabled = true;
+    }
+    stdin.resume();
+  }
+
+  return {
+    abortSignal: abortController.signal,
+    showCancelHint: listening,
+    wasCancelled: () => cancelled || abortController.signal.aborted,
+    cleanup: () => {
+      if (listening) {
+        stdin.off("data", onData);
+      }
+      if (rawModeEnabled && typeof stdin.setRawMode === "function" && stdin.isRaw) {
+        stdin.setRawMode(false);
+      }
+      if (rawModeEnabled && typeof stdin.pause === "function") {
+        stdin.pause();
+      }
+    },
+  };
+}
+
+function createToolTracker(
+  spinner: SpinnerLike,
+  options?: { showCancelHint?: boolean }
+) {
   const tools = new Map<string, ToolState>();
+  const startedAt = Date.now();
+  let phase: TrackerPhase = "thinking";
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  const showCancelHint = options?.showCancelHint ?? false;
 
   // @clack spinner renders: `${frame}  ${message}` (icon + 2 spaces)
   // Subsequent lines in a multi-line message need 3 chars to align.
   const PAD = "   ";
 
-  function formatLine(t: ToolState, isFirst: boolean): string {
+  function formatMultiline(lines: string[]): string {
+    if (lines.length === 0) return "";
+    return lines
+      .map((line, idx) => (idx === 0 ? line : `${PAD}${line}`))
+      .join("\n");
+  }
+
+  function formatLine(t: ToolState): string {
     const skill = t.skillName ? `sports-skills/${t.skillName}` : "agent";
-    const prefix = isFirst ? "" : PAD;
     if (t.status === "running") {
-      return `${prefix}${pc.dim("\u25CB")} ${skill}: ${t.label}...`;
+      return `${pc.dim("\u25CB")} ${skill}: ${t.label}...`;
     }
     const sec = t.durationMs != null ? ` ${(t.durationMs / 1000).toFixed(1)}s` : "";
     const icon = t.status === "done" ? pc.green("\u2713") : pc.red("\u2717");
-    return `${prefix}${icon} ${skill}: ${t.label}${sec}`;
+    return `${icon} ${skill}: ${t.label}${sec}`;
+  }
+
+  function headerLine(): string {
+    const cancelHint = showCancelHint ? " · Press Esc to cancel" : "";
+    return pc.dim(`Elapsed ${formatElapsed(Date.now() - startedAt)}${cancelHint}`);
   }
 
   function render() {
@@ -172,35 +387,56 @@ function createToolTracker(spinner: { message(msg?: string): void }) {
     const done = entries.filter(t => t.status !== "running");
     const running = entries.filter(t => t.status === "running");
 
-    const lines: string[] = [];
-    const all = [...done, ...running];
-    for (let i = 0; i < all.length; i++) {
-      lines.push(formatLine(all[i], i === 0));
+    const bodyLines: string[] = [];
+    if (entries.length === 0) {
+      bodyLines.push(
+        phase === "synthesizing" ? pc.dim("Synthesizing...") : pc.dim("Thinking...")
+      );
+    } else {
+      const all = [...done, ...running];
+      for (let i = 0; i < all.length; i++) {
+        bodyLines.push(formatLine(all[i]));
+      }
+      if (phase === "synthesizing") {
+        bodyLines.push(pc.dim("Synthesizing..."));
+      }
     }
 
-    spinner.message(lines.join("\n"));
+    spinner.message(formatMultiline([headerLine(), ...bodyLines]));
   }
 
-  /** Summary of all tools used — for the spinner stop message */
-  function summary(): string {
-    const entries = Array.from(tools.values());
-    if (entries.length === 0) return "Done.";
+  function stopTicker() {
+    if (ticker) {
+      clearInterval(ticker);
+      ticker = undefined;
+    }
+  }
 
-    const lines: string[] = [];
+  function start() {
+    render();
+    ticker = setInterval(render, 100);
+  }
+
+  function buildFinalLines(prefix: string): string {
+    stopTicker();
+    const entries = Array.from(tools.values());
+    const lines = [`${prefix} (${formatElapsed(Date.now() - startedAt)}).`];
+    if (entries.length === 0) return formatMultiline(lines);
+
     for (let i = 0; i < entries.length; i++) {
       const t = entries[i];
       const sec = t.durationMs != null ? ` ${(t.durationMs / 1000).toFixed(1)}s` : "";
       const icon = t.status === "done" ? pc.green("\u2713") : t.status === "failed" ? pc.red("\u2717") : "\u2026";
       const skill = t.skillName ? `sports-skills/${t.skillName}` : "agent";
-      const prefix = i === 0 ? "" : PAD;
-      lines.push(`${prefix}${icon} ${skill}: ${t.label}${sec}`);
+      lines.push(`${icon} ${skill}: ${t.label}${sec}`);
     }
-    return lines.join("\n");
+    return formatMultiline(lines);
   }
 
   const handler = (event: ToolProgressEvent) => {
     switch (event.type) {
       case "tool_start":
+        phase = "tools";
         tools.set(event.toolCallId, {
           label: toolLabel(event.toolName, event.skillName),
           skillName: event.skillName,
@@ -218,12 +454,20 @@ function createToolTracker(spinner: { message(msg?: string): void }) {
         render();
         break;
       case "synthesizing":
-        spinner.message(tools.size > 0 ? `${tools.size} tools done \u00b7 Synthesizing...` : "Synthesizing...");
+        phase = "synthesizing";
+        render();
         break;
     }
   };
 
-  return { handler, summary };
+  return {
+    start,
+    stop: stopTicker,
+    handler,
+    doneSummary: () => buildFinalLines("Done"),
+    errorSummary: () => buildFinalLines("Failed"),
+    cancelledSummary: () => buildFinalLines("Cancelled"),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +646,7 @@ async function cmdChat(args: string[]): Promise<void> {
     resolved = applyConfigToEnv();
   }
 
+  await maybePromptForCliUpgrade();
   await ensureDefaultSchemas();
 
   const engine = new sportsclawEngine({
@@ -474,22 +719,35 @@ async function cmdChat(args: string[]): Promise<void> {
       }
     } else {
       const s = p.spinner();
+      const cancel = setupEscCancellation();
+      const tracker = createToolTracker(s, {
+        showCancelHint: cancel.showCancelHint,
+      });
       s.start("Thinking...");
-      const tracker = createToolTracker(s);
+      tracker.start();
       try {
         const result = await engine.run(prompt, {
           userId,
           onProgress: tracker.handler,
+          abortSignal: cancel.abortSignal,
         });
-        s.stop(tracker.summary());
+        s.stop(tracker.doneSummary());
         console.log(`\n${renderMarkdown(result)}\n`);
       } catch (error: unknown) {
-        s.stop(tracker.summary() || "Error.");
+        if (cancel.wasCancelled() || isAbortError(error)) {
+          s.stop(tracker.cancelledSummary());
+          console.log("");
+          continue;
+        }
+        s.stop(tracker.errorSummary());
         if (error instanceof Error) {
           console.error(`Error: ${error.message}`);
         } else {
           console.error("An unknown error occurred:", error);
         }
+      } finally {
+        tracker.stop();
+        cancel.cleanup();
       }
     }
   }
@@ -544,22 +802,34 @@ async function cmdQuery(args: string[]): Promise<void> {
   } else {
     // Normal mode: show a reasoning spinner
     const s = p.spinner();
+    const cancel = setupEscCancellation();
+    const tracker = createToolTracker(s, {
+      showCancelHint: cancel.showCancelHint,
+    });
     s.start("Thinking...");
-    const tracker = createToolTracker(s);
+    tracker.start();
     try {
       const result = await engine.run(prompt, {
         onProgress: tracker.handler,
+        abortSignal: cancel.abortSignal,
       });
-      s.stop(tracker.summary());
+      s.stop(tracker.doneSummary());
       console.log(renderMarkdown(result));
     } catch (error: unknown) {
-      s.stop(tracker.summary() || "Error.");
+      if (cancel.wasCancelled() || isAbortError(error)) {
+        s.stop(tracker.cancelledSummary());
+        process.exit(130);
+      }
+      s.stop(tracker.errorSummary());
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
       } else {
         console.error("An unknown error occurred:", error);
       }
       process.exit(1);
+    } finally {
+      tracker.stop();
+      cancel.cleanup();
     }
   }
 }

@@ -32,7 +32,6 @@ import {
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { loadAllSchemas } from "./schema.js";
 import { MemoryManager } from "./memory.js";
-import { buildSportsSkillsRepairCommand } from "./python.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -194,6 +193,48 @@ export class sportsclawEngine {
     }
 
     return parts.join("\n");
+  }
+
+  /**
+   * Evidence gate pass: when tools failed, rewrite draft response so claims
+   * only rely on successful tool outputs.
+   */
+  private async applyEvidenceGate(params: {
+    userPrompt: string;
+    draft: string;
+    failedTools: string[];
+    succeededTools: string[];
+  }): Promise<string> {
+    const { userPrompt, draft, failedTools, succeededTools } = params;
+    try {
+      const res = await generateText({
+        model: this.model,
+        system:
+          "You are an evidence gate for a sports agent. Remove or rewrite any claim " +
+          "that depends on failed tools. Keep only claims supportable by successful tools. " +
+          "If unsure, omit the claim. Be concise and explicit about unavailable sections.",
+        prompt: [
+          `User request: ${userPrompt}`,
+          `Failed tools: ${failedTools.join(", ") || "none"}`,
+          `Successful tools: ${succeededTools.join(", ") || "none"}`,
+          "Draft response:",
+          draft,
+        ].join("\n\n"),
+        maxOutputTokens: Math.min(2_048, this.config.maxTokens),
+      });
+      const cleaned = res.text?.trim();
+      if (cleaned) return cleaned;
+    } catch {
+      // fall through to deterministic fallback
+    }
+
+    const failed = failedTools.join(", ");
+    const succeeded = succeededTools.join(", ");
+    return (
+      `I couldn't fully complete this because some required tools failed: ${failed}. ` +
+      `Successful tools: ${succeeded || "none"}. ` +
+      "Retry to get a complete answer."
+    );
   }
 
   /** Build the Vercel AI SDK tool map from our registry */
@@ -435,6 +476,7 @@ export class sportsclawEngine {
     const emitProgress = options?.onProgress;
     const legacyUpdate = options?.onSpinnerUpdate;
     const failedExternalTools = new Map<string, { toolName: string; skillName?: string }>();
+    const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
 
     const callLLM = () =>
       generateText({
@@ -442,6 +484,7 @@ export class sportsclawEngine {
         system: this.buildSystemPrompt(!!memory),
         messages: this.messages,
         tools: this.buildTools(memory),
+        abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
         maxOutputTokens: this.config.maxTokens,
         // Google Gemini 2.5 thinking models: set an explicit thinking budget
@@ -477,6 +520,11 @@ export class sportsclawEngine {
           });
           if (!success && !toolCall.toolName.startsWith("update_")) {
             failedExternalTools.set(toolCall.toolCallId, {
+              toolName: toolCall.toolName,
+              skillName,
+            });
+          } else if (success && !toolCall.toolName.startsWith("update_")) {
+            succeededExternalTools.set(toolCall.toolCallId, {
               toolName: toolCall.toolName,
               skillName,
             });
@@ -563,16 +611,18 @@ export class sportsclawEngine {
 
     if (failedExternalTools.size > 0) {
       const failures = Array.from(failedExternalTools.values());
+      const successes = Array.from(succeededExternalTools.values());
       const labels = failures.map((f) => f.toolName).join(", ");
-      const hasF1Failure = failures.some(
-        (f) => f.skillName === "f1" || f.toolName.startsWith("f1_")
-      );
-      const repairHint = hasF1Failure
-        ? `\nRepair: \`${buildSportsSkillsRepairCommand(this.config.pythonPath)}\``
-        : "";
       const warning =
         `⚠️ Partial data: some live tools failed (${labels}). ` +
-        `Treat related sections as unavailable.${repairHint}`;
+        "Treat related sections as unavailable.";
+
+      responseText = await this.applyEvidenceGate({
+        userPrompt,
+        draft: responseText,
+        failedTools: failures.map((f) => f.toolName),
+        succeededTools: successes.map((s) => s.toolName),
+      });
       responseText = `${warning}\n\n${responseText}`;
     }
 
