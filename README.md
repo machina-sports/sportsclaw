@@ -50,10 +50,10 @@ For an interactive conversation, start chat mode:
 sportsclaw chat
 ```
 
-If your Python environment is out of sync, repair with:
+If something isn't working, run the built-in diagnostic:
 
 ```bash
-python3 -m pip install --upgrade sports-skills
+sportsclaw doctor
 ```
 
 Optional routing controls (defaults shown):

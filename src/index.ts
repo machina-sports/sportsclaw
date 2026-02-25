@@ -8,6 +8,7 @@
  *   sportsclaw list              — List all installed sport schemas
  *   sportsclaw init              — Bootstrap all 14 default sport schemas
  *   sportsclaw chat              — Start an interactive conversation (REPL)
+ *   sportsclaw doctor            — Check setup and diagnose issues
  *   sportsclaw listen <platform> — Start a Discord or Telegram listener
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
@@ -555,6 +556,122 @@ function cmdList(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw doctor` — diagnose and fix common issues
+// ---------------------------------------------------------------------------
+
+async function cmdDoctor(): Promise<void> {
+  const { pythonPath, provider, model, apiKey } = resolveConfig();
+  let allGood = true;
+
+  console.log(pc.bold("sportsclaw doctor\n"));
+
+  // 1. Node.js version
+  const nodeVersion = process.versions.node;
+  const nodeMajor = Number.parseInt(nodeVersion.split(".")[0], 10);
+  if (nodeMajor >= 18) {
+    console.log(pc.green("  ✓") + ` Node.js ${nodeVersion}`);
+  } else {
+    console.log(pc.red("  ✗") + ` Node.js ${nodeVersion} — v18+ required`);
+    allGood = false;
+  }
+
+  // 2. Python reachable
+  let pythonVersion = "";
+  try {
+    pythonVersion = await new Promise<string>((resolve, reject) => {
+      execFile(pythonPath, ["--version"], { timeout: 5_000 }, (err, stdout, stderr) => {
+        if (err) return reject(err);
+        resolve((stdout || stderr).trim());
+      });
+    });
+    console.log(pc.green("  ✓") + ` ${pythonVersion} (${pythonPath})`);
+  } catch {
+    console.log(pc.red("  ✗") + ` Python not found at ${pythonPath}`);
+    console.log(`    Set PYTHON_PATH or run: sportsclaw config`);
+    allGood = false;
+  }
+
+  // 3. sports-skills installed + version
+  if (pythonVersion) {
+    let ssVersion = "";
+    try {
+      ssVersion = await new Promise<string>((resolve, reject) => {
+        execFile(
+          pythonPath,
+          ["-c", "from sports_skills import __version__; print(__version__)"],
+          { timeout: 10_000 },
+          (err, stdout) => {
+            if (err) return reject(err);
+            resolve(stdout.trim());
+          }
+        );
+      });
+      console.log(pc.green("  ✓") + ` sports-skills ${ssVersion}`);
+    } catch {
+      console.log(pc.red("  ✗") + " sports-skills not installed");
+      console.log(`    Fix: ${buildSportsSkillsRepairCommand(pythonPath)}`);
+      allGood = false;
+    }
+
+    // 4. F1 module (optional but checked)
+    if (ssVersion) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          execFile(
+            pythonPath,
+            ["-c", "from sports_skills import f1"],
+            { timeout: 10_000 },
+            (err) => (err ? reject(err) : resolve())
+          );
+        });
+        console.log(pc.green("  ✓") + " F1 support (fastf1)");
+      } catch {
+        console.log(pc.yellow("  ⚠") + " F1 support unavailable (fastf1 not installed)");
+        console.log(`    Optional: ${pythonPath} -m pip install 'sports-skills[f1]'`);
+      }
+    }
+  }
+
+  // 5. API key
+  if (apiKey) {
+    const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
+    console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
+  } else {
+    console.log(pc.red("  ✗") + ` No API key for ${provider}`);
+    console.log(`    Set the env var or run: sportsclaw config`);
+    allGood = false;
+  }
+
+  // 6. Model
+  if (model) {
+    console.log(pc.green("  ✓") + ` Model: ${model}`);
+  }
+
+  // 7. Schemas installed
+  const schemas = listSchemas();
+  if (schemas.length > 0) {
+    console.log(pc.green("  ✓") + ` ${schemas.length} sport schemas installed`);
+  } else {
+    console.log(pc.yellow("  ⚠") + " No sport schemas installed");
+    console.log("    Fix: sportsclaw init --all");
+    allGood = false;
+  }
+
+  // 8. Schema directory location
+  if (schemas.length > 0) {
+    console.log(pc.green("  ✓") + ` Schema dir: ${getSchemaDir()}`);
+  }
+
+  // Summary
+  console.log("");
+  if (allGood) {
+    console.log(pc.green("All checks passed."));
+  } else {
+    console.log(pc.yellow("Some issues found — see suggestions above."));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw init`
 // ---------------------------------------------------------------------------
 
@@ -905,6 +1022,7 @@ function printHelp(): void {
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
+  console.log("  sportsclaw doctor                  Check setup and diagnose issues");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
@@ -981,6 +1099,8 @@ async function main(): Promise<void> {
       return cmdConfig();
     case "chat":
       return cmdChat(subArgs);
+    case "doctor":
+      return cmdDoctor();
     case "add":
       return cmdAdd(subArgs);
     case "remove":
