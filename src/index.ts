@@ -51,6 +51,14 @@ import {
   ASCII_LOGO,
 } from "./config.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
+import {
+  bootstrapDefaultAgents,
+  needsAgentBootstrap,
+  loadAgents,
+  loadAgent,
+  listAgentIds,
+  getAgentsDir,
+} from "./agents.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -78,6 +86,14 @@ export {
   getCachedSchemaVersion,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
+export {
+  loadAgents,
+  loadAgent,
+  listAgentIds,
+  bootstrapDefaultAgents,
+  getAgentsDir,
+} from "./agents.js";
+export type { AgentDef } from "./agents.js";
 export {
   loadConfig,
   saveConfig,
@@ -314,23 +330,15 @@ function isAbortError(error: unknown): boolean {
   return String(error).toLowerCase().includes("abort");
 }
 
-function clearPostSubmitEchoLine(): void {
-  if (!process.stdout.isTTY) return;
-  // When switching from readline to raw-mode, some terminals re-echo the
-  // submitted input on a NEW line. We need to:
-  //   1. Clear the current (possibly empty) line
-  //   2. Move up one line and clear the re-echoed text
-  //   3. Return the cursor to the start of that line
-  process.stdout.write("\x1b[2K\x1b[1A\x1b[2K\r");
-}
-
-function setupEscCancellation() {
+function setupEscCancellation(options?: { enabled?: boolean }) {
+  const enabled = options?.enabled ?? true;
   const abortController = new AbortController();
   const stdin = process.stdin;
   let cancelled = false;
   const canRawMode = stdin.isTTY && typeof stdin.setRawMode === "function";
   const wasRaw = canRawMode ? Boolean(stdin.isRaw) : false;
   let listening = false;
+  let savedStdinListeners: Function[] = [];
 
   const onData = (chunk: Buffer | string) => {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -340,25 +348,50 @@ function setupEscCancellation() {
     abortController.abort();
   };
 
-  if (stdin.isTTY) {
+  if (enabled && stdin.isTTY) {
+    // Save and remove ALL existing data listeners (readline's keypress
+    // parser, etc.) BEFORE adding ours.  This prevents any re-echo of
+    // buffered input when the stream is later resumed in activate().
+    const existing = stdin.listeners('data');
+    savedStdinListeners = [...existing] as Function[];
+    for (const l of savedStdinListeners) {
+      stdin.removeListener('data', l as (...args: any[]) => void);
+    }
+
     stdin.on("data", onData);
     listening = true;
     if (canRawMode && !wasRaw) {
       stdin.setRawMode(true);
     }
-    stdin.resume();
+    // NOTE: We do NOT call stdin.resume() here. The caller must call
+    // activate() after the spinner has started so that any terminal
+    // re-echo of the last readline input is overwritten by the spinner
+    // line instead of appearing as a visible duplicate.
   }
 
   return {
     abortSignal: abortController.signal,
     showCancelHint: listening,
     wasCancelled: () => cancelled || abortController.signal.aborted,
+    /** Start listening for ESC. Call this AFTER the spinner is active. */
+    activate: () => {
+      if (listening) {
+        stdin.resume();
+      }
+    },
     cleanup: () => {
       if (listening) {
         stdin.off("data", onData);
-      }
-      if (canRawMode && !wasRaw && stdin.isRaw) {
-        stdin.setRawMode(false);
+        // Pause stdin before restoring listeners so no buffered data
+        // reaches readline when they are re-added.
+        stdin.pause();
+        for (const l of savedStdinListeners) {
+          stdin.on('data', l as (...args: any[]) => void);
+        }
+        savedStdinListeners = [];
+        if (canRawMode && !wasRaw && stdin.isRaw) {
+          stdin.setRawMode(false);
+        }
       }
     },
   };
@@ -371,6 +404,7 @@ function createToolTracker(
   const tools = new Map<string, ToolState>();
   const startedAt = Date.now();
   let phase: TrackerPhase = "thinking";
+  let phaseLabel = "Thinking";
   let ticker: ReturnType<typeof setInterval> | undefined;
   const showCancelHint = options?.showCancelHint ?? false;
 
@@ -408,7 +442,7 @@ function createToolTracker(
     const bodyLines: string[] = [];
     if (entries.length === 0) {
       bodyLines.push(
-        phase === "synthesizing" ? pc.dim("Synthesizing...") : pc.dim("Thinking...")
+        phase === "synthesizing" ? pc.dim("Synthesizing...") : pc.dim(`${phaseLabel}...`)
       );
     } else {
       const all = [...done, ...running];
@@ -453,6 +487,10 @@ function createToolTracker(
 
   const handler = (event: ToolProgressEvent) => {
     switch (event.type) {
+      case "phase":
+        phaseLabel = event.label;
+        render();
+        break;
       case "tool_start":
         phase = "tools";
         tools.set(event.toolCallId, {
@@ -716,6 +754,14 @@ async function cmdInit(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function ensureDefaultSchemas(): Promise<void> {
+  // Bootstrap default agents if missing
+  if (needsAgentBootstrap()) {
+    const agentCount = bootstrapDefaultAgents();
+    if (agentCount > 0) {
+      console.error(`[sportsclaw] Bootstrapped ${agentCount} default agent(s).`);
+    }
+  }
+
   // Always preflight sports-skills (including F1) even when schemas already exist.
   const { pythonPath } = resolveConfig();
   await ensureSportsSkills({ pythonPath });
@@ -811,10 +857,6 @@ async function cmdChat(args: string[]): Promise<void> {
   const engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
-    ...(resolved.routerModel && { routerModel: resolved.routerModel }),
-    ...(resolved.routerModelStrategy && {
-      routerModelStrategy: resolved.routerModelStrategy,
-    }),
     pythonPath: resolved.pythonPath,
     routingMode: resolved.routingMode,
     routingMaxSkills: resolved.routingMaxSkills,
@@ -853,57 +895,58 @@ async function cmdChat(args: string[]): Promise<void> {
     );
   }
 
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    historySize: 200,
-    removeHistoryDuplicates: false,
-    terminal: true,
-  });
+  const chatHistory: string[] = [];
 
   // REPL loop — each turn feeds history back through the same engine instance
-  try {
-    while (true) {
-      let input: string;
-      try {
-        console.log("You");
-        input = await rl.question("> ");
-      } catch {
-        p.outro("See you.");
-        break;
-      }
+  while (true) {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      history: chatHistory,
+      historySize: 200,
+      removeHistoryDuplicates: false,
+      terminal: true,
+    });
 
-      const prompt = input.trim();
-      if (!prompt) continue;
-      if (prompt === "exit" || prompt === "quit") {
-        p.outro("See you.");
-        break;
-      }
+    let input: string;
+    try {
+      input = await rl.question(`${pc.dim("You")}  `);
+    } catch {
+      rl.close();
+      p.outro("See you.");
+      break;
+    }
+
+    // Preserve history across readline instances (property exists at runtime)
+    const snapshot = [...(rl as unknown as { history: string[] }).history];
+    rl.close();
+    chatHistory.length = 0;
+    chatHistory.push(...snapshot);
+
+    const prompt = input.trim();
+    if (!prompt) continue;
+    if (prompt === "exit" || prompt === "quit") {
+      p.outro("See you.");
+      break;
+    }
 
       if (verbose) {
-        rl.pause();
-        clearPostSubmitEchoLine();
-        process.stdout.write(`You\n> ${prompt}\n`);
         try {
           const result = await engine.run(prompt, { userId });
-          console.log(`\n${renderMarkdown(result)}\n`);
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
         } catch (error: unknown) {
           if (error instanceof Error) {
             console.error(`Error: ${error.message}`);
           } else {
             console.error("An unknown error occurred:", error);
           }
-        } finally {
-          rl.resume();
         }
       } else {
-        rl.pause();
+        // In chat REPL, ESC cancellation can cause duplicate user input echoes
+        // with readline on some terminals. Keep cancellation disabled here.
+        const cancel = setupEscCancellation({ enabled: false });
+        // readline already echoed "You  <input>" — just start the spinner below
         const s = p.spinner();
-        const cancel = setupEscCancellation();
-        // Clear the echo line AFTER mode switches (rl.pause + raw mode)
-        // so it catches any re-echo caused by the transition.
-        clearPostSubmitEchoLine();
-        process.stdout.write(`You\n> ${prompt}\n`);
         const tracker = createToolTracker(s, {
           showCancelHint: cancel.showCancelHint,
         });
@@ -916,7 +959,7 @@ async function cmdChat(args: string[]): Promise<void> {
             abortSignal: cancel.abortSignal,
           });
           s.stop(tracker.doneSummary());
-          console.log(`\n${renderMarkdown(result)}\n`);
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
         } catch (error: unknown) {
           if (cancel.wasCancelled() || isAbortError(error)) {
             s.stop(tracker.cancelledSummary());
@@ -932,13 +975,9 @@ async function cmdChat(args: string[]): Promise<void> {
         } finally {
           tracker.stop();
           cancel.cleanup();
-          rl.resume();
         }
       }
     }
-  } finally {
-    rl.close();
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -969,10 +1008,6 @@ async function cmdQuery(args: string[]): Promise<void> {
   const engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
-    ...(resolved.routerModel && { routerModel: resolved.routerModel }),
-    ...(resolved.routerModelStrategy && {
-      routerModelStrategy: resolved.routerModelStrategy,
-    }),
     pythonPath: resolved.pythonPath,
     routingMode: resolved.routingMode,
     routingMaxSkills: resolved.routingMaxSkills,
@@ -1002,6 +1037,7 @@ async function cmdQuery(args: string[]): Promise<void> {
       showCancelHint: cancel.showCancelHint,
     });
     s.start("Thinking...");
+    cancel.activate();
     tracker.start();
     try {
       const result = await engine.run(prompt, {
@@ -1047,6 +1083,7 @@ function printHelp(): void {
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
+  console.log("  sportsclaw agents                  List installed agents");
   console.log("");
   console.log("Default skills (selected during first-run config):");
   console.log("  football-data, nfl-data, nba-data, nhl-data, mlb-data, wnba-data,");
@@ -1065,8 +1102,6 @@ function printHelp(): void {
   console.log("Environment:");
   console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
   console.log("  sportsclaw_MODEL        Model override (default: depends on provider)");
-  console.log("  SPORTSCLAW_ROUTER_STRATEGY  Router model strategy: provider_fast or same_as_main");
-  console.log("  SPORTSCLAW_ROUTER_MODEL     Router model override (default: provider fast model)");
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
@@ -1083,6 +1118,33 @@ function printHelp(): void {
 
 async function cmdConfig(): Promise<void> {
   await runConfigFlow();
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw agents` — list installed agents
+// ---------------------------------------------------------------------------
+
+function cmdAgents(): void {
+  if (needsAgentBootstrap()) {
+    bootstrapDefaultAgents();
+  }
+  const agents = loadAgents();
+  if (agents.length === 0) {
+    console.log("No agents installed.");
+    console.log(`Create agent files in: ${getAgentsDir()}/`);
+    return;
+  }
+
+  console.log(pc.bold(`Agents (${agents.length})`) + `  ${pc.dim(getAgentsDir())}`);
+  console.log("");
+  for (const agent of agents) {
+    const skills = agent.skills.length > 0
+      ? pc.dim(agent.skills.join(", "))
+      : pc.dim("all skills");
+    console.log(`  ${pc.cyan(agent.id.padEnd(14))} ${agent.name.padEnd(18)} ${skills}`);
+  }
+  console.log("");
+  console.log(pc.dim("Add custom agents by creating .md files in the agents directory."));
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,6 +1190,8 @@ async function main(): Promise<void> {
       return cmdInit(subArgs);
     case "listen":
       return cmdListen(subArgs);
+    case "agents":
+      return cmdAgents();
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);

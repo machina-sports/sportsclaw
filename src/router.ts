@@ -2,10 +2,12 @@ import { generateText } from "ai";
 import type {
   LLMProvider,
   RouteDecision,
+  RouteMeta,
   RouteOutcome,
   ToolSpec,
   sportsclawConfig,
 } from "./types.js";
+import type { AgentDef } from "./agents.js";
 
 type ModelType = Parameters<typeof generateText>[0]["model"];
 
@@ -16,8 +18,6 @@ interface RouteInput {
   memoryBlock?: string;
   model: ModelType;
   modelId: string;
-  fallbackModel?: ModelType;
-  fallbackModelId?: string;
   provider: LLMProvider;
   config: Pick<
     Required<sportsclawConfig>,
@@ -257,9 +257,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
         reason: "No sport schemas installed.",
       },
       meta: {
-        primaryModelId: input.modelId,
         modelUsed: null,
-        fallbackUsed: false,
         llmAttempted: false,
         llmSucceeded: false,
         llmDurationMs: 0,
@@ -323,27 +321,10 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
     rankedDeterministic.slice(0, 4),
     rankedMemory.slice(0, 4)
   );
-  let llmDecision = primaryAttempt.decision;
-  let llmDurationMs = primaryAttempt.durationMs;
-  let llmSucceeded = primaryAttempt.succeeded;
-  let modelUsed: string | null = llmSucceeded ? input.modelId : null;
-  let fallbackUsed = false;
-
-  if (!llmSucceeded && input.fallbackModel && input.fallbackModel !== input.model) {
-    fallbackUsed = true;
-    const fallbackAttempt = await runLlmRouter(
-      input,
-      input.fallbackModel,
-      rankedDeterministic.slice(0, 4),
-      rankedMemory.slice(0, 4)
-    );
-    llmDurationMs += fallbackAttempt.durationMs;
-    if (fallbackAttempt.succeeded) {
-      llmDecision = fallbackAttempt.decision;
-      llmSucceeded = true;
-      modelUsed = input.fallbackModelId ?? "fallback";
-    }
-  }
+  const llmDecision = primaryAttempt.decision;
+  const llmDurationMs = primaryAttempt.durationMs;
+  const llmSucceeded = primaryAttempt.succeeded;
+  const modelUsed: string | null = llmSucceeded ? input.modelId : null;
 
   const selected = new Set<string>();
   let mode: "focused" | "ambiguous" =
@@ -436,12 +417,110 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       reason,
     },
     meta: {
-      primaryModelId: input.modelId,
       modelUsed,
-      fallbackUsed,
       llmAttempted: true,
       llmSucceeded,
       llmDurationMs,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Agent routing — pick the best agent for a given prompt + selected skills
+// ---------------------------------------------------------------------------
+
+export interface AgentRouteResult {
+  agent: AgentDef;
+  score: number;
+  reason: string;
+}
+
+/**
+ * Given the skills selected by `routePromptToSkills`, score each agent
+ * and return the top matches. Uses a simple overlap-based heuristic:
+ *
+ *   1. If prompt explicitly mentions an agent name → that agent wins (solo)
+ *   2. Otherwise, score = (agent.skills ∩ selectedSkills).size / selectedSkills.size
+ *   3. Agents with empty skills[] are generalists (score = 0.3 baseline)
+ *   4. Tie-break: agent with broader coverage (more skills) wins
+ *
+ * Returns up to `maxAgents` agents with score > 0.5 (at least 1 if any exist).
+ * Returns empty array if no agents are available.
+ */
+export function routeToAgents(
+  agents: AgentDef[],
+  selectedSkills: string[],
+  prompt: string,
+  maxAgents = 2
+): AgentRouteResult[] {
+  if (agents.length === 0) return [];
+  if (agents.length === 1) {
+    return [{ agent: agents[0], score: 1, reason: "Only agent available." }];
+  }
+
+  const promptLower = prompt.toLowerCase();
+  const selectedSet = new Set(selectedSkills);
+
+  // Phase 1: Check for explicit agent name in prompt
+  for (const agent of agents) {
+    const nameLower = agent.name.toLowerCase();
+    const idLower = agent.id.toLowerCase();
+    if (
+      promptLower.includes(nameLower) ||
+      promptLower.includes(idLower) ||
+      promptLower.includes(`@${idLower}`)
+    ) {
+      return [{ agent, score: 1, reason: `Explicit mention: "${agent.name}"` }];
+    }
+  }
+
+  // Phase 2: Score by skill overlap
+  const scored: AgentRouteResult[] = [];
+
+  for (const agent of agents) {
+    if (agent.skills.length === 0) {
+      // Generalist agent — low baseline score
+      scored.push({ agent, score: 0.3, reason: "Generalist (no skill filter)." });
+      continue;
+    }
+
+    const agentSkillSet = new Set(agent.skills);
+
+    if (selectedSet.size === 0) {
+      // No skills were selected (e.g. conversational query)
+      scored.push({ agent, score: 0.3, reason: "No skills to match." });
+      continue;
+    }
+
+    // Count overlap
+    let overlap = 0;
+    for (const skill of selectedSkills) {
+      if (agentSkillSet.has(skill)) overlap++;
+    }
+
+    // Score = overlap ratio, with bonus for coverage breadth
+    const overlapRatio = overlap / selectedSet.size;
+    // Coverage bonus: agents with more skills = broader coverage, better generalist
+    const coverageBonus = overlap > 0 ? 0.01 * (agent.skills.length / 20) : 0;
+    const score = overlapRatio + coverageBonus;
+
+    const reason =
+      overlap > 0
+        ? `Skill overlap: ${overlap}/${selectedSet.size} (${agent.skills.filter((s) => selectedSet.has(s)).join(", ")})`
+        : "No skill overlap.";
+
+    scored.push({ agent, score, reason });
+  }
+
+  // Sort: highest score first, then by broader coverage (more skills = better generalist)
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return b.agent.skills.length - a.agent.skills.length;
+  });
+
+  // Return top agents with score > 0.5, capped at maxAgents.
+  // Always return at least 1 if any agents exist.
+  const strong = scored.filter((r) => r.score > 0.5).slice(0, maxAgents);
+  if (strong.length > 0) return strong;
+  return scored.length > 0 ? [scored[0]] : [];
 }
