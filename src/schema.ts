@@ -388,6 +388,42 @@ export async function ensureSportsSkills(
 }
 
 // ---------------------------------------------------------------------------
+// Installed version detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the installed sports-skills package version by running Python.
+ * Returns the version string (e.g., "0.9.6") or null if unavailable.
+ */
+export function getInstalledSportsSkillsVersion(
+  config?: Partial<sportsclawConfig>
+): string | null {
+  const pythonPath = config?.pythonPath ?? "python3";
+  try {
+    const output = execFileSync(
+      pythonPath,
+      ["-c", "from sports_skills import __version__; print(__version__)"],
+      { timeout: 10_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
+    );
+    return output.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get the version stored in cached schemas.
+ * Reads the first cached schema that has a version field.
+ */
+export function getCachedSchemaVersion(): string | null {
+  const schemas = loadAllSchemas();
+  for (const schema of schemas) {
+    if (schema.version) return schema.version;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap default schemas
 // ---------------------------------------------------------------------------
 

@@ -36,6 +36,8 @@ import {
   getSchemaDir,
   bootstrapDefaultSchemas,
   ensureSportsSkills,
+  getInstalledSportsSkillsVersion,
+  getCachedSchemaVersion,
   DEFAULT_SKILLS,
 } from "./schema.js";
 import type { LLMProvider, ToolProgressEvent } from "./types.js";
@@ -72,6 +74,8 @@ export {
   DEFAULT_SKILLS,
   SKILL_DESCRIPTIONS,
   getInstalledVsAvailable,
+  getInstalledSportsSkillsVersion,
+  getCachedSchemaVersion,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
 export {
@@ -717,7 +721,18 @@ async function ensureDefaultSchemas(): Promise<void> {
   await ensureSportsSkills({ pythonPath });
 
   const installed = listSchemas();
-  if (installed.length > 0) return; // schemas already exist
+  if (installed.length > 0) {
+    // Schemas exist — check if sports-skills was upgraded since last cache
+    const cachedVersion = getCachedSchemaVersion();
+    const installedVersion = getInstalledSportsSkillsVersion({ pythonPath });
+    if (installedVersion && cachedVersion && installedVersion !== cachedVersion) {
+      console.error(
+        `[sportsclaw] sports-skills upgraded (${cachedVersion} → ${installedVersion}). Refreshing schemas...`
+      );
+      await bootstrapDefaultSchemas({ pythonPath }, { force: true });
+    }
+    return;
+  }
 
   // First-time user: interactive sport selection instead of installing all 14
   console.error(
