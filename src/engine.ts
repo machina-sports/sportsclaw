@@ -1177,6 +1177,19 @@ export class sportsclawEngine {
       }
     }
 
+    // --- Confidence-based clarification ---
+    if (
+      this.config.clarifyOnLowConfidence &&
+      routing.decision &&
+      routing.decision.confidence < this.config.clarifyThreshold &&
+      routing.decision.mode === "ambiguous"
+    ) {
+      const skillList = routing.decision.selectedSkills
+        .map((skill) => `- ${skill}`)
+        .join("\n");
+      return `I'm not sure which sport you mean. Did you want:\n\n${skillList}\n\nPlease clarify your question.`;
+    }
+
     const callLLM = (messagesOverride?: Message[]) =>
       generateText({
         model: this.mainModel,
