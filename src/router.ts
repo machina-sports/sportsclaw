@@ -31,7 +31,7 @@ interface LlmRouteAttempt {
   succeeded: boolean;
 }
 
-const HELPER_SKILLS = new Set(["news", "kalshi", "polymarket"]);
+const HELPER_SKILLS = new Set(["news", "kalshi", "polymarket", "betting", "markets"]);
 const TOOL_TOKEN_STOP_WORDS = new Set([
   "get",
   "list",
@@ -121,6 +121,29 @@ function inferHelperSkills(prompt: string, installed: Set<string>): Set<string> 
   if (installed.has("polymarket") && /\bpolymarket\b/.test(p)) {
     out.add("polymarket");
   }
+
+  // Betting analysis — de-vigging, Kelly criterion, edge detection, arbitrage
+  if (
+    installed.has("betting") &&
+    /\b(devig|de-vig|kelly|edge|arbitrage|parlay|convert odds|vig|line movement)\b/.test(p)
+  ) {
+    out.add("betting");
+  }
+
+  // Markets dashboard — unified odds comparison across sources
+  if (installed.has("markets")) {
+    if (/\b(markets dashboard|compare odds|evaluate market|unified odds)\b/.test(p)) {
+      out.add("markets");
+    }
+    // Co-activate with prediction market skills when both present
+    if (
+      (out.has("kalshi") || out.has("polymarket")) &&
+      (out.has("kalshi") && out.has("polymarket"))
+    ) {
+      out.add("markets");
+    }
+  }
+
   return out;
 }
 

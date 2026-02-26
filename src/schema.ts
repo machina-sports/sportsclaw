@@ -27,7 +27,7 @@ import { buildSubprocessEnv } from "./tools.js";
 import { buildSportsSkillsRepairCommand, checkPythonVersion, MIN_PYTHON_VERSION } from "./python.js";
 
 // ---------------------------------------------------------------------------
-// Default skills — the 14 sports-skills that ship with sportsclaw
+// Default skills — the sports-skills that ship with sportsclaw
 // See https://sports-skills.sh
 // ---------------------------------------------------------------------------
 
@@ -46,6 +46,8 @@ export const DEFAULT_SKILLS = [
   "kalshi",
   "polymarket",
   "news",
+  "betting",
+  "markets",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,8 @@ export const SKILL_DESCRIPTIONS: Record<string, string> = {
   kalshi: "Kalshi — CFTC-regulated prediction markets & event contracts",
   polymarket: "Polymarket — decentralized prediction markets & odds",
   news: "Sports News — headlines & articles via RSS feeds & Google News",
+  betting: "Betting Analysis — odds conversion, de-vigging, edge detection, Kelly criterion",
+  markets: "Markets — unified prediction market dashboard connecting ESPN with Kalshi & Polymarket",
 };
 
 // ---------------------------------------------------------------------------
@@ -444,11 +448,49 @@ export function getCachedSchemaVersion(): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic discovery — ask sports-skills for its module catalog
+// ---------------------------------------------------------------------------
+
+interface SkillCatalog {
+  version: string;
+  modules: string[];
+}
+
+/**
+ * Run `python3 -m sports_skills catalog` and return the list of available
+ * modules. Returns `null` when the command fails (e.g. older sports-skills
+ * versions that don't support `catalog`).
+ */
+export function discoverAvailableSkills(
+  config?: Partial<sportsclawConfig>
+): SkillCatalog | null {
+  const pythonPath = config?.pythonPath ?? "python3";
+  try {
+    const output = execFileSync(
+      pythonPath,
+      ["-m", "sports_skills", "catalog"],
+      { timeout: 15_000, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
+    );
+    const parsed = JSON.parse(output.trim()) as SkillCatalog;
+    if (Array.isArray(parsed.modules) && parsed.modules.length > 0) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap default schemas
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch and save schemas for all 14 default sports-skills.
+ * Fetch and save schemas for all default sports-skills.
+ *
+ * Attempts dynamic discovery via `catalog` first. Falls back to the
+ * hardcoded `DEFAULT_SKILLS` list when discovery is unavailable (e.g.
+ * older sports-skills versions).
  *
  * By default, skips skills that already have a schema on disk.
  * Pass `force: true` to re-fetch everything (useful for upgrades).
@@ -465,7 +507,17 @@ export async function bootstrapDefaultSchemas(
   const existing = new Set(listSchemas());
   let succeeded = 0;
 
-  for (const skill of DEFAULT_SKILLS) {
+  // Try dynamic discovery; fall back to hardcoded list
+  const catalog = discoverAvailableSkills(config);
+  const skills: readonly string[] = catalog?.modules ?? DEFAULT_SKILLS;
+
+  if (verbose && catalog) {
+    console.error(
+      `[sportsclaw] discovered ${catalog.modules.length} skills from sports-skills v${catalog.version}`
+    );
+  }
+
+  for (const skill of skills) {
     if (!force && existing.has(skill)) {
       if (verbose) {
         console.error(`[sportsclaw] skip: "${skill}" already installed`);
