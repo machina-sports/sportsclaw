@@ -12,10 +12,8 @@ import pc from "picocolors";
 import * as p from "@clack/prompts";
 import {
   DEFAULT_MODELS,
-  DEFAULT_ROUTER_MODELS,
   PROVIDER_MODEL_PROFILES,
   type LLMProvider,
-  type sportsclawConfig,
 } from "./types.js";
 import {
   SKILL_DESCRIPTIONS,
@@ -37,8 +35,6 @@ export const SPORTS_SKILLS_DISCLAIMER =
 export interface CLIConfig {
   provider?: LLMProvider;
   model?: string;
-  routerModelStrategy?: "provider_fast" | "same_as_main";
-  routerModel?: string;
   apiKey?: string;
   pythonPath?: string;
   routingMode?: "soft_lock";
@@ -100,8 +96,6 @@ export function saveConfig(config: CLIConfig): void {
 export interface ResolvedConfig {
   provider: LLMProvider;
   model: string | undefined;
-  routerModelStrategy: NonNullable<sportsclawConfig["routerModelStrategy"]>;
-  routerModel: string;
   apiKey: string | undefined;
   pythonPath: string;
   routingMode: "soft_lock";
@@ -129,14 +123,6 @@ function parsePositiveInt(
   return parsed;
 }
 
-function parseRouterModelStrategy(
-  value: string | undefined
-): NonNullable<sportsclawConfig["routerModelStrategy"]> {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === "same_as_main") return "same_as_main";
-  return "provider_fast";
-}
-
 export function resolveConfig(): ResolvedConfig {
   const file = loadConfig();
 
@@ -151,19 +137,6 @@ export function resolveConfig(): ResolvedConfig {
     firstEnv("SPORTSCLAW_MODEL", "sportsclaw_MODEL") ||
     file.model ||
     DEFAULT_MODELS[provider];
-
-  const routerModelStrategy = parseRouterModelStrategy(
-    firstEnv("SPORTSCLAW_ROUTER_STRATEGY", "sportsclaw_ROUTER_STRATEGY") ||
-      file.routerModelStrategy
-  );
-  const configuredRouterModel =
-    firstEnv("SPORTSCLAW_ROUTER_MODEL", "sportsclaw_ROUTER_MODEL") ||
-    file.routerModel;
-  const routerModel =
-    configuredRouterModel ||
-    (routerModelStrategy === "same_as_main"
-      ? model
-      : DEFAULT_ROUTER_MODELS[provider]);
 
   // env var > config-file apiKey (only if provider matches)
   const apiKey = process.env[envVar] || file.apiKey;
@@ -199,8 +172,6 @@ export function resolveConfig(): ResolvedConfig {
   return {
     provider,
     model,
-    routerModelStrategy,
-    routerModel,
     apiKey,
     pythonPath,
     routingMode,
@@ -225,18 +196,6 @@ export function applyConfigToEnv(): ResolvedConfig {
   }
   if (resolved.model && !process.env.SPORTSCLAW_MODEL) {
     process.env.SPORTSCLAW_MODEL = resolved.model;
-  }
-  if (!process.env.SPORTSCLAW_ROUTER_STRATEGY) {
-    process.env.SPORTSCLAW_ROUTER_STRATEGY = resolved.routerModelStrategy;
-  }
-  if (!process.env.sportsclaw_ROUTER_STRATEGY) {
-    process.env.sportsclaw_ROUTER_STRATEGY = resolved.routerModelStrategy;
-  }
-  if (!process.env.SPORTSCLAW_ROUTER_MODEL) {
-    process.env.SPORTSCLAW_ROUTER_MODEL = resolved.routerModel;
-  }
-  if (!process.env.sportsclaw_ROUTER_MODEL) {
-    process.env.sportsclaw_ROUTER_MODEL = resolved.routerModel;
   }
   if (!process.env.sportsclaw_PROVIDER) {
     process.env.sportsclaw_PROVIDER = resolved.provider;
@@ -349,31 +308,67 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     process.exit(0);
   }
 
-  // --- Sport selection ---
-  p.log.warn(SPORTS_SKILLS_DISCLAIMER);
+  // --- Sport selection (skip if schemas already installed) ---
+  const existingSchemas = listSchemas();
+  let sportSelections: string[] | undefined;
 
-  const sportSelections = await promptSportSelection();
-  if (p.isCancel(sportSelections)) {
-    p.cancel("🚫 Setup cancelled.");
-    process.exit(0);
+  if (existingSchemas.length > 0) {
+    p.log.info(`${existingSchemas.length} sport schema(s) already installed: ${existingSchemas.join(", ")}`);
+    const reconfigure = await p.confirm({
+      message: "Reconfigure installed sports?",
+      initialValue: false,
+    });
+    if (p.isCancel(reconfigure)) {
+      p.cancel("🚫 Setup cancelled.");
+      process.exit(0);
+    }
+    if (reconfigure) {
+      p.log.warn(SPORTS_SKILLS_DISCLAIMER);
+      const selections = await promptSportSelection();
+      if (p.isCancel(selections)) {
+        p.cancel("🚫 Setup cancelled.");
+        process.exit(0);
+      }
+      sportSelections = selections as string[];
+    }
+  } else {
+    p.log.warn(SPORTS_SKILLS_DISCLAIMER);
+    const selections = await promptSportSelection();
+    if (p.isCancel(selections)) {
+      p.cancel("🚫 Setup cancelled.");
+      process.exit(0);
+    }
+    sportSelections = selections as string[];
   }
 
   const config: CLIConfig = {
     provider: selectedProvider,
     model: model as string,
-    routerModelStrategy: "provider_fast",
-    routerModel: DEFAULT_ROUTER_MODELS[selectedProvider],
     apiKey: finalApiKey,
     pythonPath: (pythonPath as string) || "python3",
-    selectedSports: sportSelections as string[],
+    ...(sportSelections && { selectedSports: sportSelections }),
   };
 
   saveConfig(config);
   p.outro(`✅ Config saved to ${CONFIG_PATH}`);
 
-  // Install selected sport schemas
-  const resolvedPython = config.pythonPath || "python3";
-  await installSelectedSports(sportSelections as string[], resolvedPython);
+  // Install selected sport schemas (only if user made a new selection)
+  if (sportSelections) {
+    const resolvedPython = config.pythonPath || "python3";
+    await installSelectedSports(sportSelections, resolvedPython);
+  }
+
+  // Post-config usage guide
+  console.log("");
+  console.log(pc.bold("You're all set! Here's how to get started:"));
+  console.log("");
+  console.log(`  ${pc.cyan("sportsclaw chat")}              Start an interactive session`);
+  console.log(`  ${pc.cyan('sportsclaw "your question"')}   One-shot query`);
+  console.log(`  ${pc.cyan("sportsclaw add <sport>")}       Install more sports`);
+  console.log(`  ${pc.cyan("sportsclaw list")}              See installed sports`);
+  console.log(`  ${pc.cyan("sportsclaw agents")}            See installed agents`);
+  console.log(`  ${pc.cyan("sportsclaw config")}            Reconfigure anytime`);
+  console.log("");
 
   return config;
 }

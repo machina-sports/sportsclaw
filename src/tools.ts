@@ -125,6 +125,78 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Search-First Middleware — intercept guessed IDs before they hit the bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a value looks like a human-readable name rather than a valid ID.
+ *
+ * Valid IDs are typically: numeric ("258"), dot-codes ("eng.1"), hex ("0x..."),
+ * or slugs with digits ("premier-league-2024-2025"). Human names contain
+ * spaces, start with uppercase, or are long strings with no digits/dots.
+ */
+function looksLikeHumanName(value: string): boolean {
+  const v = value.trim();
+  if (v.length <= 4) return false;              // short codes: "ne", "buf", "nba"
+  if (/\d/.test(v)) return false;               // has digits — real ID or slug
+  if (v.includes(".")) return false;            // dot notation — code like "eng.1"
+  if (v.startsWith("0x")) return false;         // hex address
+  if (/\s/.test(v)) return true;                // spaces — definitely a name
+  if (/^[A-Z]/.test(v)) return true;            // starts uppercase — proper noun
+  if (v.length > 5 && /^[a-z]+(?:-[a-z]+)*$/.test(v)) return true; // long lowercase word/slug
+  return false;
+}
+
+/**
+ * Build a helpful suggestion for which lookup tool to call.
+ */
+function buildLookupSuggestion(sport: string, paramName: string): string {
+  if (paramName === "team_id") {
+    return `Call ${sport}_search_team(query="<name>") to find the correct team_id.`;
+  }
+  if (paramName === "player_id" || paramName === "tm_player_id" || paramName === "fpl_id") {
+    return `Call ${sport}_search_player(query="<name>") to find the correct ${paramName}.`;
+  }
+  if (paramName === "season_id") {
+    return (
+      `Call ${sport}_get_competitions to list competitions, then ` +
+      `${sport}_get_competition_seasons to find the correct season_id.`
+    );
+  }
+  if (paramName === "competition_id") {
+    return `Call ${sport}_get_competitions to find the correct competition_id.`;
+  }
+  if (paramName === "event_id") {
+    return `Call ${sport}_get_season_schedule or ${sport}_get_daily_schedule to find event IDs.`;
+  }
+  return `Use a listing or search tool for "${sport}" to discover the correct ${paramName}.`;
+}
+
+/**
+ * Scan tool call input for _id parameters that look like guessed human names.
+ * Returns an error message if a guessed ID is detected, null otherwise.
+ */
+function detectGuessedId(sport: string, input: Record<string, unknown>): string | null {
+  for (const [key, value] of Object.entries(input)) {
+    if (!key.endsWith("_id") && !key.endsWith("_ids")) continue;
+
+    const values: unknown[] = Array.isArray(value) ? value : [value];
+    for (const v of values) {
+      if (typeof v !== "string") continue;
+      if (!looksLikeHumanName(v)) continue;
+
+      const suggestion = buildLookupSuggestion(sport, key.replace(/_ids$/, "_id"));
+      return (
+        `"${v}" looks like a name, not a valid ${key}. ` +
+        `IDs are typically numeric (e.g. "258") or code-formatted (e.g. "eng.1"). ` +
+        suggestion
+      );
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Input validation
 // ---------------------------------------------------------------------------
 
@@ -378,6 +450,13 @@ export class ToolRegistry {
       return { content: JSON.stringify({ error: cmdError }), isError: true };
     }
 
+    // Search-first middleware: reject guessed human names in _id parameters.
+    // Forces the LLM to call a search/listing tool first to discover real IDs.
+    const idIssue = detectGuessedId(sport, input as Record<string, unknown>);
+    if (idIssue) {
+      return { content: JSON.stringify({ error: idIssue }), isError: true };
+    }
+
     // All input fields are args for the Python bridge
     const args: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input)) {
@@ -550,27 +629,37 @@ export function executePythonBridge(
 
   return (async () => {
     const firstAttempt = await runOnce(timeout);
-    if (firstAttempt.success || !firstAttempt.timedOut) {
+    if (firstAttempt.success) {
       return firstAttempt;
     }
 
-    if (config?.verbose) {
+    // Retry once on any failure (timeout gets a longer window; transient
+    // errors like network blips / RSS parse failures get a second chance).
+    if (firstAttempt.timedOut) {
+      if (config?.verbose) {
+        console.error(
+          `[sportsclaw] exec timeout after ${timeout}ms; retrying with ${retryTimeout}ms`
+        );
+      }
+    } else if (config?.verbose) {
       console.error(
-        `[sportsclaw] exec timeout after ${timeout}ms; retrying with ${retryTimeout}ms`
+        `[sportsclaw] exec failed; retrying once: ${firstAttempt.error?.slice(0, 120)}`
       );
     }
 
-    const secondAttempt = await runOnce(retryTimeout);
+    const secondTimeout = firstAttempt.timedOut ? retryTimeout : timeout;
+    const secondAttempt = await runOnce(secondTimeout);
     if (secondAttempt.success) {
       return secondAttempt;
     }
 
-    // Preserve first timeout context so callers can surface the true cause.
+    // Preserve first error context so callers can surface the true cause.
     return {
       ...secondAttempt,
-      error:
-        `Command timed out after ${timeout}ms and retry after ${retryTimeout}ms failed. ` +
-        `${secondAttempt.error ?? firstAttempt.error ?? ""}`.trim(),
+      error: firstAttempt.timedOut
+        ? `Command timed out after ${timeout}ms and retry after ${retryTimeout}ms failed. ` +
+          `${secondAttempt.error ?? firstAttempt.error ?? ""}`.trim()
+        : secondAttempt.error ?? firstAttempt.error,
     };
   })();
 }

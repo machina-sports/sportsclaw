@@ -39,16 +39,6 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-function parseRouterStrategy(
-  value: string | undefined
-): "provider_fast" | "same_as_main" | undefined {
-  if (!value) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "same_as_main") return "same_as_main";
-  if (normalized === "provider_fast") return "provider_fast";
-  return undefined;
-}
-
 export async function startDiscordListener(): Promise<void> {
   // Dynamic import — discord.js is an optional dependency
   let Discord: typeof import("discord.js");
@@ -77,20 +67,6 @@ export async function startDiscordListener(): Promise<void> {
     ) as LLMProvider,
     ...((process.env.SPORTSCLAW_MODEL || process.env.sportsclaw_MODEL) && {
       model: process.env.SPORTSCLAW_MODEL || process.env.sportsclaw_MODEL,
-    }),
-    ...((process.env.SPORTSCLAW_ROUTER_MODEL ||
-      process.env.sportsclaw_ROUTER_MODEL) && {
-      routerModel:
-        process.env.SPORTSCLAW_ROUTER_MODEL ||
-        process.env.sportsclaw_ROUTER_MODEL,
-    }),
-    ...((process.env.SPORTSCLAW_ROUTER_STRATEGY ||
-      process.env.sportsclaw_ROUTER_STRATEGY) && {
-      routerModelStrategy:
-        parseRouterStrategy(
-          process.env.SPORTSCLAW_ROUTER_STRATEGY ||
-            process.env.sportsclaw_ROUTER_STRATEGY
-        ),
     }),
     ...(process.env.PYTHON_PATH && { pythonPath: process.env.PYTHON_PATH }),
     routingMode: "soft_lock" as const,

@@ -20,14 +20,12 @@ export interface ProviderModelOption {
 
 export interface ProviderModelProfile {
   defaultModel: string;
-  fastRouterModel: string;
   selectableModels: ProviderModelOption[];
 }
 
 export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> = {
   anthropic: {
     defaultModel: "claude-sonnet-4-5-20250514",
-    fastRouterModel: "claude-sonnet-4-5-20250514",
     selectableModels: [
       {
         value: "claude-sonnet-4-5-20250514",
@@ -43,7 +41,6 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
   },
   openai: {
     defaultModel: "gpt-5.3-codex",
-    fastRouterModel: "gpt-5.3-codex",
     selectableModels: [
       {
         value: "gpt-5.3-codex",
@@ -54,7 +51,6 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
   },
   google: {
     defaultModel: "gemini-3-flash-preview",
-    fastRouterModel: "gemini-3-flash-preview",
     selectableModels: [
       {
         value: "gemini-3-flash-preview",
@@ -81,12 +77,6 @@ export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   google: PROVIDER_MODEL_PROFILES.google.defaultModel,
 };
 
-export const DEFAULT_ROUTER_MODELS: Record<LLMProvider, string> = {
-  anthropic: PROVIDER_MODEL_PROFILES.anthropic.fastRouterModel,
-  openai: PROVIDER_MODEL_PROFILES.openai.fastRouterModel,
-  google: PROVIDER_MODEL_PROFILES.google.fastRouterModel,
-};
-
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -96,10 +86,6 @@ export interface sportsclawConfig {
   provider?: LLMProvider;
   /** Model ID for the chosen provider (default: depends on provider) */
   model?: string;
-  /** Router model strategy (default: provider_fast) */
-  routerModelStrategy?: "provider_fast" | "same_as_main";
-  /** Explicit router model override (default: provider fast model) */
-  routerModel?: string;
   /** Maximum agentic turns before the loop halts (default: 25) */
   maxTurns?: number;
   /** Maximum tokens for model responses (default: 4096) */
@@ -125,8 +111,6 @@ export interface sportsclawConfig {
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   provider: "anthropic",
   model: DEFAULT_MODELS.anthropic,
-  routerModelStrategy: "provider_fast",
-  routerModel: DEFAULT_ROUTER_MODELS.anthropic,
   maxTurns: 25,
   maxTokens: 16_384,
   systemPrompt: "",
@@ -203,6 +187,7 @@ export interface SportToolDef {
 // ---------------------------------------------------------------------------
 
 export type ToolProgressEvent =
+  | { type: "phase"; label: string }
   | { type: "tool_start"; toolName: string; toolCallId: string; skillName?: string }
   | { type: "tool_finish"; toolName: string; toolCallId: string; durationMs: number; success: boolean; skillName?: string }
   | { type: "synthesizing" };
@@ -226,9 +211,7 @@ export interface RouteDecision {
 }
 
 export interface RouteMeta {
-  primaryModelId: string;
   modelUsed: string | null;
-  fallbackUsed: boolean;
   llmAttempted: boolean;
   llmSucceeded: boolean;
   llmDurationMs: number;

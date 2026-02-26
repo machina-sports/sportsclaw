@@ -15,8 +15,8 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>sportsclaw — Sports AI CLI & Bots</title>
-  <meta name="description" content="A CLI and bot scaffold that connects any LLM to live sports data via sports-skills. Supports Anthropic, OpenAI, and Google. Built-in Discord and Telegram bots.">
+  <title>sportsclaw — Self-Evolving Sports AI</title>
+  <meta name="description" content="Host an autonomous sports AI on Discord, Telegram, or WhatsApp. Persistent memory, live data, prediction markets. Gets smarter every day.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -47,7 +47,6 @@
       --nav-bg: rgba(10, 10, 10, 0.85);
     }
 
-    /* Light theme */
     html.light {
       --bg: #f8f9fa;
       --bg-card: #ffffff;
@@ -84,7 +83,6 @@
       --nav-bg: rgba(10, 10, 10, 0.85);
     }
 
-    /* System preference: light mode */
     @media (prefers-color-scheme: light) {
       html:not(.dark) {
         --bg: #f8f9fa;
@@ -135,7 +133,7 @@
     }
 
     .container {
-      max-width: 1000px;
+      max-width: 1200px;
       margin: 0 auto;
       padding: 0 2rem;
     }
@@ -171,9 +169,7 @@
       gap: 0.5rem;
     }
 
-    .logo span {
-      color: var(--blue);
-    }
+    .logo span { color: var(--blue); }
 
     .nav-links {
       display: flex;
@@ -186,9 +182,7 @@
       font-size: 0.9rem;
     }
 
-    .nav-link:hover {
-      color: var(--text);
-    }
+    .nav-link:hover { color: var(--text); }
 
     .hero {
       padding: 140px 0 80px;
@@ -218,8 +212,8 @@
 
     .hero p {
       color: var(--text-muted);
-      font-size: clamp(1rem, 2vw, 1.25rem);
-      max-width: 600px;
+      font-size: clamp(1rem, 2vw, 1.2rem);
+      max-width: 650px;
       margin: 0 auto 3rem;
     }
 
@@ -240,7 +234,7 @@
       box-shadow: 0 20px 40px rgba(0,0,0,0.4);
       position: relative;
     }
-    
+
     html.light .terminal {
       box-shadow: 0 20px 40px rgba(0,0,0,0.1);
     }
@@ -263,7 +257,7 @@
 
     .prompt { color: var(--green); }
     .command { color: var(--white); }
-    
+
     .install-box {
       background-color: var(--bg-card);
       border: 1px solid var(--border);
@@ -292,9 +286,7 @@
       transition: color 0.2s;
     }
 
-    .copy-btn:hover {
-      color: var(--blue);
-    }
+    .copy-btn:hover { color: var(--blue); }
 
     .copy-feedback {
       position: absolute;
@@ -310,13 +302,12 @@
       transition: opacity 0.2s;
       pointer-events: none;
     }
-    
-    .copy-feedback.show {
-      opacity: 1;
-    }
 
-    .architecture-section {
-      padding: 60px 0;
+    .copy-feedback.show { opacity: 1; }
+
+    /* Sections */
+    .section {
+      padding: 80px 0;
       border-top: 1px solid var(--border);
     }
 
@@ -330,15 +321,17 @@
       color: var(--text-muted);
       text-align: center;
       margin-bottom: 4rem;
-      max-width: 600px;
+      max-width: 650px;
       margin-left: auto;
       margin-right: auto;
+      font-size: 1.05rem;
     }
 
+    /* Feature grid */
     .grid-2 {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 2rem;
+      gap: 1.5rem;
     }
 
     @media (min-width: 768px) {
@@ -359,8 +352,8 @@
     }
 
     .card h3 {
-      font-size: 1.25rem;
-      margin-bottom: 1rem;
+      font-size: 1.15rem;
+      margin-bottom: 0.75rem;
       color: var(--text);
       display: flex;
       align-items: center;
@@ -369,20 +362,283 @@
 
     .card p {
       color: var(--text-muted);
-      font-size: 0.95rem;
-      margin-bottom: 1.5rem;
-    }
-    
-    .card pre {
-      background: #000;
-      padding: 1rem;
-      border-radius: 6px;
-      font-size: 0.85rem;
-      color: #ccc;
-      overflow-x: auto;
-      border: 1px solid var(--border);
+      font-size: 0.9rem;
     }
 
+    /* Ecosystem */
+    .ecosystem {
+      display: flex;
+      justify-content: center;
+      align-items: stretch;
+      gap: 1rem;
+      margin: 3rem 0;
+      flex-wrap: wrap;
+    }
+
+    .eco-box {
+      flex: 1;
+      min-width: 250px;
+      padding: 1.5rem;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      background: var(--bg-card);
+      text-align: center;
+    }
+
+    .eco-arrow {
+      display: flex;
+      align-items: center;
+      color: var(--border-hover);
+      font-size: 1.5rem;
+    }
+
+    .eco-box h4 {
+      margin-bottom: 0.5rem;
+      color: var(--blue);
+    }
+
+    .features-list {
+      list-style: none;
+      margin-top: 1.5rem;
+    }
+
+    .features-list li {
+      position: relative;
+      padding-left: 1.5rem;
+      margin-bottom: 0.75rem;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .features-list li::before {
+      content: "\2192";
+      position: absolute;
+      left: 0;
+      color: var(--blue);
+    }
+
+    /* Template cards */
+    .templates-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.25rem;
+      margin-bottom: 3rem;
+    }
+
+    @media (min-width: 768px) {
+      .templates-grid { grid-template-columns: 1fr 1fr 1fr; }
+    }
+
+    .template-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+
+    .template-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .template-icon {
+      color: var(--blue);
+      margin-bottom: 1rem;
+    }
+
+    .template-card h4 {
+      font-size: 1rem;
+      margin-bottom: 0.25rem;
+      color: var(--text);
+    }
+
+    .template-card .template-tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      color: var(--blue);
+      margin-bottom: 0.75rem;
+    }
+
+    .template-card p {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+
+    .deploy-cta {
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+
+    .deploy-cta p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .pricing-trial {
+      display: block;
+      margin-top: 0.6rem;
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      font-weight: 400;
+      text-align: center;
+    }
+
+    /* Pricing */
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.25rem;
+    }
+
+    @media (min-width: 768px) {
+      .pricing-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (min-width: 1024px) {
+      .pricing-grid { grid-template-columns: 1fr 1fr 1fr 1fr; }
+    }
+
+    .pricing-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.2s, transform 0.2s;
+      position: relative;
+    }
+
+    .pricing-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .pricing-card-oss {
+      border-style: dashed;
+      background: transparent;
+    }
+
+    .pricing-card-max {
+      border-color: var(--blue);
+    }
+
+    .pricing-card-max:hover {
+      border-color: var(--blue);
+      box-shadow: 0 4px 24px rgba(59, 130, 246, 0.12);
+    }
+
+    .pricing-badge {
+      position: absolute;
+      top: -10px;
+      right: 1.25rem;
+      background: var(--blue);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .pricing-card-enterprise {
+      border-color: var(--border-hover);
+    }
+
+    .pricing-card-enterprise:hover {
+      border-color: var(--text-muted);
+    }
+
+    .pricing-name {
+      font-size: 1.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+    }
+
+    .pricing-price {
+      font-size: 2.25rem;
+      font-weight: 700;
+      margin-bottom: 1.25rem;
+      line-height: 1.2;
+    }
+
+    .pricing-price span {
+      font-size: 0.9rem;
+      font-weight: 400;
+      color: var(--text-muted);
+    }
+
+    .pricing-features {
+      list-style: none;
+      flex: 1;
+      margin-bottom: 1.5rem;
+    }
+
+    .pricing-features li {
+      position: relative;
+      padding-left: 1.25rem;
+      margin-bottom: 0.5rem;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+
+    .pricing-features li::before {
+      content: "~";
+      position: absolute;
+      left: 0;
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    .pricing-features li.highlight {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .pricing-card-footer {
+      margin-top: auto;
+      height: 4rem;
+    }
+
+    .pricing-cta {
+      display: block;
+      text-align: center;
+      padding: 0.65rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text) !important;
+      transition: all 0.2s;
+    }
+
+    .pricing-cta:hover {
+      border-color: var(--blue);
+      color: var(--blue) !important;
+      background: var(--blue-muted);
+    }
+
+    .pricing-cta-primary {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: #fff !important;
+    }
+
+    .pricing-cta-primary:hover {
+      background: var(--blue-dim);
+      border-color: var(--blue-dim);
+      color: #fff !important;
+      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+    }
+
+    /* Theme toggle */
     .theme-toggle {
       background: none;
       border: none;
@@ -394,9 +650,7 @@
       justify-content: center;
     }
 
-    .theme-toggle:hover {
-      color: var(--text);
-    }
+    .theme-toggle:hover { color: var(--text); }
 
     .icon-sun { display: none; }
     .icon-moon { display: block; }
@@ -417,66 +671,6 @@
       .ascii-art { display: block; }
     }
 
-    .features-list {
-      list-style: none;
-      margin-top: 1.5rem;
-    }
-    
-    .features-list li {
-      position: relative;
-      padding-left: 1.5rem;
-      margin-bottom: 0.75rem;
-      color: var(--text-muted);
-      font-size: 0.95rem;
-    }
-    
-    .features-list li::before {
-      content: "→";
-      position: absolute;
-      left: 0;
-      color: var(--blue);
-    }
-
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 2rem 0;
-      margin-top: 4rem;
-      text-align: center;
-      color: var(--text-muted);
-      font-size: 0.9rem;
-    }
-    
-    .ecosystem {
-      display: flex;
-      justify-content: center;
-      align-items: stretch;
-      gap: 1rem;
-      margin: 3rem 0;
-      flex-wrap: wrap;
-    }
-    
-    .eco-box {
-      flex: 1;
-      min-width: 250px;
-      padding: 1.5rem;
-      border: 1px dashed var(--border);
-      border-radius: 8px;
-      background: var(--bg-card);
-      text-align: center;
-    }
-    
-    .eco-arrow {
-      display: flex;
-      align-items: center;
-      color: var(--border-hover);
-      font-size: 1.5rem;
-    }
-    
-    .eco-box h4 {
-      margin-bottom: 0.5rem;
-      color: var(--blue);
-    }
-    
     .nav-cta {
       padding: 6px 14px;
       border: 1px solid var(--border-hover);
@@ -495,11 +689,20 @@
       color: var(--blue) !important;
       background: var(--blue-muted);
     }
-    
+
     @media (max-width: 640px) {
       .nav-links a:not(.nav-cta) {
         display: none;
       }
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      margin-top: 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
     }
   </style>
 </head>
@@ -511,6 +714,7 @@
       </div>
       <div class="nav-links">
         <a href="https://sports-skills.sh" class="nav-link" target="_blank">sports-skills.sh</a>
+        <a href="#pricing" class="nav-link">Pricing</a>
         <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
           <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
           <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
@@ -521,10 +725,11 @@
   </header>
 
   <main>
+    <!-- Hero -->
     <section class="hero container">
       <div class="badge">v0.5.6 Released</div>
-      <h1>Sports AI in Your Terminal & Group Chat</h1>
-      <p>A CLI and bot scaffold that connects any LLM to live sports data via <a href="https://sports-skills.sh" target="_blank">sports-skills</a>. Ask questions in plain English, get real answers from real data.</p>
+      <h1>Self-Evolving Sports AI for Your Chat Apps</h1>
+      <p>Host an autonomous sports AI on Discord, Telegram, or WhatsApp with one click. It builds persistent memory, adapts to your users, and gets smarter every day.</p>
 
       <div style="position: relative; display: inline-block;">
         <div id="copy-feedback" class="copy-feedback">Copied!</div>
@@ -536,9 +741,6 @@
           </button>
         </div>
       </div>
-      <p style="margin-top: 10px; color: var(--text-muted); font-size: 0.85rem;">
-        Data package: <code>pip install sports-skills</code> (includes all sports modules).
-      </p>
 
       <div class="terminal-container">
         <div class="terminal">
@@ -574,66 +776,113 @@
       </div>
     </section>
 
-    <section class="architecture-section container">
-      <h2 class="section-title">How It Works</h2>
-      <p class="section-subtitle">sportsclaw is a TypeScript CLI that connects LLMs to <a href="https://sports-skills.sh" target="_blank">sports-skills</a>, a Python package with 14 deterministic sports data connectors.</p>
+    <!-- Day One Capabilities -->
+    <section class="section container">
+      <h2 class="section-title">Day One Capabilities</h2>
+      <p class="section-subtitle">Your agent ships with three built-in personas. Each one learns from your chat&mdash;the more your users interact, the sharper it gets.</p>
 
-      <div class="ecosystem">
-        <div class="eco-box">
-          <h4><a href="https://sports-skills.sh" target="_blank" style="color: var(--blue); text-decoration: none; border-bottom: 1px dotted var(--blue);">sports-skills</a></h4>
-          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">The deterministic data layer.</p>
-          <ul class="features-list" style="text-align: left; display: inline-block;">
-            <li>Zero API keys required</li>
-            <li>ESPN, FastF1, Polymarket</li>
-            <li>Normalizes complex JSON</li>
-            <li>Exposes JSON schemas to LLM</li>
-          </ul>
+      <div class="templates-grid">
+        <div class="template-card">
+          <div class="template-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"></path><path d="M18 20V4"></path><path d="M6 20v-4"></path></svg>
+          </div>
+          <h4>The Analyst</h4>
+          <div class="template-tag">Prediction Markets</div>
+          <p>Drops odds and value bets into the chat. It learns which sports and markets your audience actually cares about and tailors its alerts.</p>
         </div>
-        
-        <div class="eco-arrow">⇄</div>
-        
-        <div class="eco-box">
-          <h4>sportsclaw</h4>
-          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">The CLI & bot scaffold.</p>
-          <ul class="features-list" style="text-align: left; display: inline-block;">
-            <li>Anthropic, OpenAI, Google</li>
-            <li>Interactive setup & config</li>
-            <li>Persistent memory</li>
-            <li>Built-in Discord/Telegram bots</li>
-          </ul>
+        <div class="template-card">
+          <div class="template-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          </div>
+          <h4>The Scoreboard</h4>
+          <div class="template-tag">Multi-Sport</div>
+          <p>Pulls live play-by-play and stats for any game. Over time, it anticipates the matchups your audience follows and tracks them proactively.</p>
+        </div>
+        <div class="template-card">
+          <div class="template-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+          </div>
+          <h4>The News Desk</h4>
+          <div class="template-tag">Scheduled Reports</div>
+          <p>Curates morning injury reports and headlines, refining its daily feed based on the teams your chat interacts with most.</p>
         </div>
       </div>
 
-      <div class="grid-2">
-        <div class="card">
-          <h3>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
-            Readable Codebase
-          </h3>
-          <p>~2,300 lines of TypeScript built on the Vercel AI SDK. The core agent loop is ~80 lines. Easy to fork, extend, or learn from.</p>
+      <div class="deploy-cta">
+        <p>Build your agent, paste your token, and we'll keep it evolving. Supports Discord and Telegram (WhatsApp coming soon).</p>
+      </div>
+    </section>
+
+    <!-- Pricing -->
+    <section class="section container" id="pricing">
+      <h2 class="section-title">Pricing</h2>
+      <p class="section-subtitle">Run it yourself for free, or deploy to Machina Cloud and we handle the rest.</p>
+
+      <div class="pricing-grid">
+        <!-- Open Source -->
+        <div class="pricing-card pricing-card-oss">
+          <div class="pricing-name">Open Source</div>
+          <div class="pricing-price">$0<span>/mo</span></div>
+          <ul class="pricing-features">
+            <li>Run it yourself (Local/Docker)</li>
+            <li>Bring your own API keys (BYOK)</li>
+            <li>Open source data connectors</li>
+            <li>Community Discord support</li>
+          </ul>
+          <div class="pricing-card-footer">
+            <a href="#" class="pricing-cta" id="copy-install-cta">Copy Install Script</a>
+          </div>
         </div>
-        <div class="card">
-          <h3>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-            Zero API Keys for Data
-          </h3>
-          <p>You need an Anthropic or OpenAI key for the reasoning model, but the Python data layer requires absolutely zero API keys or paid subscriptions. It just works.</p>
+
+        <!-- Starter -->
+        <div class="pricing-card">
+          <div class="pricing-name">Starter</div>
+          <div class="pricing-price">$30<span>/mo</span></div>
+          <ul class="pricing-features">
+            <li>Always on, running 24/7</li>
+            <li>Remembers every conversation</li>
+            <li>Deploy to Discord & Telegram</li>
+            <li>All Machina skills</li>
+            <li>Premium data connectors</li>
+          </ul>
+          <div class="pricing-card-footer">
+            <a href="https://cloud.machina.gg" target="_blank" class="pricing-cta">Deploy Your Agent</a>
+            <span class="pricing-trial">7-day free trial. Card required.</span>
+          </div>
         </div>
-        <div class="card">
-          <h3>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
-            Interactive CLI
-          </h3>
-          <p>Setup is entirely interactive. Run it once, paste your API key, and watch the reasoning spinner solve your queries in real-time.</p>
+
+        <!-- Max -->
+        <div class="pricing-card pricing-card-max">
+          <div class="pricing-badge">Most Popular</div>
+          <div class="pricing-name">Max</div>
+          <div class="pricing-price">$200<span>/mo</span></div>
+          <ul class="pricing-features">
+            <li>Everything in Starter</li>
+            <li>Custom data connectors</li>
+            <li>Higher usage limits</li>
+            <li>Faster responses</li>
+            <li>Priority support</li>
+          </ul>
+          <div class="pricing-card-footer">
+            <a href="https://cloud.machina.gg" target="_blank" class="pricing-cta pricing-cta-primary">Deploy Your Agent</a>
+            <span class="pricing-trial">7-day free trial. Card required.</span>
+          </div>
         </div>
-        <div class="card">
-          <h3>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-            Discord & Telegram Bots
-          </h3>
-          <p>Want it in your group chat? The CLI includes built-in listeners.</p>
-          <pre><code>sportsclaw listen discord
-sportsclaw listen telegram</code></pre>
+
+        <!-- Enterprise -->
+        <div class="pricing-card pricing-card-enterprise">
+          <div class="pricing-name">Enterprise</div>
+          <div class="pricing-price">Custom</div>
+          <ul class="pricing-features">
+            <li class="highlight">For Teams, Leagues, Media & Sportsbooks</li>
+            <li>Everything in Max</li>
+            <li>Dedicated account manager</li>
+            <li>Custom LLM fine-tuning</li>
+            <li>Solutions engineering team</li>
+          </ul>
+          <div class="pricing-card-footer">
+            <a href="https://machina.gg/schedule" target="_blank" class="pricing-cta">Contact Us</a>
+          </div>
         </div>
       </div>
     </section>
@@ -642,7 +891,6 @@ sportsclaw listen telegram</code></pre>
   <footer>
     <div class="container">
       <p>Built by the team at <a href="https://machina.gg" target="_blank">Machina Sports</a></p>
-      <p style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-dim);">MIT License. Open source forever.</p>
     </div>
   </footer>
 
@@ -669,7 +917,7 @@ sportsclaw listen telegram</code></pre>
       const html = document.documentElement;
       const isCurrentlyLight = html.classList.contains('light') ||
         (!html.classList.contains('dark') && window.matchMedia('(prefers-color-scheme: light)').matches);
-      
+
       if (isCurrentlyLight) {
         html.classList.remove('light');
         html.classList.add('dark');
@@ -683,6 +931,21 @@ sportsclaw listen telegram</code></pre>
 
     const themeToggle = document.getElementById('theme-toggle');
     themeToggle.addEventListener('click', toggleTheme);
+
+    // Copy install script from pricing card
+    const copyInstallCta = document.getElementById('copy-install-cta');
+    copyInstallCta.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try {
+        await navigator.clipboard.writeText('curl -fsSL https://sportsclaw.gg/install.sh | bash');
+        copyInstallCta.textContent = 'Copied!';
+        setTimeout(() => {
+          copyInstallCta.textContent = 'Copy Install Script';
+        }, 2000);
+      } catch (err) {
+        console.error('Failed to copy text: ', err);
+      }
+    });
   </script>
 </body>
 </html>

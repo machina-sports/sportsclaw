@@ -1,17 +1,21 @@
 /**
  * sportsclaw — Markdown Persistent Memory (OpenClaw Architecture)
  *
- * A 4-file memory system using plain .md files, each with a single purpose:
+ * A 6-file memory system using plain .md files, each with a single purpose:
  *
  *   CONTEXT.md       — HOT:  ephemeral state snapshot (overwritten on context shifts)
  *   SOUL.md          — WARM: agent personality & relationship with this user (evolves)
  *   FAN_PROFILE.md   — WARM: interest graph — teams, leagues, sports (read-merge-write)
+ *   REFLECTIONS.md   — WARM: append-only lessons learned from tool failures & discoveries
+ *   STRATEGY.md      — WARM: self-authored behavioral directives (injected into system prompt)
  *   <date>.md        — WARM/COLD: append-only conversation archive
  *
  * Storage layout:
  *   ~/.sportsclaw/memory/<userId>/CONTEXT.md
  *   ~/.sportsclaw/memory/<userId>/SOUL.md
  *   ~/.sportsclaw/memory/<userId>/FAN_PROFILE.md
+ *   ~/.sportsclaw/memory/<userId>/REFLECTIONS.md
+ *   ~/.sportsclaw/memory/<userId>/STRATEGY.md
  *   ~/.sportsclaw/memory/<userId>/2026-02-25.md
  *
  * No SQLite. No JSON blobs. Just markdown.
@@ -35,6 +39,8 @@ const MEMORY_BASE =
 const CONTEXT_FILE = "CONTEXT.md";
 const SOUL_FILE = "SOUL.md";
 const FAN_PROFILE_FILE = "FAN_PROFILE.md";
+const REFLECTIONS_FILE = "REFLECTIONS.md";
+const STRATEGY_FILE = "STRATEGY.md";
 
 /** Maximum tail lines injected from today's log into the memory block */
 const MAX_LOG_LINES = 100;
@@ -240,6 +246,38 @@ export class MemoryManager {
   }
 
   // -------------------------------------------------------------------------
+  // WARM layer — REFLECTIONS.md (append-only lessons learned)
+  // -------------------------------------------------------------------------
+
+  /** Read the reflections log */
+  async readReflections(): Promise<string> {
+    await this.dirReady;
+    return safeRead(join(this.dir, REFLECTIONS_FILE));
+  }
+
+  /** Append a structured reflection entry */
+  async appendReflection(entry: string): Promise<void> {
+    await this.dirReady;
+    await appendFile(join(this.dir, REFLECTIONS_FILE), entry + "\n", "utf-8");
+  }
+
+  // -------------------------------------------------------------------------
+  // WARM layer — STRATEGY.md (self-authored behavioral directives)
+  // -------------------------------------------------------------------------
+
+  /** Read the strategy file */
+  async readStrategy(): Promise<string> {
+    await this.dirReady;
+    return safeRead(join(this.dir, STRATEGY_FILE));
+  }
+
+  /** Write the strategy file. Content is fully LLM-authored markdown. */
+  async writeStrategy(content: string): Promise<void> {
+    await this.dirReady;
+    await writeFile(join(this.dir, STRATEGY_FILE), content, "utf-8");
+  }
+
+  // -------------------------------------------------------------------------
   // Combined read for prompt injection-safe context assembly
   // -------------------------------------------------------------------------
 
@@ -251,14 +289,15 @@ export class MemoryManager {
    * to reduce prompt injection surface area.
    */
   async buildMemoryBlock(): Promise<string> {
-    const [context, todayLog, fanProfile, soul] = await Promise.all([
+    const [context, todayLog, fanProfile, soul, reflections] = await Promise.all([
       this.readContext(),
       this.readTodayLog(),
       this.readFanProfile(),
       this.readSoul(),
+      this.readReflections(),
     ]);
 
-    if (!context && !todayLog && !fanProfile && !soul) return "";
+    if (!context && !todayLog && !fanProfile && !soul && !reflections) return "";
 
     const parts: string[] = [
       "## Persistent Memory",
@@ -277,6 +316,12 @@ export class MemoryManager {
 
     if (context) {
       parts.push("", "### Current Context (CONTEXT.md)", context);
+    }
+
+    // Reflections — lessons learned from past interactions
+    if (reflections) {
+      const tail = truncateAtEntryBoundary(reflections, 60);
+      parts.push("", "### Reflections (REFLECTIONS.md)", tail);
     }
 
     if (todayLog) {

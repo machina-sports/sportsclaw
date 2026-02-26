@@ -24,7 +24,6 @@ import { google } from "@ai-sdk/google";
 import {
   DEFAULT_CONFIG,
   DEFAULT_MODELS,
-  DEFAULT_ROUTER_MODELS,
   type LLMProvider,
   type RouteDecision,
   type RouteMeta,
@@ -45,7 +44,8 @@ import {
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import type { CLIConfig } from "./config.js";
 import { MemoryManager } from "./memory.js";
-import { routePromptToSkills } from "./router.js";
+import { routePromptToSkills, routeToAgents } from "./router.js";
+import { loadAgents, type AgentDef } from "./agents.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -117,7 +117,21 @@ Your core directives:
        - Call the relevant listing tool (e.g. get_rankings, get_team_roster, get_leaderboard),
          find the player by name, extract their ID, then call the player detail tool.
     c. These lookups are SEQUENTIAL — don't parallelize steps that depend on IDs from prior calls.
-    d. If no discovery path exists for a sport, say so. Don't guess IDs.`;
+    d. If no discovery path exists for a sport, say so. Don't guess IDs.
+14. FOOTBALL PLAYER LOOKUPS — For football (soccer) players specifically:
+    a. ALWAYS call \`football_search_player\` first with the player's name. It returns both
+       \`tm_player_id\` (Transfermarkt) and \`espn_athlete_id\` (ESPN) in one call.
+    b. Use the IDs from search results to call \`football_get_player_profile\` with BOTH
+       \`tm_player_id\` AND \`player_id\` (ESPN) to get the richest profile (market value,
+       transfer history from Transfermarkt + ESPN stats).
+    c. For transfer data, pass the \`tm_player_id\` list to \`football_get_season_transfers\`.
+    d. Save discovered IDs to the Fan Profile for future lookups.
+15. SELF-IMPROVEMENT — You have two optional tools for learning across sessions:
+    - \`reflect\`: log a one-sentence lesson when something genuinely surprising happens
+      (a tool failure, a data gap, a workaround you discovered). These are rare events.
+    - \`evolve_strategy\`: codify a behavioral pattern into your system instructions
+      (e.g. a data quality rule or user preference). Only when a pattern is clear and repeated.
+    These are available, not mandatory. Use your judgment. Most turns need neither.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -191,12 +205,11 @@ function buildToolCallSignature(
 
 export class sportsclawEngine {
   private mainModel: ResolvedModel;
-  private routerModel: ResolvedModel;
   private mainModelId: string;
-  private routerModelId: string;
   private config: Required<sportsclawConfig>;
   private messages: Message[] = [];
   private registry: ToolRegistry;
+  private agents: AgentDef[] = [];
 
   constructor(config?: Partial<sportsclawConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
@@ -205,26 +218,18 @@ export class sportsclawEngine {
     if (config?.provider && !config?.model) {
       merged.model = DEFAULT_MODELS[merged.provider] ?? DEFAULT_CONFIG.model;
     }
-    if (!config?.routerModelStrategy) {
-      merged.routerModelStrategy = "provider_fast";
-    }
-    if (!config?.routerModel) {
-      merged.routerModel =
-        merged.routerModelStrategy === "same_as_main"
-          ? merged.model
-          : DEFAULT_ROUTER_MODELS[merged.provider];
-    }
-    if (merged.routerModelStrategy === "same_as_main") {
-      merged.routerModel = merged.model;
-    }
 
     this.config = merged;
     this.mainModel = resolveModel(this.config.provider, this.config.model);
-    this.routerModel = resolveModel(this.config.provider, this.config.routerModel);
     this.mainModelId = readModelId(this.mainModel);
-    this.routerModelId = readModelId(this.routerModel);
     this.registry = new ToolRegistry();
     this.loadDynamicSchemas();
+    this.agents = loadAgents();
+    if (this.config.verbose && this.agents.length > 0) {
+      console.error(
+        `[sportsclaw] loaded ${this.agents.length} agent(s): ${this.agents.map((a) => a.id).join(", ")}`
+      );
+    }
   }
 
   /**
@@ -243,8 +248,8 @@ export class sportsclawEngine {
     }
   }
 
-  /** Full system prompt (base + dynamic tool info + user-supplied) */
-  private buildSystemPrompt(hasMemory: boolean): string {
+  /** Full system prompt (base + dynamic tool info + strategy + agent directives + user-supplied) */
+  private buildSystemPrompt(hasMemory: boolean, agents?: AgentDef[], strategyContent?: string): string {
     const parts = [BASE_SYSTEM_PROMPT];
 
     // --- Self-awareness block ---
@@ -261,7 +266,6 @@ export class sportsclawEngine {
       "",
       "### Current Configuration",
       `- Provider: ${this.config.provider}, Model: ${readModelId(this.mainModel)}`,
-      `- Router: ${readModelId(this.routerModel)} (strategy: ${this.config.routerModelStrategy})`,
       `- Routing: maxSkills=${this.config.routingMaxSkills}, spillover=${this.config.routingAllowSpillover}`,
       "",
       `### Installed Sports (${installed.length})`,
@@ -290,14 +294,30 @@ export class sportsclawEngine {
       );
     }
 
+    // Inject evolved strategies as system-level directives (above memory/agent sections).
+    // Strategy content is self-authored by the agent, not user-generated, so it's safe
+    // to inject at the system level.
+    if (strategyContent?.trim()) {
+      parts.push(
+        "",
+        "## Evolved Strategies",
+        "",
+        "The following strategies were developed through experience with this user. " +
+          "Treat them as behavioral rules. When calling `evolve_strategy`, read these, " +
+          "modify as needed, and write the full updated content back.",
+        "",
+        strategyContent.trim()
+      );
+    }
+
     // Tell the LLM about memory capabilities without injecting memory content
     // into the system prompt (memory content goes into a user-role message to
     // reduce prompt injection surface area).
     if (hasMemory) {
       parts.push(
         "",
-        "You have persistent memory. Previous context, fan profile, and today's conversation log " +
-          "will be provided in a preceding message labeled [MEMORY].",
+        "You have persistent memory. Previous context, fan profile, reflections, and today's " +
+          "conversation log will be provided in a preceding message labeled [MEMORY].",
         "",
         "You have an `update_context` tool. Call it when the user changes topic or " +
           "when you need to save important context (active game, current team focus, " +
@@ -309,8 +329,54 @@ export class sportsclawEngine {
         "",
         "You have an `update_soul` tool. Call it when you notice something genuinely new " +
           "about the user's communication style, a memorable moment, or a content preference. " +
-          "Keep observations concise. Do NOT call it every turn."
+          "Keep observations concise. Do NOT call it every turn.",
+        "",
+        "You have `reflect` and `evolve_strategy` tools for self-improvement. " +
+          "Use them sparingly — only when you hit a genuine surprise or discover a repeated pattern. " +
+          "Check existing reflections in [MEMORY] to avoid past mistakes."
       );
+    }
+
+    // Agent directives — shapes voice, focus, and behavior
+    if (agents && agents.length > 0) {
+      if (agents.length === 1) {
+        const agent = agents[0];
+        parts.push(
+          "",
+          `## Active Agent: ${agent.name} (${agent.id})`,
+          "",
+          agent.body
+        );
+        if (agent.skills.length > 0) {
+          parts.push(
+            "",
+            `This agent specializes in: ${agent.skills.join(", ")}. ` +
+              "Prioritize tools from these skills when relevant."
+          );
+        }
+      } else {
+        parts.push(
+          "",
+          "## Active Agents",
+          "",
+          "Multiple agents are active for this query. Combine their perspectives " +
+            "and directives to give a comprehensive answer."
+        );
+        for (const agent of agents) {
+          parts.push(
+            "",
+            `### ${agent.name} (${agent.id})`,
+            "",
+            agent.body
+          );
+          if (agent.skills.length > 0) {
+            parts.push(
+              "",
+              `This agent specializes in: ${agent.skills.join(", ")}.`
+            );
+          }
+        }
+      }
     }
 
     if (this.config.systemPrompt) {
@@ -333,10 +399,8 @@ export class sportsclawEngine {
       installedSkills,
       toolSpecs: this.registry.getAllToolSpecs(),
       memoryBlock,
-      model: this.routerModel,
-      modelId: this.routerModelId,
-      fallbackModel: this.mainModel,
-      fallbackModelId: this.mainModelId,
+      model: this.mainModel,
+      modelId: this.mainModelId,
       provider: this.config.provider,
       config: {
         routingMode: this.config.routingMode,
@@ -347,13 +411,15 @@ export class sportsclawEngine {
     const decision = routed.decision;
 
     const selectedSkills = new Set(decision.selectedSkills);
+    const isInternalTool = (name: string) =>
+      name.startsWith("update_") || name === "reflect" || name === "evolve_strategy";
     const active = toolNames.filter((name) => {
-      if (name.startsWith("update_")) return true;
+      if (isInternalTool(name)) return true;
       const skill = this.registry.getSkillName(name);
       return skill ? selectedSkills.has(skill) : false;
     });
 
-    const hasExternalTool = active.some((name) => !name.startsWith("update_"));
+    const hasExternalTool = active.some((name) => !isInternalTool(name));
     return hasExternalTool
       ? { activeTools: active, decision, routeMeta: routed.meta }
       : { decision, routeMeta: routed.meta };
@@ -384,7 +450,7 @@ export class sportsclawEngine {
           "Draft response:",
           draft,
         ].join("\n\n"),
-        maxOutputTokens: Math.min(2_048, this.config.maxTokens),
+        maxOutputTokens: this.config.maxTokens,
       });
       const cleaned = res.text?.trim();
       if (cleaned) return cleaned;
@@ -660,8 +726,6 @@ export class sportsclawEngine {
             version: _packageVersion,
             provider: config.provider,
             model: config.model,
-            routerModel: config.routerModel,
-            routerModelStrategy: config.routerModelStrategy,
             routingMode: config.routingMode,
             routingMaxSkills: config.routingMaxSkills,
             routingAllowSpillover: config.routingAllowSpillover,
@@ -677,20 +741,14 @@ export class sportsclawEngine {
 
     toolMap["update_agent_config"] = defineTool({
       description:
-        "Update agent configuration. Accepts partial config: model, routerModelStrategy, " +
-        "routerModel, routingMaxSkills, routingAllowSpillover. Changes are saved to " +
+        "Update agent configuration. Accepts partial config: model, " +
+        "routingMaxSkills, routingAllowSpillover. Changes are saved to " +
         "~/.sportsclaw/config.json and take effect next session. " +
         "Does NOT allow changing provider or apiKey (direct users to `sportsclaw config`).",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
           model: { type: "string", description: "Main LLM model ID" },
-          routerModelStrategy: {
-            type: "string",
-            enum: ["provider_fast", "same_as_main"],
-            description: "Router model strategy",
-          },
-          routerModel: { type: "string", description: "Explicit router model ID" },
           routingMaxSkills: {
             type: "number",
             description: "Max sport skills to activate per prompt",
@@ -704,8 +762,6 @@ export class sportsclawEngine {
       execute: async (args: Record<string, unknown>) => {
         const allowedKeys = [
           "model",
-          "routerModelStrategy",
-          "routerModel",
           "routingMaxSkills",
           "routingAllowSpillover",
         ];
@@ -927,6 +983,100 @@ export class sportsclawEngine {
           return "Soul updated.";
         },
       });
+
+      // ---------------------------------------------------------------
+      // Self-improvement tools
+      // ---------------------------------------------------------------
+
+      toolMap["reflect"] = defineTool({
+        description:
+          "Log a lesson learned from this interaction. Call when a tool fails, " +
+          "returns unexpected/empty data, or when you discover a better approach. " +
+          "Reflections persist across sessions and are loaded into your memory " +
+          "so you learn from experience. Do NOT call every turn — only on genuine lessons.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            category: {
+              type: "string",
+              enum: ["tool_failure", "data_quality", "strategy", "user_preference"],
+              description:
+                "Category: tool_failure (a tool errored or timed out), " +
+                "data_quality (empty/unexpected data from a provider), " +
+                "strategy (discovered a better approach), " +
+                "user_preference (learned how this user wants data delivered).",
+            },
+            insight: {
+              type: "string",
+              description: "What you learned — one concise sentence.",
+            },
+            action: {
+              type: "string",
+              description: "What to do differently next time — one concise sentence.",
+            },
+          },
+          required: ["category", "insight", "action"],
+        }),
+        execute: async (args: { category?: string; insight?: string; action?: string }) => {
+          const { category, insight, action } = args;
+          if (!category || !insight || !action) {
+            return "Error: category, insight, and action are all required.";
+          }
+          const ts = new Date().toISOString().slice(0, 10);
+          const entry = [
+            `### [${ts}] ${category}`,
+            `**Insight**: ${insight}`,
+            `**Action**: ${action}`,
+            "---",
+            "",
+          ].join("\n");
+
+          if (verbose) {
+            console.error(
+              `[sportsclaw] reflect: [${category}] ${insight.slice(0, 100)}`
+            );
+          }
+          await memory.appendReflection(entry);
+          return "Reflection logged.";
+        },
+      });
+
+      toolMap["evolve_strategy"] = defineTool({
+        description:
+          "Add, update, or deprecate a behavioral strategy. Your current strategies " +
+          "are shown in the 'Evolved Strategies' section of your system prompt. " +
+          "Read them, modify as needed, and write the full updated STRATEGY.md back. " +
+          "Strategies become system-level instructions that shape your behavior " +
+          "across all future sessions with this user. Keep each strategy concise " +
+          "and actionable. Only call when you discover a genuine pattern.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            content: {
+              type: "string",
+              description:
+                "The full updated STRATEGY.md content as markdown. Organize with " +
+                "sections like ## Data Quality, ## User Preferences, ## Tool Usage. " +
+                "Each strategy should be a bullet point: '- **rule**: rationale'. " +
+                "Include a '# Strategies' header. Deprecate outdated rules by removing them.",
+            },
+          },
+          required: ["content"],
+        }),
+        execute: async (args: { content?: string }) => {
+          const content = args.content;
+          if (!content || typeof content !== "string") {
+            return "Error: content parameter is required and must be a string.";
+          }
+          if (verbose) {
+            console.error(
+              `[sportsclaw] evolve_strategy: ${content.slice(0, 200)}...`
+            );
+          }
+          await memory.writeStrategy(content);
+          return "Strategy evolved.";
+        },
+      });
     }
 
     return toolMap;
@@ -957,9 +1107,14 @@ export class sportsclawEngine {
     let memory: MemoryManager | undefined;
     let memoryBlock = "";
 
+    let strategyContent = "";
     if (options?.userId) {
       memory = new MemoryManager(options.userId);
-      memoryBlock = await memory.buildMemoryBlock();
+      options?.onProgress?.({ type: "phase", label: "Loading memory" });
+      [memoryBlock, strategyContent] = await Promise.all([
+        memory.buildMemoryBlock(),
+        memory.readStrategy(),
+      ]);
 
       if (this.config.verbose && memoryBlock) {
         console.error(
@@ -988,6 +1143,7 @@ export class sportsclawEngine {
     const failedToolSignaturesThisTurn = new Map<string, string>();
 
     const tools = this.buildTools(memory, failedToolSignaturesThisTurn);
+    emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       userPrompt,
       Object.keys(tools),
@@ -995,22 +1151,32 @@ export class sportsclawEngine {
     );
     const activeTools = routing.activeTools;
 
+    // --- Agent routing: pick the best agent(s) for this prompt ---
+    const selectedSkills = routing.decision?.selectedSkills ?? [];
+    const agentRoutes = routeToAgents(this.agents, selectedSkills, userPrompt);
+    const activeAgents = agentRoutes.map((r) => r.agent);
+
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;
       const meta = routing.routeMeta;
       const skills = d.selectedSkills.length > 0 ? d.selectedSkills.join(", ") : "none";
       const modelInfo = meta
-        ? `router_model=${meta.modelUsed ?? "none"} primary_router_model=${meta.primaryModelId} fallback=${meta.fallbackUsed ? "yes" : "no"} llm_ok=${meta.llmSucceeded ? "yes" : "no"} llm_ms=${meta.llmDurationMs}`
-        : `router_model=${this.routerModelId}`;
+        ? `model=${meta.modelUsed ?? "none"} llm_ok=${meta.llmSucceeded ? "yes" : "no"} llm_ms=${meta.llmDurationMs}`
+        : `model=${this.mainModelId}`;
       console.error(
         `[sportsclaw] route mode=${d.mode} confidence=${d.confidence.toFixed(2)} skills=${skills} ${modelInfo} reason="${d.reason}"`
       );
+      for (const ar of agentRoutes) {
+        console.error(
+          `[sportsclaw] agent=${ar.agent.id} score=${ar.score.toFixed(2)} reason="${ar.reason}"`
+        );
+      }
     }
 
     const callLLM = (messagesOverride?: Message[]) =>
       generateText({
         model: this.mainModel,
-        system: this.buildSystemPrompt(!!memory),
+        system: this.buildSystemPrompt(!!memory, activeAgents.length > 0 ? activeAgents : undefined, strategyContent),
         messages: messagesOverride ?? this.messages,
         tools,
         ...(activeTools ? { activeTools } : {}),
@@ -1074,6 +1240,10 @@ export class sportsclawEngine {
         },
       });
 
+    const reasoningLabel = activeAgents.length > 0
+      ? `${activeAgents.map((a) => a.name).join(" + ")} · Reasoning (${this.mainModelId})`
+      : `Reasoning (${this.mainModelId})`;
+    emitProgress?.({ type: "phase", label: reasoningLabel });
     let result: Awaited<ReturnType<typeof callLLM>>;
     const MAX_RETRIES = 2;
     for (let attempt = 0; ; attempt++) {
@@ -1180,6 +1350,15 @@ export class sportsclawEngine {
 
     const failures = Array.from(failedExternalTools.values());
     const successes = Array.from(succeededExternalTools.values());
+
+    // Net failures: exclude tools that failed once but succeeded on a
+    // subsequent call (e.g. a retry or parallel duplicate). If the data
+    // is available from a successful call, the failure doesn't matter.
+    const succeededToolNames = new Set(successes.map((s) => s.toolName));
+    const netFailures = failures.filter(
+      (f) => !succeededToolNames.has(f.toolName)
+    );
+
     if (successes.length > 0 && this.isLowSignalResponse(responseText)) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
@@ -1196,13 +1375,13 @@ export class sportsclawEngine {
         userPrompt,
         draft: responseText,
         successfulTools: successes.map((s) => s.toolName),
-        failedTools: failures.map((f) => f.toolName),
+        failedTools: netFailures.map((f) => f.toolName),
         toolOutputs,
       });
     }
 
-    if (failedExternalTools.size > 0) {
-      const labels = failures.map((f) => f.toolName).join(", ");
+    if (netFailures.length > 0) {
+      const labels = netFailures.map((f) => f.toolName).join(", ");
       const warning =
         `⚠️ Partial data: some live tools failed (${labels}). ` +
         "Treat related sections as unavailable.";
@@ -1210,7 +1389,7 @@ export class sportsclawEngine {
       responseText = await this.applyEvidenceGate({
         userPrompt,
         draft: responseText,
-        failedTools: failures.map((f) => f.toolName),
+        failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
       });
       responseText = `${warning}\n\n${responseText}`;
