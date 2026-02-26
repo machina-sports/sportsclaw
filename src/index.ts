@@ -50,7 +50,11 @@ import {
   runSportSelectionFlow,
   ASCII_LOGO,
 } from "./config.js";
-import { buildSportsSkillsRepairCommand } from "./python.js";
+import {
+  buildSportsSkillsRepairCommand,
+  checkPythonVersion,
+  MIN_PYTHON_VERSION,
+} from "./python.js";
 import {
   bootstrapDefaultAgents,
   needsAgentBootstrap,
@@ -86,6 +90,13 @@ export {
   getCachedSchemaVersion,
 } from "./schema.js";
 export { MemoryManager, getMemoryDir } from "./memory.js";
+export {
+  checkPythonVersion,
+  findBestPython,
+  checkPrerequisites,
+  MIN_PYTHON_VERSION,
+} from "./python.js";
+export type { PythonVersionResult, PrerequisiteStatus } from "./python.js";
 export {
   loadAgents,
   loadAgent,
@@ -617,24 +628,27 @@ async function cmdDoctor(): Promise<void> {
     allGood = false;
   }
 
-  // 2. Python reachable
-  let pythonVersion = "";
-  try {
-    pythonVersion = await new Promise<string>((resolve, reject) => {
-      execFile(pythonPath, ["--version"], { timeout: 5_000 }, (err, stdout, stderr) => {
-        if (err) return reject(err);
-        resolve((stdout || stderr).trim());
-      });
-    });
-    console.log(pc.green("  ✓") + ` ${pythonVersion} (${pythonPath})`);
-  } catch {
+  // 2. Python reachable + version check
+  const pyCheck = checkPythonVersion(pythonPath);
+  let pythonOk = false;
+  if (pyCheck.ok) {
+    console.log(pc.green("  ✓") + ` Python ${pyCheck.version} (${pythonPath})`);
+    pythonOk = true;
+  } else if (pyCheck.version) {
+    console.log(
+      pc.red("  ✗") +
+      ` Python ${pyCheck.version} (${pythonPath}) — v${MIN_PYTHON_VERSION.major}.${MIN_PYTHON_VERSION.minor}+ required`
+    );
+    console.log(`    Upgrade Python or run: sportsclaw config`);
+    allGood = false;
+  } else {
     console.log(pc.red("  ✗") + ` Python not found at ${pythonPath}`);
     console.log(`    Set PYTHON_PATH or run: sportsclaw config`);
     allGood = false;
   }
 
-  // 3. sports-skills installed + version
-  if (pythonVersion) {
+  // 3. sports-skills installed + version (skip if Python too old or missing)
+  if (pythonOk) {
     let ssVersion = "";
     try {
       ssVersion = await new Promise<string>((resolve, reject) => {

@@ -32,6 +32,9 @@ RUN apt-get update && \
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Build-time assertion: require Python 3.10+
+RUN python3 -c "import sys; assert sys.version_info >= (3, 10), f'Python too old: {sys.version_info}'"
+
 WORKDIR /app
 
 # ---------------------------------------------------------------------------

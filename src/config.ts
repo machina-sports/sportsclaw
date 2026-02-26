@@ -22,6 +22,15 @@ import {
   saveSchema,
   listSchemas,
 } from "./schema.js";
+import {
+  checkPythonVersion,
+  findBestPython,
+  detectHomebrew,
+  detectPlatformPackageManager,
+  installHomebrew,
+  installPythonViaPackageManager,
+  MIN_PYTHON_VERSION,
+} from "./python.js";
 
 // ---------------------------------------------------------------------------
 // Config shape persisted to disk
@@ -295,17 +304,154 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     finalApiKey = (apiKey as string).trim();
   }
 
+  // --- Smart Python prerequisite detection & guided install ---
+  let detectedPython = findBestPython();
+
+  if (detectedPython) {
+    p.log.success(
+      `Python ${detectedPython.version.version} detected at ${detectedPython.path}`
+    );
+  } else {
+    p.log.warn(
+      `Python ${MIN_PYTHON_VERSION.major}.${MIN_PYTHON_VERSION.minor}+ not detected on this system.`
+    );
+
+    const os = (await import("node:os")).platform();
+
+    if (os === "darwin") {
+      // macOS: check Homebrew first
+      const hb = detectHomebrew();
+      if (!hb.installed) {
+        const installHb = await p.confirm({
+          message:
+            "Homebrew is not installed. Install it now? (needed for Python)",
+          initialValue: true,
+        });
+        if (p.isCancel(installHb)) {
+          p.cancel("🚫 Setup cancelled.");
+          process.exit(0);
+        }
+        if (installHb) {
+          const s = p.spinner();
+          s.start("Installing Homebrew...");
+          const hbResult = installHomebrew();
+          if (hbResult.ok) {
+            s.stop("Homebrew installed.");
+          } else {
+            s.stop("Homebrew installation failed.");
+            p.log.error(hbResult.error ?? "Unknown error");
+            p.log.info(
+              'Install manually: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            );
+          }
+        } else {
+          p.log.info(
+            'Install Homebrew manually: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+          );
+        }
+      }
+
+      // Check again after potential Homebrew install
+      detectedPython = findBestPython();
+      if (!detectedPython) {
+        const mgr = detectPlatformPackageManager();
+        if (mgr === "brew") {
+          const installPy = await p.confirm({
+            message:
+              "Python 3.10+ not found. Install Python 3.12 via Homebrew?",
+            initialValue: true,
+          });
+          if (p.isCancel(installPy)) {
+            p.cancel("🚫 Setup cancelled.");
+            process.exit(0);
+          }
+          if (installPy) {
+            const s = p.spinner();
+            s.start("Installing Python 3.12 via Homebrew...");
+            const pyResult = installPythonViaPackageManager("brew");
+            if (pyResult.ok) {
+              s.stop("Python installed via Homebrew.");
+            } else {
+              s.stop("Python installation failed.");
+              p.log.error(pyResult.error ?? "Unknown error");
+              p.log.info("Install manually: brew install python@3.12");
+            }
+          } else {
+            p.log.info("Install manually: brew install python@3.12");
+          }
+        } else {
+          p.log.info(
+            "Install Python 3.10+ manually (e.g. brew install python@3.12) and re-run config."
+          );
+        }
+      }
+    } else {
+      // Linux: detect package manager and offer install
+      const mgr = detectPlatformPackageManager();
+      if (mgr) {
+        const installPy = await p.confirm({
+          message: `Python 3.10+ not found. Install via ${mgr}?`,
+          initialValue: true,
+        });
+        if (p.isCancel(installPy)) {
+          p.cancel("🚫 Setup cancelled.");
+          process.exit(0);
+        }
+        if (installPy) {
+          const s = p.spinner();
+          s.start(`Installing Python via ${mgr}...`);
+          const pyResult = installPythonViaPackageManager(mgr);
+          if (pyResult.ok) {
+            s.stop(`Python installed via ${mgr}.`);
+          } else {
+            s.stop("Python installation failed.");
+            p.log.error(pyResult.error ?? "Unknown error");
+          }
+        }
+      } else {
+        p.log.info(
+          "Install Python 3.10+ using your system package manager and re-run config."
+        );
+      }
+    }
+
+    // Re-detect after install attempts
+    detectedPython = findBestPython();
+    if (detectedPython) {
+      p.log.success(
+        `Python ${detectedPython.version.version} installed at ${detectedPython.path}`
+      );
+    }
+  }
+
+  const pythonDefault = detectedPython?.path
+    ?? (existsSync("/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" : "python3");
+
   const pythonPath = await p.text({
     message: "🐍 Path to Python interpreter:",
     placeholder: "python3",
-    defaultValue: existsSync("/opt/homebrew/bin/python3")
-      ? "/opt/homebrew/bin/python3"
-      : "python3",
+    defaultValue: pythonDefault,
   });
 
   if (p.isCancel(pythonPath)) {
     p.cancel("🚫 Setup cancelled.");
     process.exit(0);
+  }
+
+  // Validate the chosen Python version
+  const pyCheck = checkPythonVersion((pythonPath as string) || "python3");
+  if (pyCheck.ok) {
+    p.log.success(`Python ${pyCheck.version} OK`);
+  } else if (pyCheck.version) {
+    p.log.error(
+      `Python ${pyCheck.version} is too old. v${MIN_PYTHON_VERSION.major}.${MIN_PYTHON_VERSION.minor}+ is required.`
+    );
+    p.log.info("Install a newer Python and re-run: sportsclaw config");
+    process.exit(1);
+  } else {
+    p.log.warn(
+      `Could not verify Python version at "${(pythonPath as string) || "python3"}". Proceeding anyway.`
+    );
   }
 
   // --- Sport selection (skip if schemas already installed) ---

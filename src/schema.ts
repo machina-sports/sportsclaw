@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { SportSchema, sportsclawConfig } from "./types.js";
 import { buildSubprocessEnv } from "./tools.js";
-import { buildSportsSkillsRepairCommand } from "./python.js";
+import { buildSportsSkillsRepairCommand, checkPythonVersion, MIN_PYTHON_VERSION } from "./python.js";
 
 // ---------------------------------------------------------------------------
 // Default skills — the 14 sports-skills that ship with sportsclaw
@@ -251,6 +251,26 @@ export async function ensureSportsSkills(
   config?: Partial<sportsclawConfig>
 ): Promise<boolean> {
   const pythonPath = config?.pythonPath ?? "python3";
+
+  // Preflight: ensure Python >= 3.10 before attempting any imports
+  const pyCheck = checkPythonVersion(pythonPath);
+  if (!pyCheck.ok) {
+    if (pyCheck.version) {
+      console.error(
+        `[sportsclaw] Python ${pyCheck.version} is too old. ` +
+        `sports-skills requires Python ${MIN_PYTHON_VERSION.major}.${MIN_PYTHON_VERSION.minor}+.`
+      );
+    } else {
+      console.error(
+        `[sportsclaw] Python not found at "${pythonPath}". ` +
+        `Install Python ${MIN_PYTHON_VERSION.major}.${MIN_PYTHON_VERSION.minor}+ or run: sportsclaw config`
+      );
+    }
+    console.error(
+      `[sportsclaw] Upgrade Python and re-run, or set PYTHON_PATH to a valid interpreter.`
+    );
+    return false;
+  }
 
   const canImportBase = (): boolean => {
     try {

@@ -23,6 +23,7 @@ type BridgeErrorCode =
   | "dependency_missing"
   | "network_dns"
   | "rate_limited"
+  | "python_version_incompatible"
   | "tool_execution_failed";
 
 function classifyBridgeError(
@@ -69,6 +70,18 @@ function classifyBridgeError(
     return {
       errorCode: "rate_limited",
       hint: "The provider rate-limited requests. Wait briefly and retry.",
+    };
+  }
+  if (
+    haystack.includes("unsupported operand type(s) for |") ||
+    (haystack.includes("typeerror") && haystack.includes("type |")) ||
+    (haystack.includes("syntaxerror") && haystack.includes("x | y"))
+  ) {
+    return {
+      errorCode: "python_version_incompatible",
+      hint:
+        "Python 3.10+ is required. The current interpreter is too old for sports-skills. " +
+        "Upgrade Python or run: sportsclaw config",
     };
   }
 
@@ -409,17 +422,22 @@ export class ToolRegistry {
     if (!result.success) {
       const isF1 = input.sport === "f1";
       const classified = classifyBridgeError(result.error, result.stderr);
+      let hint: string;
+      if (classified.errorCode === "python_version_incompatible") {
+        hint = classified.hint;
+      } else if (classified.errorCode === "dependency_missing") {
+        hint = isF1
+          ? `F1 support is unavailable. Repair with: ${repairCmd}`
+          : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
+      } else {
+        hint = classified.hint;
+      }
       return {
         content: JSON.stringify({
           error: result.error,
           error_code: classified.errorCode,
           stderr: result.stderr,
-          hint:
-            classified.errorCode === "dependency_missing"
-              ? isF1
-                ? `F1 support is unavailable. Repair with: ${repairCmd}`
-                : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`
-              : classified.hint,
+          hint,
         }),
         isError: true,
       };
@@ -469,12 +487,16 @@ export class ToolRegistry {
 
     if (!result.success) {
       const classified = classifyBridgeError(result.error, result.stderr);
-      const hint =
-        classified.errorCode === "dependency_missing"
-          ? sport === "f1"
-            ? `F1 support is unavailable. Repair with: ${repairCmd}`
-            : `Tool "${command}" for sport "${sport}" failed due to missing dependency. Repair with: ${repairCmd}`
-          : classified.hint;
+      let hint: string;
+      if (classified.errorCode === "python_version_incompatible") {
+        hint = classified.hint;
+      } else if (classified.errorCode === "dependency_missing") {
+        hint = sport === "f1"
+          ? `F1 support is unavailable. Repair with: ${repairCmd}`
+          : `Tool "${command}" for sport "${sport}" failed due to missing dependency. Repair with: ${repairCmd}`;
+      } else {
+        hint = classified.hint;
+      }
       return {
         content: JSON.stringify({
           error: result.error,
