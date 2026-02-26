@@ -868,6 +868,7 @@ async function cmdChat(args: string[]): Promise<void> {
       if (verbose) {
         rl.pause();
         clearPostSubmitEchoLine();
+        process.stdout.write(`You\n> ${prompt}\n`);
         try {
           const result = await engine.run(prompt, { userId });
           console.log(`\n${renderMarkdown(result)}\n`);
@@ -887,6 +888,7 @@ async function cmdChat(args: string[]): Promise<void> {
         // Clear the echo line AFTER mode switches (rl.pause + raw mode)
         // so it catches any re-echo caused by the transition.
         clearPostSubmitEchoLine();
+        process.stdout.write(`You\n> ${prompt}\n`);
         const tracker = createToolTracker(s, {
           showCancelHint: cancel.showCancelHint,
         });
