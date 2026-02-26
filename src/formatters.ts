@@ -239,6 +239,27 @@ function convertTableToUnicode(lines: string[]): string[] {
 }
 
 /**
+ * Clean markdown formatting for CLI display.
+ * - Converts **bold** to ANSI bold or strips it
+ * - Converts * bullets to clean bullets
+ */
+function cleanMarkdown(line: string): string {
+  let cleaned = line;
+  
+  // Convert **text** to bold ANSI (or strip if nested/complex)
+  cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, (_, text) => c.bold(text));
+  
+  // Convert leading * bullets to clean bullets
+  // Match: "* text" or "  * text" (with indentation)
+  cleaned = cleaned.replace(/^(\s*)\*\s+/, "$1• ");
+  
+  // Convert leading - bullets to clean bullets (already clean, but normalize)
+  cleaned = cleaned.replace(/^(\s*)-\s+/, "$1• ");
+  
+  return cleaned;
+}
+
+/**
  * Format response for CLI with Unicode tables and colors.
  */
 function formatCli(response: string): string {
@@ -249,18 +270,18 @@ function formatCli(response: string): string {
   const formatted: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
 
-    // Format headers with Unicode separator
-    if (/^###?\s+/.test(line)) {
-      const headerText = line.replace(/^###?\s+/, "");
+    // Format headers with Unicode separator (match ##, ###, ####)
+    if (/^#{2,4}\s+/.test(line)) {
+      const headerText = line.replace(/^#{2,4}\s+/, "").replace(/\*\*/g, ""); // Strip ** from headers
       formatted.push(`\n${c.bold(headerText)}`);
       formatted.push(c.dim(box.horizontal.repeat(Math.min(headerText.length, 60))));
       continue;
     }
 
     // Detect table blocks and convert them
-    if (line.includes("|")) {
+    if (line.includes("|") && line.trim().startsWith("|")) {
       const tableLines = [line];
       let j = i + 1;
 
@@ -275,6 +296,9 @@ function formatCli(response: string): string {
       i = j - 1; // Skip processed lines
       continue;
     }
+
+    // Clean markdown formatting (bullets, bold)
+    line = cleanMarkdown(line);
 
     // Format scores with colors (e.g., "Arsenal 2-1 Chelsea")
     if (/\w+.*\d+\s*-\s*\d+.*\w+/.test(line)) {
