@@ -5,6 +5,8 @@
  * Detects tables, headers, and scores to format appropriately.
  */
 
+import { c, box } from "./colors.js";
+
 export interface DiscordEmbed {
   title?: string;
   description?: string;
@@ -177,6 +179,141 @@ function formatTelegram(response: string): string {
 }
 
 /**
+ * Convert markdown table to Unicode box-drawing table.
+ */
+function convertTableToUnicode(lines: string[]): string[] {
+  // Parse all table rows and calculate column widths
+  const rows: string[][] = [];
+  let headerIndex = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Skip separator lines (e.g., "|---|---|")
+    if (/^\|[\s\-:|]+\|$/.test(line)) {
+      headerIndex = rows.length - 1;
+      continue;
+    }
+
+    if (!line.includes("|")) continue;
+
+    // Parse cells (exclude empty first/last from split)
+    const cells = line.split("|").slice(1, -1).map(c => c.trim());
+    rows.push(cells);
+  }
+
+  if (rows.length === 0) return lines;
+
+  // Calculate max width for each column
+  const colCount = Math.max(...rows.map(r => r.length));
+  const widths: number[] = [];
+  for (let col = 0; col < colCount; col++) {
+    widths[col] = Math.max(...rows.map(r => (r[col] || "").length));
+  }
+
+  // Build Unicode table
+  const result: string[] = [];
+
+  // Top border
+  const top = box.topLeft + widths.map(w => box.horizontal.repeat(w + 2)).join(box.topTee) + box.topRight;
+  result.push(top);
+
+  for (let i = 0; i < rows.length; i++) {
+    const cells = rows[i];
+    const paddedCells = cells.map((cell, col) => cell.padEnd(widths[col] || 0));
+    const row = box.vertical + paddedCells.map(cell => ` ${cell} `).join(box.vertical) + box.vertical;
+    result.push(row);
+
+    // Add header separator after first row if detected
+    if (i === headerIndex) {
+      const sep = box.leftTee + widths.map(w => box.horizontal.repeat(w + 2)).join(box.cross) + box.rightTee;
+      result.push(sep);
+    }
+  }
+
+  // Bottom border
+  const bottom = box.bottomLeft + widths.map(w => box.horizontal.repeat(w + 2)).join(box.bottomTee) + box.bottomRight;
+  result.push(bottom);
+
+  return result;
+}
+
+/**
+ * Format response for CLI with Unicode tables and colors.
+ */
+function formatCli(response: string): string {
+  const source = extractSource(response);
+  let content = removeSourceLine(response);
+
+  const lines = content.split("\n");
+  const formatted: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Format headers with Unicode separator
+    if (/^###?\s+/.test(line)) {
+      const headerText = line.replace(/^###?\s+/, "");
+      formatted.push(`\n${c.bold(headerText)}`);
+      formatted.push(c.dim(box.horizontal.repeat(Math.min(headerText.length, 60))));
+      continue;
+    }
+
+    // Detect table blocks and convert them
+    if (line.includes("|")) {
+      const tableLines = [line];
+      let j = i + 1;
+
+      // Collect all consecutive table lines
+      while (j < lines.length && (lines[j].includes("|") || /^[\s\-:|]+$/.test(lines[j]))) {
+        tableLines.push(lines[j]);
+        j++;
+      }
+
+      const unicodeTable = convertTableToUnicode(tableLines);
+      formatted.push(...unicodeTable);
+      i = j - 1; // Skip processed lines
+      continue;
+    }
+
+    // Format scores with colors (e.g., "Arsenal 2-1 Chelsea")
+    if (/\w+.*\d+\s*-\s*\d+.*\w+/.test(line)) {
+      const scoreLine = line.replace(
+        /(\w+(?:\s+\w+)*)\s+(\d+)\s*-\s*(\d+)\s+(\w+(?:\s+\w+)*)/g,
+        (_, team1, score1, score2, team2) => {
+          const s1 = Number.parseInt(score1);
+          const s2 = Number.parseInt(score2);
+          if (s1 > s2) {
+            return `${c.green(team1)} ${score1}-${score2} ${team2}`;
+          } else if (s2 > s1) {
+            return `${team1} ${score1}-${score2} ${c.green(team2)}`;
+          }
+          return `${team1} ${score1}-${score2} ${team2}`;
+        }
+      );
+      formatted.push(scoreLine);
+      continue;
+    }
+
+    // Highlight live games
+    if (/🔴|LIVE/i.test(line)) {
+      formatted.push(c.yellow(line));
+      continue;
+    }
+
+    formatted.push(line);
+  }
+
+  // Add source footer
+  if (source) {
+    formatted.push("");
+    formatted.push(c.dim(`Source: ${source}`));
+  }
+
+  return formatted.join("\n");
+}
+
+/**
  * Format response for the specified channel.
  */
 export function formatResponse(
@@ -191,6 +328,8 @@ export function formatResponse(
     formatted.discord = formatDiscord(response);
   } else if (channel === "telegram") {
     formatted.telegram = formatTelegram(response);
+  } else if (channel === "cli") {
+    formatted.text = formatCli(response);
   }
 
   return formatted;

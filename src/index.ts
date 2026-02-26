@@ -63,6 +63,7 @@ import {
   listAgentIds,
   getAgentsDir,
 } from "./agents.js";
+import { formatResponse } from "./formatters.js";
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -947,7 +948,8 @@ async function cmdChat(args: string[]): Promise<void> {
       if (verbose) {
         try {
           const result = await engine.run(prompt, { userId });
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          const formatted = formatResponse(result, "cli");
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(formatted.text)}\n`);
         } catch (error: unknown) {
           if (error instanceof Error) {
             console.error(`Error: ${error.message}`);
@@ -973,7 +975,8 @@ async function cmdChat(args: string[]): Promise<void> {
             abortSignal: cancel.abortSignal,
           });
           s.stop(tracker.doneSummary());
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          const formatted = formatResponse(result, "cli");
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(formatted.text)}\n`);
         } catch (error: unknown) {
           if (cancel.wasCancelled() || isAbortError(error)) {
             s.stop(tracker.cancelledSummary());
@@ -1033,7 +1036,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     // Verbose mode: no spinner, raw console.error logs
     try {
       const result = await engine.run(prompt);
-      console.log(renderMarkdown(result));
+      const formatted = formatResponse(result, "cli");
+      console.log(renderMarkdown(formatted.text));
     } catch (error: unknown) {
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
@@ -1059,7 +1063,8 @@ async function cmdQuery(args: string[]): Promise<void> {
         abortSignal: cancel.abortSignal,
       });
       s.stop(tracker.doneSummary());
-      console.log(renderMarkdown(result));
+      const formatted = formatResponse(result, "cli");
+      console.log(renderMarkdown(formatted.text));
     } catch (error: unknown) {
       if (cancel.wasCancelled() || isAbortError(error)) {
         s.stop(tracker.cancelledSummary());
