@@ -608,6 +608,7 @@
 
     .pricing-cta {
       display: block;
+      width: 100%;
       text-align: center;
       padding: 0.65rem;
       border: 1px solid var(--border-hover);
@@ -616,6 +617,7 @@
       font-size: 0.85rem;
       font-weight: 600;
       color: var(--text) !important;
+      cursor: pointer;
       transition: all 0.2s;
     }
 
@@ -703,6 +705,119 @@
       text-align: center;
       color: var(--text-muted);
       font-size: 0.9rem;
+    }
+
+    /* Waitlist modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.open { display: flex; }
+
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem;
+      width: 90%;
+      max-width: 400px;
+      position: relative;
+    }
+
+    .modal h3 {
+      font-size: 1.2rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .modal p {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .modal-close {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 1.25rem;
+      line-height: 1;
+    }
+
+    .modal-close:hover { color: var(--text); }
+
+    .modal-input {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .modal-input:focus { border-color: var(--blue); }
+
+    .modal-submit {
+      width: 100%;
+      padding: 0.65rem;
+      background: var(--blue);
+      border: 1px solid var(--blue);
+      border-radius: 6px;
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .modal-submit:hover {
+      background: var(--blue-dim);
+      border-color: var(--blue-dim);
+      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+    }
+
+    .modal-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .modal-error {
+      color: #ef4444;
+      font-size: 0.8rem;
+      margin-bottom: 0.75rem;
+      display: none;
+    }
+
+    .modal-success {
+      text-align: center;
+      padding: 1rem 0;
+    }
+
+    .modal-success .checkmark {
+      color: var(--green);
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .modal-success p {
+      margin-bottom: 0;
     }
   </style>
 </head>
@@ -825,7 +940,7 @@
           <div class="pricing-price">$0<span>/mo</span></div>
           <ul class="pricing-features">
             <li>Run it yourself (Local/Docker)</li>
-            <li>Bring your own API keys (BYOK)</li>
+            <li>Bring your own API keys</li>
             <li>Open source data connectors</li>
             <li>Community Discord support</li>
           </ul>
@@ -834,40 +949,36 @@
           </div>
         </div>
 
-        <!-- Starter -->
+        <!-- Pro -->
         <div class="pricing-card">
-          <div class="pricing-name">Starter</div>
+          <div class="pricing-name">Pro</div>
           <div class="pricing-price">$30<span>/mo</span></div>
           <ul class="pricing-features">
             <li>Always on, running 24/7</li>
             <li>Remembers every conversation</li>
-            <li>Deploy to Discord & Telegram</li>
-            <li>WhatsApp, Slack & iMessage coming soon</li>
+            <li>Talk via your existing chat apps</li>
+            <li>Vector database</li>
             <li>All Machina skills</li>
             <li>Premium data connectors</li>
           </ul>
           <div class="pricing-card-footer">
-            <a href="https://cloud.machina.gg" target="_blank" class="pricing-cta">Deploy Your Agent</a>
-            <span class="pricing-trial">7-day free trial. Card required.</span>
+            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
           </div>
         </div>
 
         <!-- Max -->
         <div class="pricing-card pricing-card-max">
-          <div class="pricing-badge">Most Popular</div>
           <div class="pricing-name">Max</div>
           <div class="pricing-price">$200<span>/mo</span></div>
           <ul class="pricing-features">
-            <li>Everything in Starter</li>
-            <li class="highlight">Vector database & long-term memory</li>
+            <li>Everything in Pro</li>
             <li>Custom data connectors</li>
             <li>Higher usage limits</li>
             <li>Faster responses</li>
             <li>Priority support</li>
           </ul>
           <div class="pricing-card-footer">
-            <a href="https://cloud.machina.gg" target="_blank" class="pricing-cta pricing-cta-primary">Deploy Your Agent</a>
-            <span class="pricing-trial">7-day free trial. Card required.</span>
+            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
           </div>
         </div>
 
@@ -895,6 +1006,27 @@
       <p>Built by the team at <a href="https://machina.gg" target="_blank">Machina Sports</a></p>
     </div>
   </footer>
+
+  <!-- Waitlist Modal -->
+  <div class="modal-overlay" id="waitlist-modal">
+    <div class="modal">
+      <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+      <div id="modal-form-view">
+        <h3>Join the Waitlist</h3>
+        <p>Enter your email and we'll notify you when Machina Cloud is ready.</p>
+        <div class="modal-error" id="modal-error"></div>
+        <form id="waitlist-form">
+          <input class="modal-input" type="email" id="waitlist-email" placeholder="you@example.com" required autocomplete="email">
+          <button class="modal-submit" type="submit" id="waitlist-submit">Get Early Access</button>
+        </form>
+      </div>
+      <div id="modal-success-view" class="modal-success" style="display:none;">
+        <div class="checkmark">&#10003;</div>
+        <h3>You're in.</h3>
+        <p>We'll notify you when Machina Cloud launches.</p>
+      </div>
+    </div>
+  </div>
 
   <script>
     // Copy to clipboard functionality
@@ -946,6 +1078,79 @@
         }, 2000);
       } catch (err) {
         console.error('Failed to copy text: ', err);
+      }
+    });
+
+    // Waitlist modal
+    const LOOPS_FORM_ID = 'cmk0agb7w9wgo0izrcf2e040w';
+
+    const modal = document.getElementById('waitlist-modal');
+    const modalClose = document.getElementById('modal-close');
+    const waitlistForm = document.getElementById('waitlist-form');
+    const waitlistEmail = document.getElementById('waitlist-email');
+    const waitlistSubmit = document.getElementById('waitlist-submit');
+    const modalError = document.getElementById('modal-error');
+    const modalFormView = document.getElementById('modal-form-view');
+    const modalSuccessView = document.getElementById('modal-success-view');
+
+    function openModal() {
+      modal.classList.add('open');
+      modalFormView.style.display = '';
+      modalSuccessView.style.display = 'none';
+      modalError.style.display = 'none';
+      waitlistEmail.value = '';
+      waitlistSubmit.disabled = false;
+      waitlistSubmit.textContent = 'Get Early Access';
+      setTimeout(() => waitlistEmail.focus(), 100);
+    }
+
+    function closeModal() {
+      modal.classList.remove('open');
+    }
+
+    document.querySelectorAll('.waitlist-btn').forEach(btn => {
+      btn.addEventListener('click', openModal);
+    });
+
+    modalClose.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeModal();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+
+    waitlistForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = waitlistEmail.value.trim();
+      if (!email) return;
+
+      waitlistSubmit.disabled = true;
+      waitlistSubmit.textContent = 'Joining...';
+      modalError.style.display = 'none';
+
+      try {
+        const resp = await fetch(`https://app.loops.so/api/newsletter-form/${LOOPS_FORM_ID}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+
+        if (resp.ok || resp.status === 409) {
+          modalFormView.style.display = 'none';
+          modalSuccessView.style.display = '';
+        } else {
+          const data = await resp.json().catch(() => ({}));
+          modalError.textContent = data.message || 'Something went wrong. Please try again.';
+          modalError.style.display = 'block';
+          waitlistSubmit.disabled = false;
+          waitlistSubmit.textContent = 'Get Early Access';
+        }
+      } catch {
+        modalError.textContent = 'Something went wrong. Please try again.';
+        modalError.style.display = 'block';
+        waitlistSubmit.disabled = false;
+        waitlistSubmit.textContent = 'Get Early Access';
       }
     });
   </script>

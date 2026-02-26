@@ -7,6 +7,47 @@
 
 import { c, box } from "./colors.js";
 
+/** Terminal width, capped at a reasonable max for readability. */
+function termWidth(): number {
+  const cols = process.stdout.columns || 80;
+  return Math.min(cols, 120);
+}
+
+/** Strip ANSI escape codes to get visible character length. */
+function stripAnsi(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/**
+ * Word-wrap a line to fit within `width` visible columns.
+ * Continuation lines are indented by `indent` spaces.
+ */
+function wrapLine(line: string, width: number, indent = 0): string {
+  // Don't wrap lines that already fit
+  if (stripAnsi(line) <= width) return line;
+
+  // Don't wrap lines that are part of tables (contain box chars)
+  if (/[┌┐└┘─│├┤┬┴┼]/.test(line)) return line;
+
+  const words = line.split(/( +)/); // preserve spacing between words
+  const lines: string[] = [];
+  let current = "";
+  const pad = " ".repeat(indent);
+
+  for (const word of words) {
+    const candidate = current + word;
+    if (stripAnsi(candidate) > width && current.length > 0) {
+      lines.push(current.trimEnd());
+      current = pad + word.trimStart();
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.trimEnd().length > 0) lines.push(current.trimEnd());
+
+  return lines.join("\n");
+}
+
 export interface DiscordEmbed {
   title?: string;
   description?: string;
@@ -182,6 +223,8 @@ function formatTelegram(response: string): string {
  * Convert markdown table to Unicode box-drawing table.
  */
 function convertTableToUnicode(lines: string[]): string[] {
+  const maxWidth = termWidth();
+
   // Parse all table rows and calculate column widths
   const rows: string[][] = [];
   let headerIndex = -1;
@@ -209,6 +252,29 @@ function convertTableToUnicode(lines: string[]): string[] {
   const widths: number[] = [];
   for (let col = 0; col < colCount; col++) {
     widths[col] = Math.max(...rows.map(r => (r[col] || "").length));
+  }
+
+  // Shrink columns to fit terminal width
+  // Overhead: 1 border char per column + 1 closing border + 2 padding per col
+  const overhead = colCount + 1 + colCount * 2;
+  const totalContent = widths.reduce((a, b) => a + b, 0);
+  if (totalContent + overhead > maxWidth) {
+    const available = maxWidth - overhead;
+    if (available > colCount) {
+      // Proportionally shrink each column
+      const ratio = available / totalContent;
+      for (let col = 0; col < colCount; col++) {
+        widths[col] = Math.max(3, Math.floor(widths[col] * ratio));
+      }
+      // Truncate cell content to fit new widths
+      for (const row of rows) {
+        for (let col = 0; col < row.length; col++) {
+          if (row[col].length > widths[col]) {
+            row[col] = row[col].slice(0, widths[col] - 1) + "…";
+          }
+        }
+      }
+    }
   }
 
   // Build Unicode table
@@ -263,6 +329,7 @@ function cleanMarkdown(line: string): string {
  * Format response for CLI with Unicode tables and colors.
  */
 function formatCli(response: string): string {
+  const width = termWidth();
   const source = extractSource(response);
   let content = removeSourceLine(response);
 
@@ -276,7 +343,7 @@ function formatCli(response: string): string {
     if (/^#{2,4}\s+/.test(line)) {
       const headerText = line.replace(/^#{2,4}\s+/, "").replace(/\*\*/g, ""); // Strip ** from headers
       formatted.push(`\n${c.bold(headerText)}`);
-      formatted.push(c.dim(box.horizontal.repeat(Math.min(headerText.length, 60))));
+      formatted.push(c.dim(box.horizontal.repeat(Math.min(headerText.length, width - 2))));
       continue;
     }
 
@@ -315,17 +382,22 @@ function formatCli(response: string): string {
           return `${team1} ${score1}-${score2} ${team2}`;
         }
       );
-      formatted.push(scoreLine);
+      formatted.push(wrapLine(scoreLine, width));
       continue;
     }
 
     // Highlight live games
     if (/🔴|LIVE/i.test(line)) {
-      formatted.push(c.yellow(line));
+      formatted.push(wrapLine(c.yellow(line), width));
       continue;
     }
 
-    formatted.push(line);
+    // Determine hanging indent for wrapped lines
+    // Bullets (• ) get 2-char indent; indented bullets get their indent + 2
+    const bulletMatch = line.match(/^(\s*)•\s/);
+    const indent = bulletMatch ? bulletMatch[1].length + 2 : 0;
+
+    formatted.push(wrapLine(line, width, indent));
   }
 
   // Add source footer
