@@ -239,6 +239,21 @@ export interface ToolCallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Tool Result Cache — TTL-based in-memory caching
+// ---------------------------------------------------------------------------
+
+interface CacheEntry {
+  result: ToolCallResult;
+  timestamp: number;
+}
+
+interface CacheStats {
+  hits: number;
+  misses: number;
+  size: number;
+}
+
+// ---------------------------------------------------------------------------
 // Tool Registry — instance-level, not module singletons
 // ---------------------------------------------------------------------------
 
@@ -249,6 +264,67 @@ export interface ToolCallResult {
 export class ToolRegistry {
   private dynamicSpecs: ToolSpec[] = [];
   private routeMap = new Map<string, { sport: string; command: string }>();
+  private cache = new Map<string, CacheEntry>();
+  private cacheHits = 0;
+  private cacheMisses = 0;
+  private cacheEnabled = true;
+  private cacheTtlMs = 300_000; // 5 minutes default
+
+  /**
+   * Configure cache settings. Must be called before any tool calls to take effect.
+   */
+  configureCaching(options: { enabled?: boolean; ttlMs?: number }): void {
+    if (options.enabled !== undefined) {
+      this.cacheEnabled = options.enabled;
+    }
+    if (options.ttlMs !== undefined && options.ttlMs > 0) {
+      this.cacheTtlMs = options.ttlMs;
+    }
+  }
+
+  /**
+   * Get cache statistics for debugging.
+   */
+  getCacheStats(): CacheStats {
+    return {
+      hits: this.cacheHits,
+      misses: this.cacheMisses,
+      size: this.cache.size,
+    };
+  }
+
+  /**
+   * Generate a cache key from tool name and sorted arguments.
+   */
+  private generateCacheKey(
+    toolName: string,
+    input: ToolCallInput
+  ): string {
+    // Sort keys for consistent hashing
+    const sortedArgs = Object.keys(input)
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = input[key];
+        return acc;
+      }, {} as Record<string, unknown>);
+    return `${toolName}:${JSON.stringify(sortedArgs)}`;
+  }
+
+  /**
+   * Check if a tool should skip caching (internal tools).
+   */
+  private shouldSkipCache(toolName: string): boolean {
+    const internalTools = [
+      "update_",
+      "reflect",
+      "evolve_strategy",
+      "get_agent_config",
+      "update_agent_config",
+      "install_sport",
+      "remove_sport",
+    ];
+    return internalTools.some((prefix) => toolName.startsWith(prefix));
+  }
 
   /**
    * Inject a sport schema's tools into the dynamic registry.
@@ -361,19 +437,54 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    // Check cache if enabled and tool is cacheable
+    if (this.cacheEnabled && !this.shouldSkipCache(toolName)) {
+      const cacheKey = this.generateCacheKey(toolName, input);
+      const cached = this.cache.get(cacheKey);
+
+      if (cached) {
+        const age = Date.now() - cached.timestamp;
+        if (age < this.cacheTtlMs) {
+          this.cacheHits++;
+          if (config?.verbose) {
+            console.error(
+              `[sportsclaw] cache hit for ${toolName} (age: ${Math.round(age / 1000)}s)`
+            );
+          }
+          return cached.result;
+        }
+        // Expired entry — remove it
+        this.cache.delete(cacheKey);
+      }
+      this.cacheMisses++;
+    }
+
+    // Execute the tool
+    let result: ToolCallResult;
     if (toolName === "sports_query") {
-      return this.handleSportsQuery(input, config);
+      result = await this.handleSportsQuery(input, config);
+    } else {
+      const route = this.routeMap.get(toolName);
+      if (route) {
+        result = await this.handleDynamicTool(route.sport, route.command, input, config);
+      } else {
+        result = {
+          content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
+          isError: true,
+        };
+      }
     }
 
-    const route = this.routeMap.get(toolName);
-    if (route) {
-      return this.handleDynamicTool(route.sport, route.command, input, config);
+    // Store successful results in cache
+    if (this.cacheEnabled && !this.shouldSkipCache(toolName) && !result.isError) {
+      const cacheKey = this.generateCacheKey(toolName, input);
+      this.cache.set(cacheKey, {
+        result,
+        timestamp: Date.now(),
+      });
     }
 
-    return {
-      content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
-      isError: true,
-    };
+    return result;
   }
 
   // -------------------------------------------------------------------------

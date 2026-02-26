@@ -106,6 +106,14 @@ export interface sportsclawConfig {
   routingMaxSkills?: number;
   /** Additional spillover skills allowed in focused routing (default: 1) */
   routingAllowSpillover?: number;
+  /** Enable TTL-based tool result caching (default: true) */
+  cacheEnabled?: boolean;
+  /** Cache time-to-live in milliseconds (default: 300000 = 5 minutes) */
+  cacheTtlMs?: number;
+  /** Ask for clarification when confidence is low (default: true) */
+  clarifyOnLowConfidence?: boolean;
+  /** Confidence threshold for clarification (default: 0.5) */
+  clarifyThreshold?: number;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -121,6 +129,10 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   routingMode: "soft_lock",
   routingMaxSkills: 2,
   routingAllowSpillover: 1,
+  cacheEnabled: true,
+  cacheTtlMs: 300_000,
+  clarifyOnLowConfidence: true,
+  clarifyThreshold: 0.5,
 };
 
 // ---------------------------------------------------------------------------

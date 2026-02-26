@@ -223,6 +223,10 @@ export class sportsclawEngine {
     this.mainModel = resolveModel(this.config.provider, this.config.model);
     this.mainModelId = readModelId(this.mainModel);
     this.registry = new ToolRegistry();
+    this.registry.configureCaching({
+      enabled: this.config.cacheEnabled,
+      ttlMs: this.config.cacheTtlMs,
+    });
     this.loadDynamicSchemas();
     this.agents = loadAgents();
     if (this.config.verbose && this.agents.length > 0) {
