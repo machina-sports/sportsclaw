@@ -434,7 +434,7 @@ function createToolTracker(
   function formatLine(t: ToolState): string {
     const skill = t.skillName ? `sports-skills/${t.skillName}` : "agent";
     if (t.status === "running") {
-      return `${pc.dim("\u25CB")} ${skill}: ${t.label}...`;
+      return `${pc.dim("\u25CB")} ${skill}: ${t.label}`;
     }
     const sec = t.durationMs != null ? ` ${(t.durationMs / 1000).toFixed(1)}s` : "";
     const icon = t.status === "done" ? pc.green("\u2713") : pc.red("\u2717");
@@ -454,7 +454,7 @@ function createToolTracker(
     const bodyLines: string[] = [];
     if (entries.length === 0) {
       bodyLines.push(
-        phase === "synthesizing" ? pc.dim("Synthesizing...") : pc.dim(`${phaseLabel}...`)
+        phase === "synthesizing" ? pc.dim("Synthesizing") : pc.dim(phaseLabel)
       );
     } else {
       const all = [...done, ...running];
@@ -462,7 +462,7 @@ function createToolTracker(
         bodyLines.push(formatLine(all[i]));
       }
       if (phase === "synthesizing") {
-        bodyLines.push(pc.dim("Synthesizing..."));
+        bodyLines.push(pc.dim("Synthesizing"));
       }
     }
 
@@ -966,7 +966,7 @@ async function cmdChat(args: string[]): Promise<void> {
         const tracker = createToolTracker(s, {
           showCancelHint: cancel.showCancelHint,
         });
-        s.start("Thinking...");
+        s.start("Thinking");
         tracker.start();
         try {
           const result = await engine.run(prompt, {
@@ -1054,7 +1054,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     const tracker = createToolTracker(s, {
       showCancelHint: cancel.showCancelHint,
     });
-    s.start("Thinking...");
+    s.start("Thinking");
     cancel.activate();
     tracker.start();
     try {

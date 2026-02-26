@@ -416,7 +416,12 @@ export class sportsclawEngine {
 
     const selectedSkills = new Set(decision.selectedSkills);
     const isInternalTool = (name: string) =>
-      name.startsWith("update_") || name === "reflect" || name === "evolve_strategy";
+      name.startsWith("update_") ||
+      name === "reflect" ||
+      name === "evolve_strategy" ||
+      name === "get_agent_config" ||
+      name === "install_sport" ||
+      name === "remove_sport";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
       const skill = this.registry.getSkillName(name);
@@ -1219,7 +1224,7 @@ export class sportsclawEngine {
             toolCallId: toolCall.toolCallId,
             skillName,
           });
-          legacyUpdate?.(`Running ${toolCall.toolName}...`);
+          legacyUpdate?.(`Running ${toolCall.toolName}`);
         },
         experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
           const skillName = this.registry.getSkillName(toolCall.toolName);
@@ -1252,7 +1257,7 @@ export class sportsclawEngine {
           }
           if (toolCalls.length > 0) {
             emitProgress?.({ type: "synthesizing" });
-            legacyUpdate?.("Synthesizing...");
+            legacyUpdate?.("Synthesizing");
           }
         },
       });
