@@ -17,6 +17,7 @@
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
+import { formatResponse } from "../formatters.js";
 
 const COMMAND_PREFIX = "/claw";
 
@@ -183,8 +184,12 @@ async function processUpdate(
     const engine = new sportsclawEngine(engineConfig);
     const response = await engine.run(prompt, { userId });
 
+    // Format response for Telegram
+    const formatted = formatResponse(response, "telegram");
+    const textToSend = formatted.telegram || formatted.text;
+
     // Telegram has a 4096 char limit — split if needed
-    const chunks = splitMessage(response, 4096);
+    const chunks = splitMessage(textToSend, 4096);
     for (const chunk of chunks) {
       await fetch(`${apiBase}/sendMessage`, {
         method: "POST",
@@ -192,6 +197,7 @@ async function processUpdate(
         body: JSON.stringify({
           chat_id: msg.chat.id,
           text: chunk,
+          parse_mode: formatted.telegram ? "MarkdownV2" : undefined,
           reply_to_message_id: msg.message_id,
         }),
       });
