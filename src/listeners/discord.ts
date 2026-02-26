@@ -18,6 +18,7 @@
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
+import { formatResponse } from "../formatters.js";
 
 const PREFIX = "!claw";
 
@@ -131,10 +132,28 @@ export async function startDiscordListener(): Promise<void> {
       const engine = new sportsclawEngine(engineConfig);
       const response = await engine.run(prompt, { userId });
 
-      // Discord has a 2000 char limit — split if needed
-      const chunks = splitMessage(response, 2000);
-      for (const chunk of chunks) {
-        await message.reply(chunk);
+      // Format response for Discord
+      const formatted = formatResponse(response, "discord");
+
+      // Use Discord embed if available
+      if (formatted.discord) {
+        const { EmbedBuilder } = Discord;
+        const embed = new EmbedBuilder();
+
+        if (formatted.discord.title) embed.setTitle(formatted.discord.title);
+        if (formatted.discord.description)
+          embed.setDescription(formatted.discord.description);
+        if (formatted.discord.fields) embed.addFields(formatted.discord.fields);
+        if (formatted.discord.footer) embed.setFooter(formatted.discord.footer);
+        if (formatted.discord.color) embed.setColor(formatted.discord.color);
+
+        await message.reply({ embeds: [embed] });
+      } else {
+        // Fallback to plain text with 2000 char limit
+        const chunks = splitMessage(formatted.text, 2000);
+        for (const chunk of chunks) {
+          await message.reply(chunk);
+        }
       }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
