@@ -48,6 +48,7 @@ import { routePromptToSkills, routeToAgents } from "./router.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { SECURITY_DIRECTIVES, sanitizeInput, logSecurityEvent } from "./security.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -255,6 +256,9 @@ export class sportsclawEngine {
   /** Full system prompt (base + dynamic tool info + strategy + agent directives + user-supplied) */
   private buildSystemPrompt(hasMemory: boolean, agents?: AgentDef[], strategyContent?: string): string {
     const parts = [BASE_SYSTEM_PROMPT];
+
+    // --- Security directives (framework-level, always active) ---
+    parts.push("", SECURITY_DIRECTIVES);
 
     // --- Self-awareness block ---
     const { installed, available } = getInstalledVsAvailable();
@@ -1168,6 +1172,31 @@ export class sportsclawEngine {
    * @returns The final assistant text.
    */
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    // --- Security: Sanitize input FIRST ---
+    const sanitization = sanitizeInput(userPrompt);
+    const sanitizedPrompt = sanitization.sanitized;
+
+    if (sanitization.wasModified) {
+      logSecurityEvent("injection_attempt", {
+        userId: options?.userId,
+        strippedPatterns: sanitization.strippedPatterns,
+        originalLength: userPrompt.length,
+        sanitizedLength: sanitizedPrompt.length,
+      });
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] security: stripped ${sanitization.strippedPatterns.length} injection pattern(s)`
+        );
+      }
+    }
+
+    if (sanitization.suspiciousPatterns.length > 0) {
+      logSecurityEvent("suspicious_input", {
+        userId: options?.userId,
+        suspiciousPatterns: sanitization.suspiciousPatterns,
+      });
+    }
+
     // --- Memory: read before LLM call (async, non-blocking) ---
     let memory: MemoryManager | undefined;
     let memoryBlock = "";
@@ -1198,7 +1227,7 @@ export class sportsclawEngine {
       });
     }
 
-    this.messages.push({ role: "user", content: userPrompt });
+    this.messages.push({ role: "user", content: sanitizedPrompt });
 
     let stepCount = 0;
     const emitProgress = options?.onProgress;
@@ -1210,7 +1239,7 @@ export class sportsclawEngine {
     const tools = this.buildTools(memory, failedToolSignaturesThisTurn);
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
-      userPrompt,
+      sanitizedPrompt,
       Object.keys(tools),
       memoryBlock
     );
@@ -1218,7 +1247,7 @@ export class sportsclawEngine {
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
-    const agentRoutes = routeToAgents(this.agents, selectedSkills, userPrompt);
+    const agentRoutes = routeToAgents(this.agents, selectedSkills, sanitizedPrompt);
     const activeAgents = agentRoutes.map((r) => r.agent);
 
     if (this.config.verbose && routing.decision) {
@@ -1450,7 +1479,7 @@ export class sportsclawEngine {
         successIds
       );
       responseText = await this.synthesizeFromToolOutputs({
-        userPrompt,
+        userPrompt: sanitizedPrompt,
         draft: responseText,
         successfulTools: successes.map((s) => s.toolName),
         failedTools: netFailures.map((f) => f.toolName),
@@ -1465,7 +1494,7 @@ export class sportsclawEngine {
         "Treat related sections as unavailable.";
 
       responseText = await this.applyEvidenceGate({
-        userPrompt,
+        userPrompt: sanitizedPrompt,
         draft: responseText,
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
@@ -1476,7 +1505,7 @@ export class sportsclawEngine {
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {
       try {
-        await memory.appendExchange(userPrompt, responseText);
+        await memory.appendExchange(sanitizedPrompt, responseText);
         // Evolve: increment soul exchange counter (only thing code touches)
         await memory.incrementSoulExchanges();
       } catch (err) {

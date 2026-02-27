@@ -17,6 +17,7 @@ import type {
   SportSchema,
 } from "./types.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
+import { isBlockedTool, logSecurityEvent } from "./security.js";
 
 type BridgeErrorCode =
   | "timeout"
@@ -344,6 +345,13 @@ export class ToolRegistry {
         continue;
       }
 
+      // Security: Skip blocked tools entirely — don't even expose them to the LLM
+      const blockReason = isBlockedTool(tool.name);
+      if (blockReason) {
+        console.error(`[sportsclaw] blocking tool "${tool.name}": trading operation`);
+        continue;
+      }
+
       const existingIdx = this.dynamicSpecs.findIndex((s) => s.name === tool.name);
       // Support both Vercel-compatible `parameters` and legacy `input_schema`
       const schemaObj = tool.parameters ?? tool.input_schema ?? {};
@@ -437,6 +445,20 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    // Security: Check blocklist FIRST, before any other processing
+    const blockReason = isBlockedTool(toolName);
+    if (blockReason) {
+      logSecurityEvent("blocked_tool", { toolName, input });
+      return {
+        content: JSON.stringify({
+          error: blockReason,
+          error_code: "blocked_tool",
+          hint: "This tool is disabled for security reasons. SportsClaw is a read-only sports data agent.",
+        }),
+        isError: true,
+      };
+    }
+
     // Check cache if enabled and tool is cacheable
     if (this.cacheEnabled && !this.shouldSkipCache(toolName)) {
       const cacheKey = this.generateCacheKey(toolName, input);
