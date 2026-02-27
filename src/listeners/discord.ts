@@ -91,6 +91,31 @@ export async function startDiscordListener(): Promise<void> {
     partials: [Partials.Channel],
   });
 
+  /** Send a reply, falling back to channel.send() if the original message is gone */
+  async function safeSend(
+    message: import("discord.js").Message,
+    content: string | { embeds: import("discord.js").EmbedBuilder[] }
+  ): Promise<void> {
+    try {
+      await message.reply(content);
+    } catch {
+      // Original message may have been deleted — send to channel instead
+      try {
+        if ("send" in message.channel) {
+          await message.channel.send(content);
+        }
+      } catch (sendErr) {
+        console.error(
+          `[sportsclaw] Failed to send to channel: ${sendErr instanceof Error ? sendErr.message : sendErr}`
+        );
+      }
+    }
+  }
+
+  client.on("error", (err) => {
+    console.error(`[sportsclaw] Discord client error: ${err.message}`);
+  });
+
   client.once("ready", () => {
     console.log(`[sportsclaw] Discord bot connected as ${client.user?.tag}`);
     console.log(
@@ -107,16 +132,21 @@ export async function startDiscordListener(): Promise<void> {
 
     let prompt: string | null = null;
 
-    // Check for prefix command: !claw <question>
+    // Check for prefix command
     if (message.content.startsWith(PREFIX)) {
       prompt = message.content.slice(PREFIX.length).trim();
     }
 
     // Check for direct mention: @sportsclaw <question>
     if (!prompt && client.user && message.mentions.has(client.user)) {
-      prompt = message.content
+      let extracted = message.content
         .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
         .trim();
+      // Strip prefix if user wrote "@bot !sportsclaw question"
+      if (extracted.startsWith(PREFIX)) {
+        extracted = extracted.slice(PREFIX.length).trim();
+      }
+      prompt = extracted;
     }
 
     if (!prompt) return;
@@ -124,8 +154,13 @@ export async function startDiscordListener(): Promise<void> {
     // Use the Discord user ID for memory isolation
     const userId = `discord-${message.author.id}`;
 
+    // Keep typing indicator alive while processing (~5s refresh)
+    const typingInterval = setInterval(() => {
+      message.channel.sendTyping().catch(() => {});
+    }, 5_000);
+
     try {
-      // Show typing indicator
+      // Show typing indicator immediately
       await message.channel.sendTyping();
 
       // Fresh engine per request — avoids shared-state race conditions
@@ -147,22 +182,46 @@ export async function startDiscordListener(): Promise<void> {
         if (formatted.discord.footer) embed.setFooter(formatted.discord.footer);
         if (formatted.discord.color) embed.setColor(formatted.discord.color);
 
-        await message.reply({ embeds: [embed] });
+        await safeSend(message, { embeds: [embed] });
       } else {
         // Fallback to plain text with 2000 char limit
         const chunks = splitMessage(formatted.text, 2000);
         for (const chunk of chunks) {
-          await message.reply(chunk);
+          await safeSend(message, chunk);
         }
       }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[sportsclaw] Discord error: ${errMsg}`);
-      await message.reply(
+      await safeSend(
+        message,
         "Sorry, I encountered an error processing your request."
       );
+    } finally {
+      clearInterval(typingInterval);
     }
   });
 
-  await client.login(process.env.DISCORD_BOT_TOKEN);
+  try {
+    await client.login(process.env.DISCORD_BOT_TOKEN);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("disallowed intents")) {
+      console.error("[sportsclaw] Error: Discord rejected the connection due to disallowed intents.");
+      console.error("");
+      console.error("The Message Content Intent must be enabled in the Discord Developer Portal:");
+      console.error("  1. Go to https://discord.com/developers/applications");
+      console.error("  2. Select your bot → Bot tab");
+      console.error("  3. Enable 'Message Content Intent' under Privileged Gateway Intents");
+      console.error("  4. Save and retry: sportsclaw listen discord");
+      process.exit(1);
+    }
+    if (msg.includes("TOKEN_INVALID") || msg.includes("invalid token")) {
+      console.error("[sportsclaw] Error: Invalid Discord bot token.");
+      console.error("Update it with: sportsclaw config");
+      console.error("Or set the DISCORD_BOT_TOKEN environment variable.");
+      process.exit(1);
+    }
+    throw err;
+  }
 }

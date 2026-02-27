@@ -158,12 +158,61 @@ function parseHeaderFields(
 }
 
 /**
+ * Convert markdown pipe tables to Discord-friendly code blocks.
+ * Discord embeds don't render markdown tables, so we use monospace.
+ */
+function convertTablesForDiscord(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Detect start of a pipe table
+    if (line.includes("|") && line.trim().startsWith("|")) {
+      const tableLines: string[] = [];
+      while (
+        i < lines.length &&
+        (lines[i].includes("|") || /^\s*[\-:|]+\s*$/.test(lines[i]))
+      ) {
+        // Skip separator lines (|---|---|)
+        if (!/^\|[\s\-:|]+\|$/.test(lines[i])) {
+          // Clean pipe cells into aligned text
+          const cells = lines[i]
+            .split("|")
+            .slice(1, -1)
+            .map((c) => c.trim());
+          tableLines.push(cells.join("  |  "));
+        }
+        i++;
+      }
+      if (tableLines.length > 0) {
+        result.push("```");
+        result.push(...tableLines);
+        result.push("```");
+      }
+    } else {
+      result.push(line);
+      i++;
+    }
+  }
+
+  return result.join("\n");
+}
+
+/**
  * Format response as a Discord embed.
  */
 function formatDiscord(response: string): DiscordEmbed {
   const source = extractSource(response);
-  const content = removeSourceLine(response);
+  let content = removeSourceLine(response);
   const hasScore = hasScores(content);
+
+  // Convert markdown tables to code blocks for Discord
+  if (hasTableData(content)) {
+    content = convertTablesForDiscord(content);
+  }
 
   // If response has headers, parse into fields
   if (hasHeaders(content)) {
