@@ -22,6 +22,7 @@ spec:
       containers:
         - name: sportsclaw-relay
           image: machinasports/sportsclaw-relay:v0.9.0
+          imagePullPolicy: Always
           args: ["relay"]
           ports:
             - containerPort: 8080
