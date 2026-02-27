@@ -514,9 +514,16 @@ export class sportsclawEngine {
     if (!trimmed) return true;
     if (trimmed.length < 90) return true;
     if (/^_?source:/i.test(trimmed)) return true;
-    return /\b(anything else|anything specific|what specific|drill into|want me to)\b/i.test(
-      trimmed
-    );
+    // Conversational filler without data
+    if (
+      /\b(anything else|anything specific|what specific|drill into|want me to)\b/i.test(trimmed)
+    ) return true;
+    // Fan profile / memory acknowledgment without real data
+    if (
+      /\b(updated.*(?:fan profile|your profile|memory)|tracking.*closely|remember you)\b/i.test(trimmed) &&
+      !/\b\d{1,3}\s*[-–]\s*\d{1,3}\b/.test(trimmed) // has no scores → no data
+    ) return true;
+    return false;
   }
 
   private hasAnyStepText(steps: Array<{ text?: string }>): boolean {
@@ -1475,9 +1482,22 @@ export class sportsclawEngine {
 
     // result.text is only from the final step. When the model produces text
     // alongside tool calls (e.g. update_fan_profile), the SDK feeds tool
-    // results back and the model may reply with empty text. Fall back to
-    // the last non-empty text from any step.
+    // results back and the model may reply with just a conversational
+    // acknowledgment. Prefer the substantive answer from an earlier step.
     let finalText = result.text;
+
+    // If final text is low-signal (e.g. "I updated your fan profile!"),
+    // look for a more substantive answer from an earlier step.
+    if (this.isLowSignalResponse(finalText ?? "") && result.steps) {
+      for (let i = result.steps.length - 1; i >= 0; i--) {
+        const stepText = result.steps[i].text;
+        if (stepText && !this.isLowSignalResponse(stepText)) {
+          finalText = stepText;
+          break;
+        }
+      }
+    }
+
     if (!finalText && result.steps) {
       for (let i = result.steps.length - 1; i >= 0; i--) {
         if (result.steps[i].text) {
