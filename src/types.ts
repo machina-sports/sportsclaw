@@ -25,17 +25,17 @@ export interface ProviderModelProfile {
 
 export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> = {
   anthropic: {
-    defaultModel: "claude-sonnet-4-5-20250514",
+    defaultModel: "claude-opus-4-6",
     selectableModels: [
-      {
-        value: "claude-sonnet-4-5-20250514",
-        label: "Claude Sonnet 4.5",
-        hint: "recommended",
-      },
       {
         value: "claude-opus-4-6",
         label: "Claude Opus 4.6",
-        hint: "most capable",
+        hint: "recommended",
+      },
+      {
+        value: "claude-sonnet-4-5-20250514",
+        label: "Claude Sonnet 4.5",
+        hint: "faster, cheaper",
       },
     ],
   },
