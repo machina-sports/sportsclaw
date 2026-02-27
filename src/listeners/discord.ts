@@ -23,7 +23,7 @@
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
-import { formatResponse } from "../formatters.js";
+import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
 import { executePythonBridge } from "../tools.js";
 import { loadConfig } from "../config.js";
 import type { DiscordFeaturesConfig } from "../config.js";
@@ -322,38 +322,6 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // Detect if response is game-related (warrants action buttons)
-  // ---------------------------------------------------------------------------
-
-  function isGameRelatedResponse(response: string, prompt: string): boolean {
-    const promptLower = prompt.toLowerCase();
-    const responseLower = response.toLowerCase();
-
-    // Prompt indicators
-    const gamePromptPatterns = [
-      /\b(score|scores|game|games|playing|live|tonight|today)\b/,
-      /\b(matchup|match-up|vs\.?|versus)\b/,
-      /\b(box\s*score|play[\s-]*by[\s-]*play|stats)\b/,
-      /\bhow.*(playing|doing)\b/,
-    ];
-
-    // Response indicators
-    const gameResponsePatterns = [
-      /\b\d{1,3}\s*[-–]\s*\d{1,3}\b/,
-      /\b(Q[1-4]|[1-4](st|nd|rd|th)\s*(quarter|qtr)|half|halftime|overtime|OT)\b/i,
-      /\b(final|live|in progress|upcoming)\b/i,
-      /\b(pts?|reb|ast|points|rebounds|assists)\b/i,
-      /\b(lakers?|celtics?|warriors?|suns?|nuggets?|bucks?|heat|knicks?)\b/i,
-    ];
-
-    const promptMatch = gamePromptPatterns.some(p => p.test(promptLower));
-    const responseMatch = gameResponsePatterns.some(p => p.test(responseLower));
-
-    return promptMatch || responseMatch;
-  }
-
-
-  // ---------------------------------------------------------------------------
   // Poll creation for "who wins?" questions
   // ---------------------------------------------------------------------------
 
@@ -463,7 +431,7 @@ export async function startDiscordListener(): Promise<void> {
     console.error(`[sportsclaw] Discord client error: ${err.message}`);
   });
 
-  client.once("ready", () => {
+  client.once(Discord.Events.ClientReady, () => {
     console.log(`[sportsclaw] Discord bot connected as ${client.user?.tag}`);
     console.log(
       `[sportsclaw] Listening for "${PREFIX}" commands and mentions.`
