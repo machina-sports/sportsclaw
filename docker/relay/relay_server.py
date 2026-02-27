@@ -299,7 +299,7 @@ def _timestamp() -> str:
 def _build_cmd(body: dict) -> list[str]:
     """Build the sportsclaw CLI command from the request body."""
     prompt = body["prompt"]
-    cmd = [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, prompt]
+    cmd = [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "--pipe", prompt]
 
     if body.get("verbose"):
         cmd.append("--verbose")

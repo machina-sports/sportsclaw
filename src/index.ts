@@ -1010,7 +1010,8 @@ function emitNdjson(event: Record<string, unknown>): void {
 
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
-  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v");
+  const forcePipe = args.includes("--pipe");
+  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe");
   const prompt = filteredArgs.join(" ");
 
   if (!prompt) {
@@ -1039,8 +1040,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     verbose,
   });
 
-  // Pipe mode: stdout is not a TTY → emit NDJSON events (for relay/programmatic use)
-  const pipeMode = !process.stdout.isTTY;
+  // Pipe mode: emit NDJSON events (for relay/programmatic use)
+  const pipeMode = forcePipe || !process.stdout.isTTY;
 
   if (pipeMode) {
     emitNdjson({ type: "start", timestamp: new Date().toISOString() });
@@ -1050,6 +1051,7 @@ async function cmdQuery(args: string[]): Promise<void> {
       });
       const formatted = formatResponse(result, "cli");
       emitNdjson({ type: "result", text: formatted.text });
+      process.exit(0);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       emitNdjson({ type: "error", error: msg });
