@@ -143,26 +143,16 @@ export class McpManager {
   }
 
   private async connectOne(name: string, config: McpServerConfig): Promise<void> {
-    const client = new Client({ name: `sportsclaw-${name}`, version: "1.0.0" });
     const url = new URL(config.url);
     const headers = config.headers ?? {};
 
-    // Try StreamableHTTP first, fall back to SSE
-    let connected = false;
-    try {
-      const transport = new StreamableHTTPClientTransport(url, {
-        requestInit: { headers },
-      });
-      await client.connect(transport);
-      connected = true;
-      if (this.verbose) {
-        console.error(`[sportsclaw] mcp: "${name}" connected via StreamableHTTP`);
-      }
-    } catch {
-      // Fall back to SSE
-    }
+    // Detect transport from URL path: /sse or /mcp/sse → SSE, otherwise try HTTP first
+    const isSseEndpoint = /\/sse\b/i.test(url.pathname);
+    let client: Client;
 
-    if (!connected) {
+    if (isSseEndpoint) {
+      // Skip StreamableHTTP entirely for known SSE endpoints
+      client = new Client({ name: `sportsclaw-${name}`, version: "1.0.0" });
       const sseTransport = new SSEClientTransport(url, {
         requestInit: { headers },
         eventSourceInit: {
@@ -173,6 +163,37 @@ export class McpManager {
       await client.connect(sseTransport);
       if (this.verbose) {
         console.error(`[sportsclaw] mcp: "${name}" connected via SSE`);
+      }
+    } else {
+      // Try StreamableHTTP with a tight timeout, fall back to SSE
+      let connected = false;
+      client = new Client({ name: `sportsclaw-${name}`, version: "1.0.0" });
+      try {
+        const transport = new StreamableHTTPClientTransport(url, {
+          requestInit: { headers, signal: AbortSignal.timeout(5_000) },
+        });
+        await client.connect(transport);
+        connected = true;
+        if (this.verbose) {
+          console.error(`[sportsclaw] mcp: "${name}" connected via StreamableHTTP`);
+        }
+      } catch {
+        // Fall back to SSE — need a fresh client after failed connect
+        client = new Client({ name: `sportsclaw-${name}`, version: "1.0.0" });
+      }
+
+      if (!connected) {
+        const sseTransport = new SSEClientTransport(url, {
+          requestInit: { headers },
+          eventSourceInit: {
+            fetch: (input: string | URL | Request, init?: RequestInit) =>
+              fetch(input, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string>) } }),
+          },
+        });
+        await client.connect(sseTransport);
+        if (this.verbose) {
+          console.error(`[sportsclaw] mcp: "${name}" connected via SSE`);
+        }
       }
     }
 
