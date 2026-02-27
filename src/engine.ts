@@ -56,6 +56,9 @@ import {
   logSession,
   generateSessionId,
 } from "./analytics.js";
+import { AskUserQuestionHalt } from "./ask.js";
+import { isGuideIntent, generateGuideResponse } from "./guide.js";
+import { createTask, listTasks, completeTask } from "./taskbus.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -662,7 +665,8 @@ export class sportsclawEngine {
   /** Build the Vercel AI SDK tool map from our registry */
   private buildTools(
     memory?: MemoryManager,
-    failedToolSignaturesThisTurn?: Map<string, string>
+    failedToolSignaturesThisTurn?: Map<string, string>,
+    runUserId?: string
   ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
@@ -1179,6 +1183,183 @@ export class sportsclawEngine {
       });
     }
 
+    // -----------------------------------------------------------------
+    // Sprint 2: AskUserQuestion — interactive halting tool
+    // -----------------------------------------------------------------
+
+    toolMap["ask_user_question"] = defineTool({
+      description:
+        "Halt execution and present the user with a clarifying question and a set " +
+        "of options. Use this when the router confidence is low or the query is " +
+        "ambiguous. The user will see the options as buttons (Discord/Telegram) or " +
+        "a numbered list (CLI). Execution resumes when the user picks an option.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "The question to ask the user.",
+          },
+          options: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: {
+                  type: "string",
+                  description: "Display text for this option.",
+                },
+                value: {
+                  type: "string",
+                  description: "Value returned when this option is selected.",
+                },
+              },
+              required: ["label", "value"],
+            },
+            description: "2-5 options for the user to choose from.",
+          },
+          context_key: {
+            type: "string",
+            description: "A short key to identify this question context (e.g. 'sport_clarify').",
+          },
+        },
+        required: ["prompt", "options", "context_key"],
+      }),
+      execute: async (args: {
+        prompt?: string;
+        options?: Array<{ label: string; value: string }>;
+        context_key?: string;
+      }) => {
+        const { prompt: questionPrompt, options, context_key } = args;
+        if (!questionPrompt || !options || !context_key) {
+          return "Error: prompt, options, and context_key are all required.";
+        }
+        if (options.length < 2 || options.length > 5) {
+          return "Error: options must contain 2-5 items.";
+        }
+
+        // Throw a sentinel error to halt the engine loop.
+        // The listener catches this and renders native UI.
+        throw new AskUserQuestionHalt({
+          prompt: questionPrompt,
+          options,
+          contextKey: context_key,
+        });
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Sprint 2: Async Watcher Bus — condition-action triggers
+    // -----------------------------------------------------------------
+
+    const watcherUserId = runUserId ?? "anonymous";
+
+    toolMap["create_task"] = defineTool({
+      description:
+        "Create an async monitoring task. The task persists to disk and can be " +
+        "checked by a watcher agent. Use for conditional notifications like " +
+        "'Ping me if LeBron hits 30pts' or 'Alert me when Arsenal scores.'",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          condition: {
+            type: "string",
+            description:
+              "Human-readable condition to monitor (e.g., 'LeBron PTS >= 30').",
+          },
+          action: {
+            type: "string",
+            description:
+              "Action to take when condition is met (e.g., 'Notify User').",
+          },
+          context: {
+            type: "object",
+            additionalProperties: true,
+            description:
+              "Extra context for the watcher: game_id, player_id, team, sport, etc.",
+          },
+        },
+        required: ["condition", "action"],
+      }),
+      execute: async (args: {
+        condition?: string;
+        action?: string;
+        context?: Record<string, unknown>;
+      }) => {
+        if (!args.condition || !args.action) {
+          return "Error: condition and action are required.";
+        }
+        try {
+          const task = await createTask({
+            condition: args.condition,
+            action: args.action,
+            context: args.context ?? {},
+            userId: watcherUserId,
+          });
+          return JSON.stringify({
+            status: "created",
+            task_id: task.id,
+            condition: task.condition,
+            action: task.action,
+            created_at: task.createdAt,
+          });
+        } catch (err) {
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+    });
+
+    toolMap["list_active_tasks"] = defineTool({
+      description:
+        "List all active monitoring tasks for the current user. Returns task IDs, " +
+        "conditions, actions, and creation timestamps.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const tasks = await listTasks({ status: "active", userId: watcherUserId });
+        if (tasks.length === 0) {
+          return "No active tasks.";
+        }
+        return JSON.stringify(
+          tasks.map((t) => ({
+            id: t.id,
+            condition: t.condition,
+            action: t.action,
+            context: t.context,
+            created_at: t.createdAt,
+          }))
+        );
+      },
+    });
+
+    toolMap["complete_task"] = defineTool({
+      description:
+        "Mark a monitoring task as completed. Call this after the watcher fires " +
+        "the notification or the user cancels the task.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          task_id: {
+            type: "string",
+            description: "The task ID to complete.",
+          },
+        },
+        required: ["task_id"],
+      }),
+      execute: async (args: { task_id?: string }) => {
+        if (!args.task_id) return "Error: task_id is required.";
+        const task = await completeTask(args.task_id);
+        if (!task) return `Task "${args.task_id}" not found.`;
+        return JSON.stringify({
+          status: "completed",
+          task_id: task.id,
+          completed_at: task.completedAt,
+        });
+      },
+    });
+
     return toolMap;
   }
 
@@ -1228,6 +1409,14 @@ export class sportsclawEngine {
       });
     }
 
+    // --- Sprint 2: Guide subagent — intercept meta-queries early ---
+    if (isGuideIntent(sanitizedPrompt)) {
+      if (this.config.verbose) {
+        console.error("[sportsclaw] guide intercept: handling meta-query");
+      }
+      return generateGuideResponse(sanitizedPrompt);
+    }
+
     // --- Memory: read before LLM call (async, non-blocking) ---
     let memory: MemoryManager | undefined;
     let memoryBlock = "";
@@ -1272,7 +1461,7 @@ export class sportsclawEngine {
     const analyticsSessionId = options?.userId ? generateSessionId() : "anonymous";
     const toolCallsForAnalytics: Array<{ name: string; success: boolean; latencyMs: number }> = [];
 
-    const tools = this.buildTools(memory, failedToolSignaturesThisTurn);
+    const tools = this.buildTools(memory, failedToolSignaturesThisTurn, options?.userId);
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,

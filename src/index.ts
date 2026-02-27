@@ -134,7 +134,27 @@ export type {
   TurnResult,
   SportSchema,
   SportToolDef,
+  AskUserOption,
+  AskUserQuestionRequest,
+  SuspendedState,
+  WatcherTask,
 } from "./types.js";
+
+// Sprint 2 modules
+export {
+  AskUserQuestionHalt,
+  saveSuspendedState,
+  loadSuspendedState,
+  clearSuspendedState,
+} from "./ask.js";
+export { isGuideIntent, generateGuideResponse } from "./guide.js";
+export {
+  createTask,
+  listTasks,
+  completeTask,
+  deleteTask,
+  expireOldTasks,
+} from "./taskbus.js";
 
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
