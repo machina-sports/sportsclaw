@@ -555,8 +555,8 @@ export async function runConfigFlow(): Promise<CLIConfig> {
 
     const existingAllowed = savedConfig.chatIntegrations?.discord?.allowedUsers;
     const allowedUsersInput = await p.text({
-      message: "👥 Allowed Discord user IDs (comma-separated, leave empty for all):",
-      placeholder: "123456789,987654321",
+      message: "👥 Allowed Discord user IDs (comma-separated, or blank to let anyone chat):",
+      placeholder: "Leave blank for public access",
       defaultValue: existingAllowed?.join(",") ?? "",
     });
     if (p.isCancel(allowedUsersInput)) {
