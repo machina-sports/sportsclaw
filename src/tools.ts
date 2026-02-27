@@ -157,7 +157,8 @@ function looksLikeHumanName(value: string): boolean {
   if (v.startsWith("0x")) return false;         // hex address
   if (/\s/.test(v)) return true;                // spaces — definitely a name
   if (/^[A-Z]/.test(v)) return true;            // starts uppercase — proper noun
-  if (v.length > 5 && /^[a-z]+(?:-[a-z]+)*$/.test(v)) return true; // long lowercase word/slug
+  // Hyphenated slugs like "premier-league" are valid IDs — only flag single long words
+  if (v.length > 10 && /^[a-z]+$/.test(v)) return true; // single long lowercase word (e.g. "liverpool")
   return false;
 }
 

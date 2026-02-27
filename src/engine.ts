@@ -468,6 +468,7 @@ export class sportsclawEngine {
       name.startsWith("update_") || name === "reflect" || name === "evolve_strategy";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
+      if (name.startsWith("mcp__")) return true; // MCP tools always active
       const skill = this.registry.getSkillName(name);
       return skill ? selectedSkills.has(skill) : false;
     });

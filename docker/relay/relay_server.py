@@ -35,7 +35,7 @@ from aiohttp import web
 PORT = int(os.environ.get("RELAY_PORT", 8080))
 SPORTSCLAW_BIN = os.environ.get("SPORTSCLAW_BIN", "node")
 SPORTSCLAW_ENTRY = os.environ.get("SPORTSCLAW_ENTRY", "/app/dist/index.js")
-DEFAULT_TIMEOUT = int(os.environ.get("RELAY_TIMEOUT", 120))
+DEFAULT_TIMEOUT = int(os.environ.get("RELAY_TIMEOUT", 180))
 
 
 def log(msg: str) -> None:
