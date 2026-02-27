@@ -21,7 +21,7 @@ spec:
         - name: dockerhub-secret
       containers:
         - name: sportsclaw-relay
-          image: machinasports/sportsclaw-relay:v0.9.0
+          image: machinasports/sportsclaw-relay:v0.9.4
           imagePullPolicy: Always
           args: ["relay"]
           ports:

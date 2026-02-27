@@ -29,4 +29,4 @@ patches:
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: machinasports/sportsclaw-relay:v0.9.0
+        value: machinasports/sportsclaw-relay:v0.9.4
