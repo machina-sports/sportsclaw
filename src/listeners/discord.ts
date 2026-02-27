@@ -12,7 +12,7 @@
  *
  * The bot responds to:
  *   - Direct mentions (@sportsclaw <question>)
- *   - Messages starting with `!claw <question>`
+ *   - Messages starting with `!sportsclaw <question>` (configurable via DISCORD_PREFIX)
  */
 
 import { sportsclawEngine } from "../engine.js";
@@ -20,7 +20,7 @@ import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
 import { formatResponse } from "../formatters.js";
 
-const PREFIX = "!claw";
+const PREFIX = process.env.DISCORD_PREFIX || "!sportsclaw";
 
 /** Parse ALLOWED_USERS env var into a Set of user IDs, or null if unset */
 function getAllowedUsers(): Set<string> | null {

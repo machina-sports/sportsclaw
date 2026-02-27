@@ -258,6 +258,7 @@ export class sportsclawEngine {
 
     // --- Self-awareness block ---
     const { installed, available } = getInstalledVsAvailable();
+    const discordCfg = loadConfig().chatIntegrations?.discord;
     const selfAwareness = [
       "",
       "## Self-Awareness",
@@ -284,6 +285,12 @@ export class sportsclawEngine {
       "",
       "When the user asks about a sport you DON'T have installed, tell them and",
       "offer to install it. Always include the disclaimer. User must confirm first.",
+      "",
+      "### Chat Integrations",
+      `- Discord bot: ${discordCfg?.botToken ? "configured" : "not configured"} (prefix: ${discordCfg?.prefix || "!sportsclaw"})`,
+      "- update_agent_config supports: discordBotToken, discordAllowedUsers, discordPrefix",
+      "- When user wants to set up Discord: check config → guide through token → save → tell them to run `sportsclaw listen discord`",
+      "- Guide users to https://discord.com/developers/applications for bot token",
     ];
     parts.push(...selfAwareness);
 
@@ -723,13 +730,15 @@ export class sportsclawEngine {
       description:
         "Return the current agent configuration as JSON. Includes provider, model, " +
         "router settings, routing parameters, Python path, installed sports, " +
-        "available (uninstalled) sports, and version.",
+        "available (uninstalled) sports, chat integrations status, and version.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {},
       }),
       execute: async () => {
         const { installed, available } = getInstalledVsAvailable();
+        const currentConfig = loadConfig();
+        const discord = currentConfig.chatIntegrations?.discord;
         return JSON.stringify(
           {
             version: _packageVersion,
@@ -741,6 +750,14 @@ export class sportsclawEngine {
             pythonPath: config.pythonPath,
             installedSports: installed,
             availableSports: available,
+            chatIntegrations: {
+              discord: {
+                configured: !!discord?.botToken,
+                hasAllowedUsers: !!(discord?.allowedUsers && discord.allowedUsers.length > 0),
+                allowedUserCount: discord?.allowedUsers?.length ?? 0,
+                prefix: discord?.prefix || "!sportsclaw",
+              },
+            },
           },
           null,
           2
@@ -751,7 +768,8 @@ export class sportsclawEngine {
     toolMap["update_agent_config"] = defineTool({
       description:
         "Update agent configuration. Accepts partial config: model, " +
-        "routingMaxSkills, routingAllowSpillover. Changes are saved to " +
+        "routingMaxSkills, routingAllowSpillover, discordBotToken, " +
+        "discordAllowedUsers, discordPrefix. Changes are saved to " +
         "~/.sportsclaw/config.json and take effect next session. " +
         "Does NOT allow changing provider or apiKey (direct users to `sportsclaw config`).",
       inputSchema: jsonSchema({
@@ -766,6 +784,19 @@ export class sportsclawEngine {
             type: "number",
             description: "Additional spillover skills for ambiguous prompts",
           },
+          discordBotToken: {
+            type: "string",
+            description: "Discord bot token",
+          },
+          discordAllowedUsers: {
+            type: "array",
+            items: { type: "string" },
+            description: "Discord user IDs whitelist",
+          },
+          discordPrefix: {
+            type: "string",
+            description: "Command prefix, default !sportsclaw",
+          },
         },
       }),
       execute: async (args: Record<string, unknown>) => {
@@ -773,12 +804,37 @@ export class sportsclawEngine {
           "model",
           "routingMaxSkills",
           "routingAllowSpillover",
+          "discordBotToken",
+          "discordAllowedUsers",
+          "discordPrefix",
         ];
         const currentConfig = loadConfig();
         const changes: string[] = [];
 
         for (const key of allowedKeys) {
-          if (args[key] !== undefined) {
+          if (args[key] === undefined) continue;
+
+          // Discord fields go into chatIntegrations.discord.*
+          if (key === "discordBotToken") {
+            if (!currentConfig.chatIntegrations) currentConfig.chatIntegrations = {};
+            if (!currentConfig.chatIntegrations.discord) currentConfig.chatIntegrations.discord = {};
+            currentConfig.chatIntegrations.discord.botToken = args[key] as string;
+            const token = args[key] as string;
+            const masked = token.length > 10
+              ? token.slice(0, 6) + "..." + token.slice(-4)
+              : "***";
+            changes.push(`discordBotToken=${masked}`);
+          } else if (key === "discordAllowedUsers") {
+            if (!currentConfig.chatIntegrations) currentConfig.chatIntegrations = {};
+            if (!currentConfig.chatIntegrations.discord) currentConfig.chatIntegrations.discord = {};
+            currentConfig.chatIntegrations.discord.allowedUsers = args[key] as string[];
+            changes.push(`discordAllowedUsers=${JSON.stringify(args[key])}`);
+          } else if (key === "discordPrefix") {
+            if (!currentConfig.chatIntegrations) currentConfig.chatIntegrations = {};
+            if (!currentConfig.chatIntegrations.discord) currentConfig.chatIntegrations.discord = {};
+            currentConfig.chatIntegrations.discord.prefix = args[key] as string;
+            changes.push(`discordPrefix=${JSON.stringify(args[key])}`);
+          } else {
             (currentConfig as Record<string, unknown>)[key] = args[key];
             changes.push(`${key}=${JSON.stringify(args[key])}`);
           }

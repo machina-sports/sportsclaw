@@ -63,7 +63,7 @@ import {
   listAgentIds,
   getAgentsDir,
 } from "./agents.js";
-import { formatResponse } from "./formatters.js";
+
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -133,6 +133,9 @@ export type {
 // ---------------------------------------------------------------------------
 
 const terminalExt = markedTerminal({
+  width: Math.min(process.stdout.columns || 80, 120),
+  reflowText: true,
+  showSectionPrefix: false,
   strong: pc.bold,
   em: pc.italic,
   heading: pc.bold,
@@ -142,6 +145,9 @@ const terminalExt = markedTerminal({
   del: pc.strikethrough,
   link: pc.cyan,
   href: pc.underline,
+  tableOptions: {
+    style: { head: [], border: [] },
+  },
 }) as MarkedExtension;
 
 // Patch: marked-terminal's `text` renderer doesn't parse inline tokens
@@ -160,11 +166,63 @@ const origTextRenderer = (terminalExt as { renderer: Record<string, Function> })
 
 const md = new Marked(terminalExt);
 
+/**
+ * Remove row separators between data rows in cli-table3 output.
+ * Keeps only the first mid-separator (header → data boundary) per table.
+ */
+function cleanTableSeparators(text: string): string {
+  const lines = text.split("\n");
+  let inTable = false;
+  let headerSepSeen = false;
+  const result: string[] = [];
+
+  for (const line of lines) {
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+
+    if (stripped.startsWith("┌")) {
+      inTable = true;
+      headerSepSeen = false;
+      result.push(line);
+    } else if (stripped.startsWith("└")) {
+      inTable = false;
+      result.push(line);
+    } else if (inTable && stripped.startsWith("├")) {
+      if (!headerSepSeen) {
+        headerSepSeen = true;
+        result.push(line);
+      }
+      // Skip subsequent mid-separators (between data rows)
+    } else {
+      result.push(line);
+    }
+  }
+
+  return result.join("\n");
+}
+
 function renderMarkdown(text: string): string {
-  const rendered = md.parse(text);
-  if (typeof rendered !== "string") return text;
-  // marked-terminal adds a trailing newline; trim to avoid double-spacing
-  return rendered.replace(/\n+$/, "");
+  // Pre-process: strip HTML tags that may appear in LLM responses.
+  // Inside table rows (lines with |), replace <br> with a separator
+  // instead of \n to avoid breaking the table structure.
+  let cleaned = text.replace(/<br\s*\/?>/gi, (match, offset, str) => {
+    const lineStart = str.lastIndexOf("\n", offset) + 1;
+    const lineEnd = str.indexOf("\n", offset);
+    const line = str.substring(lineStart, lineEnd === -1 ? str.length : lineEnd);
+    return line.includes("|") ? " · " : "\n";
+  });
+  cleaned = cleaned.replace(/<\/?[a-z][^>]*>/gi, "");
+
+  let rendered = md.parse(cleaned);
+  if (typeof rendered !== "string") return cleaned;
+
+  // Post-process: clean table row separators (keep header sep only)
+  rendered = cleanTableSeparators(rendered);
+
+  // Post-process: replace * bullets with • for cleaner look
+  rendered = rendered.replace(/^(\s*)\*\s/gm, "$1• ");
+
+  // Collapse excessive blank lines; trim trailing whitespace
+  return rendered.replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -832,8 +890,10 @@ async function cmdListen(args: string[]): Promise<void> {
 
   if (platform === "discord") {
     if (!process.env.DISCORD_BOT_TOKEN) {
-      console.error("Error: DISCORD_BOT_TOKEN environment variable is required.");
-      console.error("Get one at https://discord.com/developers/applications");
+      console.error("Error: Discord bot token is not configured.");
+      console.error("Set it up with: sportsclaw config");
+      console.error("Or set the DISCORD_BOT_TOKEN environment variable.");
+      console.error("Get a token at https://discord.com/developers/applications");
       process.exit(1);
     }
     const { startDiscordListener } = await import("./listeners/discord.js");
@@ -948,8 +1008,7 @@ async function cmdChat(args: string[]): Promise<void> {
       if (verbose) {
         try {
           const result = await engine.run(prompt, { userId });
-          const formatted = formatResponse(result, "cli");
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(formatted.text)}\n`);
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
         } catch (error: unknown) {
           if (error instanceof Error) {
             console.error(`Error: ${error.message}`);
@@ -975,8 +1034,7 @@ async function cmdChat(args: string[]): Promise<void> {
             abortSignal: cancel.abortSignal,
           });
           s.stop(tracker.doneSummary());
-          const formatted = formatResponse(result, "cli");
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(formatted.text)}\n`);
+          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
         } catch (error: unknown) {
           if (cancel.wasCancelled() || isAbortError(error)) {
             s.stop(tracker.cancelledSummary());
@@ -1036,8 +1094,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     // Verbose mode: no spinner, raw console.error logs
     try {
       const result = await engine.run(prompt);
-      const formatted = formatResponse(result, "cli");
-      console.log(renderMarkdown(formatted.text));
+      console.log(renderMarkdown(result));
     } catch (error: unknown) {
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
@@ -1063,8 +1120,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         abortSignal: cancel.abortSignal,
       });
       s.stop(tracker.doneSummary());
-      const formatted = formatResponse(result, "cli");
-      console.log(renderMarkdown(formatted.text));
+      console.log(renderMarkdown(result));
     } catch (error: unknown) {
       if (cancel.wasCancelled() || isAbortError(error)) {
         s.stop(tracker.cancelledSummary());
@@ -1127,8 +1183,11 @@ function printHelp(): void {
   console.log("  PYTHON_PATH             Path to Python interpreter (default: auto-detect)");
   console.log("  sportsclaw_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");
+  console.log("  DISCORD_PREFIX          Command prefix for Discord bot (default: !sportsclaw)");
   console.log("  TELEGRAM_BOT_TOKEN      Telegram bot token (for listen telegram)");
   console.log("  ALLOWED_USERS           Comma-separated user IDs for listener whitelist");
+  console.log("");
+  console.log("  Discord can also be configured via `sportsclaw config` or in-chat.");
 }
 
 // ---------------------------------------------------------------------------

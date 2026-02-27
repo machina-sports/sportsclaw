@@ -41,6 +41,20 @@ export const SPORTS_SKILLS_DISCLAIMER =
   `sports-skills is provided "as is" for personal, non-commercial use.\n` +
   `You are solely responsible for how you use the data it provides.`;
 
+/** Per-platform chat integration config */
+export interface DiscordIntegrationConfig {
+  botToken?: string;
+  allowedUsers?: string[];   // Discord user ID strings
+  prefix?: string;           // Default: "!sportsclaw"
+}
+
+// Future: TelegramIntegrationConfig, SlackIntegrationConfig, etc.
+
+export interface ChatIntegrationsConfig {
+  discord?: DiscordIntegrationConfig;
+  // telegram?: TelegramIntegrationConfig;  // future
+}
+
 export interface CLIConfig {
   provider?: LLMProvider;
   model?: string;
@@ -50,6 +64,7 @@ export interface CLIConfig {
   routingMaxSkills?: number;
   routingAllowSpillover?: number;
   selectedSports?: string[];
+  chatIntegrations?: ChatIntegrationsConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +125,9 @@ export interface ResolvedConfig {
   routingMode: "soft_lock";
   routingMaxSkills: number;
   routingAllowSpillover: number;
+  discordBotToken: string | undefined;
+  discordAllowedUsers: string[] | undefined;
+  discordPrefix: string;
 }
 
 function firstEnv(...keys: string[]): string | undefined {
@@ -178,6 +196,15 @@ export function resolveConfig(): ResolvedConfig {
     1
   );
 
+  const discordBotToken =
+    firstEnv("DISCORD_BOT_TOKEN") || file.chatIntegrations?.discord?.botToken;
+  const discordAllowedUsersRaw = firstEnv("ALLOWED_USERS");
+  const discordAllowedUsers = discordAllowedUsersRaw
+    ? discordAllowedUsersRaw.split(",").map(id => id.trim()).filter(Boolean)
+    : file.chatIntegrations?.discord?.allowedUsers;
+  const discordPrefix =
+    firstEnv("DISCORD_PREFIX") || file.chatIntegrations?.discord?.prefix || "!sportsclaw";
+
   return {
     provider,
     model,
@@ -186,6 +213,9 @@ export function resolveConfig(): ResolvedConfig {
     routingMode,
     routingMaxSkills,
     routingAllowSpillover,
+    discordBotToken,
+    discordAllowedUsers,
+    discordPrefix,
   };
 }
 
@@ -234,6 +264,13 @@ export function applyConfigToEnv(): ResolvedConfig {
       resolved.routingAllowSpillover
     );
   }
+
+  if (resolved.discordBotToken && !process.env.DISCORD_BOT_TOKEN)
+    process.env.DISCORD_BOT_TOKEN = resolved.discordBotToken;
+  if (resolved.discordAllowedUsers?.length && !process.env.ALLOWED_USERS)
+    process.env.ALLOWED_USERS = resolved.discordAllowedUsers.join(",");
+  if (resolved.discordPrefix && !process.env.DISCORD_PREFIX)
+    process.env.DISCORD_PREFIX = resolved.discordPrefix;
 
   return resolved;
 }
@@ -487,12 +524,75 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     sportSelections = selections as string[];
   }
 
+  // --- Optional Discord bot integration ---
+  let discordConfig: DiscordIntegrationConfig | undefined;
+
+  const configureDiscord = await p.confirm({
+    message: "🤖 Configure Discord bot integration? (optional)",
+    initialValue: false,
+  });
+
+  if (!p.isCancel(configureDiscord) && configureDiscord) {
+    const existingDiscordToken = savedConfig.chatIntegrations?.discord?.botToken;
+
+    let discordToken: string;
+    if (existingDiscordToken && existingDiscordToken.trim().length > 0) {
+      p.log.info("Using existing Discord bot token (already configured).");
+      discordToken = existingDiscordToken.trim();
+    } else {
+      const tokenInput = await p.password({
+        message: "🔑 Paste your Discord bot token:",
+        validate: (val) => {
+          if (!val || val.trim().length === 0) return "Bot token is required.";
+        },
+      });
+      if (p.isCancel(tokenInput)) {
+        p.cancel("🚫 Setup cancelled.");
+        process.exit(0);
+      }
+      discordToken = (tokenInput as string).trim();
+    }
+
+    const existingAllowed = savedConfig.chatIntegrations?.discord?.allowedUsers;
+    const allowedUsersInput = await p.text({
+      message: "👥 Allowed Discord user IDs (comma-separated, leave empty for all):",
+      placeholder: "123456789,987654321",
+      defaultValue: existingAllowed?.join(",") ?? "",
+    });
+    if (p.isCancel(allowedUsersInput)) {
+      p.cancel("🚫 Setup cancelled.");
+      process.exit(0);
+    }
+    const allowedUsers = (allowedUsersInput as string)
+      .split(",")
+      .map(id => id.trim())
+      .filter(Boolean);
+
+    const existingPrefix = savedConfig.chatIntegrations?.discord?.prefix;
+    const prefixInput = await p.text({
+      message: "💬 Command prefix:",
+      placeholder: "!sportsclaw",
+      defaultValue: existingPrefix || "!sportsclaw",
+    });
+    if (p.isCancel(prefixInput)) {
+      p.cancel("🚫 Setup cancelled.");
+      process.exit(0);
+    }
+
+    discordConfig = {
+      botToken: discordToken,
+      ...(allowedUsers.length > 0 && { allowedUsers }),
+      prefix: (prefixInput as string) || "!sportsclaw",
+    };
+  }
+
   const config: CLIConfig = {
     provider: selectedProvider,
     model: model as string,
     apiKey: finalApiKey,
     pythonPath: (pythonPath as string) || "python3",
     ...(sportSelections && { selectedSports: sportSelections }),
+    ...(discordConfig && { chatIntegrations: { discord: discordConfig } }),
   };
 
   saveConfig(config);
@@ -514,6 +614,9 @@ export async function runConfigFlow(): Promise<CLIConfig> {
   console.log(`  ${pc.cyan("sportsclaw list")}              See installed sports`);
   console.log(`  ${pc.cyan("sportsclaw agents")}            See installed agents`);
   console.log(`  ${pc.cyan("sportsclaw config")}            Reconfigure anytime`);
+  if (discordConfig?.botToken) {
+    console.log(`  ${pc.cyan("sportsclaw listen discord")}    Start Discord bot`);
+  }
   console.log("");
 
   return config;
