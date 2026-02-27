@@ -63,6 +63,11 @@ import {
   listAgentIds,
   getAgentsDir,
 } from "./agents.js";
+import {
+  generateReport as generateAnalyticsReport,
+  getAggregateStats,
+  getToolMetrics,
+} from "./analytics.js";
 
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1231,64 @@ function cmdAgents(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Analytics Command
+// ---------------------------------------------------------------------------
+
+function cmdAnalytics(args: string[]): void {
+  const subCmd = args[0];
+
+  if (subCmd === "report" || !subCmd) {
+    // Default: print full report
+    console.log(generateAnalyticsReport());
+    return;
+  }
+
+  if (subCmd === "json") {
+    // Export as JSON for programmatic access
+    const stats = getAggregateStats();
+    const tools = getToolMetrics();
+    console.log(JSON.stringify({ stats, tools }, null, 2));
+    return;
+  }
+
+  if (subCmd === "tools") {
+    // Just tool metrics
+    const tools = getToolMetrics();
+    console.log(pc.bold("Tool Metrics"));
+    console.log("");
+    const sorted = Object.entries(tools).sort((a, b) => b[1].callCount - a[1].callCount);
+    for (const [name, m] of sorted.slice(0, 20)) {
+      const successRate = ((m.successCount / m.callCount) * 100).toFixed(1);
+      const status = m.failCount > 0 ? pc.yellow(`${m.failCount} fails`) : pc.green("ok");
+      console.log(
+        `  ${name.padEnd(40)} ${String(m.callCount).padStart(6)} calls  ${successRate}% success  ${status}`
+      );
+    }
+    return;
+  }
+
+  if (subCmd === "summary") {
+    // Quick summary
+    const stats = getAggregateStats();
+    console.log(pc.bold("SportsClaw Analytics Summary"));
+    console.log("");
+    console.log(`  Queries:      ${stats.totalQueries.toLocaleString()}`);
+    console.log(`  Users:        ${stats.uniqueUsers.toLocaleString()}`);
+    console.log(`  Success Rate: ${(stats.successRate * 100).toFixed(1)}%`);
+    console.log(`  Avg Latency:  ${stats.avgLatencyMs}ms`);
+    console.log(`  Last Updated: ${stats.lastUpdated}`);
+    return;
+  }
+
+  console.log("Usage: sportsclaw analytics [report|json|tools|summary]");
+  console.log("");
+  console.log("  report   Full markdown report (default)");
+  console.log("  json     Export all data as JSON");
+  console.log("  tools    Tool call metrics");
+  console.log("  summary  Quick stats summary");
+}
+
+// ---------------------------------------------------------------------------
 // Main — route subcommands
 // ---------------------------------------------------------------------------
 
@@ -1270,6 +1333,8 @@ async function main(): Promise<void> {
       return cmdListen(subArgs);
     case "agents":
       return cmdAgents();
+    case "analytics":
+      return cmdAnalytics(subArgs);
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);

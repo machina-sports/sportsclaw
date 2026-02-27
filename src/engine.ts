@@ -49,6 +49,13 @@ import { loadAgents, type AgentDef } from "./agents.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { SECURITY_DIRECTIVES, sanitizeInput, logSecurityEvent } from "./security.js";
+import {
+  logQuery,
+  buildQueryEvent,
+  recordToolCall,
+  logSession,
+  generateSessionId,
+} from "./analytics.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -1236,6 +1243,11 @@ export class sportsclawEngine {
     const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const failedToolSignaturesThisTurn = new Map<string, string>();
 
+    // Analytics tracking
+    const analyticsStartTime = Date.now();
+    const analyticsSessionId = options?.userId ? generateSessionId() : "anonymous";
+    const toolCallsForAnalytics: Array<{ name: string; success: boolean; latencyMs: number }> = [];
+
     const tools = this.buildTools(memory, failedToolSignaturesThisTurn);
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
@@ -1321,6 +1333,22 @@ export class sportsclawEngine {
             success,
             skillName,
           });
+
+          // Analytics: record tool call metrics (skip internal tools)
+          if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
+            recordToolCall({
+              toolName: toolCall.toolName,
+              success,
+              latencyMs: durationMs ?? 0,
+            });
+            // Track for query-level analytics
+            toolCallsForAnalytics.push({
+              name: toolCall.toolName,
+              success,
+              latencyMs: durationMs ?? 0,
+            });
+          }
+
           if (!success && !toolCall.toolName.startsWith("update_")) {
             failedExternalTools.set(toolCall.toolCallId, {
               toolName: toolCall.toolName,
@@ -1519,6 +1547,29 @@ export class sportsclawEngine {
       console.error(
         `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
       );
+    }
+
+    // --- Analytics: log query event ---
+    if (options?.userId) {
+      try {
+        const queryEvent = buildQueryEvent({
+          userId: options.userId,
+          sessionId: analyticsSessionId,
+          promptLength: sanitizedPrompt.length,
+          detectedSports: routing.decision?.selectedSkills ?? [],
+          toolsCalled: toolCallsForAnalytics,
+          totalLatencyMs: Date.now() - analyticsStartTime,
+          clarificationNeeded: routing.decision?.mode === "ambiguous",
+        });
+        logQuery(queryEvent);
+      } catch (err) {
+        // Analytics should never break the main flow
+        if (this.config.verbose) {
+          console.error(
+            `[sportsclaw] analytics error: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
     }
 
     return responseText;
