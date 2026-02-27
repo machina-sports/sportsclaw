@@ -44,6 +44,9 @@ spec:
           volumeMounts:
             - name: memory-storage
               mountPath: /data/memory
+            - name: skill-guides
+              mountPath: /opt/skill-guides
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /health
@@ -64,3 +67,5 @@ spec:
         - name: memory-storage
           persistentVolumeClaim:
             claimName: sportsclaw-memory
+        - name: skill-guides
+          emptyDir: {}

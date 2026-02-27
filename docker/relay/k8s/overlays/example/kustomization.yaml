@@ -41,7 +41,7 @@ secretGenerator:
       - secrets.env
     type: Opaque
 
-# --- Patches (optional image override) --------------------------------------
+# --- Patches (optional) -----------------------------------------------------
 # Uncomment to pin a specific image version for this user:
 # patches:
 #   - target:
@@ -51,3 +51,22 @@ secretGenerator:
 #       - op: replace
 #         path: /spec/template/spec/containers/0/image
 #         value: machinasports/sportsclaw-relay:v0.9.0
+
+# --- Skill Guides initContainers (optional) ---------------------------------
+# Uncomment to clone template repos into the skill-guides volume.
+# Each initContainer clones a repo; the main container reads SKILL.md files.
+#
+# patches:
+#   - target:
+#       kind: Deployment
+#       name: sportsclaw-relay
+#     patch: |-
+#       - op: add
+#         path: /spec/template/spec/initContainers
+#         value:
+#           - name: clone-skills
+#             image: alpine/git
+#             command: ["sh", "-c", "git clone --depth 1 https://github.com/machina-sports/adidas-templates.git /skill-guides/adidas"]
+#             volumeMounts:
+#               - name: skill-guides
+#                 mountPath: /skill-guides
