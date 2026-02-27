@@ -48,12 +48,15 @@ WORKDIR /app
 
 # --- Node.js dependencies ----------------------------------------------------
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --include=optional
+RUN npm ci --include=optional
 
 # --- Build TypeScript ---------------------------------------------------------
 COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npx tsc
+
+# --- Prune dev dependencies after build --------------------------------------
+RUN npm prune --omit=dev
 
 # --- Bootstrap default sport schemas -----------------------------------------
 ENV SPORTSCLAW_SCHEMA_DIR=/app/.sportsclaw/schemas
