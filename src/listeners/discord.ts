@@ -371,12 +371,12 @@ export async function startDiscordListener(): Promise<void> {
     // --- Sprint 2: AskUserQuestion response handling ---
     if (customId.startsWith("sc_ask_")) {
       const parts = customId.split("_");
-      // Format: sc_ask_<contextKey>_<optionIndex>
-      const contextKey = parts[2];
+      // Format: sc_ask_<stateKey>_<optionIndex>
+      const stateKey = parts[2];
       const optionIdx = parseInt(parts[3], 10);
 
       const userId = `discord-${interaction.user.id}`;
-      const suspended = loadSuspendedState("discord", userId);
+      const suspended = await loadSuspendedState("discord", userId, stateKey);
 
       if (!suspended) {
         await interaction.reply({
@@ -395,7 +395,7 @@ export async function startDiscordListener(): Promise<void> {
         return;
       }
 
-      clearSuspendedState("discord", userId);
+      await clearSuspendedState("discord", userId, stateKey);
       await interaction.deferReply();
 
       try {
@@ -556,32 +556,31 @@ export async function startDiscordListener(): Promise<void> {
     } catch (error: unknown) {
       // Sprint 2: AskUserQuestion — render options as Discord buttons
       if (error instanceof AskUserQuestionHalt) {
-        clearInterval(typingInterval);
         const q = error.question;
 
-        // Persist state so the button handler can resume
-        saveSuspendedState({
-          platform: "discord",
-          userId,
-          question: q,
-          createdAt: new Date().toISOString(),
-          originalPrompt: prompt,
-        });
-
         // Build a button row from the question options
-        const contextKey = Math.random().toString(36).slice(2, 9);
+        const stateKey = Math.random().toString(36).slice(2, 9);
         const askRow = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
         for (let i = 0; i < q.options.length; i++) {
           askRow.addComponents(
             new ButtonBuilder()
-              .setCustomId(`sc_ask_${contextKey}_${i}`)
+              .setCustomId(`sc_ask_${stateKey}_${i}`)
               .setLabel(q.options[i].label)
               .setStyle(i === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
           );
         }
 
-        // Store the suspended state key so button handler can find it
-        // (We use the userId-based state file, so contextKey isn't needed for lookup)
+        // Persist state keyed by stateKey so concurrent questions don't collide
+        await saveSuspendedState(
+          {
+            platform: "discord",
+            userId,
+            question: q,
+            createdAt: new Date().toISOString(),
+            originalPrompt: prompt,
+          },
+          stateKey
+        );
 
         await safeSend(message, {
           content: q.prompt,

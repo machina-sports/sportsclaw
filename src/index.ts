@@ -137,7 +137,7 @@ export type {
   AskUserOption,
   AskUserQuestionRequest,
   SuspendedState,
-  DegenTask,
+  WatcherTask,
 } from "./types.js";
 
 // Sprint 2 modules

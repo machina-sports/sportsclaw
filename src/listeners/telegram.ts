@@ -326,7 +326,6 @@ async function processMessage(
     // Fresh engine per request — avoids shared-state issues
     const engine = new sportsclawEngine(engineConfig);
     const response = await engine.run(prompt, { userId });
-    clearInterval(typingInterval);
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
@@ -351,26 +350,28 @@ async function processMessage(
       });
     }
   } catch (error: unknown) {
-    clearInterval(typingInterval);
-
     // Sprint 2: AskUserQuestion — render options as Telegram inline keyboard
     if (error instanceof AskUserQuestionHalt) {
       const q = error.question;
+      const stateKey = Math.random().toString(36).slice(2, 9);
 
       // Persist state so the callback handler can resume
-      saveSuspendedState({
-        platform: "telegram",
-        userId,
-        question: q,
-        createdAt: new Date().toISOString(),
-        originalPrompt: prompt,
-      });
+      await saveSuspendedState(
+        {
+          platform: "telegram",
+          userId,
+          question: q,
+          createdAt: new Date().toISOString(),
+          originalPrompt: prompt,
+        },
+        stateKey
+      );
 
       // Build inline keyboard from question options
       const keyboard: InlineKeyboardButton[][] = [
         q.options.map((opt, idx) => ({
           text: opt.label,
-          callback_data: `sc_ask_${idx}`,
+          callback_data: `sc_ask_${stateKey}_${idx}`,
         })),
       ];
 
@@ -386,6 +387,8 @@ async function processMessage(
     await sendMessage(apiBase, msg.chat.id, "Sorry, I encountered an error processing your request.", {
       replyToMessageId: msg.message_id,
     });
+  } finally {
+    clearInterval(typingInterval);
   }
 }
 
@@ -420,10 +423,13 @@ async function processCallbackQuery(
   if (!cq.data.startsWith("sc_")) return;
 
   // Sprint 2: AskUserQuestion callback handling
+  // Format: sc_ask_<stateKey>_<optionIndex>
   if (cq.data.startsWith("sc_ask_")) {
-    const optionIdx = parseInt(cq.data.split("_")[2], 10);
+    const askParts = cq.data.split("_");
+    const stateKey = askParts[2];
+    const optionIdx = parseInt(askParts[3], 10);
     const userId = `telegram-${cq.from.id}`;
-    const suspended = loadSuspendedState("telegram", userId);
+    const suspended = await loadSuspendedState("telegram", userId, stateKey);
 
     if (!suspended) {
       await fetch(`${apiBase}/answerCallbackQuery`, {
@@ -441,7 +447,7 @@ async function processCallbackQuery(
     const selectedOption = suspended.question.options[optionIdx];
     if (!selectedOption) return;
 
-    clearSuspendedState("telegram", userId);
+    await clearSuspendedState("telegram", userId, stateKey);
 
     await fetch(`${apiBase}/answerCallbackQuery`, {
       method: "POST",
@@ -462,7 +468,6 @@ async function processCallbackQuery(
       const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
       const engine = new sportsclawEngine(engineConfig);
       const response = await engine.run(resumePrompt, { userId });
-      clearInterval(typingInterval);
 
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;
@@ -475,12 +480,13 @@ async function processCallbackQuery(
         });
       }
     } catch (resumeErr: unknown) {
-      clearInterval(typingInterval);
       const errMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
       console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
       await sendMessage(apiBase, cqMessage.chat.id, "Sorry, I encountered an error processing your selection.", {
         replyToMessageId: cqMessage.message_id,
       });
+    } finally {
+      clearInterval(typingInterval);
     }
     return;
   }
@@ -533,7 +539,6 @@ async function processCallbackQuery(
       skipFanProfile: true,
     });
     const response = await engine.run(followUpPrompt, { userId: ctx.userId });
-    clearInterval(typingInterval);
 
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;
@@ -546,7 +551,6 @@ async function processCallbackQuery(
       });
     }
   } catch (error: unknown) {
-    clearInterval(typingInterval);
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error(`[sportsclaw] Callback query error: ${errMsg}`);
     await sendMessage(
@@ -555,5 +559,7 @@ async function processCallbackQuery(
       "Sorry, I encountered an error processing that request.",
       { replyToMessageId: cqMessage.message_id }
     );
+  } finally {
+    clearInterval(typingInterval);
   }
 }

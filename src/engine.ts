@@ -1249,10 +1249,10 @@ export class sportsclawEngine {
     });
 
     // -----------------------------------------------------------------
-    // Sprint 2: Degen Task Bus — async subagent coordination
+    // Sprint 2: Async Watcher Bus — condition-action triggers
     // -----------------------------------------------------------------
 
-    const taskBusUserId = runUserId ?? "anonymous";
+    const watcherUserId = runUserId ?? "anonymous";
 
     toolMap["create_task"] = defineTool({
       description:
@@ -1289,19 +1289,23 @@ export class sportsclawEngine {
         if (!args.condition || !args.action) {
           return "Error: condition and action are required.";
         }
-        const task = createTask({
-          condition: args.condition,
-          action: args.action,
-          context: args.context ?? {},
-          userId: taskBusUserId,
-        });
-        return JSON.stringify({
-          status: "created",
-          task_id: task.id,
-          condition: task.condition,
-          action: task.action,
-          created_at: task.createdAt,
-        });
+        try {
+          const task = await createTask({
+            condition: args.condition,
+            action: args.action,
+            context: args.context ?? {},
+            userId: watcherUserId,
+          });
+          return JSON.stringify({
+            status: "created",
+            task_id: task.id,
+            condition: task.condition,
+            action: task.action,
+            created_at: task.createdAt,
+          });
+        } catch (err) {
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
       },
     });
 
@@ -1314,7 +1318,7 @@ export class sportsclawEngine {
         properties: {},
       }),
       execute: async () => {
-        const tasks = listTasks({ status: "active" });
+        const tasks = await listTasks({ status: "active", userId: watcherUserId });
         if (tasks.length === 0) {
           return "No active tasks.";
         }
@@ -1346,7 +1350,7 @@ export class sportsclawEngine {
       }),
       execute: async (args: { task_id?: string }) => {
         if (!args.task_id) return "Error: task_id is required.";
-        const task = completeTask(args.task_id);
+        const task = await completeTask(args.task_id);
         if (!task) return `Task "${args.task_id}" not found.`;
         return JSON.stringify({
           status: "completed",

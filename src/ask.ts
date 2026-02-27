@@ -7,10 +7,11 @@
  * buttons / Telegram inline keyboards). When the user taps an option, the
  * listener resumes the engine with the selected value.
  *
- * State file: ~/.sportsclaw/memory/<platform>-<user_id>/state.json
+ * State file: ~/.sportsclaw/memory/<platform>-<user_id>/state_<contextKey>.json
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { SuspendedState, AskUserQuestionRequest } from "./types.js";
@@ -28,8 +29,9 @@ function getMemoryDir(platform: string, userId: string): string {
   return dir;
 }
 
-function getStatePath(platform: string, userId: string): string {
-  return join(getMemoryDir(platform, userId), "state.json");
+function getStatePath(platform: string, userId: string, contextKey?: string): string {
+  const filename = contextKey ? `state_${contextKey}.json` : "state.json";
+  return join(getMemoryDir(platform, userId), filename);
 }
 
 // ---------------------------------------------------------------------------
@@ -39,23 +41,30 @@ function getStatePath(platform: string, userId: string): string {
 /**
  * Persist the engine's suspended state to disk so the listener can
  * resume execution when the user responds.
+ *
+ * @param stateKey Unique key for this question instance (used in filename
+ *   to prevent concurrent questions from overwriting each other).
  */
-export function saveSuspendedState(state: SuspendedState): void {
-  const path = getStatePath(state.platform, state.userId);
-  writeFileSync(path, JSON.stringify(state, null, 2), "utf-8");
+export async function saveSuspendedState(
+  state: SuspendedState,
+  stateKey?: string
+): Promise<void> {
+  const path = getStatePath(state.platform, state.userId, stateKey);
+  await writeFile(path, JSON.stringify(state, null, 2), "utf-8");
 }
 
 /**
  * Load a suspended state for a given platform + user, or null if none exists.
  */
-export function loadSuspendedState(
+export async function loadSuspendedState(
   platform: string,
-  userId: string
-): SuspendedState | null {
-  const path = getStatePath(platform, userId);
+  userId: string,
+  contextKey?: string
+): Promise<SuspendedState | null> {
+  const path = getStatePath(platform, userId, contextKey);
   if (!existsSync(path)) return null;
   try {
-    const raw = readFileSync(path, "utf-8");
+    const raw = await readFile(path, "utf-8");
     return JSON.parse(raw) as SuspendedState;
   } catch {
     return null;
@@ -65,13 +74,19 @@ export function loadSuspendedState(
 /**
  * Clear (delete) a suspended state after the user has responded.
  */
-export function clearSuspendedState(platform: string, userId: string): void {
-  const path = getStatePath(platform, userId);
+export async function clearSuspendedState(
+  platform: string,
+  userId: string,
+  contextKey?: string
+): Promise<void> {
+  const path = getStatePath(platform, userId, contextKey);
   if (existsSync(path)) {
     try {
-      unlinkSync(path);
-    } catch {
-      // Best effort — non-critical
+      await unlink(path);
+    } catch (err) {
+      console.error(
+        `[sportsclaw] Failed to clear suspended state: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 }

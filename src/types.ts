@@ -267,10 +267,10 @@ export interface SuspendedState {
 }
 
 // ---------------------------------------------------------------------------
-// Degen Task Bus — async subagent coordination (Sprint 2)
+// Async Watcher Bus — condition-action triggers (Sprint 2)
 // ---------------------------------------------------------------------------
 
-export interface DegenTask {
+export interface WatcherTask {
   id: string;
   /** Human-readable condition to check (e.g., "LeBron PTS >= 30") */
   condition: string;
