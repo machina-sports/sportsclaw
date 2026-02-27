@@ -20,7 +20,10 @@
     "listen:discord": "tsc && node dist/index.js listen discord",
     "listen:telegram": "tsc && node dist/index.js listen telegram",
     "docker:build": "docker build -t sportsclaw .",
-    "docker:run": "docker run --rm --env-file .env sportsclaw"
+    "docker:run": "docker run --rm --env-file .env sportsclaw",
+    "server": "tsc && node --env-file=.env.local dist/server/index.js",
+    "server:dev": "tsc --watch & node --env-file=.env.local --watch dist/server/index.js",
+    "stripe:listen": "stripe listen --forward-to localhost:3001/api/webhooks/stripe"
   },
   "keywords": [
     "sports",
@@ -41,6 +44,8 @@
     "discord.js": "^14.16.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/marked-terminal": "^6.1.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
@@ -50,10 +55,15 @@
     "@ai-sdk/google": "^3.0.30",
     "@ai-sdk/openai": "^3.0.31",
     "@clack/prompts": "^1.0.1",
+    "@clerk/express": "^1.7.76",
     "ai": "^6.0.97",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
     "figlet": "^1.10.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
-    "picocolors": "^1.1.1"
+    "picocolors": "^1.1.1",
+    "stripe": "^20.4.0"
   }
 }

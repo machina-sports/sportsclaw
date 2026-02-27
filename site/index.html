@@ -20,6 +20,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="pk_live_Y2xlcmsuZGV2Lm1hY2hpbmEuZ2ck"
+    src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js">
+  </script>
   <style>
     *, *::before, *::after {
       margin: 0;
@@ -707,118 +711,6 @@
       font-size: 0.9rem;
     }
 
-    /* Waitlist modal */
-    .modal-overlay {
-      display: none;
-      position: fixed;
-      inset: 0;
-      z-index: 200;
-      background: rgba(0, 0, 0, 0.6);
-      backdrop-filter: blur(4px);
-      -webkit-backdrop-filter: blur(4px);
-      align-items: center;
-      justify-content: center;
-    }
-
-    .modal-overlay.open { display: flex; }
-
-    .modal {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 2rem;
-      width: 90%;
-      max-width: 400px;
-      position: relative;
-    }
-
-    .modal h3 {
-      font-size: 1.2rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .modal p {
-      color: var(--text-muted);
-      font-size: 0.85rem;
-      margin-bottom: 1.25rem;
-    }
-
-    .modal-close {
-      position: absolute;
-      top: 1rem;
-      right: 1rem;
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      cursor: pointer;
-      font-size: 1.25rem;
-      line-height: 1;
-    }
-
-    .modal-close:hover { color: var(--text); }
-
-    .modal-input {
-      width: 100%;
-      padding: 0.65rem 0.75rem;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      margin-bottom: 0.75rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-
-    .modal-input:focus { border-color: var(--blue); }
-
-    .modal-submit {
-      width: 100%;
-      padding: 0.65rem;
-      background: var(--blue);
-      border: 1px solid var(--blue);
-      border-radius: 6px;
-      color: #fff;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .modal-submit:hover {
-      background: var(--blue-dim);
-      border-color: var(--blue-dim);
-      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
-    }
-
-    .modal-submit:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-    }
-
-    .modal-error {
-      color: #ef4444;
-      font-size: 0.8rem;
-      margin-bottom: 0.75rem;
-      display: none;
-    }
-
-    .modal-success {
-      text-align: center;
-      padding: 1rem 0;
-    }
-
-    .modal-success .checkmark {
-      color: var(--green);
-      font-size: 1.5rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .modal-success p {
-      margin-bottom: 0;
-    }
   </style>
 </head>
 <body>
@@ -843,7 +735,7 @@
     <!-- Hero -->
     <section class="hero container">
       <div class="badge">v0.7.2 Released</div>
-      <h1>Self-Evolving Sports AI for Your Chat Apps</h1>
+      <h1>Self-Evolving Sports AI</h1>
       <p>Host an autonomous sports AI on Discord and Telegram with one click. It builds persistent memory, adapts to your users, and gets smarter every day.</p>
 
       <div style="position: relative; display: inline-block;">
@@ -962,7 +854,7 @@
             <li>Premium data connectors</li>
           </ul>
           <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
+            <button class="pricing-cta pricing-cta-primary checkout-btn" data-plan="pro" type="button">Subscribe</button>
           </div>
         </div>
 
@@ -978,7 +870,7 @@
             <li>Priority support</li>
           </ul>
           <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
+            <button class="pricing-cta pricing-cta-primary checkout-btn" data-plan="max" type="button">Subscribe</button>
           </div>
         </div>
 
@@ -1007,25 +899,9 @@
     </div>
   </footer>
 
-  <!-- Waitlist Modal -->
-  <div class="modal-overlay" id="waitlist-modal">
-    <div class="modal">
-      <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
-      <div id="modal-form-view">
-        <h3>Join the Waitlist</h3>
-        <p>Enter your email and we'll notify you when Machina Cloud is ready.</p>
-        <div class="modal-error" id="modal-error"></div>
-        <form id="waitlist-form">
-          <input class="modal-input" type="email" id="waitlist-email" placeholder="you@example.com" required autocomplete="email">
-          <button class="modal-submit" type="submit" id="waitlist-submit">Get Early Access</button>
-        </form>
-      </div>
-      <div id="modal-success-view" class="modal-success" style="display:none;">
-        <div class="checkmark">&#10003;</div>
-        <h3>You're in.</h3>
-        <p>We'll notify you when Machina Cloud launches.</p>
-      </div>
-    </div>
+  <!-- Checkout Success Toast -->
+  <div id="checkout-toast" style="display:none;position:fixed;top:80px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:0.75rem 1.5rem;border-radius:6px;font-family:var(--mono);font-size:0.85rem;font-weight:600;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,0.2);">
+    Subscription active — welcome aboard!
   </div>
 
   <script>
@@ -1081,78 +957,139 @@
       }
     });
 
-    // Waitlist modal
-    const LOOPS_FORM_ID = 'cmk0agb7w9wgo0izrcf2e040w';
-
-    const modal = document.getElementById('waitlist-modal');
-    const modalClose = document.getElementById('modal-close');
-    const waitlistForm = document.getElementById('waitlist-form');
-    const waitlistEmail = document.getElementById('waitlist-email');
-    const waitlistSubmit = document.getElementById('waitlist-submit');
-    const modalError = document.getElementById('modal-error');
-    const modalFormView = document.getElementById('modal-form-view');
-    const modalSuccessView = document.getElementById('modal-success-view');
-
-    function openModal() {
-      modal.classList.add('open');
-      modalFormView.style.display = '';
-      modalSuccessView.style.display = 'none';
-      modalError.style.display = 'none';
-      waitlistEmail.value = '';
-      waitlistSubmit.disabled = false;
-      waitlistSubmit.textContent = 'Get Early Access';
-      setTimeout(() => waitlistEmail.focus(), 100);
+    // Checkout success toast
+    if (window.location.search.includes('checkout=success')) {
+      const toast = document.getElementById('checkout-toast');
+      toast.style.display = 'block';
+      setTimeout(() => { toast.style.display = 'none'; }, 5000);
+      // Clean up URL
+      const url = new URL(window.location.href);
+      url.searchParams.delete('checkout');
+      window.history.replaceState({}, '', url.toString());
     }
 
-    function closeModal() {
-      modal.classList.remove('open');
-    }
+    // Stripe checkout flow
+    const API_BASE = window.location.hostname === 'localhost'
+      ? 'http://localhost:3001'
+      : 'https://api.sportsclaw.gg';
 
-    document.querySelectorAll('.waitlist-btn').forEach(btn => {
-      btn.addEventListener('click', openModal);
-    });
+    const SESSION_SIGN_IN = 'https://session.machina.gg/clerk/sign-in';
 
-    modalClose.addEventListener('click', closeModal);
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) closeModal();
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeModal();
-    });
+    // Attach click handlers immediately — don't wait for Clerk
+    document.querySelectorAll('.checkout-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const planId = btn.dataset.plan;
+        btn.disabled = true;
+        btn.textContent = 'Loading...';
 
-    waitlistForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const email = waitlistEmail.value.trim();
-      if (!email) return;
+        try {
+          // Check if Clerk is loaded and user is signed in
+          const clerk = window.Clerk;
+          if (!clerk || !clerk.loaded) {
+            try { await clerk?.load(); } catch (e) { console.warn('Clerk load failed:', e); }
+          }
 
-      waitlistSubmit.disabled = true;
-      waitlistSubmit.textContent = 'Joining...';
-      modalError.style.display = 'none';
+          if (!clerk?.user) {
+            // Redirect to session.machina.gg sign-in with callback
+            // Put ?plan= BEFORE the hash so it lands in window.location.search
+            const callback = `${window.location.origin}/?plan=${planId}#pricing`;
+            window.location.href = `${SESSION_SIGN_IN}?callback=${encodeURIComponent(callback)}`;
+            return;
+          }
 
-      try {
-        const resp = await fetch(`https://app.loops.so/api/newsletter-form/${LOOPS_FORM_ID}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
-        });
+          const token = await clerk.session.getToken();
+          const resp = await fetch(`${API_BASE}/api/checkout`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ planId })
+          });
 
-        if (resp.ok || resp.status === 409) {
-          modalFormView.style.display = 'none';
-          modalSuccessView.style.display = '';
-        } else {
-          const data = await resp.json().catch(() => ({}));
-          modalError.textContent = data.message || 'Something went wrong. Please try again.';
-          modalError.style.display = 'block';
-          waitlistSubmit.disabled = false;
-          waitlistSubmit.textContent = 'Get Early Access';
+          const data = await resp.json();
+
+          if (resp.status === 409 && data.portalUrl) {
+            window.location.href = data.portalUrl;
+            return;
+          }
+
+          if (!resp.ok) {
+            throw new Error(data.error || 'Checkout failed');
+          }
+
+          window.location.href = data.url;
+        } catch (err) {
+          console.error('Checkout error:', err);
+          btn.textContent = 'Subscribe';
+          btn.disabled = false;
         }
-      } catch {
-        modalError.textContent = 'Something went wrong. Please try again.';
-        modalError.style.display = 'block';
-        waitlistSubmit.disabled = false;
-        waitlistSubmit.textContent = 'Get Early Access';
-      }
+      });
     });
+
+    // Auto-trigger checkout if returning from sign-in with a plan param
+    function getPlanFromUrl() {
+      // Check query string first: ?plan=pro#pricing
+      const searchParams = new URLSearchParams(window.location.search);
+      if (searchParams.get('plan')) return searchParams.get('plan');
+      // Fallback: check hash fragment: #pricing?plan=pro
+      const hashQuery = window.location.hash.split('?')[1];
+      if (hashQuery) {
+        const hashParams = new URLSearchParams(hashQuery);
+        if (hashParams.get('plan')) return hashParams.get('plan');
+      }
+      return null;
+    }
+
+    async function handleReturnFromSignIn() {
+      const plan = getPlanFromUrl();
+      if (!plan) return;
+
+      // Wait for Clerk to load (retry a few times)
+      let clerk = window.Clerk;
+      if (clerk) {
+        try { await clerk.load(); } catch (e) { console.warn('Clerk load:', e); }
+      } else {
+        // Poll for Clerk availability (max 5 seconds)
+        clerk = await new Promise((resolve) => {
+          let attempts = 0;
+          const poll = setInterval(() => {
+            if (window.Clerk || attempts++ > 25) {
+              clearInterval(poll);
+              resolve(window.Clerk);
+            }
+          }, 200);
+        });
+        if (clerk) {
+          try { await clerk.load(); } catch (e) { console.warn('Clerk load:', e); }
+        }
+      }
+
+      // Clean URL
+      const url = new URL(window.location.href);
+      url.searchParams.delete('plan');
+      url.hash = 'pricing';
+      window.history.replaceState({}, '', url.toString());
+
+      if (!clerk?.user) {
+        console.warn('Clerk session not available after sign-in redirect. User may need to sign in again.');
+        // Scroll to pricing section so the user can try again
+        document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' });
+        return;
+      }
+
+      // Trigger checkout
+      const btn = document.querySelector(`.checkout-btn[data-plan="${plan}"]`);
+      if (btn) btn.click();
+    }
+
+    // Initialize Clerk in background and handle sign-in return
+    (async () => {
+      try {
+        if (window.Clerk) await window.Clerk.load();
+      } catch (e) { console.warn('Clerk init:', e); }
+      handleReturnFromSignIn();
+    })();
   </script>
 </body>
 </html>

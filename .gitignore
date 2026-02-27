@@ -2,4 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+.env.local
 *.png
+
+.agents/
+
+.claude/
+
+skills-lock.json
