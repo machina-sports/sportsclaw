@@ -19,6 +19,8 @@ import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
+import { detectSport, getButtons, getFollowUpPrompt } from "../buttons.js";
+import type { DetectedSport } from "../buttons.js";
 
 const COMMAND_PREFIX = "/claw";
 
@@ -84,14 +86,15 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 interface ButtonContext {
   prompt: string;
   userId: string;
+  sport: DetectedSport;
 }
 
 const buttonContexts = new Map<string, ButtonContext>();
 const MAX_BUTTON_CONTEXTS = 200;
 
-function storeButtonContext(prompt: string, userId: string): string {
+function storeButtonContext(prompt: string, userId: string, sport: DetectedSport): string {
   const key = Math.random().toString(36).slice(2, 9);
-  buttonContexts.set(key, { prompt, userId });
+  buttonContexts.set(key, { prompt, userId, sport });
   // Evict oldest entries beyond cap
   if (buttonContexts.size > MAX_BUTTON_CONTEXTS) {
     const firstKey = buttonContexts.keys().next().value;
@@ -105,15 +108,16 @@ function storeButtonContext(prompt: string, userId: string): string {
 // ---------------------------------------------------------------------------
 
 function buildInlineKeyboard(
-  contextKey: string
+  contextKey: string,
+  sport: DetectedSport
 ): { inline_keyboard: InlineKeyboardButton[][] } {
+  const buttons = getButtons(sport);
   return {
     inline_keyboard: [
-      [
-        { text: "📊 Box Score", callback_data: `sc_boxscore_${contextKey}` },
-        { text: "📋 Play-by-Play", callback_data: `sc_pbp_${contextKey}` },
-        { text: "📈 Full Stats", callback_data: `sc_stats_${contextKey}` },
-      ],
+      buttons.map((b) => ({
+        text: b.label,
+        callback_data: `sc_${b.action}_${contextKey}`,
+      })),
     ],
   };
 }
@@ -324,8 +328,9 @@ async function processMessage(
     // Build inline keyboard for game-related responses
     let replyMarkup: object | undefined;
     if (isGameRelatedResponse(response, prompt)) {
-      const contextKey = storeButtonContext(prompt, userId);
-      replyMarkup = buildInlineKeyboard(contextKey);
+      const sport = detectSport(response, prompt);
+      const contextKey = storeButtonContext(prompt, userId, sport);
+      replyMarkup = buildInlineKeyboard(contextKey, sport);
     }
 
     // Telegram has a 4096 char limit — split if needed
@@ -394,19 +399,7 @@ async function processCallbackQuery(
     return;
   }
 
-  const actionLabels: Record<string, string> = {
-    boxscore: "📊 Loading box score...",
-    pbp: "📋 Loading play-by-play...",
-    stats: "📈 Loading stats...",
-  };
-
-  const actionPrompts: Record<string, string> = {
-    boxscore: `Use nba_get_live_boxscore to show the detailed box score with all player stats for the game mentioned in: ${ctx.prompt}`,
-    pbp: `Use nba_get_live_playbyplay to show the actual game play-by-play events (shots, fouls, timeouts) for the game in: ${ctx.prompt}`,
-    stats: `Show comprehensive team and player statistics for: ${ctx.prompt}`,
-  };
-
-  const followUpPrompt = actionPrompts[action];
+  const followUpPrompt = getFollowUpPrompt(action, ctx.sport, ctx.prompt);
   if (!followUpPrompt) return;
 
   // Acknowledge the button press
@@ -415,7 +408,7 @@ async function processCallbackQuery(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       callback_query_id: cq.id,
-      text: actionLabels[action] || "Loading...",
+      text: "Loading...",
     }),
   });
 

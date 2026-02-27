@@ -131,18 +131,36 @@ export function isGameRelatedResponse(
   const promptLower = prompt.toLowerCase();
   const responseLower = response.toLowerCase();
 
+  // Prompt: user is asking about game/match data
   const gamePromptPatterns = [
     /\b(score|scores|game|games|playing|live|tonight|today)\b/,
-    /\b(matchup|match-up|vs\.?|versus)\b/,
-    /\b(box\s*score|play[\s-]*by[\s-]*play|stats)\b/,
+    /\b(match|matchup|match-up|vs\.?|versus)\b/,
+    /\b(box\s*score|play[\s-]*by[\s-]*play|stats|lineup|standings|leaderboard)\b/,
     /\bhow.*(playing|doing)\b/,
   ];
 
+  // Response: contains actual game/match data (cross-sport)
   const gameResponsePatterns = [
+    // Universal score pattern
     /\b\d{1,3}\s*[-–]\s*\d{1,3}\b/,
-    /\b(Q[1-4]|[1-4](st|nd|rd|th)\s*(quarter|qtr)|half|halftime|overtime|OT)\b/i,
-    /\b(final|live|in progress|upcoming)\b/i,
+    /\b(final|live|in progress|upcoming|full[\s-]?time)\b/i,
+    // Basketball
+    /\b(Q[1-4]|[1-4](st|nd|rd|th)\s*(quarter|qtr)|halftime|overtime|OT)\b/i,
     /\b(pts?|reb|ast|points|rebounds|assists)\b/i,
+    // Football/Soccer
+    /\b(goal|clean sheet|xG|possession|penalty|half[\s-]?time|match\s*day)\b/i,
+    // American Football
+    /\b(touchdown|TD|field goal|interception|rushing|passing yards?)\b/i,
+    // Baseball
+    /\b(inning|RBI|ERA|home run|strikeout|at[\s-]?bat)\b/i,
+    // Hockey
+    /\b([1-3](st|nd|rd)\s*period|power play|shutout)\b/i,
+    // Tennis
+    /\b(set [1-5]|match point|break point|tiebreak)\b/i,
+    // F1
+    /\b(lap \d+|pole position|pit stop|fastest lap)\b/i,
+    // Golf
+    /\b(under par|over par|leaderboard|round [1-4])\b/i,
   ];
 
   const promptMatch = gamePromptPatterns.some((p) => p.test(promptLower));

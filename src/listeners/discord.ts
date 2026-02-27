@@ -24,6 +24,8 @@ import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
+import { detectSport, getButtons, getFollowUpPrompt } from "../buttons.js";
+import type { DetectedSport } from "../buttons.js";
 import { executePythonBridge } from "../tools.js";
 import { loadConfig } from "../config.js";
 import type { DiscordFeaturesConfig } from "../config.js";
@@ -152,14 +154,15 @@ function detectPollTeams(prompt: string): { team1: string; team2: string } | nul
 interface ButtonContext {
   prompt: string;
   userId: string;
+  sport: DetectedSport;
 }
 
 const buttonContexts = new Map<string, ButtonContext>();
 const MAX_BUTTON_CONTEXTS = 200;
 
-function storeButtonContext(prompt: string, userId: string): string {
+function storeButtonContext(prompt: string, userId: string, sport: DetectedSport): string {
   const key = Math.random().toString(36).slice(2, 9);
-  buttonContexts.set(key, { prompt, userId });
+  buttonContexts.set(key, { prompt, userId, sport });
   // Evict oldest entries beyond cap
   if (buttonContexts.size > MAX_BUTTON_CONTEXTS) {
     const firstKey = buttonContexts.keys().next().value;
@@ -301,24 +304,21 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // Build action row with Box Score / Play-by-Play / Full Stats buttons
+  // Build sport-aware action row from detected sport
   // ---------------------------------------------------------------------------
 
-  function buildActionRow(contextKey: string): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> {
-    return new ActionRowBuilder<import("discord.js").ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`sc_boxscore_${contextKey}`)
-        .setLabel("Box Score")
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`sc_pbp_${contextKey}`)
-        .setLabel("Play-by-Play")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`sc_stats_${contextKey}`)
-        .setLabel("Full Stats")
-        .setStyle(ButtonStyle.Secondary)
-    );
+  function buildActionRow(contextKey: string, sport: DetectedSport): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> {
+    const buttons = getButtons(sport);
+    const row = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
+    for (let i = 0; i < buttons.length; i++) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`sc_${buttons[i].action}_${contextKey}`)
+          .setLabel(buttons[i].label)
+          .setStyle(i === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      );
+    }
+    return row;
   }
 
   // ---------------------------------------------------------------------------
@@ -375,13 +375,7 @@ export async function startDiscordListener(): Promise<void> {
       return;
     }
 
-    const actionPrompts: Record<string, string> = {
-      boxscore: `Use nba_get_live_boxscore to show the detailed box score with all player stats for the game mentioned in: ${ctx.prompt}`,
-      pbp: `Use nba_get_live_playbyplay to show the actual game play-by-play events (shots, fouls, timeouts) for the game in: ${ctx.prompt}`,
-      stats: `Show comprehensive team and player statistics for: ${ctx.prompt}`,
-    };
-
-    const followUpPrompt = actionPrompts[action];
+    const followUpPrompt = getFollowUpPrompt(action, ctx.sport, ctx.prompt);
     if (!followUpPrompt) return;
 
     await interaction.deferReply();
@@ -539,8 +533,9 @@ export async function startDiscordListener(): Promise<void> {
 
       // Attach action buttons only to game/score responses
       if (features.buttons && isGameRelatedResponse(response, prompt)) {
-        const contextKey = storeButtonContext(prompt, userId);
-        messageOptions.components = [buildActionRow(contextKey)];
+        const sport = detectSport(response, prompt);
+        const contextKey = storeButtonContext(prompt, userId, sport);
+        messageOptions.components = [buildActionRow(contextKey, sport)];
       }
 
       await safeSend(message, messageOptions);
