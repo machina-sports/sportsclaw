@@ -1011,7 +1011,8 @@ function emitNdjson(event: Record<string, unknown>): void {
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
-  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe");
+  const formatArg = args.find((a) => a.startsWith("--format="))?.split("=")[1] ?? "cli";
+  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe" && !a.startsWith("--format="));
   const prompt = filteredArgs.join(" ");
 
   if (!prompt) {
@@ -1049,7 +1050,7 @@ async function cmdQuery(args: string[]): Promise<void> {
       const result = await engine.run(prompt, {
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
-      const formatted = formatResponse(result, "cli");
+      const formatted = formatResponse(result, formatArg as any);
       emitNdjson({ type: "result", text: formatted.text });
       process.exit(0);
     } catch (error: unknown) {

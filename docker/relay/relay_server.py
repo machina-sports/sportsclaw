@@ -304,6 +304,10 @@ def _build_cmd(body: dict) -> list[str]:
     if body.get("verbose"):
         cmd.append("--verbose")
 
+    fmt = body.get("format")
+    if fmt:
+        cmd.append(f"--format={fmt}")
+
     return cmd
 
 
