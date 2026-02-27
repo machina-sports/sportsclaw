@@ -1001,6 +1001,13 @@ async function cmdChat(args: string[]): Promise<void> {
 // CLI: default — run a one-shot query
 // ---------------------------------------------------------------------------
 
+/**
+ * Emit a single NDJSON line to stdout (pipe mode).
+ */
+function emitNdjson(event: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(event) + "\n");
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v");
@@ -1032,7 +1039,23 @@ async function cmdQuery(args: string[]): Promise<void> {
     verbose,
   });
 
-  if (verbose) {
+  // Pipe mode: stdout is not a TTY → emit NDJSON events (for relay/programmatic use)
+  const pipeMode = !process.stdout.isTTY;
+
+  if (pipeMode) {
+    emitNdjson({ type: "start", timestamp: new Date().toISOString() });
+    try {
+      const result = await engine.run(prompt, {
+        onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
+      });
+      const formatted = formatResponse(result, "cli");
+      emitNdjson({ type: "result", text: formatted.text });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      emitNdjson({ type: "error", error: msg });
+      process.exit(1);
+    }
+  } else if (verbose) {
     // Verbose mode: no spinner, raw console.error logs
     try {
       const result = await engine.run(prompt);

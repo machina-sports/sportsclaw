@@ -5,13 +5,19 @@ Exposes the SportsClaw engine over HTTP so any client (web app, mobile,
 Discord bot, Slack integration) can send sports queries and receive
 structured responses.
 
-Inspired by the machina-cockpit relay_server.py architecture.
+The engine emits NDJSON events on stdout when piped (non-TTY):
+    {"type": "start", ...}
+    {"type": "progress", ...}    (tool_start, tool_finish, phase, synthesizing)
+    {"type": "result", "text": "..."}
+    {"type": "error", "error": "..."}
+
+This relay forwards those events directly to the HTTP client.
 
 Endpoints:
     GET  /health           → {"status": "ok", "service": "sportsclaw-relay"}
     GET  /api/skills       → List installed sport schemas
-    POST /api/query        → Streaming NDJSON response (one-shot query)
-    POST /api/query/sync   → Buffered JSON response (one-shot query)
+    POST /api/query        → Streaming NDJSON response (real-time progress)
+    POST /api/query/sync   → Buffered JSON response (waits for result)
 
 Query body:
     {
@@ -26,7 +32,6 @@ Query body:
 import asyncio
 import json
 import os
-import subprocess
 import time
 
 from aiohttp import web
@@ -99,22 +104,16 @@ async def list_skills(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Query — streaming NDJSON
+# Query — streaming NDJSON (forwards engine events in real-time)
 # ---------------------------------------------------------------------------
 
 async def query_stream(request: web.Request) -> web.StreamResponse:
     """
-    Execute a SportsClaw query and stream output as NDJSON.
+    Execute a SportsClaw query and stream NDJSON events in real-time.
 
-    The SportsClaw CLI writes its response to stdout. We capture it line by
-    line and forward each as a JSON event, similar to the machina-cockpit
-    relay pattern.
-
-    Response events:
-        {"type": "start", "timestamp": "...", "user_id": "..."}
-        {"type": "chunk", "text": "..."}     (incremental stdout lines)
-        {"type": "result", "text": "..."}    (final assembled response)
-        {"type": "error", "error": "..."}    (if execution failed)
+    The engine emits structured NDJSON on stdout (pipe mode). This handler
+    forwards each event line directly to the HTTP client, giving consumers
+    real-time visibility into routing, tool calls, and the final result.
     """
     body = await request.json()
     prompt = body.get("prompt")
@@ -141,14 +140,6 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
 
-    # Start event
-    start_event = json.dumps({
-        "type": "start",
-        "timestamp": _timestamp(),
-        "user_id": user_id,
-    })
-    await response.write(start_event.encode() + b"\n")
-
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -157,52 +148,41 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
             env=env,
         )
 
-        collected_lines: list[str] = []
-
         async def stream_stdout():
             async for line in proc.stdout:
                 decoded = line.decode().rstrip("\n")
-                if decoded:
-                    collected_lines.append(decoded)
-                    chunk = json.dumps({"type": "chunk", "text": decoded})
-                    await response.write(chunk.encode() + b"\n")
+                if not decoded:
+                    continue
+                # Try to parse as JSON and inject user_id
+                try:
+                    event = json.loads(decoded)
+                    event["user_id"] = user_id
+                    await response.write(json.dumps(event).encode() + b"\n")
+                except json.JSONDecodeError:
+                    # Non-JSON line (e.g. pip output) — wrap as debug
+                    await response.write(json.dumps({
+                        "type": "debug", "text": decoded,
+                    }).encode() + b"\n")
 
         await asyncio.wait_for(stream_stdout(), timeout=timeout)
         await proc.wait()
 
-        stderr_bytes = await proc.stderr.read()
-        stderr_text = stderr_bytes.decode().strip() if stderr_bytes else ""
-
-        if proc.returncode == 0:
-            result_event = json.dumps({
-                "type": "result",
-                "text": "\n".join(collected_lines),
-                "user_id": user_id,
-            })
-            await response.write(result_event.encode() + b"\n")
-        else:
-            error_event = json.dumps({
+        # If engine exited with error and no error event was emitted
+        if proc.returncode != 0:
+            stderr_bytes = await proc.stderr.read()
+            stderr_text = stderr_bytes.decode().strip() if stderr_bytes else ""
+            await response.write(json.dumps({
                 "type": "error",
                 "error": stderr_text or f"Exit code {proc.returncode}",
                 "returncode": proc.returncode,
-            })
-            await response.write(error_event.encode() + b"\n")
-
-        # Debug info
-        if stderr_text:
-            debug_event = json.dumps({
-                "type": "debug",
-                "stderr": stderr_text[:2000],
-            })
-            await response.write(debug_event.encode() + b"\n")
+            }).encode() + b"\n")
 
     except asyncio.TimeoutError:
         proc.kill()
-        timeout_event = json.dumps({
+        await response.write(json.dumps({
             "type": "error",
             "error": f"Query timed out after {timeout}s",
-        })
-        await response.write(timeout_event.encode() + b"\n")
+        }).encode() + b"\n")
     except (ConnectionResetError, asyncio.CancelledError):
         proc.kill()
 
@@ -218,8 +198,7 @@ async def query_sync(request: web.Request) -> web.Response:
     """
     Execute a SportsClaw query and return a single JSON response.
 
-    Simpler than the streaming endpoint — waits for the full response
-    before sending. Better for simple integrations that don't need streaming.
+    Parses the engine's NDJSON output and extracts the result event.
     """
     body = await request.json()
     prompt = body.get("prompt")
@@ -252,6 +231,39 @@ async def query_sync(request: web.Request) -> web.Response:
         stdout_text = stdout.decode().strip() if stdout else ""
         stderr_text = stderr.decode().strip() if stderr else ""
 
+        # Parse NDJSON lines from engine output
+        result_text = None
+        error_text = None
+        for line in stdout_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "result":
+                    result_text = event.get("text", "")
+                elif event.get("type") == "error":
+                    error_text = event.get("error", "Unknown error")
+            except json.JSONDecodeError:
+                continue
+
+        if error_text:
+            return web.json_response({
+                "status": False,
+                "error": error_text,
+                "user_id": user_id,
+                "elapsed_ms": elapsed_ms,
+            }, status=500)
+
+        if result_text is not None:
+            return web.json_response({
+                "status": True,
+                "text": result_text,
+                "user_id": user_id,
+                "elapsed_ms": elapsed_ms,
+            })
+
+        # Fallback: no NDJSON parsed (shouldn't happen with pipe mode)
         if proc.returncode == 0:
             return web.json_response({
                 "status": True,
