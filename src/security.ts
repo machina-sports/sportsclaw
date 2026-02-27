@@ -38,13 +38,108 @@ export const BLOCKED_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Pattern-based blocking for future-proofing.
+ * Catches trading tools from ANY provider, not just Polymarket.
+ * These patterns match tool names that imply write/transactional operations.
+ */
+const BLOCKED_TOOL_PATTERNS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  { pattern: /create[_-]?order/i, reason: "order creation" },
+  { pattern: /place[_-]?order/i, reason: "order placement" },
+  { pattern: /market[_-]?order/i, reason: "market order" },
+  { pattern: /limit[_-]?order/i, reason: "limit order" },
+  { pattern: /cancel[_-]?order/i, reason: "order cancellation" },
+  { pattern: /cancel[_-]?all/i, reason: "bulk cancellation" },
+  { pattern: /execute[_-]?trade/i, reason: "trade execution" },
+  { pattern: /submit[_-]?trade/i, reason: "trade submission" },
+  { pattern: /[_-]buy[_-]|[_-]sell[_-]|^buy[_-]|^sell[_-]/i, reason: "buy/sell operation" },
+  { pattern: /wallet[_-]?balance/i, reason: "wallet access" },
+  { pattern: /get[_-]?balance$/i, reason: "balance check (auth required)" },
+  { pattern: /private[_-]?key/i, reason: "private key access" },
+  { pattern: /configure[_-]?wallet/i, reason: "wallet configuration" },
+  { pattern: /approve[_-]?contract/i, reason: "contract approval" },
+  { pattern: /approve[_-]?set/i, reason: "approval setup" },
+  { pattern: /ctf[_-]?(split|merge|redeem)/i, reason: "conditional token operation" },
+  { pattern: /withdraw|deposit/i, reason: "fund transfer" },
+  { pattern: /transfer[_-]?funds/i, reason: "fund transfer" },
+  { pattern: /sign[_-]?transaction/i, reason: "transaction signing" },
+];
+
+/**
  * Check if a tool is blocked. Returns a reason string if blocked, null if allowed.
+ * Uses both exact-match blocklist AND pattern-based blocking for defense in depth.
  */
 export function isBlockedTool(toolName: string): string | null {
+  // Layer 1: Exact match blocklist
   if (BLOCKED_TOOLS.has(toolName)) {
     return `Tool "${toolName}" is blocked. Trading operations are disabled for security.`;
   }
+
+  // Layer 2: Pattern-based blocking (catches future trading tools from any provider)
+  for (const { pattern, reason } of BLOCKED_TOOL_PATTERNS) {
+    if (pattern.test(toolName)) {
+      return `Tool "${toolName}" matches blocked pattern (${reason}). Trading operations are disabled.`;
+    }
+  }
+
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Unicode Normalization (Anti-Homoglyph Defense)
+// ---------------------------------------------------------------------------
+
+/**
+ * Common Unicode homoglyphs that attackers use to bypass ASCII-based filters.
+ * Maps visually similar characters to their ASCII equivalents.
+ */
+const HOMOGLYPH_MAP: Record<string, string> = {
+  // Cyrillic lookalikes
+  'а': 'a', 'А': 'A',
+  'с': 'c', 'С': 'C',
+  'е': 'e', 'Е': 'E',
+  'і': 'i', 'І': 'I',
+  'о': 'o', 'О': 'O',
+  'р': 'p', 'Р': 'P',
+  'х': 'x', 'Х': 'X',
+  'у': 'y', 'У': 'Y',
+  // Greek lookalikes
+  'α': 'a', 'Α': 'A',
+  'ε': 'e', 'Ε': 'E',
+  'ι': 'i', 'Ι': 'I',
+  'ο': 'o', 'Ο': 'O',
+  'ρ': 'p', 'Ρ': 'P',
+  'τ': 't', 'Τ': 'T',
+  'υ': 'u', 'Υ': 'Y',
+  // Other common substitutions
+  '℮': 'e',
+  'ℯ': 'e',
+  '𝐚': 'a', '𝐛': 'b', '𝐜': 'c', '𝐝': 'd', '𝐞': 'e',
+  '𝐟': 'f', '𝐠': 'g', '𝐡': 'h', '𝐢': 'i', '𝐣': 'j',
+  '𝐤': 'k', '𝐥': 'l', '𝐦': 'm', '𝐧': 'n', '𝐨': 'o',
+  '𝐩': 'p', '𝐪': 'q', '𝐫': 'r', '𝐬': 's', '𝐭': 't',
+  '𝐮': 'u', '𝐯': 'v', '𝐰': 'w', '𝐱': 'x', '𝐲': 'y', '𝐳': 'z',
+};
+
+/**
+ * Zero-width and invisible characters that can break word matching.
+ */
+const INVISIBLE_CHARS = /[\u200B-\u200D\u2060\uFEFF\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u2000-\u200F\u202A-\u202F\u205F-\u2064\u206A-\u206F\u3000\u3164]/g;
+
+/**
+ * Normalize input to defeat homoglyph and zero-width character attacks.
+ * Applied before regex matching for injection detection.
+ */
+function normalizeForDetection(input: string): string {
+  // Step 1: Unicode normalization (NFKC decomposes and recomposes)
+  let normalized = input.normalize('NFKC');
+
+  // Step 2: Strip zero-width and invisible characters
+  normalized = normalized.replace(INVISIBLE_CHARS, '');
+
+  // Step 3: Replace known homoglyphs with ASCII equivalents
+  normalized = normalized.split('').map(char => HOMOGLYPH_MAP[char] ?? char).join('');
+
+  return normalized;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,17 +157,22 @@ const INJECTION_PATTERNS: ReadonlyArray<{
 }> = [
   // Direct instruction overrides
   {
-    pattern: /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)/gi,
+    pattern: /ignore\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|rules?|guidelines?)/gi,
     replacement: "[blocked]",
     severity: "strip",
   },
   {
-    pattern: /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)/gi,
+    pattern: /disregard\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|rules?|guidelines?)/gi,
     replacement: "[blocked]",
     severity: "strip",
   },
   {
-    pattern: /forget\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)/gi,
+    pattern: /forget\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|prompts?|rules?|guidelines?)/gi,
+    replacement: "[blocked]",
+    severity: "strip",
+  },
+  {
+    pattern: /override\s+(all\s+)?(previous|prior|above|your|system)\s+(instructions?|prompts?|rules?|guidelines?)/gi,
     replacement: "[blocked]",
     severity: "strip",
   },
@@ -83,7 +183,12 @@ const INJECTION_PATTERNS: ReadonlyArray<{
     severity: "strip",
   },
   {
-    pattern: /<\s*system\s*>/gi,
+    pattern: /<\/?system\s*>/gi,
+    replacement: "[blocked]",
+    severity: "strip",
+  },
+  {
+    pattern: /<\/?assistant\s*>/gi,
     replacement: "[blocked]",
     severity: "strip",
   },
@@ -94,7 +199,17 @@ const INJECTION_PATTERNS: ReadonlyArray<{
     severity: "strip",
   },
   {
+    pattern: /pretend\s+(you\s+are|to\s+be)\s+(a|an|the)?\s*/gi,
+    replacement: "[blocked]",
+    severity: "strip",
+  },
+  {
     pattern: /act\s+as\s+(a|an|the)?\s*(different|new|another)\s*/gi,
+    replacement: "[blocked]",
+    severity: "strip",
+  },
+  {
+    pattern: /from\s+now\s+on[,\s]+(you|act|behave|respond)/gi,
     replacement: "[blocked]",
     severity: "strip",
   },
@@ -109,10 +224,21 @@ const INJECTION_PATTERNS: ReadonlyArray<{
     replacement: "[blocked]",
     severity: "strip",
   },
+  {
+    pattern: /run\s+(the\s+)?(following|this)\s+(function|tool|command)\s*:/gi,
+    replacement: "[blocked]",
+    severity: "strip",
+  },
   // JSON/code injection attempts
   {
     pattern: /```\s*(json|javascript|python|bash|sh)\s*\n\s*\{[^}]*"(tool|function|execute)"/gi,
     replacement: "[blocked code block]",
+    severity: "strip",
+  },
+  // Delimiter injection
+  {
+    pattern: /---+\s*(system|admin|root|sudo)\s*---+/gi,
+    replacement: "[blocked]",
     severity: "strip",
   },
 ];
@@ -128,6 +254,8 @@ const SUSPICIOUS_PATTERNS: ReadonlyArray<RegExp> = [
   /\bapi[_\s]?key\b/i,
   /\bsecret\b/i,
   /\bpassword\b/i,
+  /\bseed\s*phrase\b/i,
+  /\bmnemonic\b/i,
 ];
 
 export interface SanitizationResult {
@@ -147,21 +275,35 @@ export interface SanitizationResult {
  * the model to treat user input as data, not instructions.
  */
 export function sanitizeInput(input: string): SanitizationResult {
+  // Normalize for detection (defeats homoglyphs and zero-width chars)
+  const normalizedForDetection = normalizeForDetection(input);
+
+  // We'll apply the regex to the normalized version, but return
+  // a sanitized version of the original (preserving legitimate unicode)
   let sanitized = input;
   const strippedPatterns: string[] = [];
   const suspiciousPatterns: string[] = [];
 
   // Apply injection pattern filters
   for (const { pattern, replacement, severity } of INJECTION_PATTERNS) {
-    if (severity === "strip" && pattern.test(sanitized)) {
+    // Test against normalized version (catches homoglyph attacks)
+    if (severity === "strip" && pattern.test(normalizedForDetection)) {
       strippedPatterns.push(pattern.source.slice(0, 50));
+      // Apply replacement to both versions
       sanitized = sanitized.replace(pattern, replacement);
     }
   }
 
-  // Check for suspicious patterns (log only)
+  // Also strip zero-width characters from output (they have no legitimate use in sports queries)
+  const beforeZeroWidth = sanitized;
+  sanitized = sanitized.replace(INVISIBLE_CHARS, '');
+  if (sanitized !== beforeZeroWidth) {
+    strippedPatterns.push('zero-width-chars');
+  }
+
+  // Check for suspicious patterns (log only) — check normalized version
   for (const pattern of SUSPICIOUS_PATTERNS) {
-    if (pattern.test(sanitized)) {
+    if (pattern.test(normalizedForDetection)) {
       suspiciousPatterns.push(pattern.source.slice(0, 30));
     }
   }
@@ -217,7 +359,7 @@ export function logSecurityEvent(
 ): void {
   const timestamp = new Date().toISOString();
   const entry = { timestamp, event, ...details };
-  
+
   // For now, just console.error. Could be extended to file/service logging.
   console.error(`[sportsclaw:security] ${JSON.stringify(entry)}`);
 }
