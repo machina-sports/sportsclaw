@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sportsclaw-relay
+  namespace: sportsclaw
+  labels:
+    app: sportsclaw-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sportsclaw-relay
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: sportsclaw-relay
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
+      containers:
+        - name: sportsclaw-relay
+          image: machinasports/sportsclaw-relay:v0.8.0
+          args: ["relay"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sportsclaw-config
+            - secretRef:
+                name: sportsclaw-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: memory-storage
+              mountPath: /data/memory
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+      volumes:
+        - name: memory-storage
+          persistentVolumeClaim:
+            claimName: sportsclaw-memory

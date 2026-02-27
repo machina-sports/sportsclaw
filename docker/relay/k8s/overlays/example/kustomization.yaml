@@ -1,0 +1,53 @@
+# =============================================================================
+# SportsClaw Relay — User Overlay
+#
+# Customize this overlay per user. The namePrefix ensures all resources
+# get a unique name (e.g., "fernando-sportsclaw-relay").
+#
+# Deploy:
+#   kubectl apply -k docker/relay/k8s/overlays/<username>
+#
+# Tear down:
+#   kubectl delete -k docker/relay/k8s/overlays/<username>
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# --- User identity ----------------------------------------------------------
+# Change this prefix to the username. All resources will be prefixed.
+# e.g., "fernando-sportsclaw-relay", "fernando-sportsclaw-memory"
+namePrefix: example-
+
+# --- Labels ------------------------------------------------------------------
+commonLabels:
+  sportsclaw-user: example
+
+# --- Config (non-sensitive) --------------------------------------------------
+configMapGenerator:
+  - name: sportsclaw-config
+    namespace: sportsclaw
+    envs:
+      - config.env
+
+# --- Secrets (API keys) -----------------------------------------------------
+secretGenerator:
+  - name: sportsclaw-secrets
+    namespace: sportsclaw
+    envs:
+      - secrets.env
+    type: Opaque
+
+# --- Patches (optional image override) --------------------------------------
+# Uncomment to pin a specific image version for this user:
+# patches:
+#   - target:
+#       kind: Deployment
+#       name: sportsclaw-relay
+#     patch: |-
+#       - op: replace
+#         path: /spec/template/spec/containers/0/image
+#         value: machinasports/sportsclaw-relay:v0.9.0
