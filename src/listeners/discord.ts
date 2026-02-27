@@ -322,6 +322,38 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
+  // Detect if response is game-related (warrants action buttons)
+  // ---------------------------------------------------------------------------
+
+  function isGameRelatedResponse(response: string, prompt: string): boolean {
+    const promptLower = prompt.toLowerCase();
+    const responseLower = response.toLowerCase();
+
+    // Prompt indicators
+    const gamePromptPatterns = [
+      /\b(score|scores|game|games|playing|live|tonight|today)\b/,
+      /\b(matchup|match-up|vs\.?|versus)\b/,
+      /\b(box\s*score|play[\s-]*by[\s-]*play|stats)\b/,
+      /\bhow.*(playing|doing)\b/,
+    ];
+
+    // Response indicators
+    const gameResponsePatterns = [
+      /\b\d{1,3}\s*[-–]\s*\d{1,3}\b/,
+      /\b(Q[1-4]|[1-4](st|nd|rd|th)\s*(quarter|qtr)|half|halftime|overtime|OT)\b/i,
+      /\b(final|live|in progress|upcoming)\b/i,
+      /\b(pts?|reb|ast|points|rebounds|assists)\b/i,
+      /\b(lakers?|celtics?|warriors?|suns?|nuggets?|bucks?|heat|knicks?)\b/i,
+    ];
+
+    const promptMatch = gamePromptPatterns.some(p => p.test(promptLower));
+    const responseMatch = gameResponsePatterns.some(p => p.test(responseLower));
+
+    return promptMatch || responseMatch;
+  }
+
+
+  // ---------------------------------------------------------------------------
   // Poll creation for "who wins?" questions
   // ---------------------------------------------------------------------------
 
@@ -376,9 +408,9 @@ export async function startDiscordListener(): Promise<void> {
     }
 
     const actionPrompts: Record<string, string> = {
-      boxscore: `Show the box score for: ${ctx.prompt}`,
-      pbp: `Show the play-by-play for: ${ctx.prompt}`,
-      stats: `Show full stats for: ${ctx.prompt}`,
+      boxscore: `Use nba_get_live_boxscore to show the detailed box score with all player stats for the game mentioned in: ${ctx.prompt}`,
+      pbp: `Use nba_get_live_playbyplay to show the actual game play-by-play events (shots, fouls, timeouts) for the game in: ${ctx.prompt}`,
+      stats: `Show comprehensive team and player statistics for: ${ctx.prompt}`,
     };
 
     const followUpPrompt = actionPrompts[action];
@@ -531,8 +563,8 @@ export async function startDiscordListener(): Promise<void> {
         embeds: [embed],
       };
 
-      // Attach action buttons to game/score responses
-      if (features.buttons) {
+      // Attach action buttons only to game/score responses
+      if (features.buttons && isGameRelatedResponse(response, prompt)) {
         const contextKey = storeButtonContext(prompt, userId);
         messageOptions.components = [buildActionRow(contextKey)];
       }
