@@ -419,12 +419,18 @@ export async function startDiscordListener(): Promise<void> {
     await interaction.deferReply();
 
     try {
-      const engine = new sportsclawEngine(engineConfig);
+      // Skip fan profile updates for button follow-ups — these are
+      // data-only requests, not conversational turns.
+      const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
       const response = await engine.run(followUpPrompt, { userId: ctx.userId });
 
+      // Box score and play-by-play data is too large for embeds — Discord
+      // collapses them to "Tap to see attachment" on mobile. Always send
+      // as plain text chunks. Only use embeds for the "stats" action.
+      const useEmbed = action === "stats";
       const formatted = formatResponse(response, "discord");
 
-      if (formatted.discord) {
+      if (useEmbed && formatted.discord) {
         const embed = new EmbedBuilder();
         if (formatted.discord.title) embed.setTitle(formatted.discord.title);
         if (formatted.discord.description) embed.setDescription(formatted.discord.description);

@@ -262,7 +262,18 @@ export class sportsclawEngine {
 
   /** Full system prompt (base + dynamic tool info + strategy + agent directives + user-supplied) */
   private buildSystemPrompt(hasMemory: boolean, agents?: AgentDef[], strategyContent?: string): string {
-    const parts = [BASE_SYSTEM_PROMPT];
+    let basePrompt = BASE_SYSTEM_PROMPT;
+
+    // Strip fan profile update directive when skipFanProfile is active
+    // (e.g. button follow-ups that only need data, not profile management)
+    if (this.config.skipFanProfile) {
+      basePrompt = basePrompt.replace(
+        /^9\. ALWAYS call update_fan_profile.*$/m,
+        "9. (Fan profile updates disabled for this request.)"
+      );
+    }
+
+    const parts = [basePrompt];
 
     // --- Security directives (framework-level, always active) ---
     parts.push("", SECURITY_DIRECTIVES);
@@ -345,10 +356,14 @@ export class sportsclawEngine {
           "when you need to save important context (active game, current team focus, " +
           "user preferences) for future conversations.",
         "",
-        "You have an `update_fan_profile` tool. Call it EVERY TIME after answering a " +
-          "sports question to record teams, leagues, players, and sports the user asked about. " +
-          "Include entity IDs when known from tool results.",
-        "",
+        ...(this.config.skipFanProfile
+          ? []
+          : [
+              "You have an `update_fan_profile` tool. Call it EVERY TIME after answering a " +
+                "sports question to record teams, leagues, players, and sports the user asked about. " +
+                "Include entity IDs when known from tool results.",
+              "",
+            ]),
         "You have an `update_soul` tool. Call it when you notice something genuinely new " +
           "about the user's communication style, a memorable moment, or a content preference. " +
           "Keep observations concise. Do NOT call it every turn.",
@@ -987,40 +1002,42 @@ export class sportsclawEngine {
         },
       });
 
-      toolMap["update_fan_profile"] = defineTool({
-        description:
-          "Overwrite the user's fan profile (FAN_PROFILE.md). The current content " +
-          "is in [MEMORY]. Read it, merge in new entities from this exchange, and " +
-          "write the full updated markdown back. Call EVERY TIME after answering a " +
-          "sports question. Include entity IDs when known from tool results. " +
-          "Keep the file structured and concise.",
-        inputSchema: jsonSchema({
-          type: "object",
-          properties: {
-            content: {
-              type: "string",
-              description:
-                "The full updated FAN_PROFILE.md content as markdown. Include " +
-                "sections for Teams, Leagues, Players, and Sports with entity " +
-                "IDs, interest levels, and mention counts.",
+      if (!this.config.skipFanProfile) {
+        toolMap["update_fan_profile"] = defineTool({
+          description:
+            "Overwrite the user's fan profile (FAN_PROFILE.md). The current content " +
+            "is in [MEMORY]. Read it, merge in new entities from this exchange, and " +
+            "write the full updated markdown back. Call EVERY TIME after answering a " +
+            "sports question. Include entity IDs when known from tool results. " +
+            "Keep the file structured and concise.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              content: {
+                type: "string",
+                description:
+                  "The full updated FAN_PROFILE.md content as markdown. Include " +
+                  "sections for Teams, Leagues, Players, and Sports with entity " +
+                  "IDs, interest levels, and mention counts.",
+              },
             },
+            required: ["content"],
+          }),
+          execute: async (args: { content?: string }) => {
+            const content = args.content;
+            if (!content || typeof content !== "string") {
+              return "Error: content parameter is required and must be a string.";
+            }
+            if (verbose) {
+              console.error(
+                `[sportsclaw] update_fan_profile: ${content.slice(0, 200)}...`
+              );
+            }
+            await memory.writeFanProfile(content);
+            return "Fan profile updated.";
           },
-          required: ["content"],
-        }),
-        execute: async (args: { content?: string }) => {
-          const content = args.content;
-          if (!content || typeof content !== "string") {
-            return "Error: content parameter is required and must be a string.";
-          }
-          if (verbose) {
-            console.error(
-              `[sportsclaw] update_fan_profile: ${content.slice(0, 200)}...`
-            );
-          }
-          await memory.writeFanProfile(content);
-          return "Fan profile updated.";
-        },
-      });
+        });
+      }
 
       toolMap["update_soul"] = defineTool({
         description:

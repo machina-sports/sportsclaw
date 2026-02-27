@@ -114,6 +114,8 @@ export interface sportsclawConfig {
   clarifyOnLowConfidence?: boolean;
   /** Confidence threshold for clarification (default: 0.5) */
   clarifyThreshold?: number;
+  /** Skip fan profile updates and related instructions (e.g. button follow-ups) */
+  skipFanProfile?: boolean;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -133,6 +135,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   cacheTtlMs: 300_000,
   clarifyOnLowConfidence: true,
   clarifyThreshold: 0.5,
+  skipFanProfile: false,
 };
 
 // ---------------------------------------------------------------------------
