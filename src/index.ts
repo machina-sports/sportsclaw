@@ -1011,7 +1011,8 @@ function emitNdjson(event: Record<string, unknown>): void {
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
-  const formatArg = args.find((a) => a.startsWith("--format="))?.split("=")[1] ?? "cli";
+  const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];
+  const formatArg = explicitFormat ?? (forcePipe ? "markdown" : "cli");
   const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe" && !a.startsWith("--format="));
   const prompt = filteredArgs.join(" ");
 
