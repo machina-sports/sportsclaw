@@ -41,11 +41,28 @@ export const SPORTS_SKILLS_DISCLAIMER =
   `sports-skills is provided "as is" for personal, non-commercial use.\n` +
   `You are solely responsible for how you use the data it provides.`;
 
+/** Feature toggles for Discord-specific capabilities */
+export interface DiscordFeaturesConfig {
+  polls?: boolean;       // Native Discord polls for "who wins?" questions (default: true)
+  embeds?: boolean;      // Rich embeds with team logos from TheSportsDB (default: true)
+  buttons?: boolean;     // Action buttons: Box Score, Play-by-Play, Full Stats (default: true)
+  reactions?: boolean;   // Emoji reactions on messages (default: false)
+  gameThreads?: boolean; // Auto-create threads per live game (default: false)
+}
+
+/** Channel routing for Discord alerts and game threads */
+export interface DiscordChannelsConfig {
+  alerts?: string;      // Channel ID for proactive score alerts
+  gameThreads?: string; // Category ID for auto-created game threads
+}
+
 /** Per-platform chat integration config */
 export interface DiscordIntegrationConfig {
   botToken?: string;
   allowedUsers?: string[];   // Discord user ID strings
   prefix?: string;           // Default: "!sportsclaw"
+  features?: DiscordFeaturesConfig;
+  channels?: DiscordChannelsConfig;
 }
 
 // Future: TelegramIntegrationConfig, SlackIntegrationConfig, etc.
