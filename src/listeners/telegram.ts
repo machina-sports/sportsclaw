@@ -21,6 +21,12 @@ import { splitMessage } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
 import { detectSport, getButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
+import {
+  AskUserQuestionHalt,
+  saveSuspendedState,
+  loadSuspendedState,
+  clearSuspendedState,
+} from "../ask.js";
 
 const COMMAND_PREFIX = "/claw";
 
@@ -303,15 +309,15 @@ async function processMessage(
 
   if (!prompt) return;
 
-  // Send "typing" action
-  await fetch(`${apiBase}/sendChatAction`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: msg.chat.id,
-      action: "typing",
-    }),
-  });
+  // Send "typing" action and keep it alive every 4s (Telegram expires after 5s)
+  const sendTyping = () =>
+    fetch(`${apiBase}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: msg.chat.id, action: "typing" }),
+    }).catch(() => {});
+  await sendTyping();
+  const typingInterval = setInterval(sendTyping, 4000);
 
   // Use the Telegram user ID for memory isolation
   const userId = `telegram-${msg.from?.id ?? msg.chat.id}`;
@@ -320,6 +326,7 @@ async function processMessage(
     // Fresh engine per request — avoids shared-state issues
     const engine = new sportsclawEngine(engineConfig);
     const response = await engine.run(prompt, { userId });
+    clearInterval(typingInterval);
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
@@ -344,6 +351,36 @@ async function processMessage(
       });
     }
   } catch (error: unknown) {
+    clearInterval(typingInterval);
+
+    // Sprint 2: AskUserQuestion — render options as Telegram inline keyboard
+    if (error instanceof AskUserQuestionHalt) {
+      const q = error.question;
+
+      // Persist state so the callback handler can resume
+      saveSuspendedState({
+        platform: "telegram",
+        userId,
+        question: q,
+        createdAt: new Date().toISOString(),
+        originalPrompt: prompt,
+      });
+
+      // Build inline keyboard from question options
+      const keyboard: InlineKeyboardButton[][] = [
+        q.options.map((opt, idx) => ({
+          text: opt.label,
+          callback_data: `sc_ask_${idx}`,
+        })),
+      ];
+
+      await sendMessage(apiBase, msg.chat.id, q.prompt, {
+        replyToMessageId: msg.message_id,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error(`[sportsclaw] Telegram error: ${errMsg}`);
     await sendMessage(apiBase, msg.chat.id, "Sorry, I encountered an error processing your request.", {
@@ -364,6 +401,7 @@ async function processCallbackQuery(
 ): Promise<void> {
   const cq = update.callback_query;
   if (!cq?.data || !cq.message) return;
+  const cqMessage = cq.message;
 
   // Check user whitelist
   if (allowedUsers && !allowedUsers.has(String(cq.from.id))) {
@@ -380,6 +418,72 @@ async function processCallbackQuery(
   }
 
   if (!cq.data.startsWith("sc_")) return;
+
+  // Sprint 2: AskUserQuestion callback handling
+  if (cq.data.startsWith("sc_ask_")) {
+    const optionIdx = parseInt(cq.data.split("_")[2], 10);
+    const userId = `telegram-${cq.from.id}`;
+    const suspended = loadSuspendedState("telegram", userId);
+
+    if (!suspended) {
+      await fetch(`${apiBase}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: cq.id,
+          text: "This question has expired. Please ask again.",
+          show_alert: true,
+        }),
+      });
+      return;
+    }
+
+    const selectedOption = suspended.question.options[optionIdx];
+    if (!selectedOption) return;
+
+    clearSuspendedState("telegram", userId);
+
+    await fetch(`${apiBase}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cq.id, text: "Loading..." }),
+    });
+
+    const sendTyping = () =>
+      fetch(`${apiBase}/sendChatAction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: cqMessage.chat.id, action: "typing" }),
+      }).catch(() => {});
+    await sendTyping();
+    const typingInterval = setInterval(sendTyping, 4000);
+
+    try {
+      const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
+      const engine = new sportsclawEngine(engineConfig);
+      const response = await engine.run(resumePrompt, { userId });
+      clearInterval(typingInterval);
+
+      const formatted = formatResponse(response, "telegram");
+      const textToSend = formatted.telegram || formatted.text;
+
+      const chunks = splitMessage(textToSend, 4096);
+      for (const chunk of chunks) {
+        await sendMessage(apiBase, cqMessage.chat.id, chunk, {
+          parseMode: formatted.telegram ? "HTML" : undefined,
+          replyToMessageId: cqMessage.message_id,
+        });
+      }
+    } catch (resumeErr: unknown) {
+      clearInterval(typingInterval);
+      const errMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+      console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
+      await sendMessage(apiBase, cqMessage.chat.id, "Sorry, I encountered an error processing your selection.", {
+        replyToMessageId: cqMessage.message_id,
+      });
+    }
+    return;
+  }
 
   const parts = cq.data.split("_");
   const action = parts[1]; // boxscore | pbp | stats
@@ -412,15 +516,15 @@ async function processCallbackQuery(
     }),
   });
 
-  // Send typing indicator
-  await fetch(`${apiBase}/sendChatAction`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: cq.message.chat.id,
-      action: "typing",
-    }),
-  });
+  // Send typing indicator and keep it alive every 4s
+  const sendTyping = () =>
+    fetch(`${apiBase}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: cqMessage.chat.id, action: "typing" }),
+    }).catch(() => {});
+  await sendTyping();
+  const typingInterval = setInterval(sendTyping, 4000);
 
   try {
     // Skip fan profile for button follow-ups (data-only requests)
@@ -429,25 +533,27 @@ async function processCallbackQuery(
       skipFanProfile: true,
     });
     const response = await engine.run(followUpPrompt, { userId: ctx.userId });
+    clearInterval(typingInterval);
 
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;
 
     const chunks = splitMessage(textToSend, 4096);
     for (const chunk of chunks) {
-      await sendMessage(apiBase, cq.message.chat.id, chunk, {
+      await sendMessage(apiBase, cqMessage.chat.id, chunk, {
         parseMode: formatted.telegram ? "HTML" : undefined,
-        replyToMessageId: cq.message.message_id,
+        replyToMessageId: cqMessage.message_id,
       });
     }
   } catch (error: unknown) {
+    clearInterval(typingInterval);
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error(`[sportsclaw] Callback query error: ${errMsg}`);
     await sendMessage(
       apiBase,
-      cq.message.chat.id,
+      cqMessage.chat.id,
       "Sorry, I encountered an error processing that request.",
-      { replyToMessageId: cq.message.message_id }
+      { replyToMessageId: cqMessage.message_id }
     );
   }
 }

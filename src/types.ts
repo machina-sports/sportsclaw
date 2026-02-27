@@ -236,3 +236,54 @@ export interface RouteOutcome {
   decision: RouteDecision;
   meta: RouteMeta;
 }
+
+// ---------------------------------------------------------------------------
+// AskUserQuestion — interactive halting (Sprint 2)
+// ---------------------------------------------------------------------------
+
+export interface AskUserOption {
+  label: string;
+  value: string;
+}
+
+export interface AskUserQuestionRequest {
+  prompt: string;
+  options: AskUserOption[];
+  contextKey: string;
+}
+
+/** Persisted state when the engine suspends waiting for user input */
+export interface SuspendedState {
+  /** Platform identifier: "discord" | "telegram" | "cli" */
+  platform: string;
+  /** Platform-specific user ID */
+  userId: string;
+  /** The question posed to the user */
+  question: AskUserQuestionRequest;
+  /** ISO timestamp when the state was saved */
+  createdAt: string;
+  /** The original user prompt that led to this question */
+  originalPrompt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Degen Task Bus — async subagent coordination (Sprint 2)
+// ---------------------------------------------------------------------------
+
+export interface DegenTask {
+  id: string;
+  /** Human-readable condition to check (e.g., "LeBron PTS >= 30") */
+  condition: string;
+  /** Action to take when condition is met (e.g., "Notify User") */
+  action: string;
+  /** Extra context for the watcher (game_id, player_id, etc.) */
+  context: Record<string, unknown>;
+  /** Platform + user ID for notification delivery */
+  userId: string;
+  /** "active" | "completed" | "expired" */
+  status: "active" | "completed" | "expired";
+  /** ISO timestamp when the task was created */
+  createdAt: string;
+  /** ISO timestamp when the task was completed (if applicable) */
+  completedAt?: string;
+}

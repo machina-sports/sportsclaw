@@ -29,6 +29,12 @@ import type { DetectedSport } from "../buttons.js";
 import { executePythonBridge } from "../tools.js";
 import { loadConfig } from "../config.js";
 import type { DiscordFeaturesConfig } from "../config.js";
+import {
+  AskUserQuestionHalt,
+  saveSuspendedState,
+  loadSuspendedState,
+  clearSuspendedState,
+} from "../ask.js";
 
 const PREFIX = process.env.DISCORD_PREFIX || "!sportsclaw";
 
@@ -362,6 +368,53 @@ export async function startDiscordListener(): Promise<void> {
     const { customId } = interaction;
     if (!customId.startsWith("sc_")) return;
 
+    // --- Sprint 2: AskUserQuestion response handling ---
+    if (customId.startsWith("sc_ask_")) {
+      const parts = customId.split("_");
+      // Format: sc_ask_<contextKey>_<optionIndex>
+      const contextKey = parts[2];
+      const optionIdx = parseInt(parts[3], 10);
+
+      const userId = `discord-${interaction.user.id}`;
+      const suspended = loadSuspendedState("discord", userId);
+
+      if (!suspended) {
+        await interaction.reply({
+          content: "This question has expired. Please ask again.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const selectedOption = suspended.question.options[optionIdx];
+      if (!selectedOption) {
+        await interaction.reply({
+          content: "Invalid option. Please try again.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      clearSuspendedState("discord", userId);
+      await interaction.deferReply();
+
+      try {
+        // Resume the engine with the selected value injected as context
+        const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
+        const engine = new sportsclawEngine(engineConfig);
+        const response = await engine.run(resumePrompt, { userId });
+
+        await sendGameResponse(response, suspended.originalPrompt, userId, interaction as unknown as import("discord.js").Message);
+      } catch (error: unknown) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
+        await interaction.editReply(
+          "Sorry, I encountered an error processing your selection."
+        );
+      }
+      return;
+    }
+
     const parts = customId.split("_");
     const action = parts[1]; // boxscore | pbp | stats
     const contextKey = parts[2];
@@ -501,6 +554,42 @@ export async function startDiscordListener(): Promise<void> {
 
       await sendGameResponse(response, prompt, userId, message);
     } catch (error: unknown) {
+      // Sprint 2: AskUserQuestion — render options as Discord buttons
+      if (error instanceof AskUserQuestionHalt) {
+        clearInterval(typingInterval);
+        const q = error.question;
+
+        // Persist state so the button handler can resume
+        saveSuspendedState({
+          platform: "discord",
+          userId,
+          question: q,
+          createdAt: new Date().toISOString(),
+          originalPrompt: prompt,
+        });
+
+        // Build a button row from the question options
+        const contextKey = Math.random().toString(36).slice(2, 9);
+        const askRow = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
+        for (let i = 0; i < q.options.length; i++) {
+          askRow.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`sc_ask_${contextKey}_${i}`)
+              .setLabel(q.options[i].label)
+              .setStyle(i === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+          );
+        }
+
+        // Store the suspended state key so button handler can find it
+        // (We use the userId-based state file, so contextKey isn't needed for lookup)
+
+        await safeSend(message, {
+          content: q.prompt,
+          components: [askRow],
+        });
+        return;
+      }
+
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[sportsclaw] Discord error: ${errMsg}`);
       await safeSend(
