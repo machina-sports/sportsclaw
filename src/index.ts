@@ -9,6 +9,7 @@
  *   sportsclaw init              — Bootstrap all 14 default sport schemas
  *   sportsclaw chat              — Start an interactive conversation (REPL)
  *   sportsclaw doctor            — Check setup and diagnose issues
+ *   sportsclaw channels          — Configure Discord & Telegram tokens
  *   sportsclaw listen <platform> — Start a Discord or Telegram listener
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
@@ -47,6 +48,7 @@ import {
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
+  runChannelsFlow,
   runSportSelectionFlow,
   ASCII_LOGO,
 } from "./config.js";
@@ -117,6 +119,7 @@ export {
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
+  runChannelsFlow,
   runSportSelectionFlow,
   SPORTS_SKILLS_DISCLAIMER,
 } from "./config.js";
@@ -905,8 +908,11 @@ async function cmdListen(args: string[]): Promise<void> {
     await startDiscordListener();
   } else if (platform === "telegram") {
     if (!process.env.TELEGRAM_BOT_TOKEN) {
-      console.error("Error: TELEGRAM_BOT_TOKEN environment variable is required.");
-      console.error("Get one from @BotFather on Telegram.");
+      console.error("Error: Telegram bot token is not configured.");
+      console.error("Set it up with: sportsclaw channels");
+      console.error("Or set the TELEGRAM_BOT_TOKEN environment variable.");
+      console.error("Or add it to ~/.sportsclaw/.env.telegram");
+      console.error("Get a token from @BotFather on Telegram.");
       process.exit(1);
     }
     const { startTelegramListener } = await import("./listeners/telegram.js");
@@ -1157,6 +1163,7 @@ function printHelp(): void {
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
+  console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
@@ -1201,6 +1208,14 @@ function printHelp(): void {
 
 async function cmdConfig(): Promise<void> {
   await runConfigFlow();
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw channels` — channel token wizard
+// ---------------------------------------------------------------------------
+
+async function cmdChannels(): Promise<void> {
+  await runChannelsFlow();
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1332,8 @@ async function main(): Promise<void> {
   switch (subcommand) {
     case "config":
       return cmdConfig();
+    case "channels":
+      return cmdChannels();
     case "chat":
       return cmdChat(subArgs);
     case "doctor":

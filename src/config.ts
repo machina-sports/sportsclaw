@@ -65,11 +65,15 @@ export interface DiscordIntegrationConfig {
   channels?: DiscordChannelsConfig;
 }
 
-// Future: TelegramIntegrationConfig, SlackIntegrationConfig, etc.
+/** Per-platform chat integration config for Telegram */
+export interface TelegramIntegrationConfig {
+  botToken?: string;
+  allowedUsers?: string[];   // Telegram user ID strings
+}
 
 export interface ChatIntegrationsConfig {
   discord?: DiscordIntegrationConfig;
-  // telegram?: TelegramIntegrationConfig;  // future
+  telegram?: TelegramIntegrationConfig;
 }
 
 export interface CLIConfig {
@@ -90,6 +94,7 @@ export interface CLIConfig {
 
 const CONFIG_DIR = join(homedir(), ".sportsclaw");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const ENV_TELEGRAM_PATH = join(CONFIG_DIR, ".env.telegram");
 
 // ---------------------------------------------------------------------------
 // Provider ↔ API key env var mapping (duplicated here to avoid circular deps)
@@ -145,6 +150,8 @@ export interface ResolvedConfig {
   discordBotToken: string | undefined;
   discordAllowedUsers: string[] | undefined;
   discordPrefix: string;
+  telegramBotToken: string | undefined;
+  telegramAllowedUsers: string[] | undefined;
 }
 
 function firstEnv(...keys: string[]): string | undefined {
@@ -165,6 +172,33 @@ function parsePositiveInt(
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
+}
+
+/**
+ * Read a token value from a dotenv-style file (KEY=VALUE format).
+ * Returns the value for the given key, or undefined if not found.
+ */
+function readEnvFile(filePath: string, key: string): string | undefined {
+  if (!existsSync(filePath)) return undefined;
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx < 0) continue;
+      const k = trimmed.slice(0, eqIdx).trim();
+      let v = trimmed.slice(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      if (k === key) return v || undefined;
+    }
+  } catch {
+    // Ignore read errors
+  }
+  return undefined;
 }
 
 export function resolveConfig(): ResolvedConfig {
@@ -222,6 +256,16 @@ export function resolveConfig(): ResolvedConfig {
   const discordPrefix =
     firstEnv("DISCORD_PREFIX") || file.chatIntegrations?.discord?.prefix || "!sportsclaw";
 
+  // Telegram: env var > config file > .env.telegram file
+  const telegramBotToken =
+    firstEnv("TELEGRAM_BOT_TOKEN") ||
+    file.chatIntegrations?.telegram?.botToken ||
+    readEnvFile(ENV_TELEGRAM_PATH, "TELEGRAM_BOT_TOKEN");
+  const telegramAllowedUsersRaw = firstEnv("TELEGRAM_ALLOWED_USERS");
+  const telegramAllowedUsers = telegramAllowedUsersRaw
+    ? telegramAllowedUsersRaw.split(",").map(id => id.trim()).filter(Boolean)
+    : file.chatIntegrations?.telegram?.allowedUsers;
+
   return {
     provider,
     model,
@@ -233,6 +277,8 @@ export function resolveConfig(): ResolvedConfig {
     discordBotToken,
     discordAllowedUsers,
     discordPrefix,
+    telegramBotToken,
+    telegramAllowedUsers,
   };
 }
 
@@ -288,6 +334,11 @@ export function applyConfigToEnv(): ResolvedConfig {
     process.env.ALLOWED_USERS = resolved.discordAllowedUsers.join(",");
   if (resolved.discordPrefix && !process.env.DISCORD_PREFIX)
     process.env.DISCORD_PREFIX = resolved.discordPrefix;
+
+  if (resolved.telegramBotToken && !process.env.TELEGRAM_BOT_TOKEN)
+    process.env.TELEGRAM_BOT_TOKEN = resolved.telegramBotToken;
+  if (resolved.telegramAllowedUsers?.length && !process.env.TELEGRAM_ALLOWED_USERS)
+    process.env.TELEGRAM_ALLOWED_USERS = resolved.telegramAllowedUsers.join(",");
 
   return resolved;
 }
@@ -603,13 +654,21 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     };
   }
 
+  // Preserve existing Telegram config when saving from the main config flow
+  const existingTelegram = savedConfig.chatIntegrations?.telegram;
+
+  const chatIntegrations: ChatIntegrationsConfig = {
+    ...(discordConfig && { discord: discordConfig }),
+    ...(existingTelegram && { telegram: existingTelegram }),
+  };
+
   const config: CLIConfig = {
     provider: selectedProvider,
     model: model as string,
     apiKey: finalApiKey,
     pythonPath: (pythonPath as string) || "python3",
     ...(sportSelections && { selectedSports: sportSelections }),
-    ...(discordConfig && { chatIntegrations: { discord: discordConfig } }),
+    ...(Object.keys(chatIntegrations).length > 0 && { chatIntegrations }),
   };
 
   saveConfig(config);
@@ -631,12 +690,183 @@ export async function runConfigFlow(): Promise<CLIConfig> {
   console.log(`  ${pc.cyan("sportsclaw list")}              See installed sports`);
   console.log(`  ${pc.cyan("sportsclaw agents")}            See installed agents`);
   console.log(`  ${pc.cyan("sportsclaw config")}            Reconfigure anytime`);
+  console.log(`  ${pc.cyan("sportsclaw channels")}          Set up Discord & Telegram tokens`);
   if (discordConfig?.botToken) {
     console.log(`  ${pc.cyan("sportsclaw listen discord")}    Start Discord bot`);
+  }
+  if (existingTelegram?.botToken) {
+    console.log(`  ${pc.cyan("sportsclaw listen telegram")}   Start Telegram bot`);
   }
   console.log("");
 
   return config;
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw channels` — channel token wizard
+// ---------------------------------------------------------------------------
+
+/**
+ * Interactive wizard to configure Discord and Telegram tokens.
+ * Saves tokens into ~/.sportsclaw/config.json under chatIntegrations.
+ */
+export async function runChannelsFlow(): Promise<void> {
+  console.log(pc.bold(pc.blue(ASCII_LOGO)));
+  p.intro("Channel Configuration");
+
+  const savedConfig = loadConfig();
+  const existingDiscord = savedConfig.chatIntegrations?.discord;
+  const existingTelegram = savedConfig.chatIntegrations?.telegram;
+
+  // Show current status
+  const discordStatus = existingDiscord?.botToken
+    ? pc.green("configured")
+    : firstEnv("DISCORD_BOT_TOKEN")
+      ? pc.green("set via env")
+      : pc.dim("not configured");
+  const telegramStatus = existingTelegram?.botToken
+    ? pc.green("configured")
+    : (firstEnv("TELEGRAM_BOT_TOKEN") || readEnvFile(ENV_TELEGRAM_PATH, "TELEGRAM_BOT_TOKEN"))
+      ? pc.green("set via env/.env.telegram")
+      : pc.dim("not configured");
+
+  p.log.info(`Discord:  ${discordStatus}`);
+  p.log.info(`Telegram: ${telegramStatus}`);
+
+  // --- Discord ---
+  const configureDiscord = await p.confirm({
+    message: "Configure Discord bot token?",
+    initialValue: !existingDiscord?.botToken,
+  });
+
+  let discordConfig: DiscordIntegrationConfig | undefined = existingDiscord;
+
+  if (!p.isCancel(configureDiscord) && configureDiscord) {
+    if (existingDiscord?.botToken) {
+      const masked = existingDiscord.botToken.slice(0, 8) + "..." + existingDiscord.botToken.slice(-4);
+      p.log.info(`Current token: ${pc.dim(masked)}`);
+    }
+
+    const tokenInput = await p.password({
+      message: "Paste your Discord bot token:",
+      validate: (val) => {
+        if (!val || val.trim().length === 0) return "Bot token is required.";
+      },
+    });
+    if (p.isCancel(tokenInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+
+    const allowedUsersInput = await p.text({
+      message: "Allowed Discord user IDs (comma-separated, blank for public):",
+      placeholder: "Leave blank for public access",
+      defaultValue: existingDiscord?.allowedUsers?.join(",") ?? "",
+    });
+    if (p.isCancel(allowedUsersInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+    const allowedUsers = (allowedUsersInput as string)
+      .split(",")
+      .map(id => id.trim())
+      .filter(Boolean);
+
+    const prefixInput = await p.text({
+      message: "Command prefix:",
+      placeholder: "!sportsclaw",
+      defaultValue: existingDiscord?.prefix || "!sportsclaw",
+    });
+    if (p.isCancel(prefixInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+
+    discordConfig = {
+      botToken: (tokenInput as string).trim(),
+      ...(allowedUsers.length > 0 && { allowedUsers }),
+      prefix: (prefixInput as string) || "!sportsclaw",
+      // Preserve existing feature flags and channels
+      ...(existingDiscord?.features && { features: existingDiscord.features }),
+      ...(existingDiscord?.channels && { channels: existingDiscord.channels }),
+    };
+  }
+
+  // --- Telegram ---
+  const configureTelegram = await p.confirm({
+    message: "Configure Telegram bot token?",
+    initialValue: !existingTelegram?.botToken,
+  });
+
+  let telegramConfig: TelegramIntegrationConfig | undefined = existingTelegram;
+
+  if (!p.isCancel(configureTelegram) && configureTelegram) {
+    if (existingTelegram?.botToken) {
+      const masked = existingTelegram.botToken.slice(0, 8) + "..." + existingTelegram.botToken.slice(-4);
+      p.log.info(`Current token: ${pc.dim(masked)}`);
+    }
+
+    p.log.info(
+      `Get a token from ${pc.cyan("@BotFather")} on Telegram.\n` +
+      `  The token will be saved to ~/.sportsclaw/config.json.\n` +
+      `  You can also set TELEGRAM_BOT_TOKEN in env or ~/.sportsclaw/.env.telegram.`
+    );
+
+    const tokenInput = await p.password({
+      message: "Paste your Telegram bot token:",
+      validate: (val) => {
+        if (!val || val.trim().length === 0) return "Bot token is required.";
+      },
+    });
+    if (p.isCancel(tokenInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+
+    const allowedUsersInput = await p.text({
+      message: "Allowed Telegram user IDs (comma-separated, blank for public):",
+      placeholder: "Leave blank for public access",
+      defaultValue: existingTelegram?.allowedUsers?.join(",") ?? "",
+    });
+    if (p.isCancel(allowedUsersInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+    const allowedUsers = (allowedUsersInput as string)
+      .split(",")
+      .map(id => id.trim())
+      .filter(Boolean);
+
+    telegramConfig = {
+      botToken: (tokenInput as string).trim(),
+      ...(allowedUsers.length > 0 && { allowedUsers }),
+    };
+  }
+
+  // --- Save ---
+  const chatIntegrations: ChatIntegrationsConfig = {
+    ...(discordConfig && { discord: discordConfig }),
+    ...(telegramConfig && { telegram: telegramConfig }),
+  };
+
+  const updatedConfig: CLIConfig = {
+    ...savedConfig,
+    ...(Object.keys(chatIntegrations).length > 0 && { chatIntegrations }),
+  };
+
+  saveConfig(updatedConfig);
+
+  p.outro(`Config saved to ${CONFIG_PATH}`);
+
+  // Quick next-steps guide
+  console.log("");
+  if (discordConfig?.botToken) {
+    console.log(`  ${pc.cyan("sportsclaw listen discord")}    Start Discord bot`);
+  }
+  if (telegramConfig?.botToken) {
+    console.log(`  ${pc.cyan("sportsclaw listen telegram")}   Start Telegram bot`);
+  }
+  console.log("");
 }
 
 // ---------------------------------------------------------------------------
