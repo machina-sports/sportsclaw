@@ -377,6 +377,87 @@ async function maybePromptForCliUpgrade(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// sports-skills update check (chat startup)
+// ---------------------------------------------------------------------------
+
+async function getInstalledSkillsVersion(pythonPath: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      pythonPath,
+      ["-m", "sports_skills", "catalog"],
+      { encoding: "utf-8", timeout: 10_000 },
+      (error, stdout) => {
+        if (error) { resolve(undefined); return; }
+        try {
+          const data = JSON.parse((stdout ?? "").trim());
+          resolve(data.version ?? undefined);
+        } catch { resolve(undefined); }
+      }
+    );
+  });
+}
+
+async function getLatestSkillsVersion(): Promise<string | undefined> {
+  try {
+    const res = await fetch("https://pypi.org/pypi/sports-skills/json", {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { info?: { version?: string } };
+    return data.info?.version ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function upgradeSkillsPackage(pythonPath: string): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      pythonPath,
+      ["-m", "pip", "install", "--upgrade", "sports-skills"],
+      { encoding: "utf-8", timeout: 120_000 },
+      (error, _stdout, stderr) => {
+        if (error) {
+          resolve({ ok: false, error: (stderr || error.message).trim() });
+        } else {
+          resolve({ ok: true });
+        }
+      }
+    );
+  });
+}
+
+async function maybePromptForSkillsUpgrade(pythonPath: string): Promise<void> {
+  const [currentVersion, latestVersion] = await Promise.all([
+    getInstalledSkillsVersion(pythonPath),
+    getLatestSkillsVersion(),
+  ]);
+
+  if (!currentVersion || !latestVersion) return;
+  if (!isVersionNewer(latestVersion, currentVersion)) return;
+
+  const confirmUpgrade = await p.confirm({
+    message: `sports-skills update: ${currentVersion} → ${latestVersion}. Upgrade now?`,
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmUpgrade) || !confirmUpgrade) return;
+
+  const s = p.spinner();
+  s.start(`Upgrading sports-skills to ${latestVersion}...`);
+  const result = await upgradeSkillsPackage(pythonPath);
+  if (result.ok) {
+    s.stop(`sports-skills upgraded to v${latestVersion}.`);
+    return;
+  }
+  s.stop("Upgrade failed.");
+  console.log(`Run manually: ${pythonPath} -m pip install --upgrade sports-skills`);
+  if (result.error) {
+    console.error(result.error);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool progress tracker for spinner display
 // ---------------------------------------------------------------------------
 
@@ -958,6 +1039,7 @@ async function cmdChat(args: string[]): Promise<void> {
   }
 
   await maybePromptForCliUpgrade();
+  await maybePromptForSkillsUpgrade(resolved.pythonPath);
   await ensureDefaultSchemas();
 
   const engine = new sportsclawEngine({
