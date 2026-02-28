@@ -143,7 +143,11 @@ Your core directives:
       (a tool failure, a data gap, a workaround you discovered). These are rare events.
     - \`evolve_strategy\`: codify a behavioral pattern into your system instructions
       (e.g. a data quality rule or user preference). Only when a pattern is clear and repeated.
-    These are available, not mandatory. Use your judgment. Most turns need neither.`;
+    These are available, not mandatory. Use your judgment. Most turns need neither.
+16. SELF-UPGRADE — You CAN upgrade your own tools. When the user asks to update, upgrade, or check for new versions of sports-skills:
+    - Call \`upgrade_sports_skills\` — it runs pip upgrade internally and hot-reloads all schemas.
+    - Do NOT tell the user to run pip manually. You have the tool. Use it.
+    - After upgrading, confirm the new version and number of refreshed schemas.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
