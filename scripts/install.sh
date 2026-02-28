@@ -40,13 +40,13 @@ if [ -x "/opt/homebrew/bin/python3" ]; then
 fi
 echo -e "${BLUE}🐍 Using Python: ${PYTHON_BIN}${NC}"
 
-# 2. Install Node Package (Engine)
-echo -e "${BLUE}📦 Installing TypeScript Execution Engine...${NC}"
-npm install -g sportsclaw-engine-core@latest || {
-    echo -e "${RED}❌ Failed to install Node package.${NC}"
+# 2. Install Node Package (Engine) + PM2 (Daemon Manager)
+echo -e "${BLUE}📦 Installing TypeScript Execution Engine + PM2...${NC}"
+npm install -g sportsclaw-engine-core@latest pm2@latest || {
+    echo -e "${RED}❌ Failed to install Node packages.${NC}"
     exit 1
 }
-echo -e "${GREEN}✓ Engine installed.${NC}\n"
+echo -e "${GREEN}✓ Engine + PM2 installed.${NC}\n"
 
 # 3. Install Python Package (Data Skills)
 echo -e "${BLUE}🐍 Installing Python Data Skills...${NC}"

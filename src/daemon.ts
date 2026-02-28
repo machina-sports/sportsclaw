@@ -1,41 +1,19 @@
 /**
- * sportsclaw — Daemon Management
+ * sportsclaw — Daemon Management (PM2 wrapper)
  *
- * Spawn, stop, and monitor long-running listener processes as background
- * daemons. PID files live in ~/.sportsclaw/run/ and logs in ~/.sportsclaw/logs/.
+ * Delegates process lifecycle to PM2 instead of manual PID files and spawn.
+ * Each listener runs as a named PM2 process: `sportsclaw-<platform>`.
  */
 
-import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import {
-  mkdirSync,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  openSync,
-} from "node:fs";
 
 // ---------------------------------------------------------------------------
-// Paths
+// Types
 // ---------------------------------------------------------------------------
-
-const SPORTSCLAW_DIR = join(homedir(), ".sportsclaw");
-const RUN_DIR = join(SPORTSCLAW_DIR, "run");
-const LOG_DIR = join(SPORTSCLAW_DIR, "logs");
 
 export type DaemonPlatform = "discord" | "telegram";
 const VALID_PLATFORMS: DaemonPlatform[] = ["discord", "telegram"];
-
-function pidPath(platform: DaemonPlatform): string {
-  return join(RUN_DIR, `${platform}.pid`);
-}
-
-function logPath(platform: DaemonPlatform): string {
-  return join(LOG_DIR, `${platform}.log`);
-}
 
 export function isValidPlatform(value: string): value is DaemonPlatform {
   return VALID_PLATFORMS.includes(value as DaemonPlatform);
@@ -45,28 +23,41 @@ export function isValidPlatform(value: string): value is DaemonPlatform {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function ensureDir(dir: string): void {
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+/** PM2 process name for a given platform. */
+function pm2Name(platform: DaemonPlatform): string {
+  return `sportsclaw-${platform}`;
+}
+
+/** Resolve the compiled entry point (dist/index.js). */
+function entryPoint(): string {
+  return fileURLToPath(new URL("../dist/index.js", import.meta.url));
+}
+
+/** Verify PM2 is installed and accessible. Exits with guidance if missing. */
+function requirePm2(): void {
+  try {
+    execSync("which pm2", { stdio: "ignore" });
+  } catch {
+    console.error(
+      'PM2 is required to run background processes. Install it via `npm install -g pm2` or use the official install script: `curl -fsSL https://sportsclaw.gg/install.sh | bash`'
+    );
+    process.exit(1);
   }
 }
 
-/** Read a PID file, returning the numeric PID or null. */
-function readPid(platform: DaemonPlatform): number | null {
-  const p = pidPath(platform);
-  if (!existsSync(p)) return null;
-  const raw = readFileSync(p, "utf-8").trim();
-  const pid = Number.parseInt(raw, 10);
-  return Number.isFinite(pid) && pid > 0 ? pid : null;
-}
-
-/** Check whether a process with the given PID is alive. */
-function isProcessAlive(pid: number): boolean {
+/** Run a pm2 command and return stdout. */
+function pm2Exec(args: string, quiet = false): string {
   try {
-    process.kill(pid, 0); // signal 0 = existence check
-    return true;
-  } catch {
-    return false;
+    return execSync(`pm2 ${args}`, {
+      encoding: "utf-8",
+      stdio: quiet ? ["ignore", "pipe", "ignore"] : ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err: unknown) {
+    if (!quiet) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`pm2 error: ${msg}`);
+    }
+    return "";
   }
 }
 
@@ -75,44 +66,28 @@ function isProcessAlive(pid: number): boolean {
 // ---------------------------------------------------------------------------
 
 export function daemonStart(platform: DaemonPlatform): void {
-  ensureDir(RUN_DIR);
-  ensureDir(LOG_DIR);
+  requirePm2();
 
-  // Refuse if already running
-  const existingPid = readPid(platform);
-  if (existingPid !== null && isProcessAlive(existingPid)) {
-    console.error(
-      `${platform} daemon is already running (PID ${existingPid}).`
-    );
+  const name = pm2Name(platform);
+  const entry = entryPoint();
+
+  // Check if already running
+  const info = pm2Exec(`show ${name}`, true);
+  if (info.includes("online")) {
+    console.error(`${platform} daemon is already running.`);
     console.error(`Stop it first with: sportsclaw stop ${platform}`);
     process.exit(1);
   }
 
-  // Resolve the entry point: dist/index.js relative to this file
-  const entryPoint = fileURLToPath(
-    new URL("../dist/index.js", import.meta.url)
-  );
-
-  // Open log file for append
-  const logFd = openSync(logPath(platform), "a");
-
-  const child = spawn("node", [entryPoint, "listen", platform], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: { ...process.env },
+  // Start via PM2 — args after `--` are forwarded to the script
+  execSync(`pm2 start ${entry} --name ${name} -- listen ${platform}`, {
+    stdio: "inherit",
   });
 
-  // Write PID file
-  if (child.pid) {
-    writeFileSync(pidPath(platform), String(child.pid), "utf-8");
-  }
-
-  // Unref so the parent can exit immediately
-  child.unref();
-
-  console.log(`${platform} daemon started (PID ${child.pid}).`);
-  console.log(`  Logs: ${logPath(platform)}`);
-  console.log(`  Stop: sportsclaw stop ${platform}`);
+  console.log(`${platform} daemon started via PM2.`);
+  console.log(`  Status: sportsclaw status`);
+  console.log(`  Logs:   sportsclaw logs ${platform}`);
+  console.log(`  Stop:   sportsclaw stop ${platform}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,36 +95,19 @@ export function daemonStart(platform: DaemonPlatform): void {
 // ---------------------------------------------------------------------------
 
 export function daemonStop(platform: DaemonPlatform): void {
-  const pid = readPid(platform);
-  if (pid === null) {
-    console.error(`No PID file found for ${platform}. Is it running?`);
-    process.exit(1);
-  }
+  requirePm2();
 
-  if (!isProcessAlive(pid)) {
-    // Stale PID file — clean up
-    unlinkSync(pidPath(platform));
-    console.log(
-      `${platform} daemon is not running (stale PID file removed).`
-    );
-    return;
-  }
+  const name = pm2Name(platform);
 
   try {
-    process.kill(pid, "SIGTERM");
-  } catch (err: unknown) {
-    console.error(`Failed to stop ${platform} daemon (PID ${pid}):`, err);
-    process.exit(1);
-  }
-
-  // Clean up PID file
-  try {
-    unlinkSync(pidPath(platform));
+    execSync(`pm2 stop ${name}`, { stdio: "inherit" });
+    execSync(`pm2 delete ${name}`, { stdio: "ignore" });
   } catch {
-    // PID file may already be gone
+    console.error(`${platform} daemon is not running or already stopped.`);
+    process.exit(1);
   }
 
-  console.log(`${platform} daemon stopped (PID ${pid}).`);
+  console.log(`${platform} daemon stopped.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,32 +115,29 @@ export function daemonStop(platform: DaemonPlatform): void {
 // ---------------------------------------------------------------------------
 
 export function daemonStatus(): void {
-  ensureDir(RUN_DIR);
+  requirePm2();
 
-  const statuses = VALID_PLATFORMS.map((platform) => {
-    const pid = readPid(platform);
-    const running = pid !== null && isProcessAlive(pid);
+  // pm2 jlist outputs JSON; filter to sportsclaw processes
+  const raw = pm2Exec("jlist", true);
+  if (!raw) {
+    console.log("No daemons running.");
+    console.log("");
+    console.log("Start one with: sportsclaw start <discord|telegram>");
+    return;
+  }
 
-    // Clean up stale PID files
-    if (pid !== null && !running) {
-      try {
-        unlinkSync(pidPath(platform));
-      } catch {
-        // ignore
-      }
-    }
+  let procs: Array<{ name: string; pm2_env?: { status?: string }; pid?: number }>;
+  try {
+    procs = JSON.parse(raw);
+  } catch {
+    // Fallback: just run pm2 list for human-readable output
+    execSync("pm2 list", { stdio: "inherit" });
+    return;
+  }
 
-    return {
-      platform,
-      running,
-      pid: running ? pid : null,
-      logFile: logPath(platform),
-    };
-  });
+  const ours = procs.filter((p) => p.name.startsWith("sportsclaw-"));
 
-  const anyRunning = statuses.some((s) => s.running);
-
-  if (!anyRunning) {
+  if (ours.length === 0) {
     console.log("No daemons running.");
     console.log("");
     console.log("Start one with: sportsclaw start <discord|telegram>");
@@ -191,13 +146,16 @@ export function daemonStatus(): void {
 
   console.log("Daemon Status:");
   console.log("");
-  for (const s of statuses) {
-    const icon = s.running ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
-    const label = s.running ? `running (PID ${s.pid})` : "stopped";
-    console.log(`  ${icon} ${s.platform.padEnd(12)} ${label}`);
+  for (const p of ours) {
+    const status = p.pm2_env?.status ?? "unknown";
+    const online = status === "online";
+    const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
+    const platform = p.name.replace("sportsclaw-", "");
+    const label = online ? `online (PID ${p.pid})` : status;
+    console.log(`  ${icon} ${platform.padEnd(12)} ${label}`);
   }
   console.log("");
-  console.log(`Logs: ${LOG_DIR}/`);
+  console.log("Full details: pm2 list");
 }
 
 // ---------------------------------------------------------------------------
@@ -205,18 +163,17 @@ export function daemonStatus(): void {
 // ---------------------------------------------------------------------------
 
 export function daemonLogs(platform: DaemonPlatform, lines = 50): void {
-  const file = logPath(platform);
-  if (!existsSync(file)) {
-    console.error(`No log file found for ${platform}.`);
-    console.error(`Expected at: ${file}`);
+  requirePm2();
+
+  const name = pm2Name(platform);
+
+  try {
+    execSync(`pm2 logs ${name} --nostream --lines ${lines}`, {
+      stdio: "inherit",
+    });
+  } catch {
+    console.error(`No logs found for ${platform}. Is the daemon running?`);
+    console.error(`Start it with: sportsclaw start ${platform}`);
     process.exit(1);
   }
-
-  // Read the file and show the last N lines
-  const content = readFileSync(file, "utf-8");
-  const allLines = content.split("\n");
-  const tail = allLines.slice(-lines).join("\n");
-
-  console.log(`--- ${platform} logs (last ${lines} lines) ---`);
-  console.log(tail);
 }
