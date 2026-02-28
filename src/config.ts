@@ -94,6 +94,7 @@ export interface CLIConfig {
 
 const CONFIG_DIR = join(homedir(), ".sportsclaw");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const ENV_PATH = join(CONFIG_DIR, ".env");
 const ENV_TELEGRAM_PATH = join(CONFIG_DIR, ".env.telegram");
 
 // ---------------------------------------------------------------------------
@@ -283,10 +284,41 @@ export function resolveConfig(): ResolvedConfig {
 }
 
 /**
+ * Load all key-value pairs from a dotenv-style file into process.env.
+ * Existing env vars are NOT overwritten (env always wins).
+ */
+function loadEnvFile(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx < 0) continue;
+      const k = trimmed.slice(0, eqIdx).trim();
+      let v = trimmed.slice(eqIdx + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      // Don't overwrite existing env vars
+      if (!process.env[k] && v) {
+        process.env[k] = v;
+      }
+    }
+  } catch {
+    // Ignore read errors
+  }
+}
+
+/**
  * Apply saved config into process.env so downstream code (engine, listeners)
  * picks it up transparently. Env vars already set take precedence.
  */
 export function applyConfigToEnv(): ResolvedConfig {
+  // Load ~/.sportsclaw/.env first (user secrets, wallet addresses, etc.)
+  loadEnvFile(ENV_PATH);
+
   const resolved = resolveConfig();
 
   const envVar = PROVIDER_ENV[resolved.provider];
