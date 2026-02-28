@@ -360,6 +360,13 @@ export function logSecurityEvent(
   const timestamp = new Date().toISOString();
   const entry = { timestamp, event, ...details };
 
-  // For now, just console.error. Could be extended to file/service logging.
+  // Only log actionable events (blocked/injection) to stderr.
+  // suspicious_input is informational — silent unless DEBUG is set.
+  if (event === "suspicious_input") {
+    if (process.env.DEBUG) {
+      console.debug(`[sportsclaw:security] ${JSON.stringify(entry)}`);
+    }
+    return;
+  }
   console.error(`[sportsclaw:security] ${JSON.stringify(entry)}`);
 }
