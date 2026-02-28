@@ -153,6 +153,18 @@ Your core directives:
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Patterns that indicate internal tool intents (upgrade, config, etc.) — not sport queries */
+const INTERNAL_INTENT_PATTERNS = [
+  /\b(upgrade|update|refresh)\b.*\b(sports?.?skills?|tools?|package)\b/i,
+  /\b(install|add|remove|uninstall)\b.*\bsports?\b/i,
+  /\b(config|configure|setup|settings)\b/i,
+];
+
+/** Returns true when the prompt targets an internal tool, not a sport query */
+function isInternalToolIntent(prompt: string): boolean {
+  return INTERNAL_INTENT_PATTERNS.some((p) => p.test(prompt));
+}
+
 /** Filter out undefined values so they don't override defaults during merge */
 function filterDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const result: Partial<T> = {};
@@ -1569,7 +1581,8 @@ export class sportsclawEngine {
       this.config.clarifyOnLowConfidence &&
       routing.decision &&
       routing.decision.confidence < this.config.clarifyThreshold &&
-      routing.decision.mode === "ambiguous"
+      routing.decision.mode === "ambiguous" &&
+      !isInternalToolIntent(sanitizedPrompt)
     ) {
       const skillList = routing.decision.selectedSkills
         .map((skill) => `- ${skill}`)
