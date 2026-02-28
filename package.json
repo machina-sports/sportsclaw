@@ -46,6 +46,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@agent-relay/sdk": "^2.4.7",
     "@ai-sdk/anthropic": "^3.0.46",
     "@ai-sdk/google": "^3.0.30",
     "@ai-sdk/openai": "^3.0.31",
