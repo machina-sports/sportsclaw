@@ -31,7 +31,8 @@ import {
   type RunOptions,
   type Message,
 } from "./types.js";
-import { ToolRegistry, type ToolCallInput } from "./tools.js";
+import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
+import { execFile } from "node:child_process";
 import {
   loadAllSchemas,
   fetchSportSchema,
@@ -972,6 +973,72 @@ export class sportsclawEngine {
           `Removed "${sport}" (${removedCount} tools unloaded). ` +
           `Schema deleted from disk.`
         );
+      },
+    });
+
+    toolMap["upgrade_sports_skills"] = defineTool({
+      description:
+        "Upgrade the sports-skills Python package to the latest version, then " +
+        "refresh all installed sport schemas and hot-reload tools. Use when the " +
+        "user asks to update, upgrade, or refresh sports skills/tools.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const pythonPath = config.pythonPath ?? "python3";
+        const pipResult = await new Promise<{ success: boolean; output: string }>((resolve) => {
+          execFile(
+            pythonPath,
+            ["-m", "pip", "install", "--upgrade", "sports-skills"],
+            {
+              encoding: "utf-8",
+              timeout: 120_000,
+              env: buildSubprocessEnv(config.env),
+            },
+            (error, stdout, stderr) => {
+              if (error) {
+                resolve({ success: false, output: stderr || error.message });
+              } else {
+                resolve({ success: true, output: stdout || "" });
+              }
+            }
+          );
+        });
+
+        if (!pipResult.success) {
+          return `Failed to upgrade sports-skills: ${pipResult.output}`;
+        }
+
+        // Extract version from pip output
+        const versionMatch = pipResult.output.match(/Successfully installed sports-skills-(\S+)/);
+        const newVersion = versionMatch ? versionMatch[1] : "latest";
+
+        // Refresh all installed schemas from the upgraded package
+        const { installed } = getInstalledVsAvailable();
+        let refreshed = 0;
+        const errors: string[] = [];
+
+        for (const sport of installed) {
+          try {
+            const schema = await fetchSportSchema(sport, config);
+            saveSchema(schema);
+            registry.injectSchema(schema);
+            refreshed++;
+          } catch (err) {
+            errors.push(`${sport}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        const parts = [
+          `sports-skills upgraded to v${newVersion}.`,
+          `Refreshed ${refreshed}/${installed.length} sport schemas.`,
+        ];
+        if (errors.length > 0) {
+          parts.push(`Errors: ${errors.join("; ")}`);
+        }
+        parts.push("All tools are hot-reloaded and ready.");
+        return parts.join(" ");
       },
     });
 
