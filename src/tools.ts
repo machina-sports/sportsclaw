@@ -656,28 +656,14 @@ export class ToolRegistry {
 export function buildSubprocessEnv(
   extra?: Record<string, string>
 ): Record<string, string> {
+  // Inherit the full parent env — process.env already has ~/.sportsclaw/.env
+  // loaded by applyConfigToEnv(), so all service credentials (POLYMARKET_*,
+  // KALSHI_*, etc.) are available without hardcoding prefixes.
   const env: Record<string, string> = {};
-  const passthrough = [
-    "PATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "PYTHONPATH",
-    "VIRTUAL_ENV",
-  ];
-  for (const key of passthrough) {
-    if (process.env[key]) {
-      env[key] = process.env[key]!;
-    }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
   }
 
-  // Pass through service credentials loaded from ~/.sportsclaw/.env
-  const serviceEnvPrefixes = ["POLYMARKET_", "KALSHI_"];
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value && serviceEnvPrefixes.some((p) => key.startsWith(p))) {
-      env[key] = value;
-    }
-  }
   if (extra) {
     Object.assign(env, extra);
   }
