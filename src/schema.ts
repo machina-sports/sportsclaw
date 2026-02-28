@@ -85,13 +85,14 @@ export const SKILL_DESCRIPTIONS: Record<string, string> = {
  */
 function getSkillFilter(): Set<string> | null {
   const raw =
-    process.env.SPORTSCLAW_SKILLS || process.env.sportsclaw_SKILLS;
-  if (!raw) return null;
+    process.env.SPORTSCLAW_SKILLS ?? process.env.sportsclaw_SKILLS;
+  if (raw === undefined) return null; // unset → no filter (all active)
+  if (raw.trim() === "") return new Set(); // empty string → no skills
   const skills = raw
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  return skills.length > 0 ? new Set(skills) : null;
+  return skills.length > 0 ? new Set(skills) : new Set();
 }
 
 // ---------------------------------------------------------------------------

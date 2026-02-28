@@ -222,6 +222,8 @@ export interface RunOptions {
 export interface McpServerConfig {
   url: string;
   headers?: Record<string, string>;
+  /** Whitelist of tool names to register. If omitted, all tools are registered. */
+  tools?: string[];
 }
 
 // ---------------------------------------------------------------------------

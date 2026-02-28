@@ -200,10 +200,17 @@ export class McpManager {
     this.connections.set(name, { client, serverName: name });
 
     // Discover tools
-    const { tools } = await client.listTools();
+    const { tools: allTools } = await client.listTools();
+    const allowSet = config.tools?.length
+      ? new Set(config.tools.map((t) => t.trim()))
+      : null;
+    const tools = allowSet
+      ? allTools.filter((t) => allowSet.has(t.name))
+      : allTools;
     if (this.verbose) {
+      const filtered = allowSet ? ` (filtered from ${allTools.length})` : "";
       console.error(
-        `[sportsclaw] mcp: "${name}" has ${tools.length} tool(s): ${tools.map((t) => t.name).join(", ")}`
+        `[sportsclaw] mcp: "${name}" has ${tools.length} tool(s)${filtered}: ${tools.map((t) => t.name).join(", ")}`
       );
     }
 
