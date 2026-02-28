@@ -269,13 +269,45 @@ export interface EnsureVenvResult {
   error?: string;
 }
 
+/** The pip install target — includes polymarket extra for trading support */
+const PIP_INSTALL_TARGET = "sports-skills[polymarket]";
+
+/**
+ * Check whether a Python module is importable in the venv.
+ */
+function isModuleInstalled(moduleName: string): boolean {
+  try {
+    execFileSync(
+      getVenvPythonPath(),
+      ["-c", `import ${moduleName}`],
+      { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Ensure a managed venv exists at ~/.sportsclaw/venv/.
- * If it already exists, returns immediately. Otherwise creates one using
- * the provided base Python (or auto-detected), installs sports-skills into it.
+ * If it already exists, checks for missing extras and installs them.
+ * Otherwise creates one using the provided base Python (or auto-detected),
+ * and installs sports-skills[polymarket] into it.
  */
 export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
   if (isVenvSetup()) {
+    // Venv exists — check for missing extras (e.g. py_clob_client for polymarket)
+    if (!isModuleInstalled("py_clob_client")) {
+      try {
+        execFileSync(
+          getVenvPythonPath(),
+          ["-m", "pip", "install", "--upgrade", PIP_INSTALL_TARGET],
+          { timeout: 120_000, stdio: ["pipe", "pipe", "pipe"] }
+        );
+      } catch {
+        // Non-fatal — tools will error at call time with a clear message
+      }
+    }
     return { ok: true, pythonPath: getVenvPythonPath() };
   }
 
@@ -294,10 +326,10 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    // Install/upgrade pip and sports-skills into it
+    // Install/upgrade pip and sports-skills[polymarket] into it
     execFileSync(
       getVenvPythonPath(),
-      ["-m", "pip", "install", "--upgrade", "pip", "sports-skills"],
+      ["-m", "pip", "install", "--upgrade", "pip", PIP_INSTALL_TARGET],
       {
         timeout: 120_000,
         stdio: ["pipe", "pipe", "pipe"],
