@@ -29,6 +29,8 @@ import {
   detectPlatformPackageManager,
   installHomebrew,
   installPythonViaPackageManager,
+  isVenvSetup,
+  getVenvPythonPath,
   MIN_PYTHON_VERSION,
 } from "./python.js";
 
@@ -222,11 +224,13 @@ export function resolveConfig(): ResolvedConfig {
     ? "/opt/homebrew/bin/python3"
     : "python3";
   const configuredPython = firstEnv("PYTHON_PATH") || file.pythonPath;
-  // Migrate generic "python3" configs to Homebrew Python automatically when present.
+  // Resolution order: env/config > managed venv > Homebrew auto-detect > "python3"
   const pythonPath =
     configuredPython && configuredPython !== "python3"
       ? configuredPython
-      : defaultPythonPath;
+      : isVenvSetup()
+        ? getVenvPythonPath()
+        : defaultPythonPath;
 
   const routingMode = "soft_lock";
   const routingMaxSkills = parsePositiveInt(

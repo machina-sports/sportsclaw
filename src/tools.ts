@@ -16,7 +16,7 @@ import type {
   sportsclawConfig,
   SportSchema,
 } from "./types.js";
-import { buildSportsSkillsRepairCommand } from "./python.js";
+import { buildSportsSkillsRepairCommand, isVenvSetup, getVenvDir } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 
 type BridgeErrorCode =
@@ -331,7 +331,7 @@ export class ToolRegistry {
    * Inject a sport schema's tools into the dynamic registry.
    * Validates sport and command identifiers at injection time.
    */
-  injectSchema(schema: SportSchema): void {
+  injectSchema(schema: SportSchema, allowTrading?: boolean): void {
     const sportError = validateIdentifier(schema.sport, "sport");
     if (sportError) {
       console.error(`[sportsclaw] skipping schema "${schema.sport}": ${sportError}`);
@@ -346,7 +346,7 @@ export class ToolRegistry {
       }
 
       // Security: Skip blocked tools entirely — don't even expose them to the LLM
-      const blockReason = isBlockedTool(tool.name);
+      const blockReason = isBlockedTool(tool.name, allowTrading);
       if (blockReason) {
         console.error(`[sportsclaw] blocking tool "${tool.name}": trading operation`);
         continue;
@@ -446,7 +446,7 @@ export class ToolRegistry {
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
     // Security: Check blocklist FIRST, before any other processing
-    const blockReason = isBlockedTool(toolName);
+    const blockReason = isBlockedTool(toolName, config?.allowTrading);
     if (blockReason) {
       logSecurityEvent("blocked_tool", { toolName, input });
       return {
@@ -673,6 +673,15 @@ export function buildSubprocessEnv(
   if (extra) {
     Object.assign(env, extra);
   }
+
+  // Activate the managed venv for all subprocess calls
+  if (isVenvSetup()) {
+    const venvDir = getVenvDir();
+    env.VIRTUAL_ENV = venvDir;
+    const venvBin = venvDir + "/bin";
+    env.PATH = env.PATH ? `${venvBin}:${env.PATH}` : venvBin;
+  }
+
   return env;
 }
 

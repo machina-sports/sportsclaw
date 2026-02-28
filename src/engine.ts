@@ -49,7 +49,7 @@ import { routePromptToSkills, routeToAgents } from "./router.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { SECURITY_DIRECTIVES, sanitizeInput, logSecurityEvent } from "./security.js";
+import { getSecurityDirectives, sanitizeInput, logSecurityEvent } from "./security.js";
 import {
   logQuery,
   buildQueryEvent,
@@ -271,7 +271,7 @@ export class sportsclawEngine {
   private loadDynamicSchemas(): void {
     const schemas = loadAllSchemas();
     for (const schema of schemas) {
-      this.registry.injectSchema(schema);
+      this.registry.injectSchema(schema, this.config.allowTrading);
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] loaded schema: ${schema.sport} (${schema.tools.length} tools)`
@@ -295,8 +295,8 @@ export class sportsclawEngine {
 
     const parts = [basePrompt];
 
-    // --- Security directives (framework-level, always active) ---
-    parts.push("", SECURITY_DIRECTIVES);
+    // --- Security directives (framework-level, trading gated by config) ---
+    parts.push("", getSecurityDirectives(this.config.allowTrading));
 
     // --- Self-awareness block ---
     const { installed, available } = getInstalledVsAvailable();
@@ -943,7 +943,7 @@ export class sportsclawEngine {
         try {
           const schema = await fetchSportSchema(sport, config);
           saveSchema(schema);
-          registry.injectSchema(schema);
+          registry.injectSchema(schema, config.allowTrading);
 
           if (verbose) {
             console.error(
@@ -1040,7 +1040,7 @@ export class sportsclawEngine {
           try {
             const schema = await fetchSportSchema(sport, config);
             saveSchema(schema);
-            registry.injectSchema(schema);
+            registry.injectSchema(schema, config.allowTrading);
             refreshed++;
           } catch (err) {
             errors.push(`${sport}: ${err instanceof Error ? err.message : String(err)}`);

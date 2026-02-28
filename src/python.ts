@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { platform } from "node:os";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -241,4 +242,74 @@ export function checkPrerequisites(): PrerequisiteStatus {
       : { found: false },
     pythonVersion: best ? best.version : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Managed venv at ~/.sportsclaw/venv/
+// ---------------------------------------------------------------------------
+
+const VENV_DIR = join(homedir(), ".sportsclaw", "venv");
+
+export function getVenvDir(): string {
+  return VENV_DIR;
+}
+
+export function getVenvPythonPath(): string {
+  return join(VENV_DIR, "bin", "python3");
+}
+
+export function isVenvSetup(): boolean {
+  return existsSync(getVenvPythonPath());
+}
+
+export interface EnsureVenvResult {
+  ok: boolean;
+  pythonPath: string;
+  created?: boolean;
+  error?: string;
+}
+
+/**
+ * Ensure a managed venv exists at ~/.sportsclaw/venv/.
+ * If it already exists, returns immediately. Otherwise creates one using
+ * the provided base Python (or auto-detected), installs sports-skills into it.
+ */
+export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
+  if (isVenvSetup()) {
+    return { ok: true, pythonPath: getVenvPythonPath() };
+  }
+
+  const systemPython = basePythonPath ?? findBestPython()?.path ?? "python3";
+
+  try {
+    // Ensure parent dir exists
+    const parentDir = join(homedir(), ".sportsclaw");
+    if (!existsSync(parentDir)) {
+      mkdirSync(parentDir, { recursive: true });
+    }
+
+    // Create venv
+    execFileSync(systemPython, ["-m", "venv", VENV_DIR], {
+      timeout: 30_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    // Install/upgrade pip and sports-skills into it
+    execFileSync(
+      getVenvPythonPath(),
+      ["-m", "pip", "install", "--upgrade", "pip", "sports-skills"],
+      {
+        timeout: 120_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      }
+    );
+
+    return { ok: true, pythonPath: getVenvPythonPath(), created: true };
+  } catch (err) {
+    return {
+      ok: false,
+      pythonPath: systemPython,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

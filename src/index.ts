@@ -55,6 +55,7 @@ import {
 import {
   buildSportsSkillsRepairCommand,
   checkPythonVersion,
+  ensureVenv,
   MIN_PYTHON_VERSION,
 } from "./python.js";
 import {
@@ -102,9 +103,13 @@ export {
   checkPythonVersion,
   findBestPython,
   checkPrerequisites,
+  ensureVenv,
+  isVenvSetup,
+  getVenvPythonPath,
+  getVenvDir,
   MIN_PYTHON_VERSION,
 } from "./python.js";
-export type { PythonVersionResult, PrerequisiteStatus } from "./python.js";
+export type { PythonVersionResult, PrerequisiteStatus, EnsureVenvResult } from "./python.js";
 export {
   loadAgents,
   loadAgent,
@@ -989,10 +994,17 @@ async function cmdListen(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const resolved = applyConfigToEnv();
+  let resolved = applyConfigToEnv();
   if (!resolved.apiKey) {
     await runConfigFlow();
-    applyConfigToEnv();
+    resolved = applyConfigToEnv();
+  }
+
+  // Ensure managed venv exists
+  const venvResult = ensureVenv(resolved.pythonPath);
+  if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
+    resolved = { ...resolved, pythonPath: venvResult.pythonPath };
+    process.env.PYTHON_PATH = venvResult.pythonPath;
   }
 
   await ensureDefaultSchemas();
@@ -1038,6 +1050,16 @@ async function cmdChat(args: string[]): Promise<void> {
     resolved = applyConfigToEnv();
   }
 
+  // Ensure managed venv exists (creates on first run)
+  const venvResult = ensureVenv(resolved.pythonPath);
+  if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
+    if (venvResult.created) {
+      console.log(pc.dim("[sportsclaw] Setting up Python environment (~/.sportsclaw/venv/)..."));
+    }
+    resolved = { ...resolved, pythonPath: venvResult.pythonPath };
+    process.env.PYTHON_PATH = venvResult.pythonPath;
+  }
+
   await maybePromptForCliUpgrade();
   await maybePromptForSkillsUpgrade(resolved.pythonPath);
   await ensureDefaultSchemas();
@@ -1050,6 +1072,7 @@ async function cmdChat(args: string[]): Promise<void> {
     routingMaxSkills: resolved.routingMaxSkills,
     routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
+    allowTrading: true,
   });
 
   // Clear screen for a fresh start
@@ -1191,6 +1214,13 @@ async function cmdQuery(args: string[]): Promise<void> {
     resolved = applyConfigToEnv();
   }
 
+  // Ensure managed venv exists
+  const venvResult = ensureVenv(resolved.pythonPath);
+  if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
+    resolved = { ...resolved, pythonPath: venvResult.pythonPath };
+    process.env.PYTHON_PATH = venvResult.pythonPath;
+  }
+
   await ensureDefaultSchemas();
 
   const engine = new sportsclawEngine({
@@ -1201,6 +1231,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     routingMaxSkills: resolved.routingMaxSkills,
     routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
+    allowTrading: true,
   });
 
   if (verbose) {

@@ -116,6 +116,8 @@ export interface sportsclawConfig {
   clarifyThreshold?: number;
   /** Skip fan profile updates and related instructions (e.g. button follow-ups) */
   skipFanProfile?: boolean;
+  /** Allow trading tools (Polymarket orders, balance, etc.). Only enable for CLI. Default: false */
+  allowTrading?: boolean;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -136,6 +138,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   clarifyOnLowConfidence: true,
   clarifyThreshold: 0.5,
   skipFanProfile: false,
+  allowTrading: false,
 };
 
 // ---------------------------------------------------------------------------

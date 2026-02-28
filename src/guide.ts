@@ -22,10 +22,13 @@ import type { SportSchema } from "./types.js";
 // ---------------------------------------------------------------------------
 
 const GUIDE_PATTERNS = [
-  /\b(help|how (?:do|can|to)|what (?:can|sports?|data)|getting started|tutorial)\b/i,
-  /\b(what(?:'s| is) sportsclaw|who are you|about (?:this|you)|commands?|features?)\b/i,
-  /\b(supported sports?|available (?:data|sports?)|what (?:do you|can you) (?:do|support))\b/i,
-  /\b(how does (?:this|it) work|usage|instructions?)\b/i,
+  /^(?:help|getting started|tutorial)$/i,
+  /\bhow (?:do|can|to) (?:i |you )?(?:use|start|get started|set ?up)\b/i,
+  /\bwhat (?:can you do|sports do you|data do you)\b/i,
+  /\b(?:what(?:'s| is) sportsclaw|who are you)\b/i,
+  /\b(?:supported sports?|available sports?)\b/i,
+  /\bhow does (?:this|sportsclaw) work\b/i,
+  /^(?:list|show|what are) (?:your |the |all )?(?:commands|features|capabilities)\s*\??$/i,
 ];
 
 /**
@@ -118,8 +121,8 @@ export function generateGuideResponse(prompt: string): string {
   const lower = prompt.toLowerCase();
   const { installed, available } = getInstalledVsAvailable();
 
-  // "what sports" / "supported sports" / "available data"
-  if (/\b(what (?:sports?|data)|supported|available)\b/i.test(lower)) {
+  // "what sports" / "supported sports" / "available sports"
+  if (/\b(?:what sports|supported sports?|available sports?|what data do you)\b/i.test(lower)) {
     const schemaDigest = readSchemaDigest();
     const lines = [
       "## Installed Sports\n",
@@ -143,13 +146,13 @@ export function generateGuideResponse(prompt: string): string {
     return lines.join("\n");
   }
 
-  // "help" / "how to" / "getting started" / "features"
-  if (/\b(help|how (?:do|can|to)|getting started|features?|commands?|what (?:can|do) you)\b/i.test(lower)) {
+  // "help" / "getting started" / "what can you do"
+  if (/^(?:help|getting started|tutorial)$/i.test(lower) || /\bwhat (?:can|do) you (?:do|support)\b/i.test(lower)) {
     return FEATURE_MANIFESTO;
   }
 
-  // "who are you" / "about" / "what is sportsclaw"
-  if (/\b(who are you|about|what(?:'s| is) sportsclaw)\b/i.test(lower)) {
+  // "who are you" / "what is sportsclaw"
+  if (/\b(?:who are you|what(?:'s| is) sportsclaw)\b/i.test(lower)) {
     return [
       "I'm **SportsClaw**, a sports AI agent built by Machina Sports.",
       "",
