@@ -176,13 +176,16 @@ function parsePositiveInt(
   return parsed;
 }
 
+const parseCommaList = (raw: string): string[] => raw.split(",").map(s => s.trim()).filter(Boolean);
+
 /**
- * Read a token value from a dotenv-style file (KEY=VALUE format).
- * Returns the value for the given key, or undefined if not found.
+ * Parse all key-value pairs from a dotenv-style file.
+ * Returns a record of key → value (empty values are omitted).
  */
-function readEnvFile(filePath: string, key: string): string | undefined {
-  if (!existsSync(filePath)) return undefined;
+function parseEnvFile(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) return {};
   try {
+    const result: Record<string, string> = {};
     const content = readFileSync(filePath, "utf-8");
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
@@ -191,16 +194,23 @@ function readEnvFile(filePath: string, key: string): string | undefined {
       if (eqIdx < 0) continue;
       const k = trimmed.slice(0, eqIdx).trim();
       let v = trimmed.slice(eqIdx + 1).trim();
-      // Strip surrounding quotes
       if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
         v = v.slice(1, -1);
       }
-      if (k === key) return v || undefined;
+      if (v) result[k] = v;
     }
+    return result;
   } catch {
-    // Ignore read errors
+    return {};
   }
-  return undefined;
+}
+
+/**
+ * Read a token value from a dotenv-style file (KEY=VALUE format).
+ * Returns the value for the given key, or undefined if not found.
+ */
+function readEnvFile(filePath: string, key: string): string | undefined {
+  return parseEnvFile(filePath)[key];
 }
 
 export function resolveConfig(): ResolvedConfig {
@@ -255,7 +265,7 @@ export function resolveConfig(): ResolvedConfig {
     firstEnv("DISCORD_BOT_TOKEN") || file.chatIntegrations?.discord?.botToken;
   const discordAllowedUsersRaw = firstEnv("ALLOWED_USERS");
   const discordAllowedUsers = discordAllowedUsersRaw
-    ? discordAllowedUsersRaw.split(",").map(id => id.trim()).filter(Boolean)
+    ? parseCommaList(discordAllowedUsersRaw)
     : file.chatIntegrations?.discord?.allowedUsers;
   const discordPrefix =
     firstEnv("DISCORD_PREFIX") || file.chatIntegrations?.discord?.prefix || "!sportsclaw";
@@ -266,7 +276,7 @@ export function resolveConfig(): ResolvedConfig {
     file.chatIntegrations?.telegram?.botToken;
   const telegramAllowedUsersRaw = firstEnv("TELEGRAM_ALLOWED_USERS");
   const telegramAllowedUsers = telegramAllowedUsersRaw
-    ? telegramAllowedUsersRaw.split(",").map(id => id.trim()).filter(Boolean)
+    ? parseCommaList(telegramAllowedUsersRaw)
     : file.chatIntegrations?.telegram?.allowedUsers;
 
   return {
@@ -290,26 +300,8 @@ export function resolveConfig(): ResolvedConfig {
  * Existing env vars are NOT overwritten (env always wins).
  */
 function loadEnvFile(filePath: string): void {
-  if (!existsSync(filePath)) return;
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx < 0) continue;
-      const k = trimmed.slice(0, eqIdx).trim();
-      let v = trimmed.slice(eqIdx + 1).trim();
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-        v = v.slice(1, -1);
-      }
-      // Don't overwrite existing env vars
-      if (!process.env[k] && v) {
-        process.env[k] = v;
-      }
-    }
-  } catch {
-    // Ignore read errors
+  for (const [k, v] of Object.entries(parseEnvFile(filePath))) {
+    if (!process.env[k]) process.env[k] = v;
   }
 }
 
@@ -327,39 +319,20 @@ export function applyConfigToEnv(): ResolvedConfig {
   if (resolved.apiKey && !process.env[envVar]) {
     process.env[envVar] = resolved.apiKey;
   }
-  if (resolved.model && !process.env.sportsclaw_MODEL) {
-    process.env.sportsclaw_MODEL = resolved.model;
+
+  const envMap: Record<string, string | undefined> = {
+    SPORTSCLAW_MODEL: resolved.model,
+    SPORTSCLAW_PROVIDER: resolved.provider,
+    SPORTSCLAW_ROUTING_MODE: resolved.routingMode,
+    SPORTSCLAW_ROUTING_MAX_SKILLS: String(resolved.routingMaxSkills),
+    SPORTSCLAW_ROUTING_ALLOW_SPILLOVER: String(resolved.routingAllowSpillover),
+  };
+  for (const [key, value] of Object.entries(envMap)) {
+    if (value && !process.env[key]) process.env[key] = value;
   }
-  if (resolved.model && !process.env.SPORTSCLAW_MODEL) {
-    process.env.SPORTSCLAW_MODEL = resolved.model;
-  }
-  if (!process.env.sportsclaw_PROVIDER) {
-    process.env.sportsclaw_PROVIDER = resolved.provider;
-  }
-  if (!process.env.SPORTSCLAW_PROVIDER) {
-    process.env.SPORTSCLAW_PROVIDER = resolved.provider;
-  }
-  if (!process.env.SPORTSCLAW_ROUTING_MODE) {
-    process.env.SPORTSCLAW_ROUTING_MODE = resolved.routingMode;
-  }
+
   if (!process.env.PYTHON_PATH && resolved.pythonPath !== "python3") {
     process.env.PYTHON_PATH = resolved.pythonPath;
-  }
-  if (!process.env.SPORTSCLAW_ROUTING_MAX_SKILLS) {
-    process.env.SPORTSCLAW_ROUTING_MAX_SKILLS = String(resolved.routingMaxSkills);
-  }
-  if (!process.env.sportsclaw_ROUTING_MAX_SKILLS) {
-    process.env.sportsclaw_ROUTING_MAX_SKILLS = String(resolved.routingMaxSkills);
-  }
-  if (!process.env.SPORTSCLAW_ROUTING_ALLOW_SPILLOVER) {
-    process.env.SPORTSCLAW_ROUTING_ALLOW_SPILLOVER = String(
-      resolved.routingAllowSpillover
-    );
-  }
-  if (!process.env.sportsclaw_ROUTING_ALLOW_SPILLOVER) {
-    process.env.sportsclaw_ROUTING_ALLOW_SPILLOVER = String(
-      resolved.routingAllowSpillover
-    );
   }
 
   if (resolved.discordBotToken && !process.env.DISCORD_BOT_TOKEN)
@@ -665,10 +638,7 @@ export async function runConfigFlow(): Promise<CLIConfig> {
       p.cancel("🚫 Setup cancelled.");
       process.exit(0);
     }
-    const allowedUsers = (allowedUsersInput as string)
-      .split(",")
-      .map(id => id.trim())
-      .filter(Boolean);
+    const allowedUsers = parseCommaList(allowedUsersInput as string);
 
     const existingPrefix = savedConfig.chatIntegrations?.discord?.prefix;
     const prefixInput = await p.text({
@@ -801,10 +771,7 @@ export async function runChannelsFlow(): Promise<void> {
       p.cancel("Setup cancelled.");
       process.exit(0);
     }
-    const allowedUsers = (allowedUsersInput as string)
-      .split(",")
-      .map(id => id.trim())
-      .filter(Boolean);
+    const allowedUsers = parseCommaList(allowedUsersInput as string);
 
     const prefixInput = await p.text({
       message: "Command prefix:",
@@ -866,10 +833,7 @@ export async function runChannelsFlow(): Promise<void> {
       p.cancel("Setup cancelled.");
       process.exit(0);
     }
-    const allowedUsers = (allowedUsersInput as string)
-      .split(",")
-      .map(id => id.trim())
-      .filter(Boolean);
+    const allowedUsers = parseCommaList(allowedUsersInput as string);
 
     telegramConfig = {
       botToken: (tokenInput as string).trim(),

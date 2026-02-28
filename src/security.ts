@@ -15,29 +15,6 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Tools that are NEVER allowed to execute, regardless of configuration.
- * These are trading/financial operations that could cause real harm.
- *
- * Even if the LLM hallucinates a call to these tools, the dispatch layer
- * will reject it before any code runs.
- */
-export const BLOCKED_TOOLS: ReadonlySet<string> = new Set([
-  // Polymarket trading operations
-  "polymarket_configure",        // Wallet credential setup
-  "polymarket_create_order",     // Place limit orders
-  "polymarket_market_order",     // Place market orders
-  "polymarket_cancel_order",     // Cancel specific order
-  "polymarket_cancel_all_orders", // Cancel all orders
-  "polymarket_ctf_split",        // Split USDC into tokens
-  "polymarket_ctf_merge",        // Merge tokens back to USDC
-  "polymarket_ctf_redeem",       // Redeem winning tokens
-  "polymarket_approve_set",      // Approve contracts for trading
-  "polymarket_get_balance",      // Wallet balance (implies auth)
-  "polymarket_get_orders",       // View open orders (implies auth)
-  "polymarket_get_user_trades",  // View trades (implies auth)
-]);
-
-/**
  * Pattern-based blocking for future-proofing.
  * Catches trading tools from ANY provider, not just Polymarket.
  * These patterns match tool names that imply write/transactional operations.
@@ -66,18 +43,11 @@ const BLOCKED_TOOL_PATTERNS: ReadonlyArray<{ pattern: RegExp; reason: string }> 
 
 /**
  * Check if a tool is blocked. Returns a reason string if blocked, null if allowed.
- * Uses both exact-match blocklist AND pattern-based blocking for defense in depth.
+ * Uses pattern-based blocking that catches trading tools from any provider.
  */
 export function isBlockedTool(toolName: string, allowTrading?: boolean): string | null {
-  // If trading is explicitly allowed (CLI owner mode), skip all blocks
   if (allowTrading) return null;
 
-  // Layer 1: Exact match blocklist
-  if (BLOCKED_TOOLS.has(toolName)) {
-    return `Tool "${toolName}" is blocked. Trading operations are disabled for security.`;
-  }
-
-  // Layer 2: Pattern-based blocking (catches future trading tools from any provider)
   for (const { pattern, reason } of BLOCKED_TOOL_PATTERNS) {
     if (pattern.test(toolName)) {
       return `Tool "${toolName}" matches blocked pattern (${reason}). Trading operations are disabled.`;
@@ -113,14 +83,10 @@ const HOMOGLYPH_MAP: Record<string, string> = {
   'ρ': 'p', 'Ρ': 'P',
   'τ': 't', 'Τ': 'T',
   'υ': 'u', 'Υ': 'Y',
-  // Other common substitutions
+  // Other common substitutions (not handled by NFKC)
   '℮': 'e',
   'ℯ': 'e',
-  '𝐚': 'a', '𝐛': 'b', '𝐜': 'c', '𝐝': 'd', '𝐞': 'e',
-  '𝐟': 'f', '𝐠': 'g', '𝐡': 'h', '𝐢': 'i', '𝐣': 'j',
-  '𝐤': 'k', '𝐥': 'l', '𝐦': 'm', '𝐧': 'n', '𝐨': 'o',
-  '𝐩': 'p', '𝐪': 'q', '𝐫': 'r', '𝐬': 's', '𝐭': 't',
-  '𝐮': 'u', '𝐯': 'v', '𝐰': 'w', '𝐱': 'x', '𝐲': 'y', '𝐳': 'z',
+  // Math-bold (𝐚-𝐳) omitted — NFKC normalizes these to ASCII
 };
 
 /**
@@ -368,9 +334,6 @@ ${inputHandling}
 ${toolUsage}
 `.trim();
 }
-
-/** @deprecated Use getSecurityDirectives() instead */
-export const SECURITY_DIRECTIVES = getSecurityDirectives(false);
 
 // ---------------------------------------------------------------------------
 // Logging (for security auditing)

@@ -312,19 +312,25 @@ export class ToolRegistry {
   }
 
   /**
-   * Check if a tool should skip caching (internal tools).
+   * Check if a tool is an internal (non-sport) tool.
+   */
+  private isInternalTool(toolName: string): boolean {
+    return (
+      toolName.startsWith("update_") ||
+      toolName === "reflect" ||
+      toolName === "evolve_strategy" ||
+      toolName === "get_agent_config" ||
+      toolName === "install_sport" ||
+      toolName === "remove_sport" ||
+      toolName === "upgrade_sports_skills"
+    );
+  }
+
+  /**
+   * Internal tools should skip caching.
    */
   private shouldSkipCache(toolName: string): boolean {
-    const internalTools = [
-      "update_",
-      "reflect",
-      "evolve_strategy",
-      "get_agent_config",
-      "update_agent_config",
-      "install_sport",
-      "remove_sport",
-    ];
-    return internalTools.some((prefix) => toolName.startsWith(prefix));
+    return this.isInternalTool(toolName);
   }
 
   /**
@@ -514,6 +520,31 @@ export class ToolRegistry {
   // Private handlers
   // -------------------------------------------------------------------------
 
+  private buildBridgeErrorResult(
+    result: { error?: string; stderr?: string },
+    sport: string,
+    repairCmd: string
+  ): ToolCallResult {
+    const classified = classifyBridgeError(result.error, result.stderr);
+    let hint: string;
+    if (classified.errorCode === "dependency_missing") {
+      hint = sport === "f1"
+        ? `F1 support is unavailable. Repair with: ${repairCmd}`
+        : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
+    } else {
+      hint = classified.hint;
+    }
+    return {
+      content: JSON.stringify({
+        error: result.error,
+        error_code: classified.errorCode,
+        stderr: result.stderr,
+        hint,
+      }),
+      isError: true,
+    };
+  }
+
   private async handleSportsQuery(
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
@@ -554,27 +585,7 @@ export class ToolRegistry {
     );
 
     if (!result.success) {
-      const isF1 = input.sport === "f1";
-      const classified = classifyBridgeError(result.error, result.stderr);
-      let hint: string;
-      if (classified.errorCode === "python_version_incompatible") {
-        hint = classified.hint;
-      } else if (classified.errorCode === "dependency_missing") {
-        hint = isF1
-          ? `F1 support is unavailable. Repair with: ${repairCmd}`
-          : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
-      } else {
-        hint = classified.hint;
-      }
-      return {
-        content: JSON.stringify({
-          error: result.error,
-          error_code: classified.errorCode,
-          stderr: result.stderr,
-          hint,
-        }),
-        isError: true,
-      };
+      return this.buildBridgeErrorResult(result, input.sport, repairCmd);
     }
 
     return {
@@ -591,16 +602,6 @@ export class ToolRegistry {
   ): Promise<ToolCallResult> {
     const pythonPath = config?.pythonPath ?? "python3";
     const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
-
-    // Defense-in-depth: validate even though injectSchema already checks
-    const sportError = validateIdentifier(sport, "sport");
-    if (sportError) {
-      return { content: JSON.stringify({ error: sportError }), isError: true };
-    }
-    const cmdError = validateIdentifier(command, "command");
-    if (cmdError) {
-      return { content: JSON.stringify({ error: cmdError }), isError: true };
-    }
 
     // Search-first middleware: reject guessed human names in _id parameters.
     // Forces the LLM to call a search/listing tool first to discover real IDs.
@@ -620,26 +621,7 @@ export class ToolRegistry {
     const result = await executePythonBridge(sport, command, args, config);
 
     if (!result.success) {
-      const classified = classifyBridgeError(result.error, result.stderr);
-      let hint: string;
-      if (classified.errorCode === "python_version_incompatible") {
-        hint = classified.hint;
-      } else if (classified.errorCode === "dependency_missing") {
-        hint = sport === "f1"
-          ? `F1 support is unavailable. Repair with: ${repairCmd}`
-          : `Tool "${command}" for sport "${sport}" failed due to missing dependency. Repair with: ${repairCmd}`;
-      } else {
-        hint = classified.hint;
-      }
-      return {
-        content: JSON.stringify({
-          error: result.error,
-          error_code: classified.errorCode,
-          stderr: result.stderr,
-          hint,
-        }),
-        isError: true,
-      };
+      return this.buildBridgeErrorResult(result, sport, repairCmd);
     }
 
     return {
