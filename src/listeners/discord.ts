@@ -24,7 +24,7 @@ import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
-import { detectSport, getButtons, getFollowUpPrompt } from "../buttons.js";
+import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
 import { executePythonBridge } from "../tools.js";
 import { loadConfig } from "../config.js";
@@ -313,8 +313,10 @@ export async function startDiscordListener(): Promise<void> {
   // Build sport-aware action row from detected sport
   // ---------------------------------------------------------------------------
 
-  function buildActionRow(contextKey: string, sport: DetectedSport): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> {
-    const buttons = getButtons(sport);
+  function buildActionRow(contextKey: string, sport: DetectedSport, response: string, prompt: string): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> | null {
+    const league = detectLeague(response, prompt);
+    const buttons = getFilteredButtons(sport, league);
+    if (buttons.length === 0) return null;
     const row = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
     for (let i = 0; i < buttons.length; i++) {
       row.addComponents(
@@ -619,11 +621,14 @@ export async function startDiscordListener(): Promise<void> {
         embeds: [embed],
       };
 
-      // Attach action buttons only to game/score responses
+      // Attach action buttons only to game/score responses with supported data
       if (features.buttons && isGameRelatedResponse(response, prompt)) {
         const sport = detectSport(response, prompt);
         const contextKey = storeButtonContext(prompt, userId, sport);
-        messageOptions.components = [buildActionRow(contextKey, sport)];
+        const actionRow = buildActionRow(contextKey, sport, response, prompt);
+        if (actionRow) {
+          messageOptions.components = [actionRow];
+        }
       }
 
       await safeSend(message, messageOptions);

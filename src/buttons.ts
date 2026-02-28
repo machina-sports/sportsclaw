@@ -5,6 +5,12 @@
  * Detects the sport from prompt + response, then provides
  * appropriate follow-up actions and generic prompts that let
  * the engine route to the right tools.
+ *
+ * Buttons are conditionally rendered: actions like "Match Stats"
+ * or "Lineup" only appear when the detected league is verified
+ * as fully supported by our data fetchers. Unsupported leagues
+ * (e.g. Brazilian Paulista, lower-tier domestic cups) get a
+ * reduced button set to avoid dead-end interactions.
  */
 
 // ---------------------------------------------------------------------------
@@ -15,6 +21,8 @@ export type DetectedSport =
   | "nba" | "nfl" | "mlb" | "nhl" | "wnba" | "cbb" | "cfb"
   | "football" | "tennis" | "golf" | "f1"
   | null;
+
+export type DetectedLeague = string | null;
 
 export interface ButtonDef {
   /** Unique action ID used in customId / callback_data */
@@ -65,6 +73,90 @@ export function detectSport(response: string, prompt: string): DetectedSport {
 }
 
 // ---------------------------------------------------------------------------
+// League detection — identifies specific football/soccer league
+// ---------------------------------------------------------------------------
+
+const LEAGUE_PATTERNS: [string, RegExp][] = [
+  // Top-tier European leagues (full data support)
+  ["eng.1", /\b(premier league|epl)\b/i],
+  ["esp.1", /\b(la liga|laliga)\b/i],
+  ["ger.1", /\b(bundesliga)\b/i],
+  ["ita.1", /\b(serie a(?!\s*brazil))\b/i],
+  ["fra.1", /\b(ligue 1)\b/i],
+  ["usa.1", /\b(mls|major league soccer)\b/i],
+  ["uefa.champions", /\b(champions league|ucl)\b/i],
+  ["uefa.europa", /\b(europa league|uel)\b/i],
+  ["ned.1", /\b(eredivisie)\b/i],
+  ["por.1", /\b(primeira liga|liga portugal)\b/i],
+  // English lower tiers
+  ["eng.2", /\b(championship|efl championship)\b/i],
+  ["eng.fa", /\b(fa cup)\b/i],
+  ["eng.league_cup", /\b(carabao|league cup|efl cup)\b/i],
+  // International
+  ["fifa.world", /\b(world cup|fifa world)\b/i],
+  ["conmebol.libertadores", /\b(libertadores|copa libertadores)\b/i],
+  ["conmebol.copa", /\b(copa am[eé]rica)\b/i],
+  // Brazilian leagues (limited data — stats/lineup often missing)
+  ["bra.1", /\b(campeonato brasileiro|brasileir[aã]o|s[eé]rie a brazil)\b/i],
+  ["bra.paulista", /\b(paulista|paulist[aã]o|campeonato paulista)\b/i],
+  ["bra.carioca", /\b(carioca|campeonato carioca)\b/i],
+  ["bra.mineiro", /\b(mineiro|campeonato mineiro)\b/i],
+  ["bra.gaucho", /\b(ga[uú]cho|campeonato ga[uú]cho)\b/i],
+  // Brazilian clubs (may be in any of the above leagues)
+  ["bra._club", /\b(corinthians|flamengo|palmeiras|cruzeiro|s[aã]o paulo|internacional|gr[eê]mio|botafogo|vasco|atletico mineiro|santos|bahia|fortaleza|bragantino|cuiab[aá]|juventude|cear[aá]|sport recife|goi[aá]s|coritiba|am[eé]rica mineiro)\b/i],
+];
+
+/**
+ * Detect the specific football/soccer league from the combined text.
+ * Returns a league code (e.g. "eng.1", "bra.paulista") or null.
+ */
+export function detectLeague(response: string, prompt: string): DetectedLeague {
+  const combined = `${prompt} ${response}`;
+  for (const [league, pattern] of LEAGUE_PATTERNS) {
+    if (pattern.test(combined)) return league;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Supported leagues — which actions are available per league
+// ---------------------------------------------------------------------------
+
+/**
+ * Leagues with verified full data support (matchstats + lineup + standings).
+ * If a football league is NOT in this set, only "standings" is safe to show.
+ */
+const FULLY_SUPPORTED_FOOTBALL_LEAGUES = new Set([
+  "eng.1", "esp.1", "ger.1", "ita.1", "fra.1",
+  "usa.1",
+  "uefa.champions", "uefa.europa",
+  "ned.1", "por.1",
+  "eng.2", "eng.fa", "eng.league_cup",
+  "fifa.world",
+]);
+
+/**
+ * Leagues where standings are available but match-level stats are unreliable.
+ * These get a reduced button set (standings only, no matchstats/lineup).
+ */
+const STANDINGS_ONLY_FOOTBALL_LEAGUES = new Set([
+  "bra.1",
+  "conmebol.libertadores", "conmebol.copa",
+]);
+
+/** Football buttons for leagues with full data */
+const FOOTBALL_FULL_BUTTONS: ButtonDef[] = [
+  { action: "matchstats", label: "📊 Match Stats" },
+  { action: "lineup", label: "📋 Lineup" },
+  { action: "standings", label: "🏆 Standings" },
+];
+
+/** Football buttons for leagues with only standings */
+const FOOTBALL_STANDINGS_BUTTONS: ButtonDef[] = [
+  { action: "standings", label: "🏆 Standings" },
+];
+
+// ---------------------------------------------------------------------------
 // Button definitions per sport category
 // ---------------------------------------------------------------------------
 
@@ -73,13 +165,6 @@ const ESPN_BUTTONS: ButtonDef[] = [
   { action: "boxscore", label: "📊 Box Score" },
   { action: "pbp", label: "📋 Play-by-Play" },
   { action: "stats", label: "📈 Full Stats" },
-];
-
-/** Football (soccer) */
-const FOOTBALL_BUTTONS: ButtonDef[] = [
-  { action: "matchstats", label: "📊 Match Stats" },
-  { action: "lineup", label: "📋 Lineup" },
-  { action: "standings", label: "🏆 Standings" },
 ];
 
 /** Tennis */
@@ -109,14 +194,58 @@ const GENERIC_BUTTONS: ButtonDef[] = [
 
 const ESPN_SPORTS = new Set<DetectedSport>(["nba", "nfl", "mlb", "nhl", "wnba", "cbb", "cfb"]);
 
+/**
+ * Get buttons for a sport (ignores league support level).
+ * Kept for backward compatibility — prefer `getFilteredButtons()`.
+ */
 export function getButtons(sport: DetectedSport): ButtonDef[] {
   if (!sport) return GENERIC_BUTTONS;
   if (ESPN_SPORTS.has(sport)) return ESPN_BUTTONS;
-  if (sport === "football") return FOOTBALL_BUTTONS;
+  if (sport === "football") return FOOTBALL_FULL_BUTTONS;
   if (sport === "tennis") return TENNIS_BUTTONS;
   if (sport === "golf") return GOLF_BUTTONS;
   if (sport === "f1") return F1_BUTTONS;
   return GENERIC_BUTTONS;
+}
+
+/**
+ * Get buttons conditionally filtered by sport AND league data availability.
+ *
+ * For football/soccer, the detected league determines which buttons are safe:
+ *   - Fully supported leagues → Match Stats + Lineup + Standings
+ *   - Standings-only leagues → Standings only
+ *   - Unknown/regional leagues (e.g. Paulista) → no buttons (returns [])
+ *
+ * For all other sports, delegates to `getButtons()` (no league filtering needed).
+ */
+export function getFilteredButtons(
+  sport: DetectedSport,
+  league: DetectedLeague
+): ButtonDef[] {
+  if (sport !== "football") return getButtons(sport);
+
+  // Football with a known fully-supported league → all buttons
+  if (league && FULLY_SUPPORTED_FOOTBALL_LEAGUES.has(league)) {
+    return FOOTBALL_FULL_BUTTONS;
+  }
+
+  // Football with standings-only support → just standings
+  if (league && STANDINGS_ONLY_FOOTBALL_LEAGUES.has(league)) {
+    return FOOTBALL_STANDINGS_BUTTONS;
+  }
+
+  // Brazilian club detected but no specific league → conservative (standings only)
+  if (league === "bra._club") {
+    return FOOTBALL_STANDINGS_BUTTONS;
+  }
+
+  // Unknown league (e.g. Paulista, Carioca, regional cup) → no data buttons
+  if (league) {
+    return [];
+  }
+
+  // Football detected but no specific league → default full set
+  return FOOTBALL_FULL_BUTTONS;
 }
 
 // ---------------------------------------------------------------------------

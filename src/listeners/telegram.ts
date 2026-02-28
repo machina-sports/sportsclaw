@@ -19,7 +19,7 @@ import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
-import { detectSport, getButtons, getFollowUpPrompt } from "../buttons.js";
+import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
 import {
   AskUserQuestionHalt,
@@ -115,9 +115,13 @@ function storeButtonContext(prompt: string, userId: string, sport: DetectedSport
 
 function buildInlineKeyboard(
   contextKey: string,
-  sport: DetectedSport
-): { inline_keyboard: InlineKeyboardButton[][] } {
-  const buttons = getButtons(sport);
+  sport: DetectedSport,
+  response: string,
+  prompt: string
+): { inline_keyboard: InlineKeyboardButton[][] } | null {
+  const league = detectLeague(response, prompt);
+  const buttons = getFilteredButtons(sport, league);
+  if (buttons.length === 0) return null;
   return {
     inline_keyboard: [
       buttons.map((b) => ({
@@ -331,12 +335,15 @@ async function processMessage(
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;
 
-    // Build inline keyboard for game-related responses
+    // Build inline keyboard for game-related responses with supported data
     let replyMarkup: object | undefined;
     if (isGameRelatedResponse(response, prompt)) {
       const sport = detectSport(response, prompt);
       const contextKey = storeButtonContext(prompt, userId, sport);
-      replyMarkup = buildInlineKeyboard(contextKey, sport);
+      const keyboard = buildInlineKeyboard(contextKey, sport, response, prompt);
+      if (keyboard) {
+        replyMarkup = keyboard;
+      }
     }
 
     // Telegram has a 4096 char limit — split if needed
