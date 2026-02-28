@@ -459,6 +459,7 @@ export class ToolRegistry {
       };
     }
 
+
     // Check cache if enabled and tool is cacheable
     if (this.cacheEnabled && !this.shouldSkipCache(toolName)) {
       const cacheKey = this.generateCacheKey(toolName, input);
