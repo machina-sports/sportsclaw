@@ -41,6 +41,10 @@ const SOUL_FILE = "SOUL.md";
 const FAN_PROFILE_FILE = "FAN_PROFILE.md";
 const REFLECTIONS_FILE = "REFLECTIONS.md";
 const STRATEGY_FILE = "STRATEGY.md";
+const THREAD_FILE = "thread.json";
+
+/** Maximum thread messages kept on disk (20 user/assistant pairs) */
+const MAX_THREAD_MESSAGES = 40;
 
 /** Maximum tail lines injected from today's log into the memory block */
 const MAX_LOG_LINES = 100;
@@ -56,6 +60,12 @@ interface SoulData {
   born: string;
   exchanges: number;
   rest: string; // everything after the header, written freely by the LLM
+}
+
+export interface ThreadMessage {
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +285,40 @@ export class MemoryManager {
   async writeStrategy(content: string): Promise<void> {
     await this.dirReady;
     await writeFile(join(this.dir, STRATEGY_FILE), content, "utf-8");
+  }
+
+  // -------------------------------------------------------------------------
+  // Thread persistence — conversation history across process restarts
+  // -------------------------------------------------------------------------
+
+  /** Read the persisted conversation thread from disk */
+  async readThread(): Promise<ThreadMessage[]> {
+    await this.dirReady;
+    const raw = await safeRead(join(this.dir, THREAD_FILE));
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Write a conversation thread to disk, capping at MAX_THREAD_MESSAGES */
+  async writeThread(messages: ThreadMessage[]): Promise<void> {
+    await this.dirReady;
+    const capped = messages.slice(-MAX_THREAD_MESSAGES);
+    await writeFile(join(this.dir, THREAD_FILE), JSON.stringify(capped), "utf-8");
+  }
+
+  /** Append a user/assistant exchange to the persisted thread */
+  async appendToThread(userPrompt: string, assistantReply: string): Promise<void> {
+    const thread = await this.readThread();
+    const ts = new Date().toISOString();
+    thread.push(
+      { role: "user", content: userPrompt, ts },
+      { role: "assistant", content: assistantReply, ts },
+    );
+    await this.writeThread(thread);
   }
 
   // -------------------------------------------------------------------------

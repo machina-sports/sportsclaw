@@ -354,6 +354,10 @@ export class sportsclawEngine {
         "You have persistent memory. Previous context, fan profile, reflections, and today's " +
           "conversation log will be provided in a preceding message labeled [MEMORY].",
         "",
+        "You have persistent conversation history. Previous messages may appear " +
+          "in the messages array before the current user message. Use them for " +
+          "context but be aware they may be truncated to the most recent exchanges.",
+        "",
         "You have an `update_context` tool. Call it when the user changes topic or " +
           "when you need to save important context (active game, current team focus, " +
           "user preferences) for future conversations.",
@@ -1190,6 +1194,17 @@ export class sportsclawEngine {
       });
     }
 
+    // Load conversation history from disk for multi-turn context.
+    // Only load if messages array is empty (fresh process — relay/pipe/telegram).
+    // In chat mode the engine instance stays alive and this.messages accumulates
+    // naturally, so we skip to avoid duplicating history.
+    if (memory && this.messages.length <= 1) {
+      const threadHistory = await memory.readThread();
+      for (const msg of threadHistory) {
+        this.messages.push({ role: msg.role, content: msg.content });
+      }
+    }
+
     this.messages.push({ role: "user", content: userPrompt });
 
     let stepCount = 0;
@@ -1468,6 +1483,7 @@ export class sportsclawEngine {
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {
       try {
+        await memory.appendToThread(userPrompt, responseText);
         await memory.appendExchange(userPrompt, responseText);
         // Evolve: increment soul exchange counter (only thing code touches)
         await memory.incrementSoulExchanges();

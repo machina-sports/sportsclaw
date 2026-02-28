@@ -301,6 +301,10 @@ def _build_cmd(body: dict) -> list[str]:
     prompt = body["prompt"]
     cmd = [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "--pipe", prompt]
 
+    user_id = body.get("user_id")
+    if user_id:
+        cmd.extend(["--user", user_id])
+
     if body.get("verbose"):
         cmd.append("--verbose")
 

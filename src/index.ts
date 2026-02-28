@@ -1013,6 +1013,15 @@ async function cmdQuery(args: string[]): Promise<void> {
   const forcePipe = args.includes("--pipe");
   const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];
   const formatArg = explicitFormat ?? (forcePipe ? "markdown" : "cli");
+
+  // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
+  let userId: string | undefined;
+  const userIdx = args.indexOf("--user");
+  if (userIdx >= 0 && userIdx + 1 < args.length) {
+    userId = args[userIdx + 1];
+    args.splice(userIdx, 2); // remove --user and its value from args
+  }
+
   const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe" && !a.startsWith("--format="));
   const prompt = filteredArgs.join(" ");
 
@@ -1049,6 +1058,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     emitNdjson({ type: "start", timestamp: new Date().toISOString() });
     try {
       const result = await engine.run(prompt, {
+        userId,
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
       const formatted = formatResponse(result, formatArg as any);
