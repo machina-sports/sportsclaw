@@ -11,6 +11,10 @@
  *   sportsclaw doctor            — Check setup and diagnose issues
  *   sportsclaw channels          — Configure Discord & Telegram tokens
  *   sportsclaw listen <platform> — Start a Discord or Telegram listener
+ *   sportsclaw start <platform> — Start a listener as a background daemon
+ *   sportsclaw stop <platform>  — Stop a running daemon
+ *   sportsclaw status           — Show daemon status
+ *   sportsclaw logs <platform>  — Tail daemon log output
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
  * Or import as a library:
@@ -25,8 +29,7 @@ import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
-import { Marked, type MarkedExtension } from "marked";
-import { markedTerminal } from "marked-terminal";
+import { formatResponse } from "./formatters/index.js";
 import { sportsclawEngine } from "./engine.js";
 import { MemoryManager } from "./memory.js";
 import {
@@ -71,6 +74,13 @@ import {
   getAggregateStats,
   getToolMetrics,
 } from "./analytics.js";
+import {
+  daemonStart,
+  daemonStop,
+  daemonStatus,
+  daemonLogs,
+  isValidPlatform,
+} from "./daemon.js";
 
 
 // ---------------------------------------------------------------------------
@@ -161,98 +171,26 @@ export {
   expireOldTasks,
 } from "./taskbus.js";
 
+// Daemon management
+export {
+  daemonStart,
+  daemonStop,
+  daemonStatus,
+  daemonLogs,
+  isValidPlatform,
+} from "./daemon.js";
+export type { DaemonPlatform } from "./daemon.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------
 
-const terminalExt = markedTerminal({
-  width: Math.min(process.stdout.columns || 80, 120),
-  reflowText: true,
-  showSectionPrefix: false,
-  strong: pc.bold,
-  em: pc.italic,
-  heading: pc.bold,
-  firstHeading: pc.bold,
-  codespan: pc.yellow,
-  code: pc.yellow,
-  del: pc.strikethrough,
-  link: pc.cyan,
-  href: pc.underline,
-  tableOptions: {
-    style: { head: [], border: [] },
-  },
-}) as MarkedExtension;
-
-// Patch: marked-terminal's `text` renderer doesn't parse inline tokens
-// (strong, em, etc.) inside non-loose list items. Override it so bold works
-// everywhere, not just in paragraphs.
-const origTextRenderer = (terminalExt as { renderer: Record<string, Function> }).renderer.text;
-(terminalExt as { renderer: Record<string, Function> }).renderer.text = function (
-  this: { parser: { parseInline(tokens: unknown[]): string } },
-  token: string | { tokens?: unknown[]; text: string },
-) {
-  if (typeof token === "object" && token.tokens) {
-    return this.parser.parseInline(token.tokens);
-  }
-  return origTextRenderer.call(this, token);
-};
-
-const md = new Marked(terminalExt);
-
-/**
- * Remove row separators between data rows in cli-table3 output.
- * Keeps only the first mid-separator (header → data boundary) per table.
- */
-function cleanTableSeparators(text: string): string {
-  const lines = text.split("\n");
-  let inTable = false;
-  let headerSepSeen = false;
-  const result: string[] = [];
-
-  for (const line of lines) {
-    const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
-
-    if (stripped.startsWith("┌")) {
-      inTable = true;
-      headerSepSeen = false;
-      result.push(line);
-    } else if (stripped.startsWith("└")) {
-      inTable = false;
-      result.push(line);
-    } else if (inTable && stripped.startsWith("├")) {
-      if (!headerSepSeen) {
-        headerSepSeen = true;
-        result.push(line);
-      }
-      // Skip subsequent mid-separators (between data rows)
-    } else {
-      result.push(line);
-    }
-  }
-
-  return result.join("\n");
-}
-
 function renderMarkdown(text: string): string {
-  // Pre-process: strip HTML tags that may appear in LLM responses.
-  // Inside table rows (lines with |), replace <br> with a separator
-  // instead of \n to avoid breaking the table structure.
-  let cleaned = text.replace(/<br\s*\/?>/gi, (match, offset, str) => {
-    const lineStart = str.lastIndexOf("\n", offset) + 1;
-    const lineEnd = str.indexOf("\n", offset);
-    const line = str.substring(lineStart, lineEnd === -1 ? str.length : lineEnd);
-    return line.includes("|") ? " · " : "\n";
-  });
+  // Pre-process: strip HTML tags that may appear in LLM responses
+  let cleaned = text.replace(/<br\s*\/?>/gi, "\n");
   cleaned = cleaned.replace(/<\/?[a-z][^>]*>/gi, "");
 
-  let rendered = md.parse(cleaned);
-  if (typeof rendered !== "string") return cleaned;
-
-  // Post-process: clean table row separators (keep header sep only)
-  rendered = cleanTableSeparators(rendered);
-
-  // Post-process: replace * bullets with • for cleaner look
-  rendered = rendered.replace(/^(\s*)\*\s/gm, "$1• ");
+  const rendered = formatResponse(cleaned, "cli").text;
 
   // Collapse excessive blank lines; trim trailing whitespace
   return rendered.replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "");
@@ -1288,6 +1226,58 @@ async function cmdQuery(args: string[]): Promise<void> {
 // Help
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw start <platform>` — start a daemon
+// ---------------------------------------------------------------------------
+
+function cmdStart(args: string[]): void {
+  const platform = args[0]?.toLowerCase();
+  if (!platform || !isValidPlatform(platform)) {
+    console.error("Usage: sportsclaw start <discord|telegram>");
+    process.exit(1);
+  }
+  daemonStart(platform);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw stop <platform>` — stop a daemon
+// ---------------------------------------------------------------------------
+
+function cmdStop(args: string[]): void {
+  const platform = args[0]?.toLowerCase();
+  if (!platform || !isValidPlatform(platform)) {
+    console.error("Usage: sportsclaw stop <discord|telegram>");
+    process.exit(1);
+  }
+  daemonStop(platform);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw status` — show daemon status
+// ---------------------------------------------------------------------------
+
+function cmdStatus(): void {
+  daemonStatus();
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw logs <platform>` — tail daemon logs
+// ---------------------------------------------------------------------------
+
+function cmdLogs(args: string[]): void {
+  const platform = args[0]?.toLowerCase();
+  if (!platform || !isValidPlatform(platform)) {
+    console.error("Usage: sportsclaw logs <discord|telegram>");
+    process.exit(1);
+  }
+  const lines = args[1] ? Number.parseInt(args[1], 10) : 50;
+  daemonLogs(platform, Number.isFinite(lines) && lines > 0 ? lines : 50);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw --help` — usage text
+// ---------------------------------------------------------------------------
+
 function printHelp(): void {
   console.log("sportsclaw Engine v0.4.1");
   console.log("");
@@ -1303,6 +1293,10 @@ function printHelp(): void {
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
+  console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
+  console.log("  sportsclaw stop <platform>         Stop a running daemon");
+  console.log("  sportsclaw status                  Show daemon status");
+  console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
   console.log("");
   console.log("Default skills (selected during first-run config):");
@@ -1481,6 +1475,14 @@ async function main(): Promise<void> {
       return cmdInit(subArgs);
     case "listen":
       return cmdListen(subArgs);
+    case "start":
+      return cmdStart(subArgs);
+    case "stop":
+      return cmdStop(subArgs);
+    case "status":
+      return cmdStatus();
+    case "logs":
+      return cmdLogs(subArgs);
     case "agents":
       return cmdAgents();
     case "analytics":
