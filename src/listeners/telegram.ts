@@ -191,16 +191,33 @@ async function processUpdate(
     // Telegram has a 4096 char limit — split if needed
     const chunks = splitMessage(textToSend, 4096);
     for (const chunk of chunks) {
-      await fetch(`${apiBase}/sendMessage`, {
+      const sendPayload = {
+        chat_id: msg.chat.id,
+        text: chunk,
+        parse_mode: formatted.telegram ? "MarkdownV2" : undefined,
+        reply_to_message_id: msg.message_id,
+      };
+
+      const res = await fetch(`${apiBase}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: msg.chat.id,
-          text: chunk,
-          parse_mode: formatted.telegram ? "MarkdownV2" : undefined,
-          reply_to_message_id: msg.message_id,
-        }),
+        body: JSON.stringify(sendPayload),
       });
+
+      // Fallback: if MarkdownV2 fails, retry as plain text
+      if (!res.ok && formatted.telegram) {
+        console.error(`[sportsclaw] MarkdownV2 send failed (${res.status}), retrying as plain text`);
+        await fetch(`${apiBase}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: msg.chat.id,
+            text: formatted.text,
+            reply_to_message_id: msg.message_id,
+          }),
+        });
+        break; // already sent full text as fallback
+      }
     }
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
