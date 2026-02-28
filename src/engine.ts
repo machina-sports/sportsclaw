@@ -462,7 +462,8 @@ export class sportsclawEngine {
       name === "evolve_strategy" ||
       name === "get_agent_config" ||
       name === "install_sport" ||
-      name === "remove_sport";
+      name === "remove_sport" ||
+      name === "upgrade_sports_skills";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
       const skill = this.registry.getSkillName(name);
