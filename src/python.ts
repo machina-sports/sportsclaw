@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 
@@ -269,41 +269,49 @@ export interface EnsureVenvResult {
   error?: string;
 }
 
-/** The pip install target — includes polymarket extra for trading support */
-const PIP_INSTALL_TARGET = "sports-skills[polymarket]";
+/** The pip install target — [all] pulls every sport's native deps (FastF1, py_clob_client, etc.) */
+const PIP_INSTALL_TARGET = "sports-skills[all]";
+
+/** Marker file that records the pip install target used when setting up the venv */
+const EXTRAS_MARKER = join(VENV_DIR, ".sportsclaw-extras");
 
 /**
- * Check whether a Python module is importable in the venv.
+ * Check if the venv was set up with the current PIP_INSTALL_TARGET.
+ * Returns false if the marker is missing or doesn't match (needs upgrade).
  */
-function isModuleInstalled(moduleName: string): boolean {
+function hasCorrectExtras(): boolean {
   try {
-    execFileSync(
-      getVenvPythonPath(),
-      ["-c", `import ${moduleName}`],
-      { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }
-    );
-    return true;
+    return readFileSync(EXTRAS_MARKER, "utf-8").trim() === PIP_INSTALL_TARGET;
   } catch {
     return false;
   }
 }
 
+function writeExtrasMarker(): void {
+  try {
+    writeFileSync(EXTRAS_MARKER, PIP_INSTALL_TARGET, "utf-8");
+  } catch {
+    // Non-fatal
+  }
+}
+
 /**
  * Ensure a managed venv exists at ~/.sportsclaw/venv/.
- * If it already exists, checks for missing extras and installs them.
- * Otherwise creates one using the provided base Python (or auto-detected),
- * and installs sports-skills[polymarket] into it.
+ * If it already exists but was installed with a narrower target (e.g. bare
+ * sports-skills or sports-skills[polymarket]), upgrades to sports-skills[all].
+ * Otherwise creates one using the provided base Python (or auto-detected).
  */
 export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
   if (isVenvSetup()) {
-    // Venv exists — check for missing extras (e.g. py_clob_client for polymarket)
-    if (!isModuleInstalled("py_clob_client")) {
+    // Venv exists — check if extras need upgrading
+    if (!hasCorrectExtras()) {
       try {
         execFileSync(
           getVenvPythonPath(),
           ["-m", "pip", "install", "--upgrade", PIP_INSTALL_TARGET],
           { timeout: 120_000, stdio: ["pipe", "pipe", "pipe"] }
         );
+        writeExtrasMarker();
       } catch {
         // Non-fatal — tools will error at call time with a clear message
       }
@@ -326,7 +334,7 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    // Install/upgrade pip and sports-skills[polymarket] into it
+    // Install/upgrade pip and sports-skills[all] into it
     execFileSync(
       getVenvPythonPath(),
       ["-m", "pip", "install", "--upgrade", "pip", PIP_INSTALL_TARGET],
@@ -336,6 +344,7 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
       }
     );
 
+    writeExtrasMarker();
     return { ok: true, pythonPath: getVenvPythonPath(), created: true };
   } catch (err) {
     return {
