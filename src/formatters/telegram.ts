@@ -37,11 +37,13 @@ export function renderTelegram(parsed: ParsedResponse): string {
       case "text":
         for (const line of block.lines) {
           let processed = escapeHtml(line);
-          // **bold** → <b>bold</b>
+          // **bold** → <b>bold</b>  (must come before single * italic)
           processed = processed.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
           // `inline code` → <code>inline code</code>
           processed = processed.replace(/`([^`]+)`/g, "<code>$1</code>");
-          // Bullet markers → clean bullets
+          // *italic* → <i>italic</i>  (after ** is already handled)
+          processed = processed.replace(/\*(.+?)\*/g, "<i>$1</i>");
+          // Bullet markers → clean bullets (- or leftover * at line start)
           processed = processed.replace(/^(\s*)[*\-]\s+/, "$1• ");
           result.push(processed);
         }

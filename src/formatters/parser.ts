@@ -176,8 +176,10 @@ export function isGameRelatedResponse(
 function extractSource(text: string): string | null {
   const lines = text.split("\n");
   const lastLine = lines[lines.length - 1]?.trim() || "";
-  if (lastLine.toLowerCase().startsWith("source:")) {
-    return lastLine.replace(/^source:\s*/i, "");
+  // Match "Source: ...", "*Source: ...*", "**Source: ...**"
+  const stripped = lastLine.replace(/^\*{1,2}|\*{1,2}$/g, "").trim();
+  if (stripped.toLowerCase().startsWith("source:")) {
+    return stripped.replace(/^source:\s*/i, "");
   }
   return null;
 }

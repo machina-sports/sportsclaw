@@ -84,7 +84,7 @@ const FOOTBALL_BUTTONS: ButtonDef[] = [
 
 /** Tennis */
 const TENNIS_BUTTONS: ButtonDef[] = [
-  { action: "matchstats", label: "📊 Match Stats" },
+  { action: "tennisstats", label: "📊 Match Stats" },
   { action: "rankings", label: "🏆 Rankings" },
 ];
 
@@ -96,20 +96,27 @@ const GOLF_BUTTONS: ButtonDef[] = [
 
 /** Formula 1 */
 const F1_BUTTONS: ButtonDef[] = [
-  { action: "results", label: "🏁 Race Results" },
-  { action: "standings", label: "🏆 Standings" },
+  { action: "raceresults", label: "🏁 Race Results" },
+  { action: "driverstandings", label: "🏆 Standings" },
+  { action: "laptimes", label: "⏱ Lap Times" },
+];
+
+/** Generic fallback — works for any sport not explicitly mapped */
+const GENERIC_BUTTONS: ButtonDef[] = [
+  { action: "details", label: "📊 More Details" },
+  { action: "stats", label: "📈 Full Stats" },
 ];
 
 const ESPN_SPORTS = new Set<DetectedSport>(["nba", "nfl", "mlb", "nhl", "wnba", "cbb", "cfb"]);
 
 export function getButtons(sport: DetectedSport): ButtonDef[] {
-  if (!sport) return ESPN_BUTTONS; // safe default
+  if (!sport) return GENERIC_BUTTONS;
   if (ESPN_SPORTS.has(sport)) return ESPN_BUTTONS;
   if (sport === "football") return FOOTBALL_BUTTONS;
   if (sport === "tennis") return TENNIS_BUTTONS;
   if (sport === "golf") return GOLF_BUTTONS;
   if (sport === "f1") return F1_BUTTONS;
-  return ESPN_BUTTONS;
+  return GENERIC_BUTTONS;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +141,8 @@ const FOLLOW_UP_PROMPTS: Record<string, (prompt: string) => string> = {
     `Show the current league standings and table relevant to: ${p}`,
 
   // Tennis actions
+  tennisstats: (p) =>
+    `Show detailed match statistics including aces, double faults, break points, winners, unforced errors, and serve percentages for: ${p}`,
   rankings: (p) =>
     `Show the current ATP or WTA rankings relevant to: ${p}`,
 
@@ -144,8 +153,16 @@ const FOLLOW_UP_PROMPTS: Record<string, (prompt: string) => string> = {
     `Show the detailed scorecard for: ${p}`,
 
   // F1 actions
-  results: (p) =>
+  raceresults: (p) =>
     `Show the race results and finishing order for: ${p}`,
+  driverstandings: (p) =>
+    `Show the current Formula 1 driver and constructor championship standings relevant to: ${p}`,
+  laptimes: (p) =>
+    `Show lap times, sector times, and pit stop data for: ${p}`,
+
+  // Generic fallback actions
+  details: (p) =>
+    `Show more detailed information and a breakdown for: ${p}`,
 };
 
 /**
