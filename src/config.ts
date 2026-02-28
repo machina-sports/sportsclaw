@@ -95,7 +95,6 @@ export interface CLIConfig {
 const CONFIG_DIR = join(homedir(), ".sportsclaw");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const ENV_PATH = join(CONFIG_DIR, ".env");
-const ENV_TELEGRAM_PATH = join(CONFIG_DIR, ".env.telegram");
 
 // ---------------------------------------------------------------------------
 // Provider ↔ API key env var mapping (duplicated here to avoid circular deps)
@@ -257,11 +256,10 @@ export function resolveConfig(): ResolvedConfig {
   const discordPrefix =
     firstEnv("DISCORD_PREFIX") || file.chatIntegrations?.discord?.prefix || "!sportsclaw";
 
-  // Telegram: env var > config file > .env.telegram file
+  // Telegram: env var (incl. ~/.sportsclaw/.env) > config file
   const telegramBotToken =
     firstEnv("TELEGRAM_BOT_TOKEN") ||
-    file.chatIntegrations?.telegram?.botToken ||
-    readEnvFile(ENV_TELEGRAM_PATH, "TELEGRAM_BOT_TOKEN");
+    file.chatIntegrations?.telegram?.botToken;
   const telegramAllowedUsersRaw = firstEnv("TELEGRAM_ALLOWED_USERS");
   const telegramAllowedUsers = telegramAllowedUsersRaw
     ? telegramAllowedUsersRaw.split(",").map(id => id.trim()).filter(Boolean)
@@ -758,8 +756,8 @@ export async function runChannelsFlow(): Promise<void> {
       : pc.dim("not configured");
   const telegramStatus = existingTelegram?.botToken
     ? pc.green("configured")
-    : (firstEnv("TELEGRAM_BOT_TOKEN") || readEnvFile(ENV_TELEGRAM_PATH, "TELEGRAM_BOT_TOKEN"))
-      ? pc.green("set via env/.env.telegram")
+    : firstEnv("TELEGRAM_BOT_TOKEN")
+      ? pc.green("set via env/.env")
       : pc.dim("not configured");
 
   p.log.info(`Discord:  ${discordStatus}`);
@@ -841,7 +839,7 @@ export async function runChannelsFlow(): Promise<void> {
     p.log.info(
       `Get a token from ${pc.cyan("@BotFather")} on Telegram.\n` +
       `  The token will be saved to ~/.sportsclaw/config.json.\n` +
-      `  You can also set TELEGRAM_BOT_TOKEN in env or ~/.sportsclaw/.env.telegram.`
+      `  You can also set TELEGRAM_BOT_TOKEN in env or ~/.sportsclaw/.env.`
     );
 
     const tokenInput = await p.password({

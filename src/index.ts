@@ -931,7 +931,7 @@ async function cmdListen(args: string[]): Promise<void> {
       console.error("Error: Telegram bot token is not configured.");
       console.error("Set it up with: sportsclaw channels");
       console.error("Or set the TELEGRAM_BOT_TOKEN environment variable.");
-      console.error("Or add it to ~/.sportsclaw/.env.telegram");
+      console.error("Or add it to ~/.sportsclaw/.env");
       console.error("Get a token from @BotFather on Telegram.");
       process.exit(1);
     }
