@@ -1,139 +1,207 @@
 /**
- * sportsclaw — Relay Manager (Sprint 2 Live Games)
+ * sportsclaw — Relay Manager (Generic Pub/Sub Primitive)
  *
- * Typed pub/sub layer on top of @agent-relay/sdk. The GameMonitor publishes
- * structured `LiveGameEvent` messages to the `live-games` channel; one or
- * more GamePresenter instances subscribe and render updates to Discord/Telegram.
+ * Type-safe, multi-channel pub/sub layer on top of @agent-relay/sdk.
+ * Channels and their payload types are defined via a ChannelMap type
+ * parameter so producers and consumers stay in sync at compile time.
  *
- * Event flow:
- *   ESPN API → GameMonitor → RelayManager.broadcastEvent() → channel
- *   channel → RelayManager.onMessage() → GamePresenter.handleMessage()
+ * Segregated channels:
+ *
+ *   Channel        Cadence   Payload Type
+ *   ─────────────  ────────  ──────────────────────────────────
+ *   live-games     fast      LiveGameEnvelope (enriched IPTC events)
+ *   odds           fast      MarketOdds (real-time market pricing)
+ *   predictions    medium    PredictionPayload (EventPrediction | PlayerPropTrend)
+ *   intel          slow      CoverageInsight (editorial analysis)
+ *
+ * Usage:
+ *   relayManager.publish("live-games", envelope);   // type-checked payload
+ *   relayManager.publish("odds", odds);             // type-checked payload
+ *   relayManager.on("predictions", handler);        // type-checked handler
  */
 
 import { AgentRelay } from '@agent-relay/sdk';
 import type { Message as RelayMessage } from '@agent-relay/sdk';
 
 // ---------------------------------------------------------------------------
-// Live game event types — the contract between monitor and presenter
+// IPTC Sport Schema — pure IPTC types (no proprietary extensions)
 // ---------------------------------------------------------------------------
 
-export type GameStatus = "scheduled" | "in_progress" | "halftime" | "final" | "delayed" | "postponed";
+export type {
+  IPTCSportEvent,
+  IPTCSportEventEnvelope,
+  IPTCEventType,
+  IPTCEventStatus,
+  IPTCCompetitor,
+  IPTCSportDiscipline,
+  IPTCVenue,
+  IPTCContext,
+  IPTCEntity,
+  LegacyGameStatus,
+} from "./schema/iptc.js";
 
-export interface TeamScore {
-  id: string;
-  name: string;
-  abbreviation: string;
-  score: number;
-  logo?: string;
-  /** Period-by-period scores (quarters, innings, sets, etc.) */
-  periodScores?: number[];
-}
-
-export interface LiveGameState {
-  gameId: string;
-  sport: string;
-  status: GameStatus;
-  /** Human-readable status line: "4th 2:31", "TOP 7th", "2nd Half 67'" */
-  statusDetail: string;
-  home: TeamScore;
-  away: TeamScore;
-  /** Game clock or period indicator */
-  clock: string;
-  /** Venue name */
-  venue?: string;
-  /** ISO timestamp of last data fetch */
-  lastUpdated: string;
-}
-
-export type LiveGameEventType =
-  | "GAME_UPDATE"       // score/clock changed
-  | "GAME_START"        // game transitioned to in_progress
-  | "GAME_END"          // game transitioned to final
-  | "SCORE_CHANGE"      // specific score delta detected
-  | "STATUS_CHANGE";    // status changed (e.g. halftime)
-
-export interface LiveGameEvent {
-  event: LiveGameEventType;
-  data: LiveGameState;
-  /** What changed from the previous state (for presenters to highlight) */
-  delta?: {
-    homeScoreDelta?: number;
-    awayScoreDelta?: number;
-    previousStatus?: GameStatus;
-  };
-  timestamp: string;
-}
+export {
+  IPTC_CONTEXT,
+  toIPTCStatus,
+  fromIPTCStatus,
+  toIPTCDiscipline,
+  iptcGameId,
+  iptcSportCode,
+  iptcHome,
+  iptcAway,
+  iptcStatus,
+} from "./schema/iptc.js";
 
 // ---------------------------------------------------------------------------
-// Relay Manager — typed wrapper around AgentRelay pub/sub
+// Machina Alpha Schema — proprietary AI extensions + channel payloads
 // ---------------------------------------------------------------------------
 
-export type LiveGameMessageHandler = (event: LiveGameEvent) => void;
+export type {
+  MachinaContext,
+  MachinaWinProbability,
+  MachinaMarketEdge,
+  MachinaAgentSignal,
+  LiveGameEvent,
+  LiveGameEnvelope,
+  OddsLine,
+  MarketOdds,
+  EventPrediction,
+  PlayerPropTrend,
+  PredictionPayload,
+  CoverageInsight,
+} from "./schema/machina.js";
 
-export class RelayManager {
+export {
+  MACHINA_NS,
+  MACHINA_CONTEXT,
+} from "./schema/machina.js";
+
+import type { LiveGameEnvelope } from "./schema/machina.js";
+import type { MarketOdds } from "./schema/machina.js";
+import type { PredictionPayload } from "./schema/machina.js";
+import type { CoverageInsight } from "./schema/machina.js";
+
+// ---------------------------------------------------------------------------
+// Channel map — strict typing for segregated pub/sub channels
+// ---------------------------------------------------------------------------
+
+/**
+ * Map channel names → payload types. Each channel is isolated with its own
+ * cadence and payload contract. Producers and consumers must agree on types
+ * at compile time.
+ *
+ *   live-games   — fast:   Score updates, status changes, light win probability
+ *   odds         — fast:   Real-time market odds snapshots (Sportingbot structure)
+ *   predictions  — medium: Model predictions, player prop trends
+ *   intel        — slow:   Editorial coverage insights, deep analysis
+ */
+export type SportsClawChannels = {
+  "live-games": LiveGameEnvelope;
+  "odds": MarketOdds;
+  "predictions": PredictionPayload;
+  "intel": CoverageInsight;
+};
+
+/** All valid channel names */
+export type SportsClawChannelName = keyof SportsClawChannels;
+
+/** Handler for messages on a specific channel. */
+export type ChannelHandler<T> = (payload: T) => void;
+
+// ---------------------------------------------------------------------------
+// RelayManager — generic, multi-channel pub/sub over AgentRelay
+// ---------------------------------------------------------------------------
+
+export class RelayManager<TMap extends Record<string, unknown> = SportsClawChannels> {
   private relay: AgentRelay | null = null;
-  private handlers: LiveGameMessageHandler[] = [];
+  private handlers = new Map<string, Array<ChannelHandler<unknown>>>();
   private isInitialized = false;
-  private broadcastChannel = "live-games";
+  private channelNames: string[];
 
-  constructor() {}
+  constructor(channels?: Array<keyof TMap & string>) {
+    this.channelNames = channels ? [...channels] : [];
+  }
 
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
-    this.relay = new AgentRelay({
-      channels: [this.broadcastChannel, 'general'],
-    });
+    // Ensure "general" is always included
+    const sdkChannels = [...new Set([...this.channelNames, "general"])];
+
+    this.relay = new AgentRelay({ channels: sdkChannels });
 
     this.relay.onMessageReceived = (msg: RelayMessage) => {
-      // Ignore presence/system events
-      if (msg.eventId?.includes('presence')) return;
+      if (msg.eventId?.includes("presence")) return;
       if (!msg.text) return;
 
-      // Only process messages on our channel
-      if (msg.to !== this.broadcastChannel && msg.to !== `#${this.broadcastChannel}`) return;
+      // Resolve the channel name (strip leading '#' if present)
+      const rawTo = msg.to ?? "";
+      const channel = rawTo.startsWith("#") ? rawTo.slice(1) : rawTo;
+
+      const channelHandlers = this.handlers.get(channel);
+      if (!channelHandlers?.length) return;
 
       try {
-        const event = JSON.parse(msg.text) as LiveGameEvent;
-        if (!event.event || !event.data) return;
+        const payload = JSON.parse(msg.text) as unknown;
 
-        for (const handler of this.handlers) {
+        for (const handler of channelHandlers) {
           try {
-            handler(event);
+            handler(payload);
           } catch (err) {
-            console.error("[RelayManager] Handler error:", err instanceof Error ? err.message : err);
+            console.error(
+              `[RelayManager] Handler error on "${channel}":`,
+              err instanceof Error ? err.message : err
+            );
           }
         }
       } catch {
-        // Non-JSON message on channel, ignore
+        // Non-JSON message, ignore
       }
     };
 
     this.isInitialized = true;
-    console.log("[RelayManager] Relay SDK initialized on channel:", this.broadcastChannel);
+    console.log(
+      "[RelayManager] Relay SDK initialized on channels:",
+      sdkChannels.join(", ")
+    );
   }
 
   /**
-   * Register a handler for live game events.
-   * Multiple handlers can be registered (e.g. Discord + Telegram presenters).
+   * Subscribe to typed messages on a channel.
+   * Returns an unsubscribe function.
    */
-  onMessage(handler: LiveGameMessageHandler): () => void {
-    this.handlers.push(handler);
+  on<K extends keyof TMap & string>(
+    channel: K,
+    handler: ChannelHandler<TMap[K]>
+  ): () => void {
+    let arr = this.handlers.get(channel);
+    if (!arr) {
+      arr = [];
+      this.handlers.set(channel, arr);
+    }
+    arr.push(handler as ChannelHandler<unknown>);
+
     return () => {
-      const idx = this.handlers.indexOf(handler);
-      if (idx >= 0) this.handlers.splice(idx, 1);
+      const list = this.handlers.get(channel);
+      if (!list) return;
+      const idx = list.indexOf(handler as ChannelHandler<unknown>);
+      if (idx >= 0) list.splice(idx, 1);
     };
   }
 
   /**
-   * Publish a live game event to all subscribers on the channel.
+   * Publish a typed payload to a channel.
+   * Lazily initializes the relay connection on first call.
    */
-  async broadcastEvent(event: LiveGameEvent): Promise<void> {
+  async publish<K extends keyof TMap & string>(
+    channel: K,
+    payload: TMap[K]
+  ): Promise<void> {
     if (!this.relay) await this.initialize();
 
     await this.relay!.system().sendMessage({
-      to: '#' + this.broadcastChannel,
-      text: JSON.stringify(event),
+      to: "#" + channel,
+      text: JSON.stringify(payload),
     });
   }
 
@@ -142,10 +210,19 @@ export class RelayManager {
       await this.relay.shutdown();
       this.relay = null;
       this.isInitialized = false;
-      this.handlers.length = 0;
+      this.handlers.clear();
       console.log("[RelayManager] Relay SDK shut down.");
     }
   }
 }
 
-export const relayManager = new RelayManager();
+// ---------------------------------------------------------------------------
+// Default singleton — typed to all SportsClaw channels
+// ---------------------------------------------------------------------------
+
+export const relayManager = new RelayManager<SportsClawChannels>([
+  "live-games",
+  "odds",
+  "predictions",
+  "intel",
+]);

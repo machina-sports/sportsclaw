@@ -1,8 +1,8 @@
 /**
  * sportsclaw — Game Presenter (Sprint 2 Live Games)
  *
- * Subscribes to LiveGameEvent messages on the relay pub/sub channel and
- * renders live-updating messages to Discord (webhook PATCH) and Telegram
+ * Subscribes to IPTCSportEventEnvelope messages on the relay pub/sub channel
+ * and renders live-updating messages to Discord (webhook PATCH) and Telegram
  * (editMessageText). Each game gets a single message per channel that is
  * edited in-place as the score changes.
  *
@@ -16,10 +16,17 @@
  */
 
 import { relayManager } from "./relay.js";
+import {
+  iptcGameId,
+  iptcSportCode,
+  iptcHome,
+  iptcAway,
+  iptcStatus,
+} from "./relay.js";
 import type {
+  LiveGameEnvelope,
   LiveGameEvent,
-  LiveGameState,
-  GameStatus,
+  LegacyGameStatus,
 } from "./relay.js";
 
 // ---------------------------------------------------------------------------
@@ -73,7 +80,7 @@ const SPORT_EMOJI: Record<string, string> = {
   f1: "\u{1F3CE}\uFE0F",
 };
 
-const STATUS_INDICATOR: Record<GameStatus, string> = {
+const STATUS_INDICATOR: Record<LegacyGameStatus, string> = {
   scheduled: "\u{1F550}",
   in_progress: "\u{1F534} LIVE",
   halftime: "\u23F8\uFE0F HT",
@@ -109,12 +116,12 @@ export class GamePresenter {
     if (this.initialized) return;
 
     await relayManager.initialize();
-    this.unsubscribeRelay = relayManager.onMessage((event) =>
-      this.handleEvent(event)
+    this.unsubscribeRelay = relayManager.on("live-games", (envelope) =>
+      this.handleEvent(envelope)
     );
     this.initialized = true;
     console.log(
-      "[GamePresenter] Initialized and listening for live game events"
+      "[GamePresenter] Initialized and listening for IPTC sport events"
     );
   }
 
@@ -159,22 +166,22 @@ export class GamePresenter {
   // Event handler
   // -------------------------------------------------------------------------
 
-  private async handleEvent(event: LiveGameEvent): Promise<void> {
-    const { data } = event;
-    const targets = this.subscriptions.get(data.gameId);
+  private async handleEvent(envelope: LiveGameEnvelope): Promise<void> {
+    const gameId = iptcGameId(envelope.data);
+    const targets = this.subscriptions.get(gameId);
     if (!targets) return; // Not subscribed to this game
 
-    const tracked = this.trackedMessages.get(data.gameId) ?? {};
+    const tracked = this.trackedMessages.get(gameId) ?? {};
 
     // Run Discord and Telegram updates in parallel
     const [discordId, telegramId] = await Promise.all([
       targets.discord
-        ? this.updateDiscord(targets.discord, event, tracked.discordMessageId)
+        ? this.updateDiscord(targets.discord, envelope, tracked.discordMessageId)
         : Promise.resolve(tracked.discordMessageId),
       targets.telegram
         ? this.updateTelegram(
             targets.telegram,
-            event,
+            envelope,
             tracked.telegramMessageId
           )
         : Promise.resolve(tracked.telegramMessageId),
@@ -182,13 +189,14 @@ export class GamePresenter {
 
     tracked.discordMessageId = discordId;
     tracked.telegramMessageId = telegramId;
-    this.trackedMessages.set(data.gameId, tracked);
+    this.trackedMessages.set(gameId, tracked);
 
     // Clean up completed games after a grace period
-    if (data.status === "final") {
+    const status = iptcStatus(envelope.data);
+    if (status === "final") {
       setTimeout(() => {
-        this.subscriptions.delete(data.gameId);
-        this.trackedMessages.delete(data.gameId);
+        this.subscriptions.delete(gameId);
+        this.trackedMessages.delete(gameId);
       }, 120_000);
     }
   }
@@ -199,10 +207,10 @@ export class GamePresenter {
 
   private async updateDiscord(
     target: DiscordTarget,
-    event: LiveGameEvent,
+    envelope: LiveGameEnvelope,
     existingMessageId?: string
   ): Promise<string | undefined> {
-    const embed = buildDiscordEmbed(event);
+    const embed = buildDiscordEmbed(envelope);
     const payload = JSON.stringify({ embeds: [embed] });
     const headers = { "Content-Type": "application/json" };
 
@@ -249,10 +257,10 @@ export class GamePresenter {
 
   private async updateTelegram(
     target: TelegramTarget,
-    event: LiveGameEvent,
+    envelope: LiveGameEnvelope,
     existingMessageId?: number
   ): Promise<number | undefined> {
-    const html = buildTelegramHTML(event);
+    const html = buildTelegramHTML(envelope);
     const headers = { "Content-Type": "application/json" };
 
     try {
@@ -315,62 +323,81 @@ export class GamePresenter {
 }
 
 // ---------------------------------------------------------------------------
-// Discord embed builder
+// Discord embed builder — reads from IPTC sport event
 // ---------------------------------------------------------------------------
 
 function buildDiscordEmbed(
-  event: LiveGameEvent
+  envelope: LiveGameEnvelope
 ): Record<string, unknown> {
-  const { data, delta } = event;
-  const emoji = SPORT_EMOJI[data.sport] ?? "\u{1F3C6}";
-  const statusText = STATUS_INDICATOR[data.status] ?? data.status;
-  const color = EMBED_COLORS[data.status] ?? 0x5865f2;
+  const { data, delta } = envelope;
+  const sportCode = iptcSportCode(data);
+  const status = iptcStatus(data);
+  const home = iptcHome(data);
+  const away = iptcAway(data);
+  const gameId = iptcGameId(data);
 
-  const title = `${emoji} ${data.sport.toUpperCase()} ${statusText}`;
+  const emoji = SPORT_EMOJI[sportCode] ?? "\u{1F3C6}";
+  const statusText = STATUS_INDICATOR[status] ?? status;
+  const color = EMBED_COLORS[status] ?? 0x5865f2;
+
+  const title = `${emoji} ${sportCode.toUpperCase()} ${statusText}`;
 
   // Main scoreline
   const scoreline =
-    `**${data.away.abbreviation}** ${data.away.score}` +
+    `**${away["sport:code"]}** ${away["spstat:score"] ?? 0}` +
     `  \u2014  ` +
-    `${data.home.score} **${data.home.abbreviation}**`;
+    `${home["spstat:score"] ?? 0} **${home["sport:code"]}**`;
 
   // Score delta annotation (e.g. "+3 LAL")
   let deltaNote = "";
   if (delta?.homeScoreDelta && delta.homeScoreDelta > 0) {
-    deltaNote += ` (+${delta.homeScoreDelta} ${data.home.abbreviation})`;
+    deltaNote += ` (+${delta.homeScoreDelta} ${home["sport:code"]})`;
   }
   if (delta?.awayScoreDelta && delta.awayScoreDelta > 0) {
-    deltaNote += ` (+${delta.awayScoreDelta} ${data.away.abbreviation})`;
+    deltaNote += ` (+${delta.awayScoreDelta} ${away["sport:code"]})`;
   }
 
   const description =
     scoreline +
     (deltaNote ? `\n${deltaNote.trim()}` : "") +
-    `\n\n${data.statusDetail}`;
+    `\n\n${data["sport:statusDetail"]}`;
 
   const fields: Array<{ name: string; value: string; inline: boolean }> = [];
 
   // Period-by-period scores
-  if (data.home.periodScores?.length) {
+  if (home["spstat:periodScore"]?.length) {
     fields.push({
-      name: data.home.abbreviation,
-      value: data.home.periodScores.join(" | "),
+      name: home["sport:code"],
+      value: home["spstat:periodScore"].join(" | "),
       inline: true,
     });
   }
-  if (data.away.periodScores?.length) {
+  if (away["spstat:periodScore"]?.length) {
     fields.push({
-      name: data.away.abbreviation,
-      value: data.away.periodScores.join(" | "),
+      name: away["sport:code"],
+      value: away["spstat:periodScore"].join(" | "),
       inline: true,
     });
   }
 
   // Venue
-  if (data.venue) {
+  if (data["sport:venue"]) {
     fields.push({
       name: "\u{1F3DF}\uFE0F Venue",
-      value: data.venue,
+      value: data["sport:venue"]["sport:name"],
+      inline: false,
+    });
+  }
+
+  // machina: signals (if present)
+  if (data["machina:winProbability"]) {
+    const wp = data["machina:winProbability"];
+    fields.push({
+      name: "\u{1F52E} Win Probability",
+      value:
+        `${home["sport:code"]}: ${(wp.home * 100).toFixed(1)}%` +
+        ` — ${away["sport:code"]}: ${(wp.away * 100).toFixed(1)}%` +
+        (wp.draw != null ? ` — Draw: ${(wp.draw * 100).toFixed(1)}%` : ""),
       inline: false,
     });
   }
@@ -380,16 +407,16 @@ function buildDiscordEmbed(
     description,
     color,
     footer: {
-      text: `Game ${data.gameId} \u00B7 Last updated`,
+      text: `Game ${gameId} \u00B7 IPTC Sport Schema \u00B7 Last updated`,
     },
-    timestamp: data.lastUpdated,
+    timestamp: data["sport:lastUpdated"],
   };
 
   // Set team logo as thumbnail (prefer home team)
-  if (data.home.logo) {
-    embed.thumbnail = { url: data.home.logo };
-  } else if (data.away.logo) {
-    embed.thumbnail = { url: data.away.logo };
+  if (home["sport:logo"]) {
+    embed.thumbnail = { url: home["sport:logo"] };
+  } else if (away["sport:logo"]) {
+    embed.thumbnail = { url: away["sport:logo"] };
   }
 
   if (fields.length > 0) {
@@ -400,59 +427,76 @@ function buildDiscordEmbed(
 }
 
 // ---------------------------------------------------------------------------
-// Telegram HTML builder
+// Telegram HTML builder — reads from IPTC sport event
 // ---------------------------------------------------------------------------
 
-function buildTelegramHTML(event: LiveGameEvent): string {
-  const { data, delta } = event;
-  const emoji = SPORT_EMOJI[data.sport] ?? "\u{1F3C6}";
-  const statusText = STATUS_INDICATOR[data.status] ?? data.status;
+function buildTelegramHTML(envelope: LiveGameEnvelope): string {
+  const { data, delta } = envelope;
+  const sportCode = iptcSportCode(data);
+  const status = iptcStatus(data);
+  const home = iptcHome(data);
+  const away = iptcAway(data);
+
+  const emoji = SPORT_EMOJI[sportCode] ?? "\u{1F3C6}";
+  const statusText = STATUS_INDICATOR[status] ?? status;
 
   const lines: string[] = [];
 
   // Header
-  lines.push(`${emoji} <b>${data.sport.toUpperCase()} ${statusText}</b>`);
+  lines.push(`${emoji} <b>${sportCode.toUpperCase()} ${statusText}</b>`);
   lines.push("");
 
   // Scoreline
   lines.push(
-    `<b>${esc(data.away.name)}</b> ${data.away.score}` +
+    `<b>${esc(away["sport:name"])}</b> ${away["spstat:score"] ?? 0}` +
       `  \u2014  ` +
-      `${data.home.score} <b>${esc(data.home.name)}</b>`
+      `${home["spstat:score"] ?? 0} <b>${esc(home["sport:name"])}</b>`
   );
 
   // Delta annotation
   if (delta?.homeScoreDelta && delta.homeScoreDelta > 0) {
-    lines.push(`  \u26A1 +${delta.homeScoreDelta} ${esc(data.home.abbreviation)}`);
+    lines.push(`  \u26A1 +${delta.homeScoreDelta} ${esc(home["sport:code"])}`);
   }
   if (delta?.awayScoreDelta && delta.awayScoreDelta > 0) {
-    lines.push(`  \u26A1 +${delta.awayScoreDelta} ${esc(data.away.abbreviation)}`);
+    lines.push(`  \u26A1 +${delta.awayScoreDelta} ${esc(away["sport:code"])}`);
   }
 
   lines.push("");
-  lines.push(`\u{1F551} ${esc(data.statusDetail)}`);
+  lines.push(`\u{1F551} ${esc(data["sport:statusDetail"])}`);
 
   // Period scores
-  if (data.home.periodScores?.length) {
+  if (home["spstat:periodScore"]?.length) {
     lines.push("");
     lines.push(
-      `${esc(data.home.abbreviation)}: ${data.home.periodScores.join(" | ")}`
+      `${esc(home["sport:code"])}: ${home["spstat:periodScore"].join(" | ")}`
     );
-    if (data.away.periodScores?.length) {
+    if (away["spstat:periodScore"]?.length) {
       lines.push(
-        `${esc(data.away.abbreviation)}: ${data.away.periodScores.join(" | ")}`
+        `${esc(away["sport:code"])}: ${away["spstat:periodScore"].join(" | ")}`
       );
     }
   }
 
   // Venue
-  if (data.venue) {
+  if (data["sport:venue"]) {
     lines.push("");
-    lines.push(`\u{1F3DF}\uFE0F ${esc(data.venue)}`);
+    lines.push(`\u{1F3DF}\uFE0F ${esc(data["sport:venue"]["sport:name"])}`);
+  }
+
+  // machina: signals
+  if (data["machina:winProbability"]) {
+    const wp = data["machina:winProbability"];
+    lines.push("");
+    lines.push(
+      `\u{1F52E} <b>Win Prob:</b> ` +
+        `${esc(home["sport:code"])} ${(wp.home * 100).toFixed(1)}%` +
+        ` \u2014 ${esc(away["sport:code"])} ${(wp.away * 100).toFixed(1)}%` +
+        (wp.draw != null ? ` \u2014 Draw ${(wp.draw * 100).toFixed(1)}%` : "")
+    );
   }
 
   // Timestamp
-  const updated = new Date(data.lastUpdated);
+  const updated = new Date(data["sport:lastUpdated"]);
   const timeStr = updated.toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
