@@ -670,6 +670,14 @@ export function buildSubprocessEnv(
       env[key] = process.env[key]!;
     }
   }
+
+  // Pass through service credentials loaded from ~/.sportsclaw/.env
+  const serviceEnvPrefixes = ["POLYMARKET_", "KALSHI_"];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value && serviceEnvPrefixes.some((p) => key.startsWith(p))) {
+      env[key] = value;
+    }
+  }
   if (extra) {
     Object.assign(env, extra);
   }
