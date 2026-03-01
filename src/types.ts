@@ -264,6 +264,32 @@ export interface RunOptions {
   onSpinnerUpdate?: (msg: string) => void;
 }
 
+// ---------------------------------------------------------------------------
+// MCP server configuration
+// ---------------------------------------------------------------------------
+
+export interface McpServerConfig {
+  url: string;
+  headers?: Record<string, string>;
+  /** Whitelist of tool names to register. If omitted, all tools are registered. */
+  tools?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Skill Guides
+// ---------------------------------------------------------------------------
+
+export interface SkillGuide {
+  /** Directory name, e.g. "activation-radar" */
+  id: string;
+  /** Human-readable name from skill.yml */
+  name: string;
+  /** Short description from skill.yml */
+  description: string;
+  /** Raw SKILL.md content */
+  body: string;
+}
+
 export interface RouteDecision {
   selectedSkills: string[];
   mode: "focused" | "ambiguous";

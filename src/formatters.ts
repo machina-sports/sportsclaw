@@ -149,24 +149,26 @@ function formatTelegram(response: string): string {
   const source = extractSource(response);
   let content = removeSourceLine(response);
 
-  // Escape special MarkdownV2 characters
+  // Escape ALL special MarkdownV2 characters in the entire content first
   const escape = (text: string): string =>
     text.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 
-  // Highlight scores (Team 1-0 Team → **Team** `1-0` **Team**)
-  content = content.replace(
-    /(\w+(?:\s+\w+)*)\s+(\d+\s*-\s*\d+)\s+(\w+(?:\s+\w+)*)/g,
-    (_, team1, score, team2) =>
-      `**${escape(team1)}** \`${escape(score)}\` **${escape(team2)}**`
-  );
+  // Extract code blocks before escaping (they need different handling)
+  const codeBlocks: string[] = [];
+  content = content.replace(/```(\w+)?\n([\s\S]+?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`\`\`\`${lang || ""}\n${code}\`\`\``);
+    return `__CODEBLOCK_${idx}__`;
+  });
 
-  // Convert ### headers to bold
-  content = content.replace(/^###?\s+(.+)$/gm, (_, header) => `**${escape(header)}**`);
+  // Escape the entire content
+  content = escape(content);
 
-  // Wrap code blocks
-  content = content.replace(/```(\w+)?\n([\s\S]+?)```/g, (_, lang, code) =>
-    `\`\`\`${lang || ""}\n${code}\`\`\``
-  );
+  // Restore code blocks (already formatted, not escaped)
+  content = content.replace(/__CODEBLOCK_(\d+)__/g, (_, idx) => codeBlocks[Number(idx)]);
+
+  // Convert ### headers to bold (on already-escaped text)
+  content = content.replace(/^\\#\\#\\#?\\s(.+)$/gm, (_, header) => `*${header}*`);
 
   // Add source footer
   if (source) {

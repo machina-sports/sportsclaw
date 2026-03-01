@@ -9,4 +9,8 @@ dist/
 
 .claude/
 
-skills-lock.json    
+skills-lock.json
+
+# K8s overlays — allow example, ignore user-specific overlays with secrets
+docker/relay/k8s/overlays/*/secrets.env
+!docker/relay/k8s/overlays/example/secrets.env

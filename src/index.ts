@@ -1193,9 +1193,28 @@ async function saveGeneratedVideos(engine: sportsclawEngine): Promise<void> {
 // CLI: default — run a one-shot query
 // ---------------------------------------------------------------------------
 
+/**
+ * Emit a single NDJSON line to stdout (pipe mode).
+ */
+function emitNdjson(event: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(event) + "\n");
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
-  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v");
+  const forcePipe = args.includes("--pipe");
+  const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];
+  const formatArg = explicitFormat ?? (forcePipe ? "markdown" : "cli");
+
+  // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
+  let userId: string | undefined;
+  const userIdx = args.indexOf("--user");
+  if (userIdx >= 0 && userIdx + 1 < args.length) {
+    userId = args[userIdx + 1];
+    args.splice(userIdx, 2); // remove --user and its value from args
+  }
+
+  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe" && !a.startsWith("--format="));
   const prompt = filteredArgs.join(" ");
 
   if (!prompt) {
@@ -1232,7 +1251,25 @@ async function cmdQuery(args: string[]): Promise<void> {
     allowTrading: true,
   });
 
-  if (verbose) {
+  // Pipe mode: emit NDJSON events (for relay/programmatic use)
+  const pipeMode = forcePipe || !process.stdout.isTTY;
+
+  if (pipeMode) {
+    emitNdjson({ type: "start", timestamp: new Date().toISOString() });
+    try {
+      const result = await engine.run(prompt, {
+        userId,
+        onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
+      });
+      const formatted = formatResponse(result, formatArg as any);
+      emitNdjson({ type: "result", text: formatted.text });
+      process.exit(0);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      emitNdjson({ type: "error", error: msg });
+      process.exit(1);
+    }
+  } else if (verbose) {
     // Verbose mode: no spinner, raw console.error logs
     try {
       const result = await engine.run(prompt);

@@ -51,6 +51,7 @@
     "@ai-sdk/google": "^3.0.30",
     "@ai-sdk/openai": "^3.0.31",
     "@clack/prompts": "^1.0.1",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "ai": "^6.0.97",
     "figlet": "^1.10.0",
     "marked": "^15.0.12",

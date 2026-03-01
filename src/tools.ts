@@ -16,6 +16,7 @@ import type {
   sportsclawConfig,
   SportSchema,
 } from "./types.js";
+import type { McpManager } from "./mcp.js";
 import { buildSportsSkillsRepairCommand, isVenvSetup, getVenvDir } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 
@@ -157,7 +158,8 @@ function looksLikeHumanName(value: string): boolean {
   if (v.startsWith("0x")) return false;         // hex address
   if (/\s/.test(v)) return true;                // spaces — definitely a name
   if (/^[A-Z]/.test(v)) return true;            // starts uppercase — proper noun
-  if (v.length > 5 && /^[a-z]+(?:-[a-z]+)*$/.test(v)) return true; // long lowercase word/slug
+  // Hyphenated slugs like "premier-league" are valid IDs — only flag single long words
+  if (v.length > 10 && /^[a-z]+$/.test(v)) return true; // single long lowercase word (e.g. "liverpool")
   return false;
 }
 
@@ -265,6 +267,9 @@ interface CacheStats {
 export class ToolRegistry {
   private dynamicSpecs: ToolSpec[] = [];
   private routeMap = new Map<string, { sport: string; command: string }>();
+  private mcpSpecs: ToolSpec[] = [];
+  private mcpRouteMap = new Map<string, { serverName: string; toolName: string }>();
+  private mcpManager: McpManager | null = null;
   private cache = new Map<string, CacheEntry>();
   private cacheHits = 0;
   private cacheMisses = 0;
@@ -281,6 +286,15 @@ export class ToolRegistry {
     if (options.ttlMs !== undefined && options.ttlMs > 0) {
       this.cacheTtlMs = options.ttlMs;
     }
+  }
+
+  /**
+   * Inject MCP tools into the registry. Called after McpManager.connectAll().
+   */
+  injectMcpTools(manager: McpManager): void {
+    this.mcpManager = manager;
+    this.mcpSpecs = manager.getToolSpecs();
+    this.mcpRouteMap = manager.getRouteMap();
   }
 
   /**
@@ -413,10 +427,13 @@ export class ToolRegistry {
    * hide the legacy generic `sports_query` tool to reduce ambiguous routing.
    */
   getAllToolSpecs(): ToolSpec[] {
-    if (this.dynamicSpecs.length > 0) {
-      return [...this.dynamicSpecs];
+    const base =
+      this.dynamicSpecs.length > 0 ? [...this.dynamicSpecs] : [...TOOL_SPECS];
+    // Append MCP tools after Python bridge tools
+    if (this.mcpSpecs.length > 0) {
+      base.push(...this.mcpSpecs);
     }
-    return [...TOOL_SPECS];
+    return base;
   }
 
   /** Get the dispatch route for a dynamically injected tool */
@@ -492,6 +509,9 @@ export class ToolRegistry {
     let result: ToolCallResult;
     if (toolName === "sports_query") {
       result = await this.handleSportsQuery(input, config);
+    } else if (this.mcpRouteMap.has(toolName) && this.mcpManager) {
+      // MCP tool — dispatch via MCP client
+      result = await this.mcpManager.callTool(toolName, input as Record<string, unknown>);
     } else {
       const route = this.routeMap.get(toolName);
       if (route) {

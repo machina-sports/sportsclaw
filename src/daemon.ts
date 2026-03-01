@@ -183,17 +183,15 @@ export function daemonLogs(platform: DaemonPlatform, lines = 50): void {
 // ---------------------------------------------------------------------------
 
 export function daemonRestart(platform: DaemonPlatform): void {
-  const pid = readPid(platform);
-  if (pid !== null && isProcessAlive(pid)) {
-    console.log(`Stopping existing ${platform} daemon (PID ${pid})...`);
-    daemonStop(platform);
-  } else {
-    console.log(`${platform} daemon is not currently running.`);
-  }
+  requirePm2();
+  const name = pm2Name(platform);
 
-  // Allow a moment for the port/process to cleanly release
-  setTimeout(() => {
-    console.log(`Starting ${platform} daemon...`);
+  try {
+    pm2Exec(`restart ${name}`);
+    console.log(`Restarted ${platform} daemon.`);
+  } catch {
+    // Not running yet — start fresh
+    console.log(`${platform} daemon is not currently running. Starting...`);
     daemonStart(platform);
-  }, 1500);
+  }
 }

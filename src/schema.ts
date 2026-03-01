@@ -74,6 +74,28 @@ export const SKILL_DESCRIPTIONS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Skill filter — restrict active skills via SPORTSCLAW_SKILLS env var
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the SPORTSCLAW_SKILLS env var (comma-separated) into a Set.
+ * Returns null when unset → means "all skills active" (no filter).
+ *
+ * Example: SPORTSCLAW_SKILLS=football,nba,betting → Set(["football","nba","betting"])
+ */
+function getSkillFilter(): Set<string> | null {
+  const raw =
+    process.env.SPORTSCLAW_SKILLS ?? process.env.sportsclaw_SKILLS;
+  if (raw === undefined) return null; // unset → no filter (all active)
+  if (raw.trim() === "") return new Set(); // empty string → no skills
+  const skills = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return skills.length > 0 ? new Set(skills) : new Set();
+}
+
+// ---------------------------------------------------------------------------
 // Installed vs available diffing
 // ---------------------------------------------------------------------------
 
@@ -200,14 +222,23 @@ export function saveSchema(schema: SportSchema): void {
   writeFileSync(filePath, JSON.stringify(schema, null, 2), "utf-8");
 }
 
-/** Load all saved schemas from the schema directory */
+/**
+ * Load all saved schemas from the schema directory.
+ *
+ * When the SPORTSCLAW_SKILLS env var is set (comma-separated list),
+ * only schemas matching the filter are returned. This enables per-user
+ * skill selection in multi-tenant relay deployments.
+ */
 export function loadAllSchemas(): SportSchema[] {
   const dir = getSchemaDir();
   if (!existsSync(dir)) return [];
 
+  const filter = getSkillFilter();
   const schemas: SportSchema[] = [];
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
+    const sport = file.replace(".json", "");
+    if (filter && !filter.has(sport)) continue;
     try {
       const content = readFileSync(join(dir, file), "utf-8");
       const schema = JSON.parse(content) as SportSchema;
@@ -232,13 +263,18 @@ export function removeSchema(sport: string): boolean {
   return false;
 }
 
-/** List all sport names that have saved schemas */
+/**
+ * List all sport names that have saved schemas.
+ * Respects SPORTSCLAW_SKILLS filter when set.
+ */
 export function listSchemas(): string[] {
   const dir = getSchemaDir();
   if (!existsSync(dir)) return [];
+  const filter = getSkillFilter();
   return readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
-    .map((f) => f.replace(".json", ""));
+    .map((f) => f.replace(".json", ""))
+    .filter((sport) => !filter || filter.has(sport));
 }
 
 // ---------------------------------------------------------------------------

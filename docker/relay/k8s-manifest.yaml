@@ -1,0 +1,138 @@
+# =============================================================================
+# sportsclaw-relay — Kubernetes Manifest
+#
+# Namespace: default (standalone, not tied to any tenant)
+#
+# Apply:
+#   kubectl apply -f docker/relay/k8s-manifest.yaml
+#
+# Update image:
+#   kubectl set image deployment/sportsclaw-relay \
+#     sportsclaw-relay=machinasports/sportsclaw-relay:v0.8.1
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sportsclaw
+  labels:
+    app: sportsclaw
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sportsclaw-relay-secrets
+  namespace: sportsclaw
+type: Opaque
+stringData:
+  GOOGLE_GENERATIVE_AI_API_KEY: ""   # <-- fill before applying (do NOT commit real keys)
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sportsclaw-memory-pvc
+  namespace: sportsclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sportsclaw-relay
+  namespace: sportsclaw
+  labels:
+    app: sportsclaw-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sportsclaw-relay
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: sportsclaw-relay
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
+      containers:
+        - name: sportsclaw-relay
+          image: machinasports/sportsclaw-relay:v0.8.0
+          args: ["relay"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: RELAY_PORT
+              value: "8080"
+            - name: SPORTSCLAW_PROVIDER
+              value: "google"
+            - name: SPORTSCLAW_MEMORY_DIR
+              value: "/data/memory"
+            - name: PYTHON_PATH
+              value: "/opt/venv/bin/python3"
+            - name: GOOGLE_GENERATIVE_AI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sportsclaw-relay-secrets
+                  key: GOOGLE_GENERATIVE_AI_API_KEY
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: memory-storage
+              mountPath: /data/memory
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+      volumes:
+        - name: memory-storage
+          persistentVolumeClaim:
+            claimName: sportsclaw-memory-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sportsclaw-relay
+  namespace: sportsclaw
+  labels:
+    app: sportsclaw-relay
+spec:
+  type: ClusterIP
+  selector:
+    app: sportsclaw-relay
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
