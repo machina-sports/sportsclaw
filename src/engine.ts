@@ -30,6 +30,9 @@ import {
   type sportsclawConfig,
   type RunOptions,
   type Message,
+  type ImageAttachment,
+  type GeneratedImage,
+  type GeneratedVideo,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { execFile } from "node:child_process";
@@ -334,6 +337,18 @@ export class sportsclawEngine {
   private messages: Message[] = [];
   private registry: ToolRegistry;
   private agents: AgentDef[] = [];
+  private _generatedImages: GeneratedImage[] = [];
+  private _generatedVideos: GeneratedVideo[] = [];
+
+  /** Images produced by the generate_image tool during the last run. */
+  get generatedImages(): readonly GeneratedImage[] {
+    return [...this._generatedImages];
+  }
+
+  /** Videos produced by the generate_video tool during the last run. */
+  get generatedVideos(): readonly GeneratedVideo[] {
+    return [...this._generatedVideos];
+  }
 
   constructor(config?: Partial<sportsclawConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
@@ -566,6 +581,8 @@ export class sportsclawEngine {
 
     const selectedSkills = new Set(decision.selectedSkills);
     const isInternalTool = (name: string) =>
+      name === "generate_image" ||
+      name === "generate_video" ||
       name.startsWith("update_") ||
       name === "reflect" ||
       name === "evolve_strategy" ||
@@ -1541,6 +1558,79 @@ export class sportsclawEngine {
       },
     });
 
+    // -----------------------------------------------------------------
+    // Image + Video generation tools
+    // -----------------------------------------------------------------
+
+    toolMap["generate_image"] = defineTool({
+      description:
+        "Generate an image from a text prompt. Routes to the appropriate image " +
+        "generation API based on the configured provider:\n" +
+        "- Google → Gemini image generation\n" +
+        "- OpenAI → DALL-E 3\n" +
+        "- Anthropic → Not supported (will return an error)\n" +
+        "The generated image is automatically sent to the user in their channel.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "Detailed text description of the image to generate. Be specific " +
+              "about style, composition, colors, and subject matter.",
+          },
+          size: {
+            type: "string",
+            enum: ["1024x1024", "1024x1792", "1792x1024"],
+            description: "Image dimensions. Default: 1024x1024.",
+          },
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { prompt?: string; size?: string }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+        if (config.provider === "anthropic") {
+          return "Anthropic does not support image generation. Please switch to Google or OpenAI.";
+        }
+        try {
+          const image = await generateImageForProvider(config.provider, args.prompt, args.size);
+          this._generatedImages.push(image);
+          return `Image generated successfully with prompt: "${args.prompt}"`;
+        } catch (error) {
+          return `Failed to generate image: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
+    toolMap["generate_video"] = defineTool({
+      description:
+        "Generate a short video (8 seconds) from a text prompt using Google Veo 3.1. " +
+        "Only available with Google provider. Video includes native audio.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Detailed text description of the video to generate.",
+          },
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { prompt?: string }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+        if (config.provider !== "google") {
+          return "Video generation currently requires Google provider (Veo 3.1).";
+        }
+        try {
+          const video = await generateVideoForProvider(config.provider, args.prompt);
+          this._generatedVideos.push(video);
+          return `Video generated successfully with prompt: "${args.prompt}"`;
+        } catch (error) {
+          return `Failed to generate video: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
     return toolMap;
   }
 
@@ -1565,6 +1655,9 @@ export class sportsclawEngine {
    * @returns The final assistant text.
    */
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    this._generatedImages = [];
+    this._generatedVideos = [];
+
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
     const sanitizedPrompt = sanitization.sanitized;
@@ -2015,5 +2108,154 @@ export class sportsclawEngine {
   async runAndPrint(userPrompt: string, options?: RunOptions): Promise<void> {
     const result = await this.run(userPrompt, options);
     console.log(result);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Image generation helpers (standalone, outside the class)
+// ---------------------------------------------------------------------------
+
+async function generateImageForProvider(
+  provider: LLMProvider,
+  prompt: string,
+  size?: string
+): Promise<GeneratedImage> {
+  if (provider === "google") return generateImageGoogle(prompt);
+  if (provider === "openai") return generateImageOpenAI(prompt, size);
+  throw new Error("Provider does not support image generation.");
+}
+
+async function generateImageGoogle(prompt: string): Promise<GeneratedImage> {
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Google image generation failed (${res.status}): ${errBody}`);
+  }
+
+  const data = (await res.json()) as any;
+  const parts = data.candidates?.[0]?.content?.parts;
+  if (!parts) throw new Error("Google image generation returned no content.");
+
+  const imagePart = parts.find((p: any) => p.inlineData);
+  if (!imagePart?.inlineData?.data) throw new Error("No image data in response.");
+
+  return {
+    data: imagePart.inlineData.data,
+    mimeType: imagePart.inlineData.mimeType || "image/jpeg",
+    prompt,
+    provider: "google",
+  };
+}
+
+async function generateImageOpenAI(prompt: string, size?: string): Promise<GeneratedImage> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set.");
+
+  const res = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: "dall-e-3", prompt, n: 1, size: size || "1024x1024", response_format: "b64_json" }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`OpenAI image generation failed (${res.status}): ${errBody}`);
+  }
+
+  const data = (await res.json()) as any;
+  const imageData = data.data?.[0]?.b64_json;
+  if (!imageData) throw new Error("OpenAI image generation returned no image data.");
+
+  return { data: imageData, mimeType: "image/png", prompt, provider: "openai" };
+}
+
+// ---------------------------------------------------------------------------
+// Video generation helpers (standalone, outside the class)
+// ---------------------------------------------------------------------------
+
+async function generateVideoForProvider(
+  provider: LLMProvider,
+  prompt: string
+): Promise<GeneratedVideo> {
+  if (provider === "google") return generateVideoGoogle(prompt);
+  throw new Error(`${provider} does not support video generation yet.`);
+}
+
+async function generateVideoGoogle(prompt: string): Promise<GeneratedVideo> {
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  // 1. Start long-running prediction
+  const startRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: [{ prompt }],
+        parameters: { aspectRatio: "16:9", resolution: "720p" },
+      }),
+    }
+  );
+
+  if (!startRes.ok) {
+    const err = await startRes.text();
+    throw new Error(`Google video generation failed to start (${startRes.status}): ${err}`);
+  }
+
+  const startData = (await startRes.json()) as any;
+  const operationName = startData.name;
+  if (!operationName) throw new Error("No operation name returned from video generation API.");
+
+  // 2. Poll until done (Veo can take 1-3 minutes)
+  const pollUrl = `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${apiKey}`;
+  const maxPollTime = 5 * 60 * 1000; // 5 minute timeout
+  const startTime = Date.now();
+
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    if (Date.now() - startTime > maxPollTime) {
+      throw new Error("Video generation timed out after 5 minutes.");
+    }
+
+    const pollRes = await fetch(pollUrl);
+    if (!pollRes.ok) throw new Error(`Failed to poll video status (${pollRes.status})`);
+
+    const pollData = (await pollRes.json()) as any;
+    if (pollData.done) {
+      if (pollData.error) {
+        throw new Error(`Video generation failed: ${pollData.error.message}`);
+      }
+      const videoUri =
+        pollData.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
+      if (!videoUri) throw new Error("Video generation completed but no URI returned.");
+
+      // 3. Download the video bytes
+      const dlRes = await fetch(videoUri, { headers: { "x-goog-api-key": apiKey } });
+      if (!dlRes.ok) throw new Error(`Failed to download video (${dlRes.status})`);
+
+      const arrayBuffer = await dlRes.arrayBuffer();
+      return {
+        data: Buffer.from(arrayBuffer).toString("base64"),
+        mimeType: "video/mp4",
+        prompt,
+        provider: "google",
+      };
+    }
   }
 }

@@ -231,6 +231,39 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
+  // Send generated images/videos as Discord file attachments
+  // ---------------------------------------------------------------------------
+
+  async function sendGeneratedVideos(
+    engine: sportsclawEngine,
+    message: import("discord.js").Message
+  ): Promise<void> {
+    const { AttachmentBuilder } = Discord;
+    for (const vid of engine.generatedVideos) {
+      const buffer = Buffer.from(vid.data, "base64");
+      const attachment = new AttachmentBuilder(buffer, {
+        name: `sportsclaw_generated.mp4`,
+      });
+      await safeSend(message, { files: [attachment] });
+    }
+  }
+
+  async function sendGeneratedImages(
+    engine: sportsclawEngine,
+    message: import("discord.js").Message
+  ): Promise<void> {
+    const { AttachmentBuilder } = Discord;
+    for (const img of engine.generatedImages) {
+      const buffer = Buffer.from(img.data, "base64");
+      const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
+      const attachment = new AttachmentBuilder(buffer, {
+        name: `sportsclaw_generated.${ext}`,
+      });
+      await safeSend(message, { files: [attachment] });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Build sport-aware action row from detected sport
   // ---------------------------------------------------------------------------
 
@@ -452,12 +485,15 @@ export async function startDiscordListener(): Promise<void> {
 
         try {
           await message.channel.sendTyping();
+          const pollEngine = new sportsclawEngine(engineConfig);
           const [response] = await Promise.all([
-            new sportsclawEngine(engineConfig).run(prompt, { userId, sessionId: userId }),
+            pollEngine.run(prompt, { userId, sessionId: userId }),
             sendPoll(message, pollTeams.team1, pollTeams.team2),
           ]);
 
           await sendGameResponse(response, prompt, userId, message);
+          await sendGeneratedImages(pollEngine, message);
+          await sendGeneratedVideos(pollEngine, message);
         } catch (error: unknown) {
           const errMsg = error instanceof Error ? error.message : String(error);
           console.error(`[sportsclaw] Discord error: ${errMsg}`);
@@ -480,6 +516,8 @@ export async function startDiscordListener(): Promise<void> {
       const response = await engine.run(prompt, { userId, sessionId: userId });
 
       await sendGameResponse(response, prompt, userId, message);
+      await sendGeneratedImages(engine, message);
+      await sendGeneratedVideos(engine, message);
     } catch (error: unknown) {
       // Sprint 2: AskUserQuestion — render options as Discord buttons
       if (error instanceof AskUserQuestionHalt) {

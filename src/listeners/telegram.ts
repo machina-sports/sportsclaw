@@ -260,6 +260,59 @@ export async function startTelegramListener(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Send generated images/videos via Telegram API
+// ---------------------------------------------------------------------------
+
+async function sendGeneratedVideos(
+  engine: sportsclawEngine,
+  apiBase: string,
+  chatId: number,
+  replyToMessageId?: number
+): Promise<void> {
+  for (const vid of engine.generatedVideos) {
+    const buffer = Buffer.from(vid.data, "base64");
+    const blob = new Blob([buffer], { type: vid.mimeType });
+    const formData = new FormData();
+    formData.append("chat_id", String(chatId));
+    formData.append("video", blob, `sportsclaw_generated.mp4`);
+    if (replyToMessageId) {
+      formData.append("reply_to_message_id", String(replyToMessageId));
+    }
+    await fetch(`${apiBase}/sendVideo`, {
+      method: "POST",
+      body: formData,
+    }).catch((err) => {
+      console.error(`[sportsclaw] Failed to send generated video to Telegram:\n`, err);
+    });
+  }
+}
+
+async function sendGeneratedImages(
+  engine: sportsclawEngine,
+  apiBase: string,
+  chatId: number,
+  replyToMessageId?: number
+): Promise<void> {
+  for (const img of engine.generatedImages) {
+    const buffer = Buffer.from(img.data, "base64");
+    const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
+    const blob = new Blob([buffer], { type: img.mimeType });
+    const formData = new FormData();
+    formData.append("chat_id", String(chatId));
+    formData.append("photo", blob, `sportsclaw_generated.${ext}`);
+    if (replyToMessageId) {
+      formData.append("reply_to_message_id", String(replyToMessageId));
+    }
+    await fetch(`${apiBase}/sendPhoto`, {
+      method: "POST",
+      body: formData,
+    }).catch((err) => {
+      console.error(`[sportsclaw] Failed to send generated image: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Send helpers
 // ---------------------------------------------------------------------------
 
@@ -407,6 +460,8 @@ async function processMessage(
         replyMarkup: idx === chunks.length - 1 ? replyMarkup : undefined,
       });
     }
+    await sendGeneratedImages(engine, apiBase, msg.chat.id, msg.message_id);
+    await sendGeneratedVideos(engine, apiBase, msg.chat.id, msg.message_id);
   } catch (error: unknown) {
     // Sprint 2: AskUserQuestion — render options as Telegram inline keyboard
     if (error instanceof AskUserQuestionHalt) {

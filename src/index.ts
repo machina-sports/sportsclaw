@@ -25,7 +25,9 @@
 
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
@@ -154,6 +156,9 @@ export type {
   AskUserQuestionRequest,
   SuspendedState,
   WatcherTask,
+  ImageAttachment,
+  GeneratedImage,
+  GeneratedVideo,
 } from "./types.js";
 
 // Sprint 2 modules
@@ -1105,6 +1110,8 @@ async function cmdChat(args: string[]): Promise<void> {
         try {
           const result = await engine.run(prompt, { userId });
           console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          await saveGeneratedImages(engine);
+          await saveGeneratedVideos(engine);
         } catch (error: unknown) {
           if (error instanceof Error) {
             console.error(`Error: ${error.message}`);
@@ -1131,6 +1138,8 @@ async function cmdChat(args: string[]): Promise<void> {
           });
           s.stop(tracker.doneSummary());
           console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          await saveGeneratedImages(engine);
+          await saveGeneratedVideos(engine);
         } catch (error: unknown) {
           if (cancel.wasCancelled() || isAbortError(error)) {
             s.stop(tracker.cancelledSummary());
@@ -1149,6 +1158,35 @@ async function cmdChat(args: string[]): Promise<void> {
         }
       }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save generated images/videos from the engine to disk and print paths.
+// ---------------------------------------------------------------------------
+
+async function saveGeneratedImages(engine: sportsclawEngine): Promise<void> {
+  if (engine.generatedImages.length === 0) return;
+  const dir = join(tmpdir(), "sportsclaw-images");
+  await mkdir(dir, { recursive: true });
+  for (const img of engine.generatedImages) {
+    const ts = Date.now();
+    const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
+    const filePath = join(dir, `generated_${ts}.${ext}`);
+    await writeFile(filePath, Buffer.from(img.data, "base64"));
+    console.log(pc.dim(`  Image saved: ${filePath}`));
+  }
+}
+
+async function saveGeneratedVideos(engine: sportsclawEngine): Promise<void> {
+  if (engine.generatedVideos.length === 0) return;
+  const dir = join(tmpdir(), "sportsclaw-videos");
+  await mkdir(dir, { recursive: true });
+  for (const vid of engine.generatedVideos) {
+    const ts = Date.now();
+    const filePath = join(dir, `generated_${ts}.mp4`);
+    await writeFile(filePath, Buffer.from(vid.data, "base64"));
+    console.log(pc.dim(`  Video saved: ${filePath}`));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,6 +1237,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     try {
       const result = await engine.run(prompt);
       console.log(renderMarkdown(result));
+      await saveGeneratedImages(engine);
+      await saveGeneratedVideos(engine);
     } catch (error: unknown) {
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
@@ -1225,6 +1265,8 @@ async function cmdQuery(args: string[]): Promise<void> {
       });
       s.stop(tracker.doneSummary());
       console.log(renderMarkdown(result));
+      await saveGeneratedImages(engine);
+      await saveGeneratedVideos(engine);
     } catch (error: unknown) {
       if (cancel.wasCancelled() || isAbortError(error)) {
         s.stop(tracker.cancelledSummary());
