@@ -498,6 +498,10 @@
       .pricing-grid { grid-template-columns: 1fr 1fr; }
     }
 
+    @media (min-width: 1024px) {
+      .pricing-grid { grid-template-columns: 1fr 1fr 1fr; }
+    }
+
     .pricing-card {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -960,6 +964,22 @@
           </ul>
           <div class="pricing-card-footer">
             <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
+          </div>
+        </div>
+
+        <!-- Enterprise -->
+        <div class="pricing-card pricing-card-enterprise">
+          <div class="pricing-name">Enterprise</div>
+          <div class="pricing-price">Custom</div>
+          <ul class="pricing-features">
+            <li class="highlight">For Teams, Leagues, Media &amp; Sportsbooks</li>
+            <li>Everything in Machina Cloud</li>
+            <li>Dedicated account manager</li>
+            <li>Custom LLM fine-tuning</li>
+            <li>Solutions engineering team</li>
+          </ul>
+          <div class="pricing-card-footer">
+            <a href="https://machina.gg/schedule" target="_blank" class="pricing-cta">Contact Us</a>
           </div>
         </div>
       </div>
