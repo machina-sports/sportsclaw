@@ -554,6 +554,50 @@
       border-color: var(--text-muted);
     }
 
+    .trusted-by {
+      margin-top: auto;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      margin-bottom: 1rem;
+    }
+
+    .trusted-by-label {
+      font-size: 0.6rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 0.5rem;
+    }
+
+    .trusted-by-logos {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .trusted-by-logos img {
+      height: 32px;
+      width: auto;
+      opacity: 0.6;
+      transition: opacity 0.2s;
+    }
+
+    .trusted-by-logos img:hover {
+      opacity: 1;
+    }
+
+    .trusted-by-logos .logo-light { display: none; }
+    .trusted-by-logos .logo-dark { display: inline; }
+
+    html.light .trusted-by-logos .logo-light { display: inline; }
+    html.light .trusted-by-logos .logo-dark { display: none; }
+
+    @media (prefers-color-scheme: light) {
+      html:not(.dark) .trusted-by-logos .logo-light { display: inline; }
+      html:not(.dark) .trusted-by-logos .logo-dark { display: none; }
+    }
+
     .pricing-name {
       font-size: 1.2rem;
       font-weight: 700;
@@ -978,6 +1022,15 @@
             <li>Custom LLM fine-tuning</li>
             <li>Solutions engineering team</li>
           </ul>
+          <div class="trusted-by">
+            <div class="trusted-by-label">Trusted by</div>
+            <div class="trusted-by-logos">
+              <img src="logos/dazn-white-sm.png" alt="DAZN" class="logo-dark">
+              <img src="logos/dazn-black-sm.png" alt="DAZN" class="logo-light">
+              <img src="logos/entain-sm.png" alt="Entain">
+              <img src="logos/r10-sm.png" alt="R10 Score">
+            </div>
+          </div>
           <div class="pricing-card-footer">
             <a href="https://machina.gg/schedule" target="_blank" class="pricing-cta">Contact Us</a>
           </div>
