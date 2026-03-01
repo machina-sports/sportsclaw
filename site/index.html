@@ -962,7 +962,7 @@
             <li>Premium data connectors</li>
           </ul>
           <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
+            <button class="pricing-cta pricing-cta-primary waitlist-btn" data-plan="pro" type="button">Join Waitlist</button>
           </div>
         </div>
 
@@ -978,7 +978,7 @@
             <li>Priority support</li>
           </ul>
           <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
+            <button class="pricing-cta pricing-cta-primary waitlist-btn" data-plan="max" type="button">Join Waitlist</button>
           </div>
         </div>
 
@@ -1083,6 +1083,7 @@
 
     // Waitlist modal
     const LOOPS_FORM_ID = 'cmb347cez0bmp1p0ictcvajmf';
+    let selectedPlan = 'pro';
 
     const modal = document.getElementById('waitlist-modal');
     const modalClose = document.getElementById('modal-close');
@@ -1093,7 +1094,8 @@
     const modalFormView = document.getElementById('modal-form-view');
     const modalSuccessView = document.getElementById('modal-success-view');
 
-    function openModal() {
+    function openModal(plan) {
+      selectedPlan = plan || 'pro';
       modal.classList.add('open');
       modalFormView.style.display = '';
       modalSuccessView.style.display = 'none';
@@ -1109,7 +1111,7 @@
     }
 
     document.querySelectorAll('.waitlist-btn').forEach(btn => {
-      btn.addEventListener('click', openModal);
+      btn.addEventListener('click', () => openModal(btn.dataset.plan));
     });
 
     modalClose.addEventListener('click', closeModal);
@@ -1133,7 +1135,7 @@
         const resp = await fetch(`https://app.loops.so/api/newsletter-form/${LOOPS_FORM_ID}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ email, mailingLists: 'cmm81ybcmxamf0j3418qo4xm0' })
+          body: new URLSearchParams({ email, mailingLists: 'cmm81ybcmxamf0j3418qo4xm0', plan: selectedPlan })
         });
 
         if (resp.ok || resp.status === 409) {
