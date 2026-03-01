@@ -498,10 +498,6 @@
       .pricing-grid { grid-template-columns: 1fr 1fr; }
     }
 
-    @media (min-width: 1024px) {
-      .pricing-grid { grid-template-columns: 1fr 1fr 1fr 1fr; }
-    }
-
     .pricing-card {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -949,52 +945,21 @@
           </div>
         </div>
 
-        <!-- Pro -->
-        <div class="pricing-card">
-          <div class="pricing-name">Pro</div>
-          <div class="pricing-price">$30<span>/mo</span></div>
+        <!-- Machina Cloud -->
+        <div class="pricing-card pricing-card-max">
+          <div class="pricing-badge">Coming Soon</div>
+          <div class="pricing-name">Machina Cloud</div>
+          <div class="pricing-price">Soon</div>
           <ul class="pricing-features">
             <li>Always on, running 24/7</li>
             <li>Remembers every conversation</li>
             <li>Talk via your existing chat apps</li>
-            <li>Vector database</li>
-            <li>All Machina skills</li>
+            <li>Vector database &amp; all Machina skills</li>
             <li>Premium data connectors</li>
-          </ul>
-          <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" data-plan="pro" type="button">Join Waitlist</button>
-          </div>
-        </div>
-
-        <!-- Max -->
-        <div class="pricing-card pricing-card-max">
-          <div class="pricing-name">Max</div>
-          <div class="pricing-price">$200<span>/mo</span></div>
-          <ul class="pricing-features">
-            <li>Everything in Pro</li>
-            <li>Custom data connectors</li>
-            <li>Higher usage limits</li>
-            <li>Faster responses</li>
             <li>Priority support</li>
           </ul>
           <div class="pricing-card-footer">
-            <button class="pricing-cta pricing-cta-primary waitlist-btn" data-plan="max" type="button">Join Waitlist</button>
-          </div>
-        </div>
-
-        <!-- Enterprise -->
-        <div class="pricing-card pricing-card-enterprise">
-          <div class="pricing-name">Enterprise</div>
-          <div class="pricing-price">Custom</div>
-          <ul class="pricing-features">
-            <li class="highlight">For Teams, Leagues, Media & Sportsbooks</li>
-            <li>Everything in Max</li>
-            <li>Dedicated account manager</li>
-            <li>Custom LLM fine-tuning</li>
-            <li>Solutions engineering team</li>
-          </ul>
-          <div class="pricing-card-footer">
-            <a href="https://machina.gg/schedule" target="_blank" class="pricing-cta">Contact Us</a>
+            <button class="pricing-cta pricing-cta-primary waitlist-btn" type="button">Join Waitlist</button>
           </div>
         </div>
       </div>
@@ -1083,7 +1048,6 @@
 
     // Waitlist modal
     const LOOPS_FORM_ID = 'cmb347cez0bmp1p0ictcvajmf';
-    let selectedPlan = 'pro';
 
     const modal = document.getElementById('waitlist-modal');
     const modalClose = document.getElementById('modal-close');
@@ -1094,8 +1058,7 @@
     const modalFormView = document.getElementById('modal-form-view');
     const modalSuccessView = document.getElementById('modal-success-view');
 
-    function openModal(plan) {
-      selectedPlan = plan || 'pro';
+    function openModal() {
       modal.classList.add('open');
       modalFormView.style.display = '';
       modalSuccessView.style.display = 'none';
@@ -1111,7 +1074,7 @@
     }
 
     document.querySelectorAll('.waitlist-btn').forEach(btn => {
-      btn.addEventListener('click', () => openModal(btn.dataset.plan));
+      btn.addEventListener('click', openModal);
     });
 
     modalClose.addEventListener('click', closeModal);
@@ -1135,7 +1098,7 @@
         const resp = await fetch(`https://app.loops.so/api/newsletter-form/${LOOPS_FORM_ID}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ email, mailingLists: 'cmm81ybcmxamf0j3418qo4xm0', plan: selectedPlan })
+          body: new URLSearchParams({ email, mailingLists: 'cmm81ybcmxamf0j3418qo4xm0' })
         });
 
         if (resp.ok || resp.status === 409) {
