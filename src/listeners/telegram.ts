@@ -15,6 +15,7 @@
  *   ALLOWED_USERS        — Comma-separated Telegram user IDs (optional whitelist)
  */
 
+import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
@@ -313,6 +314,21 @@ async function processMessage(
 
   if (!prompt) return;
 
+  if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "/claw restart") {
+    await sendMessage(apiBase, msg.chat.id, "🔄 Restarting Telegram daemon to apply new configurations...", {
+      replyToMessageId: msg.message_id,
+    });
+    console.log("[sportsclaw] Restart triggered via Telegram chat.");
+    const child = spawn(process.execPath, [process.argv[1], "restart", "telegram"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env }
+    });
+    child.unref();
+    setTimeout(() => process.exit(0), 100);
+    return;
+  }
+
   // Send "typing" action and keep it alive every 4s (Telegram expires after 5s)
   const sendTyping = () =>
     fetch(`${apiBase}/sendChatAction`, {
@@ -327,9 +343,9 @@ async function processMessage(
   const userId = `telegram-${msg.from?.id ?? msg.chat.id}`;
 
   try {
-    // Fresh engine per request — avoids shared-state issues
+    // Fresh engine per request — session state lives in the global SessionStore
     const engine = new sportsclawEngine(engineConfig);
-    const response = await engine.run(prompt, { userId });
+    const response = await engine.run(prompt, { userId, sessionId: userId });
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
@@ -474,7 +490,7 @@ async function processCallbackQuery(
     try {
       const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
       const engine = new sportsclawEngine(engineConfig);
-      const response = await engine.run(resumePrompt, { userId });
+      const response = await engine.run(resumePrompt, { userId, sessionId: userId });
 
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;
@@ -545,7 +561,7 @@ async function processCallbackQuery(
       ...engineConfig,
       skipFanProfile: true,
     });
-    const response = await engine.run(followUpPrompt, { userId: ctx.userId });
+    const response = await engine.run(followUpPrompt, { userId: ctx.userId, sessionId: ctx.userId });
 
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;

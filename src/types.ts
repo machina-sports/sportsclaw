@@ -213,6 +213,13 @@ export type ToolProgressEvent =
 export interface RunOptions {
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
+  /**
+   * Session ID for multi-turn conversation continuity.
+   * When provided, the engine loads prior message history from the global
+   * SessionStore, appends the new turn, and saves back after execution.
+   * Format convention: `<platform>-<userId>` (e.g. "discord-123456").
+   */
+  sessionId?: string;
   /** Structured progress callback for tool execution tracking. */
   onProgress?: (event: ToolProgressEvent) => void;
   /** Abort signal for cancelling an in-flight run. */

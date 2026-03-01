@@ -228,6 +228,83 @@ function buildToolCallSignature(
 }
 
 // ---------------------------------------------------------------------------
+// SessionStore — global multi-turn conversation memory
+// ---------------------------------------------------------------------------
+
+interface SessionEntry {
+  messages: Message[];
+  updatedAt: number;
+}
+
+const SESSION_MAX_ENTRIES = 500;
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const SESSION_MAX_MESSAGES = 100;
+
+export class SessionStore {
+  private store = new Map<string, SessionEntry>();
+
+  /** Load message history for a session. Returns empty array if not found or expired. */
+  get(sessionId: string): Message[] {
+    const entry = this.store.get(sessionId);
+    if (!entry) return [];
+    if (Date.now() - entry.updatedAt > SESSION_TTL_MS) {
+      this.store.delete(sessionId);
+      return [];
+    }
+    return entry.messages;
+  }
+
+  /** Save message history for a session, trimming to keep within bounds. */
+  save(sessionId: string, messages: Message[]): void {
+    // Trim oldest messages if over limit (keep the most recent ones)
+    const trimmed =
+      messages.length > SESSION_MAX_MESSAGES
+        ? messages.slice(messages.length - SESSION_MAX_MESSAGES)
+        : messages;
+
+    this.store.set(sessionId, {
+      messages: trimmed,
+      updatedAt: Date.now(),
+    });
+
+    // Evict oldest sessions when over capacity
+    if (this.store.size > SESSION_MAX_ENTRIES) {
+      this.evict();
+    }
+  }
+
+  /** Clear a specific session. */
+  clear(sessionId: string): boolean {
+    return this.store.delete(sessionId);
+  }
+
+  /** Number of active sessions. */
+  get size(): number {
+    return this.store.size;
+  }
+
+  /** Evict expired and oldest sessions to stay within capacity. */
+  private evict(): void {
+    const now = Date.now();
+    // First pass: remove expired
+    for (const [id, entry] of this.store) {
+      if (now - entry.updatedAt > SESSION_TTL_MS) {
+        this.store.delete(id);
+      }
+    }
+    // Second pass: if still over limit, remove oldest
+    while (this.store.size > SESSION_MAX_ENTRIES) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey) this.store.delete(oldestKey);
+      else break;
+    }
+  }
+}
+
+/** Global session store — shared across all engine instances. */
+export const sessionStore = new SessionStore();
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -1501,6 +1578,20 @@ export class sportsclawEngine {
       return generateGuideResponse(sanitizedPrompt);
     }
 
+    // --- Session: restore prior conversation history ---
+    const sessionId = options?.sessionId;
+    if (sessionId) {
+      const prior = sessionStore.get(sessionId);
+      if (prior.length > 0) {
+        this.messages = prior;
+        if (this.config.verbose) {
+          console.error(
+            `[sportsclaw] session restored: ${sessionId} (${prior.length} messages)`
+          );
+        }
+      }
+    }
+
     // --- Memory: read before LLM call (async, non-blocking) ---
     let memory: MemoryManager | undefined;
     let memoryBlock = "";
@@ -1523,7 +1614,8 @@ export class sportsclawEngine {
 
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
-    // it should not have system-level authority.
+    // it should not have system-level authority. Fresh memory is injected
+    // every turn even in sessions so the LLM sees the latest state.
     if (memoryBlock) {
       this.messages.push({
         role: "user",
@@ -1858,6 +1950,16 @@ export class sportsclawEngine {
       console.error(
         `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
       );
+    }
+
+    // --- Session: persist updated conversation history ---
+    if (sessionId) {
+      sessionStore.save(sessionId, this.messages);
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] session saved: ${sessionId} (${this.messages.length} messages)`
+        );
+      }
     }
 
     // --- Analytics: log query event ---

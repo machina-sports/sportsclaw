@@ -220,3 +220,23 @@ export function daemonLogs(platform: DaemonPlatform, lines = 50): void {
   console.log(`--- ${platform} logs (last ${lines} lines) ---`);
   console.log(tail);
 }
+
+// ---------------------------------------------------------------------------
+// Restart
+// ---------------------------------------------------------------------------
+
+export function daemonRestart(platform: DaemonPlatform): void {
+  const pid = readPid(platform);
+  if (pid !== null && isProcessAlive(pid)) {
+    console.log(`Stopping existing ${platform} daemon (PID ${pid})...`);
+    daemonStop(platform);
+  } else {
+    console.log(`${platform} daemon is not currently running.`);
+  }
+
+  // Allow a moment for the port/process to cleanly release
+  setTimeout(() => {
+    console.log(`Starting ${platform} daemon...`);
+    daemonStart(platform);
+  }, 1500);
+}

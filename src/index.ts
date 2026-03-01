@@ -78,6 +78,7 @@ import {
   daemonStart,
   daemonStop,
   daemonStatus,
+  daemonRestart,
   daemonLogs,
   isValidPlatform,
 } from "./daemon.js";
@@ -1261,6 +1262,19 @@ function cmdStatus(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw restart <platform>` — restart a running daemon
+// ---------------------------------------------------------------------------
+
+function cmdRestart(args: string[]): void {
+  const platform = args[0]?.toLowerCase();
+  if (!platform || !["discord", "telegram"].includes(platform)) {
+    console.error("Usage: sportsclaw restart <discord|telegram>");
+    process.exit(1);
+  }
+  daemonRestart(platform as any);
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw logs <platform>` — tail daemon logs
 // ---------------------------------------------------------------------------
 
@@ -1296,6 +1310,7 @@ function printHelp(): void {
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");
   console.log("  sportsclaw status                  Show daemon status");
+  console.log("  sportsclaw restart <platform>      Restart a running daemon");
   console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
   console.log("");
@@ -1481,6 +1496,8 @@ async function main(): Promise<void> {
       return cmdStop(subArgs);
     case "status":
       return cmdStatus();
+    case "restart":
+      return cmdRestart(subArgs);
     case "logs":
       return cmdLogs(subArgs);
     case "agents":

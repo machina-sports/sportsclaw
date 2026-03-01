@@ -20,6 +20,7 @@
  *   - Messages starting with `!sportsclaw <question>` (configurable via DISCORD_PREFIX)
  */
 
+import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
@@ -404,7 +405,7 @@ export async function startDiscordListener(): Promise<void> {
         // Resume the engine with the selected value injected as context
         const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
         const engine = new sportsclawEngine(engineConfig);
-        const response = await engine.run(resumePrompt, { userId });
+        const response = await engine.run(resumePrompt, { userId, sessionId: userId });
 
         await sendGameResponse(response, suspended.originalPrompt, userId, interaction as unknown as import("discord.js").Message);
       } catch (error: unknown) {
@@ -439,7 +440,7 @@ export async function startDiscordListener(): Promise<void> {
       // Skip fan profile updates for button follow-ups — these are
       // data-only requests, not conversational turns.
       const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
-      const response = await engine.run(followUpPrompt, { userId: ctx.userId });
+      const response = await engine.run(followUpPrompt, { userId: ctx.userId, sessionId: ctx.userId });
 
       // Box score and play-by-play data is too large for embeds — Discord
       // collapses them to "Tap to see attachment" on mobile. Always send
@@ -514,6 +515,19 @@ export async function startDiscordListener(): Promise<void> {
 
     if (!prompt) return;
 
+    if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "claw restart") {
+      await message.reply("🔄 Restarting Discord daemon to apply new configurations...");
+      console.log("[sportsclaw] Restart triggered via Discord chat.");
+      const child = spawn(process.execPath, [process.argv[1], "restart", "discord"], {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env }
+      });
+      child.unref();
+      setTimeout(() => process.exit(0), 100);
+      return;
+    }
+
     const userId = `discord-${message.author.id}`;
 
     // Check for poll intent before running the engine
@@ -528,7 +542,7 @@ export async function startDiscordListener(): Promise<void> {
         try {
           await message.channel.sendTyping();
           const [response] = await Promise.all([
-            new sportsclawEngine(engineConfig).run(prompt, { userId }),
+            new sportsclawEngine(engineConfig).run(prompt, { userId, sessionId: userId }),
             sendPoll(message, pollTeams.team1, pollTeams.team2),
           ]);
 
@@ -552,7 +566,7 @@ export async function startDiscordListener(): Promise<void> {
     try {
       await message.channel.sendTyping();
       const engine = new sportsclawEngine(engineConfig);
-      const response = await engine.run(prompt, { userId });
+      const response = await engine.run(prompt, { userId, sessionId: userId });
 
       await sendGameResponse(response, prompt, userId, message);
     } catch (error: unknown) {
