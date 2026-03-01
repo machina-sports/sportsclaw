@@ -147,7 +147,13 @@ Your core directives:
 16. SELF-UPGRADE — You CAN upgrade your own tools. When the user asks to update, upgrade, or check for new versions of sports-skills:
     - Call \`upgrade_sports_skills\` — it runs pip upgrade internally and hot-reloads all schemas.
     - Do NOT tell the user to run pip manually. You have the tool. Use it.
-    - After upgrading, confirm the new version and number of refreshed schemas.`;
+    - After upgrading, confirm the new version and number of refreshed schemas.
+
+PERSONALITY & VIBE (CRITICAL):
+17. ZERO AI FLUFF — Never open with "Great question", "I'd be happy to help", or "Here are the stats." Just deliver the answer. Brevity is mandatory. If the score fits in one sentence, one sentence is what the user gets.
+18. DATA-BACKED TAKES — Stop hedging. If the data shows a team is playing like trash, say so. Avoid corporate neutrality (e.g., "both teams have strengths"). Have strong takes based on the data, but adapt them as you learn the user's fandom.
+19. THE 2AM SPORTS COMPANION — Be the assistant the user actually wants to text during a late-night game. No corporate drone speak. No sycophant behavior. Use natural wit, not forced jokes.
+20. CALL OUT THE DELUSION — If the user asks about a mathematically dead playoff hope, a terrible roster move, or a bad bet, don't sugarcoat it. Charm over cruelty, but tell them the truth.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -163,6 +169,18 @@ const INTERNAL_INTENT_PATTERNS = [
 /** Returns true when the prompt targets an internal tool, not a sport query */
 function isInternalToolIntent(prompt: string): boolean {
   return INTERNAL_INTENT_PATTERNS.some((p) => p.test(prompt));
+}
+
+/** Patterns that indicate conversational intents (greetings, pleasantries) — not sport queries */
+const CONVERSATIONAL_INTENT_PATTERNS = [
+  /^(hi|hello|hey|sup|yo|what'?s up|howdy|good morning|gm|gn)\b/i,
+  /^(how are you|how'?s it going|what are you up to|who are you|how are things)\b/i,
+  /^thanks?\b/i,
+];
+
+/** Returns true when the prompt is purely conversational */
+function isConversationalIntent(prompt: string): boolean {
+  return CONVERSATIONAL_INTENT_PATTERNS.some((p) => p.test(prompt));
 }
 
 /** Filter out undefined values so they don't override defaults during merge */
@@ -383,6 +401,7 @@ export class sportsclawEngine {
       "## Self-Awareness",
       "",
       `You are sportsclaw v${_packageVersion}, a sports AI agent.`,
+      `System Local Time: ${new Date().toLocaleString("en-US", { timeZoneName: "short" })}`,
       "",
       "### Architecture",
       "- TypeScript harness → Python bridge → sports-skills package",
@@ -1674,7 +1693,8 @@ export class sportsclawEngine {
       routing.decision &&
       routing.decision.confidence < this.config.clarifyThreshold &&
       routing.decision.mode === "ambiguous" &&
-      !isInternalToolIntent(sanitizedPrompt)
+      !isInternalToolIntent(sanitizedPrompt) &&
+      !isConversationalIntent(sanitizedPrompt)
     ) {
       const skillList = routing.decision.selectedSkills
         .map((skill) => `- ${skill}`)

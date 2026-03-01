@@ -189,6 +189,17 @@ export async function startTelegramListener(): Promise<void> {
   );
   console.log(`[sportsclaw] Listening for messages...`);
 
+  if (process.env.SPORTSCLAW_RESTART_CHAT_ID) {
+    try {
+      const restartChatId = parseInt(process.env.SPORTSCLAW_RESTART_CHAT_ID, 10);
+      await sendMessage(apiBase, restartChatId, "✅ I'm back. New configs loaded.");
+      console.log(`[sportsclaw] Sent restart confirmation to ${restartChatId}`);
+    } catch (e) {
+      console.error("[sportsclaw] Failed to send restart confirmation:", e);
+    }
+    delete process.env.SPORTSCLAW_RESTART_CHAT_ID;
+  }
+
   let offset = 0;
 
   // Long-polling loop
@@ -314,6 +325,7 @@ async function processMessage(
 
   if (!prompt) return;
 
+
   if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "/claw restart") {
     await sendMessage(apiBase, msg.chat.id, "🔄 Restarting Telegram daemon to apply new configurations...", {
       replyToMessageId: msg.message_id,
@@ -322,7 +334,7 @@ async function processMessage(
     const child = spawn(process.execPath, [process.argv[1], "restart", "telegram"], {
       detached: true,
       stdio: "ignore",
-      env: { ...process.env }
+      env: { ...process.env, SPORTSCLAW_RESTART_CHAT_ID: msg.chat.id.toString() }
     });
     child.unref();
     setTimeout(() => process.exit(0), 100);

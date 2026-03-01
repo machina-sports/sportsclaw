@@ -1003,7 +1003,7 @@ async function cmdChat(args: string[]): Promise<void> {
   await maybePromptForSkillsUpgrade(resolved.pythonPath);
   await ensureDefaultSchemas();
 
-  const engine = new sportsclawEngine({
+  let engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
     pythonPath: resolved.pythonPath,
@@ -1079,6 +1079,27 @@ async function cmdChat(args: string[]): Promise<void> {
       p.outro("See you.");
       break;
     }
+
+    if (prompt === "restart" || prompt === "/restart" || prompt === "/claw restart") {
+      console.log(pc.yellow("🔄 Reloading configuration and engine state..."));
+      const newConfig = resolveConfig();
+      applyConfigToEnv();
+      
+      engine = new sportsclawEngine({
+        provider: newConfig.provider,
+        ...(newConfig.model && { model: newConfig.model }),
+        pythonPath: newConfig.pythonPath,
+        routingMode: newConfig.routingMode,
+        routingMaxSkills: newConfig.routingMaxSkills,
+        routingAllowSpillover: newConfig.routingAllowSpillover,
+        verbose,
+        allowTrading: true,
+      });
+      console.log(pc.green("✔ Engine restarted successfully."));
+      continue;
+    }
+
+    // Skip the old exit logic to avoid duping
 
       if (verbose) {
         try {

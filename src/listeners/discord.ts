@@ -24,10 +24,9 @@ import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage } from "../utils.js";
-import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
+import { isGameRelatedResponse } from "../formatters/index.js";
 import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
-import { executePythonBridge } from "../tools.js";
 import { loadConfig } from "../config.js";
 import type { DiscordFeaturesConfig } from "../config.js";
 import {
@@ -82,52 +81,6 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
-}
-
-// ---------------------------------------------------------------------------
-// Team logo fetching via sports-skills metadata
-// ---------------------------------------------------------------------------
-
-/**
- * Fetch a team logo URL from TheSportsDB via the metadata skill.
- * Returns null on failure — callers should degrade gracefully.
- */
-async function fetchTeamLogo(teamName: string, pythonPath: string): Promise<string | null> {
-  try {
-    const result = await executePythonBridge(
-      "metadata",
-      "get_team_logo",
-      { team_name: teamName },
-      { pythonPath, timeout: 10_000 }
-    );
-    if (result.success && result.data && typeof result.data === "object") {
-      const d = result.data as { data?: { logo_url?: string }; status?: boolean };
-      return d.data?.logo_url ?? null;
-    }
-  } catch {
-    // Non-critical — silently ignore
-  }
-  return null;
-}
-
-/**
- * Extract the most likely primary team name from the user's prompt.
- * Looks for patterns like "Lakers vs Suns", "How are the Lakers doing", etc.
- */
-function extractPrimaryTeamFromPrompt(prompt: string): string | null {
-  // "X vs Y" — take the first team
-  const vsMatch = prompt.match(
-    /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:vs\.?|versus)\s+/i
-  );
-  if (vsMatch) return vsMatch[1].trim();
-
-  // "the Lakers", "how did Arsenal", "what about the 49ers"
-  const theMatch = prompt.match(
-    /\b(?:the|how(?:'s|\s+are|\s+did|\s+is)?(?:\s+the)?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b/i
-  );
-  if (theMatch) return theMatch[1].trim();
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,11 +150,9 @@ export async function startDiscordListener(): Promise<void> {
     Client,
     GatewayIntentBits,
     Partials,
-    EmbedBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    ComponentType,
   } = Discord;
 
   const features = resolveFeatures();
@@ -277,37 +228,6 @@ export async function startDiscordListener(): Promise<void> {
       }
     }
     return null;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Build a Discord embed from the formatted response + optional logo
-  // ---------------------------------------------------------------------------
-
-  async function buildEmbed(
-    response: string,
-    prompt: string
-  ): Promise<import("discord.js").EmbedBuilder> {
-    const formatted = formatResponse(response, "discord");
-    const embed = new EmbedBuilder();
-
-    if (formatted.discord?.title) embed.setTitle(formatted.discord.title);
-    if (formatted.discord?.description) embed.setDescription(formatted.discord.description);
-    if (formatted.discord?.fields) embed.addFields(formatted.discord.fields);
-    if (formatted.discord?.footer) embed.setFooter(formatted.discord.footer);
-    if (formatted.discord?.color) embed.setColor(formatted.discord.color);
-
-    // Fetch team logo from TheSportsDB
-    if (features.embeds) {
-      const teamName = extractPrimaryTeamFromPrompt(prompt);
-      if (teamName) {
-        const logoUrl = await fetchTeamLogo(teamName, pythonPath);
-        if (logoUrl) {
-          embed.setThumbnail(logoUrl);
-        }
-      }
-    }
-
-    return embed;
   }
 
   // ---------------------------------------------------------------------------
@@ -442,27 +362,10 @@ export async function startDiscordListener(): Promise<void> {
       const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
       const response = await engine.run(followUpPrompt, { userId: ctx.userId, sessionId: ctx.userId });
 
-      // Box score and play-by-play data is too large for embeds — Discord
-      // collapses them to "Tap to see attachment" on mobile. Always send
-      // as plain text chunks. Only use embeds for the "stats" action.
-      const useEmbed = action === "stats";
-      const formatted = formatResponse(response, "discord");
-
-      if (useEmbed && formatted.discord) {
-        const embed = new EmbedBuilder();
-        if (formatted.discord.title) embed.setTitle(formatted.discord.title);
-        if (formatted.discord.description) embed.setDescription(formatted.discord.description);
-        if (formatted.discord.fields) embed.addFields(formatted.discord.fields);
-        if (formatted.discord.footer) embed.setFooter(formatted.discord.footer);
-        if (formatted.discord.color) embed.setColor(formatted.discord.color);
-
-        await interaction.editReply({ embeds: [embed] });
-      } else {
-        const chunks = splitMessage(formatted.text, 2000);
-        await interaction.editReply(chunks[0] ?? "No data available.");
-        for (const chunk of chunks.slice(1)) {
-          await interaction.followUp(chunk);
-        }
+      const chunks = splitMessage(response, 2000);
+      await interaction.editReply(chunks[0] ?? "No data available.");
+      for (const chunk of chunks.slice(1)) {
+        await interaction.followUp(chunk);
       }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -486,6 +389,14 @@ export async function startDiscordListener(): Promise<void> {
     console.log(
       `[sportsclaw] Listening for "${PREFIX}" commands and mentions.`
     );
+
+    if (process.env.SPORTSCLAW_RESTART_CHANNEL_ID) {
+      const channel = client.channels.cache.get(process.env.SPORTSCLAW_RESTART_CHANNEL_ID);
+      if (channel && "send" in channel && typeof channel.send === "function") {
+        channel.send("✅ I'm back. New configs loaded.").catch((e) => console.error("[sportsclaw] Failed to send discord restart confirmation:", e));
+      }
+      delete process.env.SPORTSCLAW_RESTART_CHANNEL_ID;
+    }
   });
 
   client.on("messageCreate", async (message) => {
@@ -521,7 +432,7 @@ export async function startDiscordListener(): Promise<void> {
       const child = spawn(process.execPath, [process.argv[1], "restart", "discord"], {
         detached: true,
         stdio: "ignore",
-        env: { ...process.env }
+        env: { ...process.env, SPORTSCLAW_RESTART_CHANNEL_ID: message.channel.id }
       });
       child.unref();
       setTimeout(() => process.exit(0), 100);
@@ -626,32 +537,26 @@ export async function startDiscordListener(): Promise<void> {
     userId: string,
     message: import("discord.js").Message
   ): Promise<void> {
-    const formatted = formatResponse(response, "discord");
+    const chunks = splitMessage(response, 2000);
 
-    if (formatted.discord && features.embeds) {
-      const embed = await buildEmbed(response, prompt);
+    // Build action buttons for game-related responses
+    let actionRow: import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> | null = null;
+    if (features.buttons && isGameRelatedResponse(response, prompt)) {
+      const sport = detectSport(response, prompt);
+      const contextKey = storeButtonContext(prompt, userId, sport);
+      actionRow = buildActionRow(contextKey, sport, response, prompt);
+    }
 
-      const messageOptions: import("discord.js").MessageCreateOptions = {
-        embeds: [embed],
+    // Send all chunks; attach buttons to the last one
+    for (let i = 0; i < chunks.length; i++) {
+      const isLast = i === chunks.length - 1;
+      const options: import("discord.js").MessageCreateOptions = {
+        content: chunks[i],
       };
-
-      // Attach action buttons only to game/score responses with supported data
-      if (features.buttons && isGameRelatedResponse(response, prompt)) {
-        const sport = detectSport(response, prompt);
-        const contextKey = storeButtonContext(prompt, userId, sport);
-        const actionRow = buildActionRow(contextKey, sport, response, prompt);
-        if (actionRow) {
-          messageOptions.components = [actionRow];
-        }
+      if (isLast && actionRow) {
+        options.components = [actionRow];
       }
-
-      await safeSend(message, messageOptions);
-    } else {
-      // Fallback to plain text with 2000-char limit
-      const chunks = splitMessage(formatted.text, 2000);
-      for (const chunk of chunks) {
-        await safeSend(message, chunk);
-      }
+      await safeSend(message, options);
     }
   }
 
