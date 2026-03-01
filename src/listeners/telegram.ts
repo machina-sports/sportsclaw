@@ -42,6 +42,8 @@ interface TelegramUpdate {
     date: number;
     chat: { id: number; type: string };
     text?: string;
+      caption?: string;
+      photo?: Array<{ file_id: string; width: number; height: number; file_size?: number }>;
     from?: { id: number; first_name: string };
   };
   callback_query?: {
@@ -260,6 +262,42 @@ export async function startTelegramListener(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Extract Images (Inbound Vision)
+// ---------------------------------------------------------------------------
+async function extractImages(msg: any, apiBase: string): Promise<import("../types.js").ImageAttachment[]> {
+  if (!msg.photo || msg.photo.length === 0) return [];
+  
+  // Get the largest photo size (last element in the array)
+  const largestPhoto = msg.photo[msg.photo.length - 1];
+  const fileId = largestPhoto.file_id;
+  
+  try {
+    // 1. Get file path
+    const fileRes = await fetch(`${apiBase}/getFile?file_id=${fileId}`);
+    if (!fileRes.ok) return [];
+    const fileData = await fileRes.json() as any;
+    if (!fileData.ok || !fileData.result.file_path) return [];
+    
+    // 2. Download file bytes
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileData.result.file_path}`;
+    const dlRes = await fetch(fileUrl);
+    if (!dlRes.ok) return [];
+    
+    const arrayBuffer = await dlRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    return [{
+      data: buffer.toString("base64"),
+      mimeType: "image/jpeg"
+    }];
+  } catch (error) {
+    console.error("[sportsclaw] Failed to extract Telegram image:", error);
+    return [];
+  }
+}
+
 // Send generated images/videos via Telegram API
 // ---------------------------------------------------------------------------
 
@@ -378,7 +416,7 @@ async function processMessage(
   bootEpoch: number
 ): Promise<void> {
   const msg = update.message;
-  if (!msg?.text) return;
+  if (!msg?.text && !msg?.photo) return;
 
   // Ignore messages sent before this process started — prevents restart loops
   if (msg.date < bootEpoch) return;
@@ -391,11 +429,11 @@ async function processMessage(
 
   // In private chats, respond to all messages
   if (msg.chat.type === "private") {
-    prompt = msg.text;
+    prompt = msg.text || msg.caption || "";
   }
 
   // In groups, respond to /claw commands
-  if (!prompt && msg.text.startsWith(COMMAND_PREFIX)) {
+  if (!prompt && msg.text && msg.text.startsWith(COMMAND_PREFIX)) {
     prompt = msg.text.slice(COMMAND_PREFIX.length).trim();
   }
 
@@ -432,8 +470,9 @@ async function processMessage(
 
   try {
     // Fresh engine per request — session state lives in the global SessionStore
-    const engine = new sportsclawEngine(engineConfig);
-    const response = await engine.run(prompt, { userId, sessionId: userId });
+    const images = await extractImages(msg, apiBase);
+      const engine = new sportsclawEngine(engineConfig);
+    const response = await engine.run(prompt, { userId, sessionId: userId, images: images.length > 0 ? images : undefined });
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
