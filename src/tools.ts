@@ -476,7 +476,7 @@ export class ToolRegistry {
         content: JSON.stringify({
           error: blockReason,
           error_code: "blocked_tool",
-          hint: "This tool is disabled for security reasons. SportsClaw is a read-only sports data agent.",
+          hint: "This tool is disabled for security reasons. sportsclaw is a read-only sports data agent.",
         }),
         isError: true,
       };

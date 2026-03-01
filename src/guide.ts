@@ -29,6 +29,8 @@ const GUIDE_PATTERNS = [
   /\b(?:supported sports?|available sports?)\b/i,
   /\bhow does (?:this|sportsclaw) work\b/i,
   /^(?:list|show|what are) (?:your |the |all )?(?:commands|features|capabilities)\s*\??$/i,
+  /\b(?:machina (?:skills?|templates?|cloud)|premium (?:connectors?|data)|sportradar|stats ?perform|api.?football)\b/i,
+  /\b(?:what else|more features?|more data|upgrade|paid|cloud)\b/i,
 ];
 
 /**
@@ -68,7 +70,7 @@ function readSchemaDigest(): SchemaDigest[] {
 // ---------------------------------------------------------------------------
 
 const FEATURE_MANIFESTO = `
-## SportsClaw Features
+## sportsclaw Features
 
 ### Core Capabilities
 - **Live Scores & Results** — Real-time scores across 16+ sports via ESPN, Transfermarkt, FBref, FastF1
@@ -101,6 +103,12 @@ College: CFB (College Football), CBB (College Basketball)
 Global: Football (Soccer — 13 leagues), Tennis (ATP & WTA), Golf (PGA, LPGA, DP World), Formula 1
 Markets: Kalshi, Polymarket, Betting Analysis, Unified Markets Dashboard
 News: Sports News via RSS & Google News
+
+### Machina Skills & Templates
+sportsclaw is powered by open source templates and workflows from Machina Sports.
+Premium connectors from **Sportradar**, **Stats Perform**, and **API-Football** are coming soon on Machina Cloud.
+Browse all templates: https://github.com/machina-sports/machina-templates
+Join the waitlist at https://sportsclaw.gg
 
 ### Getting Started
 1. Run \`sportsclaw config\` to set up your LLM provider and install sports
@@ -146,6 +154,22 @@ export function generateGuideResponse(prompt: string): string {
     return lines.join("\n");
   }
 
+  // "machina skills" / "premium connectors" / "sportradar" / "more data" / "upgrade" / "cloud"
+  if (/\b(?:machina (?:skills?|templates?|cloud)|premium|sportradar|stats ?perform|api.?football|what else|more features?|more data|upgrade|paid|cloud)\b/i.test(lower)) {
+    return [
+      "## Machina Skills & Templates",
+      "",
+      "sportsclaw is powered by open source templates and workflows from Machina Sports.",
+      "You can browse and contribute to them here: https://github.com/machina-sports/machina-templates",
+      "",
+      "### Coming Soon on Machina Cloud",
+      "Premium connectors from **Sportradar**, **Stats Perform**, and **API-Football** are on the way.",
+      "Machina Cloud will also include 24/7 hosting, conversation memory, and vector search.",
+      "",
+      "Join the waitlist at https://sportsclaw.gg to get early access.",
+    ].join("\n");
+  }
+
   // "help" / "getting started" / "what can you do"
   if (/^(?:help|getting started|tutorial)$/i.test(lower) || /\bwhat (?:can|do) you (?:do|support)\b/i.test(lower)) {
     return FEATURE_MANIFESTO;
@@ -154,7 +178,7 @@ export function generateGuideResponse(prompt: string): string {
   // "who are you" / "what is sportsclaw"
   if (/\b(?:who are you|what(?:'s| is) sportsclaw)\b/i.test(lower)) {
     return [
-      "I'm **SportsClaw**, a sports AI agent built by Machina Sports.",
+      "I'm **sportsclaw**, a sports AI agent built by Machina Sports.",
       "",
       `I have **${installed.length}** sports installed with live data access.`,
       "",

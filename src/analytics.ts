@@ -341,7 +341,7 @@ export function generateReport(): string {
   const tools = getToolMetrics();
 
   const lines: string[] = [
-    "# SportsClaw Analytics Report",
+    "# sportsclaw Analytics Report",
     `Generated: ${new Date().toISOString()}`,
     "",
     "## Overview",

@@ -2,7 +2,7 @@
  * sportsclaw Engine — MCP Client Manager
  *
  * Connects to external MCP servers (e.g. Machina Core) via SSE/HTTP transport,
- * discovers their tools, and converts them to SportsClaw ToolSpec format.
+ * discovers their tools, and converts them to sportsclaw ToolSpec format.
  *
  * Configuration comes from:
  *   - Env var SPORTSCLAW_MCP_SERVERS (JSON)

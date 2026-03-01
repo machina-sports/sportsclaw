@@ -15,7 +15,7 @@ import { relayManager, iptcGameId, iptcHome, iptcAway, iptcSportCode, iptcStatus
 import type { LiveGameEnvelope } from "./relay.js";
 
 async function run() {
-  console.log("Starting SportsClaw Relay Pub/Sub Architecture Test (IPTC Schema)...\n");
+  console.log("Starting sportsclaw Relay Pub/Sub Architecture Test (IPTC Schema)...\n");
 
   // 1. Initialize the presenter (subscribes to relay channel)
   await gamePresenter.initialize();

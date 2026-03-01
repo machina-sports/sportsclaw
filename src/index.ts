@@ -1510,7 +1510,7 @@ function cmdAnalytics(args: string[]): void {
   if (subCmd === "summary") {
     // Quick summary
     const stats = getAggregateStats();
-    console.log(pc.bold("SportsClaw Analytics Summary"));
+    console.log(pc.bold("sportsclaw Analytics Summary"));
     console.log("");
     console.log(`  Queries:      ${stats.totalQueries.toLocaleString()}`);
     console.log(`  Users:        ${stats.uniqueUsers.toLocaleString()}`);
