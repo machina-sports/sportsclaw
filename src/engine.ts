@@ -1604,7 +1604,7 @@ export class sportsclawEngine {
 
     toolMap["generate_video"] = defineTool({
       description:
-        "Generate a short video (8 seconds) from a text prompt using Google Veo 3.1. " +
+        "Generate a short video from a text prompt using Google Veo 3.1. " +
         "Only available with Google provider. Video includes native audio.",
       inputSchema: jsonSchema({
         type: "object",
@@ -1613,16 +1613,52 @@ export class sportsclawEngine {
             type: "string",
             description: "Detailed text description of the video to generate.",
           },
+          aspectRatio: {
+            type: "string",
+            enum: ["16:9", "9:16"],
+            description: "Video aspect ratio. Default is 16:9 (horizontal). Use 9:16 for vertical/mobile.",
+          },
+          resolution: {
+            type: "string",
+            enum: ["720p", "1080p", "4k"],
+            description: "Video resolution. 1080p and 4k require durationSeconds to be 8.",
+          },
+          durationSeconds: {
+            type: "string",
+            enum: ["4", "6", "8"],
+            description: "Length of the video in seconds. Must be 8 if using 1080p or 4k.",
+          },
+          negativePrompt: {
+            type: "string",
+            description: "Text describing what NOT to include in the video.",
+          },
+          seed: {
+            type: "number",
+            description: "Integer seed for reproducible generation.",
+          }
         },
         required: ["prompt"],
       }),
-      execute: async (args: { prompt?: string }) => {
+      execute: async (args: { 
+        prompt?: string; 
+        aspectRatio?: string; 
+        resolution?: string; 
+        durationSeconds?: string; 
+        negativePrompt?: string; 
+        seed?: number; 
+      }) => {
         if (!args.prompt) return "Error: prompt is required.";
         if (config.provider !== "google") {
           return "Video generation currently requires Google provider (Veo 3.1).";
         }
         try {
-          const video = await generateVideoForProvider(config.provider, args.prompt);
+          const video = await generateVideoForProvider(config.provider, args.prompt, {
+            aspectRatio: args.aspectRatio,
+            resolution: args.resolution,
+            durationSeconds: args.durationSeconds,
+            negativePrompt: args.negativePrompt,
+            seed: args.seed
+          });
           this._generatedVideos.push(video);
           return `Video generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
@@ -2187,17 +2223,35 @@ async function generateImageOpenAI(prompt: string, size?: string): Promise<Gener
 // Video generation helpers (standalone, outside the class)
 // ---------------------------------------------------------------------------
 
+interface VideoOptions {
+  aspectRatio?: string;
+  resolution?: string;
+  durationSeconds?: string;
+  negativePrompt?: string;
+  seed?: number;
+}
+
 async function generateVideoForProvider(
   provider: LLMProvider,
-  prompt: string
+  prompt: string,
+  options?: VideoOptions
 ): Promise<GeneratedVideo> {
-  if (provider === "google") return generateVideoGoogle(prompt);
+  if (provider === "google") return generateVideoGoogle(prompt, options);
   throw new Error(`${provider} does not support video generation yet.`);
 }
 
-async function generateVideoGoogle(prompt: string): Promise<GeneratedVideo> {
+async function generateVideoGoogle(prompt: string, options?: VideoOptions): Promise<GeneratedVideo> {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  // Build parameters object
+  const parameters: Record<string, any> = {};
+  if (options?.aspectRatio) parameters.aspectRatio = options.aspectRatio;
+  if (options?.resolution) parameters.resolution = options.resolution;
+  if (options?.durationSeconds) parameters.durationSeconds = options.durationSeconds;
+  if (options?.negativePrompt) parameters.negativePrompt = options.negativePrompt;
+  if (options?.seed !== undefined) parameters.seed = options.seed;
+  parameters.personGeneration = "allow_all";
 
   // 1. Start long-running prediction
   const startRes = await fetch(
@@ -2207,7 +2261,7 @@ async function generateVideoGoogle(prompt: string): Promise<GeneratedVideo> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         instances: [{ prompt }],
-        parameters: { aspectRatio: "16:9", resolution: "720p" },
+        parameters: Object.keys(parameters).length > 0 ? parameters : undefined,
       }),
     }
   );
