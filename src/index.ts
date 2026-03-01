@@ -25,13 +25,12 @@
 
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
+import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
 import { MemoryManager } from "./memory.js";
 import {
@@ -903,28 +902,24 @@ async function ensureDefaultSchemas(): Promise<void> {
     const cachedVersion = getCachedSchemaVersion();
     const installedVersion = getInstalledSportsSkillsVersion({ pythonPath });
     if (installedVersion && cachedVersion && installedVersion !== cachedVersion) {
-      console.error(
-        `[sportsclaw] sports-skills upgraded (${cachedVersion} → ${installedVersion}). Refreshing schemas...`
+      console.log(
+        pc.dim(`[sportsclaw] sports-skills upgraded (${cachedVersion} → ${installedVersion}). Refreshing schemas...`)
       );
       await bootstrapDefaultSchemas({ pythonPath }, { force: true });
+      console.log(pc.dim("[sportsclaw] Schemas refreshed."));
     }
     return;
   }
 
-  // First-time user: interactive sport selection instead of installing all 14
-  console.error(
-    "[sportsclaw] No sport schemas found. Let's pick your sports."
+  // First-time user: skip blocking bootstrap — sports load on-demand via install_sport.
+  // The engine's self-awareness block tells the LLM about available sports,
+  // and install_sport hot-loads them in ~2s when the user first asks.
+  console.log(
+    pc.dim("[sportsclaw] Sports will be installed on-demand when you ask about them.")
   );
-  try {
-    await runSportSelectionFlow(pythonPath);
-  } catch {
-    // If interactive flow fails (non-TTY, etc.), fall back to all defaults
-    console.error("[sportsclaw] Sport selection unavailable — installing all defaults...");
-    const count = await bootstrapDefaultSchemas({ pythonPath });
-    console.error(
-      `[sportsclaw] Bootstrapped ${count}/${DEFAULT_SKILLS.length} default schemas.`
-    );
-  }
+  console.log(
+    pc.dim("[sportsclaw] To pre-install all sports at once, run: sportsclaw init --all")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -997,9 +992,6 @@ async function cmdChat(args: string[]): Promise<void> {
   // Ensure managed venv exists (creates on first run)
   const venvResult = ensureVenv(resolved.pythonPath);
   if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
-    if (venvResult.created) {
-      console.log(pc.dim("[sportsclaw] Setting up Python environment (~/.sportsclaw/venv/)..."));
-    }
     resolved = { ...resolved, pythonPath: venvResult.pythonPath };
     process.env.PYTHON_PATH = venvResult.pythonPath;
   }
@@ -1166,25 +1158,16 @@ async function cmdChat(args: string[]): Promise<void> {
 
 async function saveGeneratedImages(engine: sportsclawEngine): Promise<void> {
   if (engine.generatedImages.length === 0) return;
-  const dir = join(tmpdir(), "sportsclaw-images");
-  await mkdir(dir, { recursive: true });
   for (const img of engine.generatedImages) {
-    const ts = Date.now();
-    const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
-    const filePath = join(dir, `generated_${ts}.${ext}`);
-    await writeFile(filePath, Buffer.from(img.data, "base64"));
+    const filePath = await saveImageToDisk(img.data, img.mimeType);
     console.log(pc.dim(`  Image saved: ${filePath}`));
   }
 }
 
 async function saveGeneratedVideos(engine: sportsclawEngine): Promise<void> {
   if (engine.generatedVideos.length === 0) return;
-  const dir = join(tmpdir(), "sportsclaw-videos");
-  await mkdir(dir, { recursive: true });
   for (const vid of engine.generatedVideos) {
-    const ts = Date.now();
-    const filePath = join(dir, `generated_${ts}.mp4`);
-    await writeFile(filePath, Buffer.from(vid.data, "base64"));
+    const filePath = await saveVideoToDisk(vid.data);
     console.log(pc.dim(`  Video saved: ${filePath}`));
   }
 }

@@ -305,6 +305,7 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
   if (isVenvSetup()) {
     // Venv exists — check if extras need upgrading
     if (!hasCorrectExtras()) {
+      console.error("[sportsclaw] Upgrading sports-skills dependencies...");
       try {
         execFileSync(
           getVenvPythonPath(),
@@ -329,12 +330,14 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
     }
 
     // Create venv
+    console.error("[sportsclaw] Creating Python environment (~/.sportsclaw/venv/)...");
     execFileSync(systemPython, ["-m", "venv", VENV_DIR], {
       timeout: 30_000,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
     // Install/upgrade pip and sports-skills[all] into it
+    console.error("[sportsclaw] Installing sports-skills — this may take a minute on first run...");
     execFileSync(
       getVenvPythonPath(),
       ["-m", "pip", "install", "--upgrade", "pip", PIP_INSTALL_TARGET],
@@ -344,6 +347,7 @@ export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
       }
     );
 
+    console.error("[sportsclaw] Python environment ready.");
     writeExtrasMarker();
     return { ok: true, pythonPath: getVenvPythonPath(), created: true };
   } catch (err) {

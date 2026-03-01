@@ -23,7 +23,7 @@
 import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
-import { splitMessage } from "../utils.js";
+import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { isGameRelatedResponse } from "../formatters/index.js";
 import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
@@ -245,6 +245,8 @@ export async function startDiscordListener(): Promise<void> {
         name: `sportsclaw_generated.mp4`,
       });
       await safeSend(message, { files: [attachment] });
+      // Persist locally
+      saveVideoToDisk(vid.data).catch(() => {});
     }
   }
 
@@ -260,6 +262,8 @@ export async function startDiscordListener(): Promise<void> {
         name: `sportsclaw_generated.${ext}`,
       });
       await safeSend(message, { files: [attachment] });
+      // Persist locally
+      saveImageToDisk(img.data, img.mimeType).catch(() => {});
     }
   }
 

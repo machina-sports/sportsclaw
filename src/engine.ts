@@ -468,8 +468,9 @@ export class sportsclawEngine {
       "You have tools to inspect and modify your own state:",
       "- get_agent_config, update_agent_config, install_sport, remove_sport",
       "",
-      "When the user asks about a sport you DON'T have installed, tell them and",
-      "offer to install it. Always include the disclaimer. User must confirm first.",
+      installed.length === 0
+        ? "When the user asks about a sport, automatically call install_sport to load it — no confirmation needed on first use."
+        : "When the user asks about a sport you DON'T have installed, tell them and offer to install it. Always include the disclaimer. User must confirm first.",
       "",
       "### Chat Integrations",
       `- Discord bot: ${discordCfg?.botToken ? "configured" : "not configured"} (prefix: ${discordCfg?.prefix || "!sportsclaw"})`,

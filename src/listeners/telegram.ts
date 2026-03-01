@@ -18,7 +18,7 @@
 import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
-import { splitMessage } from "../utils.js";
+import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
 import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
@@ -322,6 +322,8 @@ async function sendGeneratedVideos(
     }).catch((err) => {
       console.error(`[sportsclaw] Failed to send generated video to Telegram:\n`, err);
     });
+    // Persist locally
+    saveVideoToDisk(vid.data).catch(() => {});
   }
 }
 
@@ -347,6 +349,8 @@ async function sendGeneratedImages(
     }).catch((err) => {
       console.error(`[sportsclaw] Failed to send generated image: ${err instanceof Error ? err.message : err}`);
     });
+    // Persist locally
+    saveImageToDisk(img.data, img.mimeType).catch(() => {});
   }
 }
 

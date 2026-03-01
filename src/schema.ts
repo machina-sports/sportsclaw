@@ -536,12 +536,12 @@ export function discoverAvailableSkills(
  */
 export async function bootstrapDefaultSchemas(
   config?: Partial<sportsclawConfig>,
-  options?: { verbose?: boolean; force?: boolean }
+  options?: { verbose?: boolean; force?: boolean; onProgress?: (skill: string, ok: boolean) => void }
 ): Promise<number> {
   const verbose = options?.verbose ?? false;
   const force = options?.force ?? false;
+  const onProgress = options?.onProgress;
   const existing = new Set(listSchemas());
-  let succeeded = 0;
 
   // Try dynamic discovery; fall back to hardcoded list
   const catalog = discoverAvailableSkills(config);
@@ -553,31 +553,52 @@ export async function bootstrapDefaultSchemas(
     );
   }
 
+  // Split into already-installed (skip) and need-to-fetch
+  const toFetch: string[] = [];
+  let succeeded = 0;
+
   for (const skill of skills) {
     if (!force && existing.has(skill)) {
       if (verbose) {
         console.error(`[sportsclaw] skip: "${skill}" already installed`);
       }
       succeeded++;
-      continue;
+    } else {
+      toFetch.push(skill);
     }
+  }
 
-    try {
-      if (verbose) {
-        console.error(`[sportsclaw] fetching: ${skill}...`);
-      }
+  if (toFetch.length === 0) return succeeded;
+
+  if (verbose) {
+    console.error(`[sportsclaw] fetching ${toFetch.length} schemas in parallel...`);
+  }
+
+  // Fetch all schemas in parallel
+  const results = await Promise.allSettled(
+    toFetch.map(async (skill) => {
       const schema = await fetchSportSchema(skill, config);
       saveSchema(schema);
-      succeeded++;
       if (verbose) {
         console.error(
           `[sportsclaw] installed: ${skill} (${schema.tools.length} tools)`
         );
       }
-    } catch {
+      onProgress?.(skill, true);
+      return skill;
+    })
+  );
+
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === "fulfilled") {
+      succeeded++;
+    } else {
+      const skill = toFetch[i];
       console.error(
         `[sportsclaw] warning: could not fetch schema for "${skill}"`
       );
+      onProgress?.(skill, false);
     }
   }
 

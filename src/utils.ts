@@ -2,6 +2,10 @@
  * sportsclaw — Shared Utilities
  */
 
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
 /**
  * Split a message into chunks that fit a platform's character limit.
  * Tries to split at newlines for clean breaks, falls back to hard breaks.
@@ -34,4 +38,35 @@ export function splitMessage(text: string, maxLen: number): string[] {
   }
 
   return chunks;
+}
+
+// ---------------------------------------------------------------------------
+// Media persistence — save generated images/videos to ~/.sportsclaw/media/
+// ---------------------------------------------------------------------------
+
+/** Resolve the media directory for a given type (images or videos). */
+export function getMediaDir(type: "images" | "videos"): string {
+  return join(homedir(), ".sportsclaw", "media", type);
+}
+
+/** Save a base64-encoded image to disk. Returns the file path. */
+export async function saveImageToDisk(
+  data: string,
+  mimeType: string
+): Promise<string> {
+  const dir = getMediaDir("images");
+  await mkdir(dir, { recursive: true });
+  const ext = mimeType === "image/jpeg" ? "jpg" : "png";
+  const filePath = join(dir, `generated_${Date.now()}.${ext}`);
+  await writeFile(filePath, Buffer.from(data, "base64"));
+  return filePath;
+}
+
+/** Save a base64-encoded video to disk. Returns the file path. */
+export async function saveVideoToDisk(data: string): Promise<string> {
+  const dir = getMediaDir("videos");
+  await mkdir(dir, { recursive: true });
+  const filePath = join(dir, `generated_${Date.now()}.mp4`);
+  await writeFile(filePath, Buffer.from(data, "base64"));
+  return filePath;
 }
