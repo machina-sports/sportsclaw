@@ -25,7 +25,9 @@
 
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
@@ -78,6 +80,7 @@ import {
   daemonStart,
   daemonStop,
   daemonStatus,
+  daemonRestart,
   daemonLogs,
   isValidPlatform,
 } from "./daemon.js";
@@ -153,6 +156,9 @@ export type {
   AskUserQuestionRequest,
   SuspendedState,
   WatcherTask,
+  ImageAttachment,
+  GeneratedImage,
+  GeneratedVideo,
 } from "./types.js";
 
 // Sprint 2 modules
@@ -1002,7 +1008,7 @@ async function cmdChat(args: string[]): Promise<void> {
   await maybePromptForSkillsUpgrade(resolved.pythonPath);
   await ensureDefaultSchemas();
 
-  const engine = new sportsclawEngine({
+  let engine = new sportsclawEngine({
     provider: resolved.provider,
     ...(resolved.model && { model: resolved.model }),
     pythonPath: resolved.pythonPath,
@@ -1079,10 +1085,33 @@ async function cmdChat(args: string[]): Promise<void> {
       break;
     }
 
+    if (prompt === "restart" || prompt === "/restart" || prompt === "/claw restart") {
+      console.log(pc.yellow("🔄 Reloading configuration and engine state..."));
+      const newConfig = resolveConfig();
+      applyConfigToEnv();
+      
+      engine = new sportsclawEngine({
+        provider: newConfig.provider,
+        ...(newConfig.model && { model: newConfig.model }),
+        pythonPath: newConfig.pythonPath,
+        routingMode: newConfig.routingMode,
+        routingMaxSkills: newConfig.routingMaxSkills,
+        routingAllowSpillover: newConfig.routingAllowSpillover,
+        verbose,
+        allowTrading: true,
+      });
+      console.log(pc.green("✔ Engine restarted successfully."));
+      continue;
+    }
+
+    // Skip the old exit logic to avoid duping
+
       if (verbose) {
         try {
           const result = await engine.run(prompt, { userId });
           console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          await saveGeneratedImages(engine);
+          await saveGeneratedVideos(engine);
         } catch (error: unknown) {
           if (error instanceof Error) {
             console.error(`Error: ${error.message}`);
@@ -1109,6 +1138,8 @@ async function cmdChat(args: string[]): Promise<void> {
           });
           s.stop(tracker.doneSummary());
           console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+          await saveGeneratedImages(engine);
+          await saveGeneratedVideos(engine);
         } catch (error: unknown) {
           if (cancel.wasCancelled() || isAbortError(error)) {
             s.stop(tracker.cancelledSummary());
@@ -1127,6 +1158,35 @@ async function cmdChat(args: string[]): Promise<void> {
         }
       }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save generated images/videos from the engine to disk and print paths.
+// ---------------------------------------------------------------------------
+
+async function saveGeneratedImages(engine: sportsclawEngine): Promise<void> {
+  if (engine.generatedImages.length === 0) return;
+  const dir = join(tmpdir(), "sportsclaw-images");
+  await mkdir(dir, { recursive: true });
+  for (const img of engine.generatedImages) {
+    const ts = Date.now();
+    const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
+    const filePath = join(dir, `generated_${ts}.${ext}`);
+    await writeFile(filePath, Buffer.from(img.data, "base64"));
+    console.log(pc.dim(`  Image saved: ${filePath}`));
+  }
+}
+
+async function saveGeneratedVideos(engine: sportsclawEngine): Promise<void> {
+  if (engine.generatedVideos.length === 0) return;
+  const dir = join(tmpdir(), "sportsclaw-videos");
+  await mkdir(dir, { recursive: true });
+  for (const vid of engine.generatedVideos) {
+    const ts = Date.now();
+    const filePath = join(dir, `generated_${ts}.mp4`);
+    await writeFile(filePath, Buffer.from(vid.data, "base64"));
+    console.log(pc.dim(`  Video saved: ${filePath}`));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1237,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     try {
       const result = await engine.run(prompt);
       console.log(renderMarkdown(result));
+      await saveGeneratedImages(engine);
+      await saveGeneratedVideos(engine);
     } catch (error: unknown) {
       if (error instanceof Error) {
         console.error(`Error: ${error.message}`);
@@ -1203,6 +1265,8 @@ async function cmdQuery(args: string[]): Promise<void> {
       });
       s.stop(tracker.doneSummary());
       console.log(renderMarkdown(result));
+      await saveGeneratedImages(engine);
+      await saveGeneratedVideos(engine);
     } catch (error: unknown) {
       if (cancel.wasCancelled() || isAbortError(error)) {
         s.stop(tracker.cancelledSummary());
@@ -1261,6 +1325,19 @@ function cmdStatus(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw restart <platform>` — restart a running daemon
+// ---------------------------------------------------------------------------
+
+function cmdRestart(args: string[]): void {
+  const platform = args[0]?.toLowerCase();
+  if (!platform || !["discord", "telegram"].includes(platform)) {
+    console.error("Usage: sportsclaw restart <discord|telegram>");
+    process.exit(1);
+  }
+  daemonRestart(platform as any);
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw logs <platform>` — tail daemon logs
 // ---------------------------------------------------------------------------
 
@@ -1296,6 +1373,7 @@ function printHelp(): void {
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");
   console.log("  sportsclaw status                  Show daemon status");
+  console.log("  sportsclaw restart <platform>      Restart a running daemon");
   console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
   console.log("");
@@ -1481,6 +1559,8 @@ async function main(): Promise<void> {
       return cmdStop(subArgs);
     case "status":
       return cmdStatus();
+    case "restart":
+      return cmdRestart(subArgs);
     case "logs":
       return cmdLogs(subArgs);
     case "agents":

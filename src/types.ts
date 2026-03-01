@@ -204,6 +204,40 @@ export interface SportToolDef {
 // Memory options passed to engine.run()
 // ---------------------------------------------------------------------------
 
+/** An image attached to a user message (inbound vision). */
+export interface ImageAttachment {
+  /** Base64-encoded image data (without data URI prefix) */
+  data: string;
+  /** MIME type of the image (e.g., "image/png", "image/jpeg", "image/webp") */
+  mimeType: string;
+  /** Optional filename for display purposes */
+  filename?: string;
+}
+
+/** An image produced by the generate_image tool (outbound). */
+export interface GeneratedImage {
+  /** Base64-encoded image data */
+  data: string;
+  /** MIME type of the generated image */
+  mimeType: string;
+  /** The prompt used to generate the image */
+  prompt: string;
+  /** The provider that generated the image */
+  provider: "openai" | "google";
+}
+
+/** A video produced by the generate_video tool (outbound). */
+export interface GeneratedVideo {
+  /** Base64-encoded video data */
+  data: string;
+  /** MIME type of the generated video */
+  mimeType: string;
+  /** The prompt used to generate the video */
+  prompt: string;
+  /** The provider that generated the video */
+  provider: "openai" | "google";
+}
+
 export type ToolProgressEvent =
   | { type: "phase"; label: string }
   | { type: "tool_start"; toolName: string; toolCallId: string; skillName?: string }
@@ -213,10 +247,19 @@ export type ToolProgressEvent =
 export interface RunOptions {
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
+  /**
+   * Session ID for multi-turn conversation continuity.
+   * When provided, the engine loads prior message history from the global
+   * SessionStore, appends the new turn, and saves back after execution.
+   * Format convention: `<platform>-<userId>` (e.g. "discord-123456").
+   */
+  sessionId?: string;
   /** Structured progress callback for tool execution tracking. */
   onProgress?: (event: ToolProgressEvent) => void;
   /** Abort signal for cancelling an in-flight run. */
   abortSignal?: AbortSignal;
+  /** Image attachments from the user (vision input). */
+  images?: ImageAttachment[];
   /** @deprecated Use onProgress instead */
   onSpinnerUpdate?: (msg: string) => void;
 }

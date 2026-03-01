@@ -15,6 +15,7 @@
  *   ALLOWED_USERS        — Comma-separated Telegram user IDs (optional whitelist)
  */
 
+import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage } from "../utils.js";
@@ -38,6 +39,7 @@ interface TelegramUpdate {
   update_id: number;
   message?: {
     message_id: number;
+    date: number;
     chat: { id: number; type: string };
     text?: string;
     from?: { id: number; first_name: string };
@@ -188,7 +190,36 @@ export async function startTelegramListener(): Promise<void> {
   );
   console.log(`[sportsclaw] Listening for messages...`);
 
+  if (process.env.SPORTSCLAW_RESTART_CHAT_ID) {
+    try {
+      const restartChatId = parseInt(process.env.SPORTSCLAW_RESTART_CHAT_ID, 10);
+      await sendMessage(apiBase, restartChatId, "✅ I'm back. New configs loaded.");
+      console.log(`[sportsclaw] Sent restart confirmation to ${restartChatId}`);
+    } catch (e) {
+      console.error("[sportsclaw] Failed to send restart confirmation:", e);
+    }
+    delete process.env.SPORTSCLAW_RESTART_CHAT_ID;
+  }
+
+  // Mark boot time — ignore any messages sent before this to prevent
+  // restart loops (the old "restart" command would otherwise be reprocessed).
+  const bootEpoch = Math.floor(Date.now() / 1000);
+
+  // Flush stale updates so we don't re-process messages from before this
+  // startup (e.g. the "restart" command that triggered a respawn).
   let offset = 0;
+  try {
+    const flushRes = await fetch(
+      `${apiBase}/getUpdates?offset=-1&timeout=0`,
+      { signal: AbortSignal.timeout(10_000) }
+    );
+    const flushData = (await flushRes.json()) as TelegramResponse;
+    if (flushData.ok && flushData.result?.length) {
+      offset = flushData.result[flushData.result.length - 1].update_id + 1;
+    }
+  } catch {
+    // Non-critical — worst case the date guard catches stale messages
+  }
 
   // Long-polling loop
   while (true) {
@@ -216,7 +247,7 @@ export async function startTelegramListener(): Promise<void> {
             allowedUsers
           );
         }
-        return processMessage(update, apiBase, engineConfig, allowedUsers);
+        return processMessage(update, apiBase, engineConfig, allowedUsers, bootEpoch);
       });
       await Promise.allSettled(tasks);
     } catch (error: unknown) {
@@ -225,6 +256,59 @@ export async function startTelegramListener(): Promise<void> {
       console.error(`[sportsclaw] Polling error: ${errMsg}`);
       await new Promise((r) => setTimeout(r, 5000));
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Send generated images/videos via Telegram API
+// ---------------------------------------------------------------------------
+
+async function sendGeneratedVideos(
+  engine: sportsclawEngine,
+  apiBase: string,
+  chatId: number,
+  replyToMessageId?: number
+): Promise<void> {
+  for (const vid of engine.generatedVideos) {
+    const buffer = Buffer.from(vid.data, "base64");
+    const blob = new Blob([buffer], { type: vid.mimeType });
+    const formData = new FormData();
+    formData.append("chat_id", String(chatId));
+    formData.append("video", blob, `sportsclaw_generated.mp4`);
+    if (replyToMessageId) {
+      formData.append("reply_to_message_id", String(replyToMessageId));
+    }
+    await fetch(`${apiBase}/sendVideo`, {
+      method: "POST",
+      body: formData,
+    }).catch((err) => {
+      console.error(`[sportsclaw] Failed to send generated video to Telegram:\n`, err);
+    });
+  }
+}
+
+async function sendGeneratedImages(
+  engine: sportsclawEngine,
+  apiBase: string,
+  chatId: number,
+  replyToMessageId?: number
+): Promise<void> {
+  for (const img of engine.generatedImages) {
+    const buffer = Buffer.from(img.data, "base64");
+    const ext = img.mimeType === "image/jpeg" ? "jpg" : "png";
+    const blob = new Blob([buffer], { type: img.mimeType });
+    const formData = new FormData();
+    formData.append("chat_id", String(chatId));
+    formData.append("photo", blob, `sportsclaw_generated.${ext}`);
+    if (replyToMessageId) {
+      formData.append("reply_to_message_id", String(replyToMessageId));
+    }
+    await fetch(`${apiBase}/sendPhoto`, {
+      method: "POST",
+      body: formData,
+    }).catch((err) => {
+      console.error(`[sportsclaw] Failed to send generated image: ${err instanceof Error ? err.message : err}`);
+    });
   }
 }
 
@@ -290,10 +374,14 @@ async function processMessage(
   update: TelegramUpdate,
   apiBase: string,
   engineConfig: Partial<sportsclawConfig>,
-  allowedUsers: Set<string> | null
+  allowedUsers: Set<string> | null,
+  bootEpoch: number
 ): Promise<void> {
   const msg = update.message;
   if (!msg?.text) return;
+
+  // Ignore messages sent before this process started — prevents restart loops
+  if (msg.date < bootEpoch) return;
 
   // Check user whitelist
   if (allowedUsers && msg.from && !allowedUsers.has(String(msg.from.id)))
@@ -313,6 +401,22 @@ async function processMessage(
 
   if (!prompt) return;
 
+
+  if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "/claw restart") {
+    await sendMessage(apiBase, msg.chat.id, "🔄 Restarting Telegram daemon to apply new configurations...", {
+      replyToMessageId: msg.message_id,
+    });
+    console.log("[sportsclaw] Restart triggered via Telegram chat.");
+    const child = spawn(process.execPath, [process.argv[1], "restart", "telegram"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, SPORTSCLAW_RESTART_CHAT_ID: msg.chat.id.toString() }
+    });
+    child.unref();
+    setTimeout(() => process.exit(0), 100);
+    return;
+  }
+
   // Send "typing" action and keep it alive every 4s (Telegram expires after 5s)
   const sendTyping = () =>
     fetch(`${apiBase}/sendChatAction`, {
@@ -327,9 +431,9 @@ async function processMessage(
   const userId = `telegram-${msg.from?.id ?? msg.chat.id}`;
 
   try {
-    // Fresh engine per request — avoids shared-state issues
+    // Fresh engine per request — session state lives in the global SessionStore
     const engine = new sportsclawEngine(engineConfig);
-    const response = await engine.run(prompt, { userId });
+    const response = await engine.run(prompt, { userId, sessionId: userId });
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
@@ -356,6 +460,8 @@ async function processMessage(
         replyMarkup: idx === chunks.length - 1 ? replyMarkup : undefined,
       });
     }
+    await sendGeneratedImages(engine, apiBase, msg.chat.id, msg.message_id);
+    await sendGeneratedVideos(engine, apiBase, msg.chat.id, msg.message_id);
   } catch (error: unknown) {
     // Sprint 2: AskUserQuestion — render options as Telegram inline keyboard
     if (error instanceof AskUserQuestionHalt) {
@@ -474,7 +580,7 @@ async function processCallbackQuery(
     try {
       const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
       const engine = new sportsclawEngine(engineConfig);
-      const response = await engine.run(resumePrompt, { userId });
+      const response = await engine.run(resumePrompt, { userId, sessionId: userId });
 
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;
@@ -545,7 +651,7 @@ async function processCallbackQuery(
       ...engineConfig,
       skipFanProfile: true,
     });
-    const response = await engine.run(followUpPrompt, { userId: ctx.userId });
+    const response = await engine.run(followUpPrompt, { userId: ctx.userId, sessionId: ctx.userId });
 
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;

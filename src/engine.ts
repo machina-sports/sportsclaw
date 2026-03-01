@@ -30,6 +30,9 @@ import {
   type sportsclawConfig,
   type RunOptions,
   type Message,
+  type ImageAttachment,
+  type GeneratedImage,
+  type GeneratedVideo,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { execFile } from "node:child_process";
@@ -118,6 +121,7 @@ Your core directives:
       When callbacks or rapport grow long, consolidate older entries into tighter summaries.
     - FAN_PROFILE.md: entity-level data only. No prose.
     Each file should stay small enough to skim in seconds.
+11.5 KALSHI MASCOTS — When searching Kalshi markets via search_markets, you CAN use team mascots (e.g. Lakers, Pelicans) as the query as long as you provide the correct sport code. The tool will auto-translate it to city names behind the scenes.
 12. FAILURE DISCIPLINE — If any requested data tool fails, you MUST:
     - Explicitly mark that section as unavailable.
     - Avoid analysis or conclusions for the failed data dimension.
@@ -147,7 +151,13 @@ Your core directives:
 16. SELF-UPGRADE — You CAN upgrade your own tools. When the user asks to update, upgrade, or check for new versions of sports-skills:
     - Call \`upgrade_sports_skills\` — it runs pip upgrade internally and hot-reloads all schemas.
     - Do NOT tell the user to run pip manually. You have the tool. Use it.
-    - After upgrading, confirm the new version and number of refreshed schemas.`;
+    - After upgrading, confirm the new version and number of refreshed schemas.
+
+PERSONALITY & VIBE (CRITICAL):
+17. ZERO AI FLUFF — Never open with "Great question", "I'd be happy to help", or "Here are the stats." Just deliver the answer. Brevity is mandatory. If the score fits in one sentence, one sentence is what the user gets.
+18. DATA-BACKED TAKES — Stop hedging. If the data shows a team is playing like trash, say so. Avoid corporate neutrality (e.g., "both teams have strengths"). Have strong takes based on the data, but adapt them as you learn the user's fandom.
+19. THE 2AM SPORTS COMPANION — Be the assistant the user actually wants to text during a late-night game. No corporate drone speak. No sycophant behavior. Use natural wit, not forced jokes.
+20. CALL OUT THE DELUSION — If the user asks about a mathematically dead playoff hope, a terrible roster move, or a bad bet, don't sugarcoat it. Charm over cruelty, but tell them the truth.`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -163,6 +173,18 @@ const INTERNAL_INTENT_PATTERNS = [
 /** Returns true when the prompt targets an internal tool, not a sport query */
 function isInternalToolIntent(prompt: string): boolean {
   return INTERNAL_INTENT_PATTERNS.some((p) => p.test(prompt));
+}
+
+/** Patterns that indicate conversational intents (greetings, pleasantries) — not sport queries */
+const CONVERSATIONAL_INTENT_PATTERNS = [
+  /^(hi|hello|hey|sup|yo|what'?s up|howdy|good morning|gm|gn)\b/i,
+  /^(how are you|how'?s it going|what are you up to|who are you|how are things)\b/i,
+  /^thanks?\b/i,
+];
+
+/** Returns true when the prompt is purely conversational */
+function isConversationalIntent(prompt: string): boolean {
+  return CONVERSATIONAL_INTENT_PATTERNS.some((p) => p.test(prompt));
 }
 
 /** Filter out undefined values so they don't override defaults during merge */
@@ -228,6 +250,83 @@ function buildToolCallSignature(
 }
 
 // ---------------------------------------------------------------------------
+// SessionStore — global multi-turn conversation memory
+// ---------------------------------------------------------------------------
+
+interface SessionEntry {
+  messages: Message[];
+  updatedAt: number;
+}
+
+const SESSION_MAX_ENTRIES = 500;
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const SESSION_MAX_MESSAGES = 100;
+
+export class SessionStore {
+  private store = new Map<string, SessionEntry>();
+
+  /** Load message history for a session. Returns empty array if not found or expired. */
+  get(sessionId: string): Message[] {
+    const entry = this.store.get(sessionId);
+    if (!entry) return [];
+    if (Date.now() - entry.updatedAt > SESSION_TTL_MS) {
+      this.store.delete(sessionId);
+      return [];
+    }
+    return entry.messages;
+  }
+
+  /** Save message history for a session, trimming to keep within bounds. */
+  save(sessionId: string, messages: Message[]): void {
+    // Trim oldest messages if over limit (keep the most recent ones)
+    const trimmed =
+      messages.length > SESSION_MAX_MESSAGES
+        ? messages.slice(messages.length - SESSION_MAX_MESSAGES)
+        : messages;
+
+    this.store.set(sessionId, {
+      messages: trimmed,
+      updatedAt: Date.now(),
+    });
+
+    // Evict oldest sessions when over capacity
+    if (this.store.size > SESSION_MAX_ENTRIES) {
+      this.evict();
+    }
+  }
+
+  /** Clear a specific session. */
+  clear(sessionId: string): boolean {
+    return this.store.delete(sessionId);
+  }
+
+  /** Number of active sessions. */
+  get size(): number {
+    return this.store.size;
+  }
+
+  /** Evict expired and oldest sessions to stay within capacity. */
+  private evict(): void {
+    const now = Date.now();
+    // First pass: remove expired
+    for (const [id, entry] of this.store) {
+      if (now - entry.updatedAt > SESSION_TTL_MS) {
+        this.store.delete(id);
+      }
+    }
+    // Second pass: if still over limit, remove oldest
+    while (this.store.size > SESSION_MAX_ENTRIES) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey) this.store.delete(oldestKey);
+      else break;
+    }
+  }
+}
+
+/** Global session store — shared across all engine instances. */
+export const sessionStore = new SessionStore();
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -238,6 +337,18 @@ export class sportsclawEngine {
   private messages: Message[] = [];
   private registry: ToolRegistry;
   private agents: AgentDef[] = [];
+  private _generatedImages: GeneratedImage[] = [];
+  private _generatedVideos: GeneratedVideo[] = [];
+
+  /** Images produced by the generate_image tool during the last run. */
+  get generatedImages(): readonly GeneratedImage[] {
+    return [...this._generatedImages];
+  }
+
+  /** Videos produced by the generate_video tool during the last run. */
+  get generatedVideos(): readonly GeneratedVideo[] {
+    return [...this._generatedVideos];
+  }
 
   constructor(config?: Partial<sportsclawConfig>) {
     const merged = { ...DEFAULT_CONFIG, ...filterDefined(config ?? {}) };
@@ -306,6 +417,7 @@ export class sportsclawEngine {
       "## Self-Awareness",
       "",
       `You are sportsclaw v${_packageVersion}, a sports AI agent.`,
+      `System Local Time: ${new Date().toLocaleString("en-US", { timeZoneName: "short" })}`,
       "",
       "### Architecture",
       "- TypeScript harness → Python bridge → sports-skills package",
@@ -469,6 +581,8 @@ export class sportsclawEngine {
 
     const selectedSkills = new Set(decision.selectedSkills);
     const isInternalTool = (name: string) =>
+      name === "generate_image" ||
+      name === "generate_video" ||
       name.startsWith("update_") ||
       name === "reflect" ||
       name === "evolve_strategy" ||
@@ -1444,6 +1558,115 @@ export class sportsclawEngine {
       },
     });
 
+    // -----------------------------------------------------------------
+    // Image + Video generation tools
+    // -----------------------------------------------------------------
+
+    toolMap["generate_image"] = defineTool({
+      description:
+        "Generate an image from a text prompt. Routes to the appropriate image " +
+        "generation API based on the configured provider:\n" +
+        "- Google → Gemini image generation\n" +
+        "- OpenAI → DALL-E 3\n" +
+        "- Anthropic → Not supported (will return an error)\n" +
+        "The generated image is automatically sent to the user in their channel.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "Detailed text description of the image to generate. Be specific " +
+              "about style, composition, colors, and subject matter.",
+          },
+          size: {
+            type: "string",
+            enum: ["1024x1024", "1024x1792", "1792x1024"],
+            description: "Image dimensions. Default: 1024x1024.",
+          },
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { prompt?: string; size?: string }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+        if (config.provider === "anthropic") {
+          return "Anthropic does not support image generation. Please switch to Google or OpenAI.";
+        }
+        try {
+          const image = await generateImageForProvider(config.provider, args.prompt, args.size);
+          this._generatedImages.push(image);
+          return `Image generated successfully with prompt: "${args.prompt}"`;
+        } catch (error) {
+          return `Failed to generate image: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
+    toolMap["generate_video"] = defineTool({
+      description:
+        "Generate a short video from a text prompt using Google Veo 3.1. " +
+        "Only available with Google provider. Video includes native audio.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description: "Detailed text description of the video to generate.",
+          },
+          aspectRatio: {
+            type: "string",
+            enum: ["16:9", "9:16"],
+            description: "Video aspect ratio. Default is 16:9 (horizontal). Use 9:16 for vertical/mobile.",
+          },
+          resolution: {
+            type: "string",
+            enum: ["720p", "1080p", "4k"],
+            description: "Video resolution. 1080p and 4k require durationSeconds to be 8.",
+          },
+          durationSeconds: {
+            type: "string",
+            enum: ["4", "6", "8"],
+            description: "Length of the video in seconds. Must be 8 if using 1080p or 4k.",
+          },
+          negativePrompt: {
+            type: "string",
+            description: "Text describing what NOT to include in the video.",
+          },
+          seed: {
+            type: "number",
+            description: "Integer seed for reproducible generation.",
+          }
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { 
+        prompt?: string; 
+        aspectRatio?: string; 
+        resolution?: string; 
+        durationSeconds?: string; 
+        negativePrompt?: string; 
+        seed?: number; 
+      }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+        if (config.provider !== "google") {
+          return "Video generation currently requires Google provider (Veo 3.1).";
+        }
+        try {
+          const video = await generateVideoForProvider(config.provider, args.prompt, {
+            aspectRatio: args.aspectRatio,
+            resolution: args.resolution,
+            durationSeconds: args.durationSeconds,
+            negativePrompt: args.negativePrompt,
+            seed: args.seed
+          });
+          this._generatedVideos.push(video);
+          return `Video generated successfully with prompt: "${args.prompt}"`;
+        } catch (error) {
+          return `Failed to generate video: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
     return toolMap;
   }
 
@@ -1468,6 +1691,9 @@ export class sportsclawEngine {
    * @returns The final assistant text.
    */
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    this._generatedImages = [];
+    this._generatedVideos = [];
+
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
     const sanitizedPrompt = sanitization.sanitized;
@@ -1501,6 +1727,20 @@ export class sportsclawEngine {
       return generateGuideResponse(sanitizedPrompt);
     }
 
+    // --- Session: restore prior conversation history ---
+    const sessionId = options?.sessionId;
+    if (sessionId) {
+      const prior = sessionStore.get(sessionId);
+      if (prior.length > 0) {
+        this.messages = prior;
+        if (this.config.verbose) {
+          console.error(
+            `[sportsclaw] session restored: ${sessionId} (${prior.length} messages)`
+          );
+        }
+      }
+    }
+
     // --- Memory: read before LLM call (async, non-blocking) ---
     let memory: MemoryManager | undefined;
     let memoryBlock = "";
@@ -1523,7 +1763,8 @@ export class sportsclawEngine {
 
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
-    // it should not have system-level authority.
+    // it should not have system-level authority. Fresh memory is injected
+    // every turn even in sessions so the LLM sees the latest state.
     if (memoryBlock) {
       this.messages.push({
         role: "user",
@@ -1582,7 +1823,8 @@ export class sportsclawEngine {
       routing.decision &&
       routing.decision.confidence < this.config.clarifyThreshold &&
       routing.decision.mode === "ambiguous" &&
-      !isInternalToolIntent(sanitizedPrompt)
+      !isInternalToolIntent(sanitizedPrompt) &&
+      !isConversationalIntent(sanitizedPrompt)
     ) {
       const skillList = routing.decision.selectedSkills
         .map((skill) => `- ${skill}`)
@@ -1860,6 +2102,16 @@ export class sportsclawEngine {
       );
     }
 
+    // --- Session: persist updated conversation history ---
+    if (sessionId) {
+      sessionStore.save(sessionId, this.messages);
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] session saved: ${sessionId} (${this.messages.length} messages)`
+        );
+      }
+    }
+
     // --- Analytics: log query event ---
     if (options?.userId) {
       try {
@@ -1892,5 +2144,172 @@ export class sportsclawEngine {
   async runAndPrint(userPrompt: string, options?: RunOptions): Promise<void> {
     const result = await this.run(userPrompt, options);
     console.log(result);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Image generation helpers (standalone, outside the class)
+// ---------------------------------------------------------------------------
+
+async function generateImageForProvider(
+  provider: LLMProvider,
+  prompt: string,
+  size?: string
+): Promise<GeneratedImage> {
+  if (provider === "google") return generateImageGoogle(prompt);
+  if (provider === "openai") return generateImageOpenAI(prompt, size);
+  throw new Error("Provider does not support image generation.");
+}
+
+async function generateImageGoogle(prompt: string): Promise<GeneratedImage> {
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Google image generation failed (${res.status}): ${errBody}`);
+  }
+
+  const data = (await res.json()) as any;
+  const parts = data.candidates?.[0]?.content?.parts;
+  if (!parts) throw new Error("Google image generation returned no content.");
+
+  const imagePart = parts.find((p: any) => p.inlineData);
+  if (!imagePart?.inlineData?.data) throw new Error("No image data in response.");
+
+  return {
+    data: imagePart.inlineData.data,
+    mimeType: imagePart.inlineData.mimeType || "image/jpeg",
+    prompt,
+    provider: "google",
+  };
+}
+
+async function generateImageOpenAI(prompt: string, size?: string): Promise<GeneratedImage> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not set.");
+
+  const res = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: "dall-e-3", prompt, n: 1, size: size || "1024x1024", response_format: "b64_json" }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`OpenAI image generation failed (${res.status}): ${errBody}`);
+  }
+
+  const data = (await res.json()) as any;
+  const imageData = data.data?.[0]?.b64_json;
+  if (!imageData) throw new Error("OpenAI image generation returned no image data.");
+
+  return { data: imageData, mimeType: "image/png", prompt, provider: "openai" };
+}
+
+// ---------------------------------------------------------------------------
+// Video generation helpers (standalone, outside the class)
+// ---------------------------------------------------------------------------
+
+interface VideoOptions {
+  aspectRatio?: string;
+  resolution?: string;
+  durationSeconds?: string;
+  negativePrompt?: string;
+  seed?: number;
+}
+
+async function generateVideoForProvider(
+  provider: LLMProvider,
+  prompt: string,
+  options?: VideoOptions
+): Promise<GeneratedVideo> {
+  if (provider === "google") return generateVideoGoogle(prompt, options);
+  throw new Error(`${provider} does not support video generation yet.`);
+}
+
+async function generateVideoGoogle(prompt: string, options?: VideoOptions): Promise<GeneratedVideo> {
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  // Build parameters object
+  const parameters: Record<string, any> = {};
+  if (options?.aspectRatio) parameters.aspectRatio = options.aspectRatio;
+  if (options?.resolution) parameters.resolution = options.resolution;
+  if (options?.durationSeconds) parameters.durationSeconds = options.durationSeconds;
+  if (options?.negativePrompt) parameters.negativePrompt = options.negativePrompt;
+  if (options?.seed !== undefined) parameters.seed = options.seed;
+  parameters.personGeneration = "allow_all";
+
+  // 1. Start long-running prediction
+  const startRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: [{ prompt }],
+        parameters: Object.keys(parameters).length > 0 ? parameters : undefined,
+      }),
+    }
+  );
+
+  if (!startRes.ok) {
+    const err = await startRes.text();
+    throw new Error(`Google video generation failed to start (${startRes.status}): ${err}`);
+  }
+
+  const startData = (await startRes.json()) as any;
+  const operationName = startData.name;
+  if (!operationName) throw new Error("No operation name returned from video generation API.");
+
+  // 2. Poll until done (Veo can take 1-3 minutes)
+  const pollUrl = `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${apiKey}`;
+  const maxPollTime = 5 * 60 * 1000; // 5 minute timeout
+  const startTime = Date.now();
+
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    if (Date.now() - startTime > maxPollTime) {
+      throw new Error("Video generation timed out after 5 minutes.");
+    }
+
+    const pollRes = await fetch(pollUrl);
+    if (!pollRes.ok) throw new Error(`Failed to poll video status (${pollRes.status})`);
+
+    const pollData = (await pollRes.json()) as any;
+    if (pollData.done) {
+      if (pollData.error) {
+        throw new Error(`Video generation failed: ${pollData.error.message}`);
+      }
+      const videoUri =
+        pollData.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
+      if (!videoUri) throw new Error("Video generation completed but no URI returned.");
+
+      // 3. Download the video bytes
+      const dlRes = await fetch(videoUri, { headers: { "x-goog-api-key": apiKey } });
+      if (!dlRes.ok) throw new Error(`Failed to download video (${dlRes.status})`);
+
+      const arrayBuffer = await dlRes.arrayBuffer();
+      return {
+        data: Buffer.from(arrayBuffer).toString("base64"),
+        mimeType: "video/mp4",
+        prompt,
+        provider: "google",
+      };
+    }
   }
 }
