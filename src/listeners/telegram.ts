@@ -39,6 +39,7 @@ interface TelegramUpdate {
   update_id: number;
   message?: {
     message_id: number;
+    date: number;
     chat: { id: number; type: string };
     text?: string;
     from?: { id: number; first_name: string };
@@ -200,7 +201,25 @@ export async function startTelegramListener(): Promise<void> {
     delete process.env.SPORTSCLAW_RESTART_CHAT_ID;
   }
 
+  // Mark boot time — ignore any messages sent before this to prevent
+  // restart loops (the old "restart" command would otherwise be reprocessed).
+  const bootEpoch = Math.floor(Date.now() / 1000);
+
+  // Flush stale updates so we don't re-process messages from before this
+  // startup (e.g. the "restart" command that triggered a respawn).
   let offset = 0;
+  try {
+    const flushRes = await fetch(
+      `${apiBase}/getUpdates?offset=-1&timeout=0`,
+      { signal: AbortSignal.timeout(10_000) }
+    );
+    const flushData = (await flushRes.json()) as TelegramResponse;
+    if (flushData.ok && flushData.result?.length) {
+      offset = flushData.result[flushData.result.length - 1].update_id + 1;
+    }
+  } catch {
+    // Non-critical — worst case the date guard catches stale messages
+  }
 
   // Long-polling loop
   while (true) {
@@ -228,7 +247,7 @@ export async function startTelegramListener(): Promise<void> {
             allowedUsers
           );
         }
-        return processMessage(update, apiBase, engineConfig, allowedUsers);
+        return processMessage(update, apiBase, engineConfig, allowedUsers, bootEpoch);
       });
       await Promise.allSettled(tasks);
     } catch (error: unknown) {
@@ -302,10 +321,14 @@ async function processMessage(
   update: TelegramUpdate,
   apiBase: string,
   engineConfig: Partial<sportsclawConfig>,
-  allowedUsers: Set<string> | null
+  allowedUsers: Set<string> | null,
+  bootEpoch: number
 ): Promise<void> {
   const msg = update.message;
   if (!msg?.text) return;
+
+  // Ignore messages sent before this process started — prevents restart loops
+  if (msg.date < bootEpoch) return;
 
   // Check user whitelist
   if (allowedUsers && msg.from && !allowedUsers.has(String(msg.from.id)))
