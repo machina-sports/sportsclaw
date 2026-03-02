@@ -617,11 +617,21 @@ export class sportsclawEngine {
     const installedSkills = this.registry.getInstalledSkills();
     if (installedSkills.length === 0) return {};
 
+    // Build recent conversation context from user messages (excluding memory
+    // injections) so the LLM router can infer which sport is being discussed
+    // in follow-up turns like "started already" or "who's winning".
+    const recentContext = this.messages
+      .filter((m) => m.role === "user" && !String(m.content).startsWith("[MEMORY]"))
+      .slice(-3)
+      .map((m) => String(m.content))
+      .join(" | ") || undefined;
+
     const routed = await routePromptToSkills({
       prompt: userPrompt,
       installedSkills,
       toolSpecs: this.registry.getAllToolSpecs(),
       memoryBlock,
+      recentContext,
       model: this.mainModel,
       modelId: this.mainModelId,
       provider: this.config.provider,
@@ -1819,6 +1829,11 @@ export class sportsclawEngine {
       }
     }
 
+    // Track whether this is a follow-up turn in an ongoing conversation.
+    // When true, the LLM already has conversation history and can resolve
+    // ambiguity itself — no need to short-circuit with a clarification prompt.
+    const isFollowUp = this.messages.length > 0;
+
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
     // it should not have system-level authority. Fresh memory is injected
@@ -1862,7 +1877,12 @@ export class sportsclawEngine {
       Object.keys(tools),
       memoryBlock
     );
-    const activeTools = routing.activeTools;
+    // On follow-up turns with low routing confidence, clear activeTools so the
+    // LLM can use any tool based on conversation context (e.g. "started already"
+    // after asking about the Celtics game should still access NBA tools).
+    const activeTools = (isFollowUp && routing.decision && routing.decision.confidence < this.config.clarifyThreshold)
+      ? undefined
+      : routing.activeTools;
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
@@ -1887,18 +1907,26 @@ export class sportsclawEngine {
     }
 
     // --- Confidence-based clarification ---
+    // Skip clarification on follow-up turns: the LLM already has conversation
+    // history and can resolve ambiguity from prior context.
     if (
       this.config.clarifyOnLowConfidence &&
+      !isFollowUp &&
       routing.decision &&
       routing.decision.confidence < this.config.clarifyThreshold &&
       routing.decision.mode === "ambiguous" &&
       !isInternalToolIntent(sanitizedPrompt) &&
       !isConversationalIntent(sanitizedPrompt)
     ) {
-      const skillList = routing.decision.selectedSkills
-        .map((skill) => `- ${skill}`)
-        .join("\n");
-      return `I'm not sure which sport you mean. Did you want:\n\n${skillList}\n\nPlease clarify your question.`;
+      const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
+      // Push a matching assistant message so history stays coherent
+      // (prevents orphaned user message that corrupts subsequent LLM calls).
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: clarification }] });
+      if (memory) {
+        await memory.appendToThread(sanitizedPrompt, clarification);
+        await memory.appendExchange(sanitizedPrompt, clarification);
+      }
+      return clarification;
     }
 
     const callLLM = (messagesOverride?: Message[]) =>

@@ -16,6 +16,7 @@ interface RouteInput {
   installedSkills: string[];
   toolSpecs: ToolSpec[];
   memoryBlock?: string;
+  recentContext?: string; // Last few user messages for multi-turn context
   model: ModelType;
   modelId: string;
   provider: LLMProvider;
@@ -239,6 +240,7 @@ async function runLlmRouter(
         `Allowed skills: ${allowedSkills}`,
         `Deterministic candidates: ${candidateHint}`,
         `Memory preference ranking: ${memoryHint}`,
+        ...(input.recentContext ? [`Recent conversation context: ${input.recentContext}`] : []),
         `User prompt: ${input.prompt}`,
         `Return JSON schema: {"selected_skills":["skill"],"mode":"focused|ambiguous","confidence":0.0,"reason":"short reason"}`,
       ].join("\n"),
