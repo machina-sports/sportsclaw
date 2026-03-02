@@ -92,7 +92,11 @@ function termWidth(): number {
 }
 
 function stripAnsi(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+  return stripAnsiChars(s).length;
+}
+
+function stripAnsiChars(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 function wrapLine(line: string, width: number, indent = 0): string {
@@ -120,7 +124,11 @@ function wrapLine(line: string, width: number, indent = 0): string {
 
 function cleanMarkdown(line: string): string {
   let cleaned = line;
+  // Bold: **text**
   cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, (_, text) => c.bold(text));
+  // Italic: *text* (but not list items — those start the line with "* ")
+  cleaned = cleaned.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_, text) => c.dim(text));
+  // Unordered list bullets
   cleaned = cleaned.replace(/^(\s*)\*\s+/, "$1• ");
   cleaned = cleaned.replace(/^(\s*)-\s+/, "$1• ");
   return cleaned;
@@ -130,6 +138,16 @@ function cleanMarkdown(line: string): string {
 // Unicode box-drawing table
 // ---------------------------------------------------------------------------
 
+/**
+ * Pad a string that may contain ANSI escape codes to a target visible width.
+ * Standard padEnd counts escape codes as characters, breaking table alignment.
+ */
+function padEndVisible(s: string, targetWidth: number): string {
+  const visible = stripAnsi(s);
+  if (visible >= targetWidth) return s;
+  return s + " ".repeat(targetWidth - visible);
+}
+
 function convertTableToUnicode(
   rows: string[][],
   headerIndex: number
@@ -138,11 +156,23 @@ function convertTableToUnicode(
 
   if (rows.length === 0) return [];
 
-  // Calculate max width for each column
+  // Apply markdown formatting (e.g. **bold** → ANSI bold) to all cells.
+  // Store both the styled cell and its visible (ANSI-stripped) text so
+  // column widths are measured correctly.
+  const styledRows: string[][] = rows.map((row) =>
+    row.map((cell) => cleanMarkdown(cell))
+  );
+
+  // Calculate max *visible* width for each column
   const colCount = Math.max(...rows.map((r) => r.length));
   const widths: number[] = [];
   for (let col = 0; col < colCount; col++) {
-    widths[col] = Math.max(...rows.map((r) => (r[col] || "").length));
+    widths[col] = Math.max(
+      ...styledRows.map((r) => {
+        const cell = r[col] ?? "";
+        return stripAnsi(cell);
+      })
+    );
   }
 
   // Shrink columns to fit terminal width
@@ -155,10 +185,12 @@ function convertTableToUnicode(
       for (let col = 0; col < colCount; col++) {
         widths[col] = Math.max(3, Math.floor(widths[col] * ratio));
       }
-      for (const row of rows) {
+      // Truncate cells that exceed the shrunk column width
+      for (const row of styledRows) {
         for (let col = 0; col < row.length; col++) {
-          if (row[col].length > widths[col]) {
-            row[col] = row[col].slice(0, widths[col] - 1) + "…";
+          const visible = stripAnsiChars(row[col] ?? "");
+          if (visible.length > widths[col]) {
+            row[col] = visible.slice(0, widths[col] - 1) + "…";
           }
         }
       }
@@ -174,10 +206,10 @@ function convertTableToUnicode(
     box.topRight;
   result.push(top);
 
-  for (let i = 0; i < rows.length; i++) {
-    const cells = rows[i];
+  for (let i = 0; i < styledRows.length; i++) {
+    const cells = styledRows[i];
     const paddedCells = cells.map((cell, col) =>
-      cell.padEnd(widths[col] || 0)
+      padEndVisible(cell, widths[col] || 0)
     );
     const row =
       box.vertical +

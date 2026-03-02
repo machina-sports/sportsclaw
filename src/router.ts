@@ -7,6 +7,7 @@ import type {
   ToolSpec,
   sportsclawConfig,
 } from "./types.js";
+import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
 import type { AgentDef } from "./agents.js";
 
 type ModelType = Parameters<typeof generateText>[0]["model"];
@@ -16,12 +17,13 @@ interface RouteInput {
   installedSkills: string[];
   toolSpecs: ToolSpec[];
   memoryBlock?: string;
+  recentContext?: string; // Last few user messages for multi-turn context
   model: ModelType;
   modelId: string;
   provider: LLMProvider;
   config: Pick<
     Required<sportsclawConfig>,
-    "routingMode" | "routingMaxSkills" | "routingAllowSpillover"
+    "routingMode" | "routingMaxSkills" | "routingAllowSpillover" | "thinkingBudget" | "tokenBudgets"
   >;
 }
 
@@ -239,19 +241,17 @@ async function runLlmRouter(
         `Allowed skills: ${allowedSkills}`,
         `Deterministic candidates: ${candidateHint}`,
         `Memory preference ranking: ${memoryHint}`,
+        ...(input.recentContext ? [`Recent conversation context: ${input.recentContext}`] : []),
         `User prompt: ${input.prompt}`,
         `Return JSON schema: {"selected_skills":["skill"],"mode":"focused|ambiguous","confidence":0.0,"reason":"short reason"}`,
       ].join("\n"),
-      maxOutputTokens: 220,
-      ...(input.provider === "google" && {
-        providerOptions: {
-          google: {
-            thinkingConfig: {
-              thinkingBudget: 512,
-            },
-          },
-        },
-      }),
+      maxOutputTokens: input.config.tokenBudgets?.router ?? DEFAULT_TOKEN_BUDGETS.router,
+      ...(() => {
+        const mainBudget = input.config.thinkingBudget ?? 8192;
+        const routerBudget = mainBudget > 0 ? Math.max(256, Math.floor(mainBudget / 16)) : 0;
+        const opts = buildProviderOptions(input.provider, routerBudget);
+        return opts ? { providerOptions: opts } : {};
+      })(),
     });
     const parsed = parseRouterJson(result.text ?? "");
     return {

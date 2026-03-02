@@ -78,6 +78,24 @@ export const DEFAULT_MODELS: Record<LLMProvider, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Per-task-type token budgets
+// ---------------------------------------------------------------------------
+
+export interface TokenBudgets {
+  main: number;          // Main agentic loop (default: 16384)
+  synthesis: number;     // synthesizeFromToolOutputs (default: 2048)
+  evidenceGate: number;  // applyEvidenceGate (default: 4096)
+  router: number;        // runLlmRouter (default: 220)
+}
+
+export const DEFAULT_TOKEN_BUDGETS: TokenBudgets = {
+  main: 16_384,
+  synthesis: 2_048,
+  evidenceGate: 4_096,
+  router: 220,
+};
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -118,6 +136,12 @@ export interface sportsclawConfig {
   skipFanProfile?: boolean;
   /** Allow trading tools (Polymarket orders, balance, etc.). Only enable for CLI. Default: false */
   allowTrading?: boolean;
+  /** Thinking/reasoning budget in tokens. 0 = disabled. Default: 8192. */
+  thinkingBudget?: number;
+  /** Per-task-type token budgets. Partial overrides merged with defaults. */
+  tokenBudgets?: Partial<TokenBudgets>;
+  /** Run multiple routed agents in parallel with synthesis. Default: false */
+  parallelAgents?: boolean;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -139,7 +163,36 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   clarifyThreshold: 0.5,
   skipFanProfile: false,
   allowTrading: false,
+  thinkingBudget: 8192,
+  tokenBudgets: {},
+  parallelAgents: false,
 };
+
+// ---------------------------------------------------------------------------
+// Provider-specific thinking/reasoning options builder
+// ---------------------------------------------------------------------------
+
+type JSONValue = string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue };
+type ProviderOptionsMap = Record<string, { [key: string]: JSONValue }>;
+
+export function buildProviderOptions(
+  provider: LLMProvider,
+  budget: number
+): ProviderOptionsMap | undefined {
+  if (budget <= 0) return undefined;
+  switch (provider) {
+    case "anthropic":
+      return { anthropic: { thinking: { type: "enabled", budgetTokens: budget } } };
+    case "openai": {
+      const effort = budget <= 4096 ? "low" : budget <= 16384 ? "medium" : "high";
+      return { openai: { reasoningEffort: effort } };
+    }
+    case "google":
+      return { google: { thinkingConfig: { thinkingBudget: budget } } };
+    default:
+      return undefined;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tool definitions exposed to the LLM

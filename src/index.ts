@@ -177,6 +177,20 @@ export {
   expireOldTasks,
 } from "./taskbus.js";
 
+// Sprint 3: Subagent spawning
+export {
+  subagentManager,
+  SubagentManager,
+} from "./subagent.js";
+export type { SubagentTask, SubagentResult, SubagentResultHandler } from "./subagent.js";
+
+// Sprint 3: Heartbeat & Cron
+export {
+  heartbeatService,
+  HeartbeatService,
+} from "./heartbeat.js";
+export type { CronJob, HeartbeatEvent, HeartbeatEventHandler } from "./heartbeat.js";
+
 // Daemon management
 export {
   daemonStart,

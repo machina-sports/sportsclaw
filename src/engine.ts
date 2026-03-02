@@ -24,6 +24,8 @@ import { google } from "@ai-sdk/google";
 import {
   DEFAULT_CONFIG,
   DEFAULT_MODELS,
+  DEFAULT_TOKEN_BUDGETS,
+  buildProviderOptions,
   type LLMProvider,
   type RouteDecision,
   type RouteMeta,
@@ -33,6 +35,7 @@ import {
   type ImageAttachment,
   type GeneratedImage,
   type GeneratedVideo,
+  type TokenBudgets,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { execFile } from "node:child_process";
@@ -66,6 +69,8 @@ import {
 import { AskUserQuestionHalt } from "./ask.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
+import { subagentManager, type SubagentResult } from "./subagent.js";
+import { heartbeatService } from "./heartbeat.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -79,6 +84,14 @@ try {
   if (parsed.version) _packageVersion = parsed.version;
 } catch {
   // best-effort
+}
+
+// ---------------------------------------------------------------------------
+// Token budget resolution
+// ---------------------------------------------------------------------------
+
+function resolveTokenBudgets(overrides?: Partial<TokenBudgets>): TokenBudgets {
+  return { ...DEFAULT_TOKEN_BUDGETS, ...overrides };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +481,15 @@ export class sportsclawEngine {
       "You have tools to inspect and modify your own state:",
       "- get_agent_config, update_agent_config, install_sport, remove_sport",
       "",
+      "### Background Tasks",
+      "- spawn_subagent: Launch async research that runs in the background. " +
+        "Use when a query is complex and the user doesn't need to wait. " +
+        "Tell them 'I'll look into that and get back to you.'",
+      "- schedule_task: Set up recurring notifications (e.g., 'injury report every morning'). " +
+        "cancel_scheduled_task to remove them. list_scheduled_tasks to see all.",
+      "- consolidate_memory: Compress old conversation logs into lean summaries. " +
+        "Use when memory feels bloated or the user asks to clean up.",
+      "",
       installed.length === 0
         ? "When the user asks about a sport, automatically call install_sport to load it — no confirmation needed on first use."
         : "When the user asks about a sport you DON'T have installed, tell them and offer to install it. Always include the disclaimer. User must confirm first.",
@@ -617,11 +639,21 @@ export class sportsclawEngine {
     const installedSkills = this.registry.getInstalledSkills();
     if (installedSkills.length === 0) return {};
 
+    // Build recent conversation context from user messages (excluding memory
+    // injections) so the LLM router can infer which sport is being discussed
+    // in follow-up turns like "started already" or "who's winning".
+    const recentContext = this.messages
+      .filter((m) => m.role === "user" && !String(m.content).startsWith("[MEMORY]"))
+      .slice(-3)
+      .map((m) => String(m.content))
+      .join(" | ") || undefined;
+
     const routed = await routePromptToSkills({
       prompt: userPrompt,
       installedSkills,
       toolSpecs: this.registry.getAllToolSpecs(),
       memoryBlock,
+      recentContext,
       model: this.mainModel,
       modelId: this.mainModelId,
       provider: this.config.provider,
@@ -629,6 +661,8 @@ export class sportsclawEngine {
         routingMode: this.config.routingMode,
         routingMaxSkills: this.config.routingMaxSkills,
         routingAllowSpillover: this.config.routingAllowSpillover,
+        thinkingBudget: this.config.thinkingBudget,
+        tokenBudgets: this.config.tokenBudgets,
       },
     });
     const decision = routed.decision;
@@ -643,7 +677,13 @@ export class sportsclawEngine {
       name === "get_agent_config" ||
       name === "install_sport" ||
       name === "remove_sport" ||
-      name === "upgrade_sports_skills";
+      name === "upgrade_sports_skills" ||
+      name === "spawn_subagent" ||
+      name === "list_subagents" ||
+      name === "schedule_task" ||
+      name === "list_scheduled_tasks" ||
+      name === "cancel_scheduled_task" ||
+      name === "consolidate_memory";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
       if (name.startsWith("mcp__")) return true; // MCP tools always active
@@ -666,8 +706,9 @@ export class sportsclawEngine {
     draft: string;
     failedTools: string[];
     succeededTools: string[];
+    maxOutputTokens: number;
   }): Promise<string> {
-    const { userPrompt, draft, failedTools, succeededTools } = params;
+    const { userPrompt, draft, failedTools, succeededTools, maxOutputTokens } = params;
     try {
       const res = await generateText({
         model: this.mainModel,
@@ -682,7 +723,7 @@ export class sportsclawEngine {
           "Draft response:",
           draft,
         ].join("\n\n"),
-        maxOutputTokens: this.config.maxTokens,
+        maxOutputTokens,
       });
       const cleaned = res.text?.trim();
       if (cleaned) return cleaned;
@@ -697,6 +738,25 @@ export class sportsclawEngine {
       `Successful tools: ${succeeded || "none"}. ` +
       "Retry to get a complete answer."
     );
+  }
+
+  private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
+    if (agent.skills.length === 0) return undefined;
+    const agentSkillSet = new Set(agent.skills);
+    const isInternalTool = (name: string) =>
+      name === "generate_image" || name === "generate_video" ||
+      name.startsWith("update_") || name === "reflect" ||
+      name === "evolve_strategy" || name === "get_agent_config" ||
+      name === "install_sport" || name === "remove_sport" ||
+      name === "upgrade_sports_skills" || name === "spawn_subagent" ||
+      name === "list_subagents" || name === "schedule_task" ||
+      name === "list_scheduled_tasks" || name === "cancel_scheduled_task" ||
+      name === "consolidate_memory";
+    return allToolNames.filter((name) => {
+      if (isInternalTool(name) || name.startsWith("mcp__")) return true;
+      const skill = this.registry.getSkillName(name);
+      return skill ? agentSkillSet.has(skill) : false;
+    });
   }
 
   private isLowSignalResponse(text: string): boolean {
@@ -806,8 +866,9 @@ export class sportsclawEngine {
     successfulTools: string[];
     failedTools: string[];
     toolOutputs: Array<{ toolName: string; output: string }>;
+    maxOutputTokens: number;
   }): Promise<string> {
-    const { userPrompt, draft, successfulTools, failedTools, toolOutputs } = params;
+    const { userPrompt, draft, successfulTools, failedTools, toolOutputs, maxOutputTokens } = params;
     if (toolOutputs.length === 0) return draft;
 
     const serialized = toolOutputs
@@ -837,7 +898,7 @@ export class sportsclawEngine {
           "Tool outputs:",
           serialized,
         ].join("\n\n"),
-        maxOutputTokens: Math.min(2_048, this.config.maxTokens),
+        maxOutputTokens,
       });
 
       const synthesized = res.text?.trim();
@@ -1614,6 +1675,284 @@ export class sportsclawEngine {
     });
 
     // -----------------------------------------------------------------
+    // Sprint 3: Subagent Spawning — async background research tasks
+    // -----------------------------------------------------------------
+
+    toolMap["spawn_subagent"] = defineTool({
+      description:
+        "Spawn an async background research task. The subagent runs independently " +
+        "while you respond to the user immediately. Use for slow or complex research " +
+        "that the user doesn't need to wait for (e.g., 'I'll dig into that and get " +
+        "back to you'). The subagent can use data tools but cannot spawn other " +
+        "subagents, send messages, or modify memory/config. Results are delivered " +
+        "to the user's channel when ready.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "The research task for the subagent. Be specific about what data " +
+              "to gather and how to present it (e.g., 'Get LeBron's last 5 games " +
+              "with stats and compare to season averages').",
+          },
+          system_prompt: {
+            type: "string",
+            description:
+              "Optional custom system prompt for the subagent. If omitted, a " +
+              "default research-focused prompt is used.",
+          },
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { prompt?: string; system_prompt?: string }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+
+        try {
+          const task = subagentManager.spawn({
+            prompt: args.prompt,
+            systemPrompt: args.system_prompt,
+            userId: watcherUserId,
+            model: this.mainModel as any,
+            provider: this.config.provider,
+            config: this.config,
+            registry: this.registry,
+            thinkingBudget: Math.min(this.config.thinkingBudget, 4096),
+          });
+
+          if (verbose) {
+            console.error(
+              `[sportsclaw] subagent spawned: ${task.id} — "${args.prompt.slice(0, 100)}"`
+            );
+          }
+
+          return JSON.stringify({
+            status: "spawned",
+            subagent_id: task.id,
+            message:
+              "Background research task started. Results will be delivered " +
+              "when ready. Tell the user you're working on it.",
+          });
+        } catch (err) {
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+    });
+
+    toolMap["list_subagents"] = defineTool({
+      description:
+        "List active and recently completed background subagent tasks for " +
+        "the current user. Shows task IDs, prompts, and status.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const all = subagentManager.getAllTasks().filter(
+          (t) => t.userId === watcherUserId
+        );
+        if (all.length === 0) return "No subagent tasks.";
+        return JSON.stringify(
+          all.map((t) => ({
+            id: t.id,
+            prompt: t.prompt.slice(0, 200),
+            status: t.status,
+            created_at: t.createdAt,
+            completed_at: t.completedAt,
+            has_result: !!t.result,
+          }))
+        );
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Sprint 3: Heartbeat & Cron — scheduled tasks
+    // -----------------------------------------------------------------
+
+    toolMap["schedule_task"] = defineTool({
+      description:
+        "Schedule a recurring or one-time background task. Unlike create_task " +
+        "(which monitors a condition), schedule_task runs a prompt on a timer. " +
+        "Use for proactive notifications: 'Check NFL injury reports every morning', " +
+        "'Send me a market summary every 6 hours.'",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          label: {
+            type: "string",
+            description: "Short name for the scheduled task.",
+          },
+          prompt: {
+            type: "string",
+            description:
+              "The query to run on schedule (e.g., 'Get today\\'s NBA injury report').",
+          },
+          interval_minutes: {
+            type: "number",
+            description:
+              "How often to run, in minutes. Minimum: 5. Examples: 60 (hourly), " +
+              "360 (every 6h), 1440 (daily).",
+          },
+          recurring: {
+            type: "boolean",
+            description:
+              "If true, runs repeatedly on interval. If false, runs once after " +
+              "the interval. Default: true.",
+          },
+        },
+        required: ["label", "prompt", "interval_minutes"],
+      }),
+      execute: async (args: {
+        label?: string;
+        prompt?: string;
+        interval_minutes?: number;
+        recurring?: boolean;
+      }) => {
+        if (!args.label || !args.prompt || !args.interval_minutes) {
+          return "Error: label, prompt, and interval_minutes are required.";
+        }
+        if (args.interval_minutes < 5) {
+          return "Error: minimum interval is 5 minutes.";
+        }
+
+        const job = heartbeatService.scheduleCron({
+          label: args.label,
+          prompt: args.prompt,
+          userId: watcherUserId,
+          intervalMs: args.interval_minutes * 60 * 1000,
+          recurring: args.recurring ?? true,
+        });
+
+        return JSON.stringify({
+          status: "scheduled",
+          job_id: job.id,
+          label: job.label,
+          interval_minutes: args.interval_minutes,
+          recurring: job.recurring,
+          message: `Scheduled "${job.label}" to run every ${args.interval_minutes} minutes.`,
+        });
+      },
+    });
+
+    toolMap["list_scheduled_tasks"] = defineTool({
+      description:
+        "List all scheduled (cron) tasks. Shows job IDs, labels, intervals, " +
+        "run counts, and status.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const jobs = heartbeatService.listCronJobs().filter(
+          (j) => j.userId === watcherUserId
+        );
+        if (jobs.length === 0) return "No scheduled tasks.";
+        return JSON.stringify(
+          jobs.map((j) => ({
+            id: j.id,
+            label: j.label,
+            interval_minutes: Math.round(j.intervalMs / 60_000),
+            recurring: j.recurring,
+            status: j.status,
+            run_count: j.runCount,
+            last_run_at: j.lastRunAt,
+          }))
+        );
+      },
+    });
+
+    toolMap["cancel_scheduled_task"] = defineTool({
+      description: "Cancel (remove) a scheduled task by its job ID.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          job_id: {
+            type: "string",
+            description: "The job ID to cancel.",
+          },
+        },
+        required: ["job_id"],
+      }),
+      execute: async (args: { job_id?: string }) => {
+        if (!args.job_id) return "Error: job_id is required.";
+        const removed = heartbeatService.removeCron(args.job_id);
+        return removed
+          ? `Scheduled task "${args.job_id}" cancelled.`
+          : `Task "${args.job_id}" not found.`;
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Sprint 3: Memory Consolidation — compress old logs
+    // -----------------------------------------------------------------
+
+    if (memory) {
+      toolMap["consolidate_memory"] = defineTool({
+        description:
+          "Consolidate old daily conversation logs into compressed knowledge. " +
+          "Logs older than 3 days are summarized by the LLM and merged into " +
+          "CONSOLIDATED.md, then the source logs are deleted. Use when memory " +
+          "feels bloated or when the user asks to clean up history.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            age_days: {
+              type: "number",
+              description:
+                "Minimum age in days for logs to consolidate. Default: 3.",
+            },
+          },
+        }),
+        execute: async (args: { age_days?: number }) => {
+          const ageDays = args.age_days ?? 3;
+          const memRef = memory!;
+          const model = this.mainModel;
+
+          const summarize = async (content: string, existing: string): Promise<string> => {
+            const res = await generateText({
+              model,
+              system: [
+                "You are a memory consolidation agent for a sports AI assistant.",
+                "Your job is to compress old conversation logs into concise,",
+                "structured knowledge that the agent can reference in future sessions.",
+                "",
+                "Rules:",
+                "- Extract key facts: teams discussed, scores, predictions made,",
+                "  user preferences discovered, tools that failed, notable moments",
+                "- Organize by topic (teams, events, user preferences, insights)",
+                "- Remove redundancy — if the same fact appears multiple times,",
+                "  keep the most recent version",
+                "- Keep the output under 2000 words",
+                "- Use markdown headers and bullet points for structure",
+                "- If existing consolidated knowledge is provided, merge and",
+                "  update it (don't just append)",
+              ].join("\n"),
+              prompt: [
+                existing ? `## Existing Consolidated Knowledge\n\n${existing}\n\n---\n\n` : "",
+                "## Old Conversation Logs to Consolidate\n\n",
+                content,
+              ].join(""),
+              maxOutputTokens: 4096,
+            });
+            return res.text?.trim() ?? "";
+          };
+
+          try {
+            const count = await memRef.consolidateOldLogs(summarize, ageDays);
+            if (count === 0) {
+              return "No logs old enough to consolidate. Current threshold: " +
+                `${ageDays} days.`;
+            }
+            return `Consolidated ${count} daily log file(s) into CONSOLIDATED.md. ` +
+              "Old logs have been deleted. Memory is now leaner.";
+          } catch (err) {
+            return `Consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        },
+      });
+    }
+
+    // -----------------------------------------------------------------
     // Image + Video generation tools
     // -----------------------------------------------------------------
 
@@ -1819,6 +2158,11 @@ export class sportsclawEngine {
       }
     }
 
+    // Track whether this is a follow-up turn in an ongoing conversation.
+    // When true, the LLM already has conversation history and can resolve
+    // ambiguity itself — no need to short-circuit with a clarification prompt.
+    const isFollowUp = this.messages.length > 0;
+
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
     // it should not have system-level authority. Fresh memory is injected
@@ -1855,6 +2199,10 @@ export class sportsclawEngine {
     const analyticsSessionId = options?.userId ? generateSessionId() : "anonymous";
     const toolCallsForAnalytics: Array<{ name: string; success: boolean; latencyMs: number }> = [];
 
+    // Resolve per-task-type token budgets (merge user overrides with defaults)
+    const budgets = resolveTokenBudgets(this.config.tokenBudgets);
+    if (!this.config.tokenBudgets?.main) budgets.main = this.config.maxTokens;
+
     const tools = this.buildTools(memory, failedToolSignaturesThisTurn, options?.userId);
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
@@ -1862,7 +2210,12 @@ export class sportsclawEngine {
       Object.keys(tools),
       memoryBlock
     );
-    const activeTools = routing.activeTools;
+    // On follow-up turns with low routing confidence, clear activeTools so the
+    // LLM can use any tool based on conversation context (e.g. "started already"
+    // after asking about the Celtics game should still access NBA tools).
+    const activeTools = (isFollowUp && routing.decision && routing.decision.confidence < this.config.clarifyThreshold)
+      ? undefined
+      : routing.activeTools;
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
@@ -1887,18 +2240,160 @@ export class sportsclawEngine {
     }
 
     // --- Confidence-based clarification ---
+    // Skip clarification on follow-up turns: the LLM already has conversation
+    // history and can resolve ambiguity from prior context.
     if (
       this.config.clarifyOnLowConfidence &&
+      !isFollowUp &&
       routing.decision &&
       routing.decision.confidence < this.config.clarifyThreshold &&
       routing.decision.mode === "ambiguous" &&
       !isInternalToolIntent(sanitizedPrompt) &&
       !isConversationalIntent(sanitizedPrompt)
     ) {
-      const skillList = routing.decision.selectedSkills
-        .map((skill) => `- ${skill}`)
-        .join("\n");
-      return `I'm not sure which sport you mean. Did you want:\n\n${skillList}\n\nPlease clarify your question.`;
+      const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
+      // Push a matching assistant message so history stays coherent
+      // (prevents orphaned user message that corrupts subsequent LLM calls).
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: clarification }] });
+      if (memory) {
+        await memory.appendToThread(sanitizedPrompt, clarification);
+        await memory.appendExchange(sanitizedPrompt, clarification);
+      }
+      return clarification;
+    }
+
+    // --- Parallel agent execution ---
+    // When parallelAgents is enabled and multiple agents were routed,
+    // run each agent as an independent lane and synthesize the results.
+    if (this.config.parallelAgents && activeAgents.length > 1) {
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] parallel agents: launching ${activeAgents.length} lanes`
+        );
+      }
+      const allToolNames = Object.keys(tools);
+      const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
+      const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+
+      const lanePromises = activeAgents.map((agent) => {
+        const agentActiveTools = this.filterToolsForAgent(agent, allToolNames);
+        const laneLabel = `${agent.name} (${this.mainModelId})`;
+        emitProgress?.({ type: "phase", label: laneLabel });
+
+        return generateText({
+          model: this.mainModel,
+          system: this.buildSystemPrompt(!!memory, [agent], strategyContent),
+          messages: this.messages,
+          tools,
+          ...(agentActiveTools ? { activeTools: agentActiveTools } : {}),
+          abortSignal: options?.abortSignal,
+          stopWhen: stepCountIs(parallelMaxTurns),
+          maxOutputTokens: budgets.main,
+          ...(providerOpts ? { providerOptions: providerOpts } : {}),
+          experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+            const skillName = this.registry.getSkillName(toolCall.toolName);
+            emitProgress?.({
+              type: "tool_finish",
+              toolName: toolCall.toolName,
+              toolCallId: toolCall.toolCallId,
+              durationMs,
+              success,
+              skillName,
+            });
+            // Track tool call analytics
+            if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
+              recordToolCall({ toolName: toolCall.toolName, success, latencyMs: durationMs ?? 0 });
+              toolCallsForAnalytics.push({ name: toolCall.toolName, success, latencyMs: durationMs ?? 0 });
+            }
+            // Node.js single-threaded event loop: Map operations are safe across
+            // concurrent promises — no data races on failedExternalTools/succeededExternalTools.
+            if (!success && !toolCall.toolName.startsWith("update_")) {
+              failedExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
+            } else if (success && !toolCall.toolName.startsWith("update_")) {
+              succeededExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
+            }
+          },
+        });
+      });
+
+      const laneResults = await Promise.all(lanePromises);
+
+      // Collect text from each agent lane
+      const agentTexts: string[] = [];
+      for (let i = 0; i < laneResults.length; i++) {
+        const lane = laneResults[i];
+        const text = lane.text?.trim() || this.extractTextFromResponseMessages(
+          lane.response.messages as Array<{ content?: unknown }>
+        ) || "";
+        if (text) {
+          agentTexts.push(`[${activeAgents[i].name}]\n${text}`);
+        }
+      }
+
+      // Synthesize a combined response
+      emitProgress?.({ type: "synthesizing" });
+      let responseText: string;
+      if (agentTexts.length === 0) {
+        responseText = "[sportsclaw] No response generated from parallel agents.";
+      } else if (agentTexts.length === 1) {
+        responseText = agentTexts[0].replace(/^\[.*?\]\n/, "");
+      } else {
+        try {
+          const synthesisResult = await generateText({
+            model: this.mainModel,
+            system:
+              "You are a sports answer synthesizer. Combine the following agent responses into one coherent, " +
+              "concise answer. Remove duplicates, merge data, and present a unified response. " +
+              "Do not mention the individual agents. Keep source citations.",
+            prompt: agentTexts.join("\n\n---\n\n"),
+            maxOutputTokens: budgets.synthesis,
+          });
+          responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
+        } catch {
+          responseText = agentTexts.join("\n\n");
+        }
+      }
+
+      // Append synthesized response to message history (not individual agent messages)
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: responseText }] });
+
+      // Memory persistence
+      if (memory) {
+        try {
+          await memory.appendToThread(sanitizedPrompt, responseText);
+          await memory.appendExchange(sanitizedPrompt, responseText);
+          await memory.incrementSoulExchanges();
+        } catch (err) {
+          console.error(
+            `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+
+      // Session persistence
+      if (sessionId) {
+        sessionStore.save(sessionId, this.messages);
+      }
+
+      // Analytics
+      if (options?.userId) {
+        try {
+          const queryEvent = buildQueryEvent({
+            userId: options.userId,
+            sessionId: analyticsSessionId,
+            promptLength: sanitizedPrompt.length,
+            detectedSports: routing.decision?.selectedSkills ?? [],
+            toolsCalled: toolCallsForAnalytics,
+            totalLatencyMs: Date.now() - analyticsStartTime,
+            clarificationNeeded: routing.decision?.mode === "ambiguous",
+          });
+          logQuery(queryEvent);
+        } catch {
+          // Analytics should never break the main flow
+        }
+      }
+
+      return responseText;
     }
 
     const callLLM = (messagesOverride?: Message[]) =>
@@ -1910,18 +2405,11 @@ export class sportsclawEngine {
         ...(activeTools ? { activeTools } : {}),
         abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
-        maxOutputTokens: this.config.maxTokens,
-        // Google Gemini 2.5 thinking models: set an explicit thinking budget
-        // so thinking tokens don't consume the entire maxOutputTokens allowance
-        ...(this.config.provider === "google" && {
-          providerOptions: {
-            google: {
-              thinkingConfig: {
-                thinkingBudget: 8192,
-              },
-            },
-          },
-        }),
+        maxOutputTokens: budgets.main,
+        ...(() => {
+          const opts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+          return opts ? { providerOptions: opts } : {};
+        })(),
         experimental_onToolCallStart: ({ toolCall }) => {
           const skillName = this.registry.getSkillName(toolCall.toolName);
           emitProgress?.({
@@ -2134,6 +2622,7 @@ export class sportsclawEngine {
         successfulTools: successes.map((s) => s.toolName),
         failedTools: netFailures.map((f) => f.toolName),
         toolOutputs,
+        maxOutputTokens: budgets.synthesis,
       });
     }
 
@@ -2148,6 +2637,7 @@ export class sportsclawEngine {
         draft: responseText,
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
+        maxOutputTokens: budgets.evidenceGate,
       });
       responseText = `${warning}\n\n${responseText}`;
     }

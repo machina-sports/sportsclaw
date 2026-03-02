@@ -1,6 +1,6 @@
 {
   "name": "sportsclaw-engine-core",
-  "version": "0.15.8",
+  "version": "0.17.0",
   "description": "A CLI and bot scaffold that connects any LLM to live sports data via sports-skills. Supports Anthropic, OpenAI, and Google.",
   "type": "module",
   "main": "dist/index.js",

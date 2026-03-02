@@ -24,7 +24,7 @@
  * concurrent bot traffic (Discord/Telegram listeners).
  */
 
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -42,6 +42,7 @@ const FAN_PROFILE_FILE = "FAN_PROFILE.md";
 const REFLECTIONS_FILE = "REFLECTIONS.md";
 const STRATEGY_FILE = "STRATEGY.md";
 const THREAD_FILE = "thread.json";
+const CONSOLIDATED_FILE = "CONSOLIDATED.md";
 
 /** Maximum thread messages kept on disk (20 user/assistant pairs) */
 const MAX_THREAD_MESSAGES = 40;
@@ -49,8 +50,17 @@ const MAX_THREAD_MESSAGES = 40;
 /** Maximum tail lines injected from today's log into the memory block */
 const MAX_LOG_LINES = 100;
 
+/** Maximum tail lines injected from consolidated memory into the memory block */
+const MAX_CONSOLIDATED_LINES = 80;
+
 /** Marker that starts each conversation entry in the daily log */
 const ENTRY_SEPARATOR = "---";
+
+/** Default age threshold for consolidation: logs older than 3 days */
+const DEFAULT_CONSOLIDATION_AGE_DAYS = 3;
+
+/** Maximum characters of old logs to send for consolidation in one batch */
+const MAX_CONSOLIDATION_INPUT_CHARS = 50_000;
 
 // ---------------------------------------------------------------------------
 // Soul types (only exchange counter is tracked by code — rest is LLM-driven)
@@ -322,6 +332,127 @@ export class MemoryManager {
   }
 
   // -------------------------------------------------------------------------
+  // CONSOLIDATED.md — compressed knowledge from old daily logs
+  // -------------------------------------------------------------------------
+
+  /** Read the consolidated memory file */
+  async readConsolidated(): Promise<string> {
+    await this.dirReady;
+    return safeRead(join(this.dir, CONSOLIDATED_FILE));
+  }
+
+  /** Write the consolidated memory file */
+  async writeConsolidated(content: string): Promise<void> {
+    await this.dirReady;
+    await writeFile(join(this.dir, CONSOLIDATED_FILE), content, "utf-8");
+  }
+
+  /**
+   * List daily log files (YYYY-MM-DD.md) in this user's memory directory.
+   * Returns filenames sorted by date (oldest first).
+   */
+  async listDailyLogs(): Promise<string[]> {
+    await this.dirReady;
+    try {
+      const files = await readdir(this.dir);
+      return files
+        .filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Gather old daily logs eligible for consolidation.
+   *
+   * Returns the filenames and combined content of logs older than
+   * `ageDays` (default: 3 days). Excludes today's log.
+   *
+   * @param ageDays  Minimum age in days for a log to be consolidation-eligible
+   */
+  async getConsolidationCandidates(
+    ageDays: number = DEFAULT_CONSOLIDATION_AGE_DAYS
+  ): Promise<{ files: string[]; content: string; totalChars: number }> {
+    const allLogs = await this.listDailyLogs();
+    const today = todayStamp();
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - ageDays);
+    const cutoffStamp = cutoffDate.toISOString().slice(0, 10);
+
+    const eligibleFiles: string[] = [];
+    const contents: string[] = [];
+    let totalChars = 0;
+
+    for (const file of allLogs) {
+      const dateStr = file.replace(".md", "");
+      if (dateStr >= cutoffStamp || dateStr === today) continue;
+
+      const content = await safeRead(join(this.dir, file));
+      if (!content.trim()) continue;
+
+      // Respect max input size — don't send unbounded content to LLM
+      if (totalChars + content.length > MAX_CONSOLIDATION_INPUT_CHARS) break;
+
+      eligibleFiles.push(file);
+      contents.push(`## ${dateStr}\n\n${content}`);
+      totalChars += content.length;
+    }
+
+    return {
+      files: eligibleFiles,
+      content: contents.join("\n\n---\n\n"),
+      totalChars,
+    };
+  }
+
+  /**
+   * Consolidate old daily logs into CONSOLIDATED.md.
+   *
+   * This is a two-phase operation:
+   *   1. Gather eligible logs (older than `ageDays`)
+   *   2. Use the provided summarizer function to compress them
+   *   3. Merge the summary into CONSOLIDATED.md
+   *   4. Delete the source log files
+   *
+   * The `summarize` function is injected to keep this module free of
+   * LLM dependencies — the engine provides the actual LLM call.
+   *
+   * @param summarize  Async function that compresses log content into a summary
+   * @param ageDays    Minimum age in days (default: 3)
+   * @returns Number of log files consolidated, or 0 if nothing to do
+   */
+  async consolidateOldLogs(
+    summarize: (content: string, existingSummary: string) => Promise<string>,
+    ageDays: number = DEFAULT_CONSOLIDATION_AGE_DAYS
+  ): Promise<number> {
+    const candidates = await this.getConsolidationCandidates(ageDays);
+    if (candidates.files.length === 0) return 0;
+
+    // Read existing consolidated knowledge
+    const existing = await this.readConsolidated();
+
+    // Ask the LLM to merge old logs into a compressed summary
+    const summary = await summarize(candidates.content, existing);
+    if (!summary.trim()) return 0;
+
+    // Write the merged consolidated file
+    await this.writeConsolidated(summary);
+
+    // Delete the source log files
+    const { unlink } = await import("node:fs/promises");
+    for (const file of candidates.files) {
+      try {
+        await unlink(join(this.dir, file));
+      } catch {
+        // Skip files that can't be deleted (e.g., already removed)
+      }
+    }
+
+    return candidates.files.length;
+  }
+
+  // -------------------------------------------------------------------------
   // Combined read for prompt injection-safe context assembly
   // -------------------------------------------------------------------------
 
@@ -333,15 +464,16 @@ export class MemoryManager {
    * to reduce prompt injection surface area.
    */
   async buildMemoryBlock(): Promise<string> {
-    const [context, todayLog, fanProfile, soul, reflections] = await Promise.all([
+    const [context, todayLog, fanProfile, soul, reflections, consolidated] = await Promise.all([
       this.readContext(),
       this.readTodayLog(),
       this.readFanProfile(),
       this.readSoul(),
       this.readReflections(),
+      this.readConsolidated(),
     ]);
 
-    if (!context && !todayLog && !fanProfile && !soul && !reflections) return "";
+    if (!context && !todayLog && !fanProfile && !soul && !reflections && !consolidated) return "";
 
     const parts: string[] = [
       "## Persistent Memory",
@@ -360,6 +492,12 @@ export class MemoryManager {
 
     if (context) {
       parts.push("", "### Current Context (CONTEXT.md)", context);
+    }
+
+    // Consolidated knowledge — compressed summaries from older conversations
+    if (consolidated) {
+      const tail = truncateAtEntryBoundary(consolidated, MAX_CONSOLIDATED_LINES);
+      parts.push("", "### Consolidated Knowledge (older conversations)", tail);
     }
 
     // Reflections — lessons learned from past interactions
