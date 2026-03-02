@@ -24,6 +24,8 @@ import { google } from "@ai-sdk/google";
 import {
   DEFAULT_CONFIG,
   DEFAULT_MODELS,
+  DEFAULT_TOKEN_BUDGETS,
+  buildProviderOptions,
   type LLMProvider,
   type RouteDecision,
   type RouteMeta,
@@ -33,6 +35,7 @@ import {
   type ImageAttachment,
   type GeneratedImage,
   type GeneratedVideo,
+  type TokenBudgets,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { execFile } from "node:child_process";
@@ -79,6 +82,14 @@ try {
   if (parsed.version) _packageVersion = parsed.version;
 } catch {
   // best-effort
+}
+
+// ---------------------------------------------------------------------------
+// Token budget resolution
+// ---------------------------------------------------------------------------
+
+function resolveTokenBudgets(overrides?: Partial<TokenBudgets>): TokenBudgets {
+  return { ...DEFAULT_TOKEN_BUDGETS, ...overrides };
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +650,8 @@ export class sportsclawEngine {
         routingMode: this.config.routingMode,
         routingMaxSkills: this.config.routingMaxSkills,
         routingAllowSpillover: this.config.routingAllowSpillover,
+        thinkingBudget: this.config.thinkingBudget,
+        tokenBudgets: this.config.tokenBudgets,
       },
     });
     const decision = routed.decision;
@@ -676,8 +689,9 @@ export class sportsclawEngine {
     draft: string;
     failedTools: string[];
     succeededTools: string[];
+    maxOutputTokens: number;
   }): Promise<string> {
-    const { userPrompt, draft, failedTools, succeededTools } = params;
+    const { userPrompt, draft, failedTools, succeededTools, maxOutputTokens } = params;
     try {
       const res = await generateText({
         model: this.mainModel,
@@ -692,7 +706,7 @@ export class sportsclawEngine {
           "Draft response:",
           draft,
         ].join("\n\n"),
-        maxOutputTokens: this.config.maxTokens,
+        maxOutputTokens,
       });
       const cleaned = res.text?.trim();
       if (cleaned) return cleaned;
@@ -707,6 +721,22 @@ export class sportsclawEngine {
       `Successful tools: ${succeeded || "none"}. ` +
       "Retry to get a complete answer."
     );
+  }
+
+  private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
+    if (agent.skills.length === 0) return undefined;
+    const agentSkillSet = new Set(agent.skills);
+    const isInternalTool = (name: string) =>
+      name === "generate_image" || name === "generate_video" ||
+      name.startsWith("update_") || name === "reflect" ||
+      name === "evolve_strategy" || name === "get_agent_config" ||
+      name === "install_sport" || name === "remove_sport" ||
+      name === "upgrade_sports_skills";
+    return allToolNames.filter((name) => {
+      if (isInternalTool(name) || name.startsWith("mcp__")) return true;
+      const skill = this.registry.getSkillName(name);
+      return skill ? agentSkillSet.has(skill) : false;
+    });
   }
 
   private isLowSignalResponse(text: string): boolean {
@@ -816,8 +846,9 @@ export class sportsclawEngine {
     successfulTools: string[];
     failedTools: string[];
     toolOutputs: Array<{ toolName: string; output: string }>;
+    maxOutputTokens: number;
   }): Promise<string> {
-    const { userPrompt, draft, successfulTools, failedTools, toolOutputs } = params;
+    const { userPrompt, draft, successfulTools, failedTools, toolOutputs, maxOutputTokens } = params;
     if (toolOutputs.length === 0) return draft;
 
     const serialized = toolOutputs
@@ -847,7 +878,7 @@ export class sportsclawEngine {
           "Tool outputs:",
           serialized,
         ].join("\n\n"),
-        maxOutputTokens: Math.min(2_048, this.config.maxTokens),
+        maxOutputTokens,
       });
 
       const synthesized = res.text?.trim();
@@ -1870,6 +1901,10 @@ export class sportsclawEngine {
     const analyticsSessionId = options?.userId ? generateSessionId() : "anonymous";
     const toolCallsForAnalytics: Array<{ name: string; success: boolean; latencyMs: number }> = [];
 
+    // Resolve per-task-type token budgets (merge user overrides with defaults)
+    const budgets = resolveTokenBudgets(this.config.tokenBudgets);
+    if (!this.config.tokenBudgets?.main) budgets.main = this.config.maxTokens;
+
     const tools = this.buildTools(memory, failedToolSignaturesThisTurn, options?.userId);
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
@@ -1929,6 +1964,140 @@ export class sportsclawEngine {
       return clarification;
     }
 
+    // --- Parallel agent execution ---
+    // When parallelAgents is enabled and multiple agents were routed,
+    // run each agent as an independent lane and synthesize the results.
+    if (this.config.parallelAgents && activeAgents.length > 1) {
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] parallel agents: launching ${activeAgents.length} lanes`
+        );
+      }
+      const allToolNames = Object.keys(tools);
+      const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
+      const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+
+      const lanePromises = activeAgents.map((agent) => {
+        const agentActiveTools = this.filterToolsForAgent(agent, allToolNames);
+        const laneLabel = `${agent.name} (${this.mainModelId})`;
+        emitProgress?.({ type: "phase", label: laneLabel });
+
+        return generateText({
+          model: this.mainModel,
+          system: this.buildSystemPrompt(!!memory, [agent], strategyContent),
+          messages: this.messages,
+          tools,
+          ...(agentActiveTools ? { activeTools: agentActiveTools } : {}),
+          abortSignal: options?.abortSignal,
+          stopWhen: stepCountIs(parallelMaxTurns),
+          maxOutputTokens: budgets.main,
+          ...(providerOpts ? { providerOptions: providerOpts } : {}),
+          experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+            const skillName = this.registry.getSkillName(toolCall.toolName);
+            emitProgress?.({
+              type: "tool_finish",
+              toolName: toolCall.toolName,
+              toolCallId: toolCall.toolCallId,
+              durationMs,
+              success,
+              skillName,
+            });
+            // Track tool call analytics
+            if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
+              recordToolCall({ toolName: toolCall.toolName, success, latencyMs: durationMs ?? 0 });
+              toolCallsForAnalytics.push({ name: toolCall.toolName, success, latencyMs: durationMs ?? 0 });
+            }
+            // Node.js single-threaded event loop: Map operations are safe across
+            // concurrent promises — no data races on failedExternalTools/succeededExternalTools.
+            if (!success && !toolCall.toolName.startsWith("update_")) {
+              failedExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
+            } else if (success && !toolCall.toolName.startsWith("update_")) {
+              succeededExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
+            }
+          },
+        });
+      });
+
+      const laneResults = await Promise.all(lanePromises);
+
+      // Collect text from each agent lane
+      const agentTexts: string[] = [];
+      for (let i = 0; i < laneResults.length; i++) {
+        const lane = laneResults[i];
+        const text = lane.text?.trim() || this.extractTextFromResponseMessages(
+          lane.response.messages as Array<{ content?: unknown }>
+        ) || "";
+        if (text) {
+          agentTexts.push(`[${activeAgents[i].name}]\n${text}`);
+        }
+      }
+
+      // Synthesize a combined response
+      emitProgress?.({ type: "synthesizing" });
+      let responseText: string;
+      if (agentTexts.length === 0) {
+        responseText = "[sportsclaw] No response generated from parallel agents.";
+      } else if (agentTexts.length === 1) {
+        responseText = agentTexts[0].replace(/^\[.*?\]\n/, "");
+      } else {
+        try {
+          const synthesisResult = await generateText({
+            model: this.mainModel,
+            system:
+              "You are a sports answer synthesizer. Combine the following agent responses into one coherent, " +
+              "concise answer. Remove duplicates, merge data, and present a unified response. " +
+              "Do not mention the individual agents. Keep source citations.",
+            prompt: agentTexts.join("\n\n---\n\n"),
+            maxOutputTokens: budgets.synthesis,
+          });
+          responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
+        } catch {
+          responseText = agentTexts.join("\n\n");
+        }
+      }
+
+      // Append synthesized response to message history (not individual agent messages)
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: responseText }] });
+
+      // Memory persistence
+      if (memory) {
+        try {
+          await memory.appendToThread(sanitizedPrompt, responseText);
+          await memory.appendExchange(sanitizedPrompt, responseText);
+          await memory.incrementSoulExchanges();
+        } catch (err) {
+          console.error(
+            `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+
+      // Session persistence
+      if (sessionId) {
+        sessionStore.save(sessionId, this.messages);
+      }
+
+      // Analytics
+      if (options?.userId) {
+        try {
+          const queryEvent = buildQueryEvent({
+            userId: options.userId,
+            sessionId: analyticsSessionId,
+            promptLength: sanitizedPrompt.length,
+            detectedSports: routing.decision?.selectedSkills ?? [],
+            toolsCalled: toolCallsForAnalytics,
+            totalLatencyMs: Date.now() - analyticsStartTime,
+            clarificationNeeded: routing.decision?.mode === "ambiguous",
+          });
+          logQuery(queryEvent);
+        } catch {
+          // Analytics should never break the main flow
+        }
+      }
+
+      return responseText;
+    }
+
     const callLLM = (messagesOverride?: Message[]) =>
       generateText({
         model: this.mainModel,
@@ -1938,18 +2107,11 @@ export class sportsclawEngine {
         ...(activeTools ? { activeTools } : {}),
         abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
-        maxOutputTokens: this.config.maxTokens,
-        // Google Gemini 2.5 thinking models: set an explicit thinking budget
-        // so thinking tokens don't consume the entire maxOutputTokens allowance
-        ...(this.config.provider === "google" && {
-          providerOptions: {
-            google: {
-              thinkingConfig: {
-                thinkingBudget: 8192,
-              },
-            },
-          },
-        }),
+        maxOutputTokens: budgets.main,
+        ...(() => {
+          const opts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+          return opts ? { providerOptions: opts } : {};
+        })(),
         experimental_onToolCallStart: ({ toolCall }) => {
           const skillName = this.registry.getSkillName(toolCall.toolName);
           emitProgress?.({
@@ -2162,6 +2324,7 @@ export class sportsclawEngine {
         successfulTools: successes.map((s) => s.toolName),
         failedTools: netFailures.map((f) => f.toolName),
         toolOutputs,
+        maxOutputTokens: budgets.synthesis,
       });
     }
 
@@ -2176,6 +2339,7 @@ export class sportsclawEngine {
         draft: responseText,
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
+        maxOutputTokens: budgets.evidenceGate,
       });
       responseText = `${warning}\n\n${responseText}`;
     }
