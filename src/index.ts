@@ -83,6 +83,7 @@ import {
   daemonLogs,
   isValidPlatform,
 } from "./daemon.js";
+import { runSetup } from "./setup.js";
 
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,9 @@ export {
   isValidPlatform,
 } from "./daemon.js";
 export type { DaemonPlatform } from "./daemon.js";
+
+// AI-native setup wizard
+export { runSetup } from "./setup.js";
 
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
@@ -1381,6 +1385,7 @@ function printHelp(): void {
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
+  console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
@@ -1471,6 +1476,15 @@ function cmdAgents(): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw setup [prompt]` — AI-native setup wizard
+// ---------------------------------------------------------------------------
+
+async function cmdSetup(args: string[]): Promise<void> {
+  const prompt = args.filter((a) => !a.startsWith("-")).join(" ").trim() || undefined;
+  await runSetup(prompt);
+}
+
+// ---------------------------------------------------------------------------
 // Analytics Command
 // ---------------------------------------------------------------------------
 
@@ -1555,6 +1569,8 @@ async function main(): Promise<void> {
   const subArgs = args.slice(1);
 
   switch (subcommand) {
+    case "setup":
+      return cmdSetup(subArgs);
     case "config":
       return cmdConfig();
     case "channels":

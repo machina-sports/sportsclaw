@@ -94,15 +94,15 @@ export interface CLIConfig {
 // Paths
 // ---------------------------------------------------------------------------
 
-const CONFIG_DIR = join(homedir(), ".sportsclaw");
+export const CONFIG_DIR = join(homedir(), ".sportsclaw");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
-const ENV_PATH = join(CONFIG_DIR, ".env");
+export const ENV_PATH = join(CONFIG_DIR, ".env");
 
 // ---------------------------------------------------------------------------
 // Provider ↔ API key env var mapping (duplicated here to avoid circular deps)
 // ---------------------------------------------------------------------------
 
-const PROVIDER_ENV: Record<LLMProvider, string> = {
+export const PROVIDER_ENV: Record<LLMProvider, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -182,7 +182,7 @@ const parseCommaList = (raw: string): string[] => raw.split(",").map(s => s.trim
  * Parse all key-value pairs from a dotenv-style file.
  * Returns a record of key → value (empty values are omitted).
  */
-function parseEnvFile(filePath: string): Record<string, string> {
+export function parseEnvFile(filePath: string): Record<string, string> {
   if (!existsSync(filePath)) return {};
   try {
     const result: Record<string, string> = {};
@@ -203,6 +203,40 @@ function parseEnvFile(filePath: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Write or update a single key=value pair in a dotenv-style file.
+ * Creates the file (and parent dirs) if it doesn't exist.
+ * Replaces the line if the key already exists, appends otherwise.
+ */
+export function writeEnvVar(filePath: string, key: string, value: string): void {
+  const dir = filePath.replace(/\/[^/]+$/, "");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+  let lines: string[] = [];
+  if (existsSync(filePath)) {
+    lines = readFileSync(filePath, "utf-8").split("\n");
+  }
+
+  const prefix = `${key}=`;
+  let replaced = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trimStart().startsWith(prefix)) {
+      lines[i] = `${key}=${value}`;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) {
+    // Remove trailing empty lines before appending
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+      lines.pop();
+    }
+    lines.push(`${key}=${value}`);
+  }
+
+  writeFileSync(filePath, lines.join("\n") + "\n", "utf-8");
 }
 
 /**
