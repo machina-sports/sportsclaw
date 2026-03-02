@@ -69,6 +69,8 @@ import {
 import { AskUserQuestionHalt } from "./ask.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
+import { subagentManager, type SubagentResult } from "./subagent.js";
+import { heartbeatService } from "./heartbeat.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -479,6 +481,15 @@ export class sportsclawEngine {
       "You have tools to inspect and modify your own state:",
       "- get_agent_config, update_agent_config, install_sport, remove_sport",
       "",
+      "### Background Tasks",
+      "- spawn_subagent: Launch async research that runs in the background. " +
+        "Use when a query is complex and the user doesn't need to wait. " +
+        "Tell them 'I'll look into that and get back to you.'",
+      "- schedule_task: Set up recurring notifications (e.g., 'injury report every morning'). " +
+        "cancel_scheduled_task to remove them. list_scheduled_tasks to see all.",
+      "- consolidate_memory: Compress old conversation logs into lean summaries. " +
+        "Use when memory feels bloated or the user asks to clean up.",
+      "",
       installed.length === 0
         ? "When the user asks about a sport, automatically call install_sport to load it — no confirmation needed on first use."
         : "When the user asks about a sport you DON'T have installed, tell them and offer to install it. Always include the disclaimer. User must confirm first.",
@@ -666,7 +677,13 @@ export class sportsclawEngine {
       name === "get_agent_config" ||
       name === "install_sport" ||
       name === "remove_sport" ||
-      name === "upgrade_sports_skills";
+      name === "upgrade_sports_skills" ||
+      name === "spawn_subagent" ||
+      name === "list_subagents" ||
+      name === "schedule_task" ||
+      name === "list_scheduled_tasks" ||
+      name === "cancel_scheduled_task" ||
+      name === "consolidate_memory";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
       if (name.startsWith("mcp__")) return true; // MCP tools always active
@@ -731,7 +748,10 @@ export class sportsclawEngine {
       name.startsWith("update_") || name === "reflect" ||
       name === "evolve_strategy" || name === "get_agent_config" ||
       name === "install_sport" || name === "remove_sport" ||
-      name === "upgrade_sports_skills";
+      name === "upgrade_sports_skills" || name === "spawn_subagent" ||
+      name === "list_subagents" || name === "schedule_task" ||
+      name === "list_scheduled_tasks" || name === "cancel_scheduled_task" ||
+      name === "consolidate_memory";
     return allToolNames.filter((name) => {
       if (isInternalTool(name) || name.startsWith("mcp__")) return true;
       const skill = this.registry.getSkillName(name);
@@ -1653,6 +1673,284 @@ export class sportsclawEngine {
         });
       },
     });
+
+    // -----------------------------------------------------------------
+    // Sprint 3: Subagent Spawning — async background research tasks
+    // -----------------------------------------------------------------
+
+    toolMap["spawn_subagent"] = defineTool({
+      description:
+        "Spawn an async background research task. The subagent runs independently " +
+        "while you respond to the user immediately. Use for slow or complex research " +
+        "that the user doesn't need to wait for (e.g., 'I'll dig into that and get " +
+        "back to you'). The subagent can use data tools but cannot spawn other " +
+        "subagents, send messages, or modify memory/config. Results are delivered " +
+        "to the user's channel when ready.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "The research task for the subagent. Be specific about what data " +
+              "to gather and how to present it (e.g., 'Get LeBron's last 5 games " +
+              "with stats and compare to season averages').",
+          },
+          system_prompt: {
+            type: "string",
+            description:
+              "Optional custom system prompt for the subagent. If omitted, a " +
+              "default research-focused prompt is used.",
+          },
+        },
+        required: ["prompt"],
+      }),
+      execute: async (args: { prompt?: string; system_prompt?: string }) => {
+        if (!args.prompt) return "Error: prompt is required.";
+
+        try {
+          const task = subagentManager.spawn({
+            prompt: args.prompt,
+            systemPrompt: args.system_prompt,
+            userId: watcherUserId,
+            model: this.mainModel as any,
+            provider: this.config.provider,
+            config: this.config,
+            registry: this.registry,
+            thinkingBudget: Math.min(this.config.thinkingBudget, 4096),
+          });
+
+          if (verbose) {
+            console.error(
+              `[sportsclaw] subagent spawned: ${task.id} — "${args.prompt.slice(0, 100)}"`
+            );
+          }
+
+          return JSON.stringify({
+            status: "spawned",
+            subagent_id: task.id,
+            message:
+              "Background research task started. Results will be delivered " +
+              "when ready. Tell the user you're working on it.",
+          });
+        } catch (err) {
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+    });
+
+    toolMap["list_subagents"] = defineTool({
+      description:
+        "List active and recently completed background subagent tasks for " +
+        "the current user. Shows task IDs, prompts, and status.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const all = subagentManager.getAllTasks().filter(
+          (t) => t.userId === watcherUserId
+        );
+        if (all.length === 0) return "No subagent tasks.";
+        return JSON.stringify(
+          all.map((t) => ({
+            id: t.id,
+            prompt: t.prompt.slice(0, 200),
+            status: t.status,
+            created_at: t.createdAt,
+            completed_at: t.completedAt,
+            has_result: !!t.result,
+          }))
+        );
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Sprint 3: Heartbeat & Cron — scheduled tasks
+    // -----------------------------------------------------------------
+
+    toolMap["schedule_task"] = defineTool({
+      description:
+        "Schedule a recurring or one-time background task. Unlike create_task " +
+        "(which monitors a condition), schedule_task runs a prompt on a timer. " +
+        "Use for proactive notifications: 'Check NFL injury reports every morning', " +
+        "'Send me a market summary every 6 hours.'",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          label: {
+            type: "string",
+            description: "Short name for the scheduled task.",
+          },
+          prompt: {
+            type: "string",
+            description:
+              "The query to run on schedule (e.g., 'Get today\\'s NBA injury report').",
+          },
+          interval_minutes: {
+            type: "number",
+            description:
+              "How often to run, in minutes. Minimum: 5. Examples: 60 (hourly), " +
+              "360 (every 6h), 1440 (daily).",
+          },
+          recurring: {
+            type: "boolean",
+            description:
+              "If true, runs repeatedly on interval. If false, runs once after " +
+              "the interval. Default: true.",
+          },
+        },
+        required: ["label", "prompt", "interval_minutes"],
+      }),
+      execute: async (args: {
+        label?: string;
+        prompt?: string;
+        interval_minutes?: number;
+        recurring?: boolean;
+      }) => {
+        if (!args.label || !args.prompt || !args.interval_minutes) {
+          return "Error: label, prompt, and interval_minutes are required.";
+        }
+        if (args.interval_minutes < 5) {
+          return "Error: minimum interval is 5 minutes.";
+        }
+
+        const job = heartbeatService.scheduleCron({
+          label: args.label,
+          prompt: args.prompt,
+          userId: watcherUserId,
+          intervalMs: args.interval_minutes * 60 * 1000,
+          recurring: args.recurring ?? true,
+        });
+
+        return JSON.stringify({
+          status: "scheduled",
+          job_id: job.id,
+          label: job.label,
+          interval_minutes: args.interval_minutes,
+          recurring: job.recurring,
+          message: `Scheduled "${job.label}" to run every ${args.interval_minutes} minutes.`,
+        });
+      },
+    });
+
+    toolMap["list_scheduled_tasks"] = defineTool({
+      description:
+        "List all scheduled (cron) tasks. Shows job IDs, labels, intervals, " +
+        "run counts, and status.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const jobs = heartbeatService.listCronJobs().filter(
+          (j) => j.userId === watcherUserId
+        );
+        if (jobs.length === 0) return "No scheduled tasks.";
+        return JSON.stringify(
+          jobs.map((j) => ({
+            id: j.id,
+            label: j.label,
+            interval_minutes: Math.round(j.intervalMs / 60_000),
+            recurring: j.recurring,
+            status: j.status,
+            run_count: j.runCount,
+            last_run_at: j.lastRunAt,
+          }))
+        );
+      },
+    });
+
+    toolMap["cancel_scheduled_task"] = defineTool({
+      description: "Cancel (remove) a scheduled task by its job ID.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          job_id: {
+            type: "string",
+            description: "The job ID to cancel.",
+          },
+        },
+        required: ["job_id"],
+      }),
+      execute: async (args: { job_id?: string }) => {
+        if (!args.job_id) return "Error: job_id is required.";
+        const removed = heartbeatService.removeCron(args.job_id);
+        return removed
+          ? `Scheduled task "${args.job_id}" cancelled.`
+          : `Task "${args.job_id}" not found.`;
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Sprint 3: Memory Consolidation — compress old logs
+    // -----------------------------------------------------------------
+
+    if (memory) {
+      toolMap["consolidate_memory"] = defineTool({
+        description:
+          "Consolidate old daily conversation logs into compressed knowledge. " +
+          "Logs older than 3 days are summarized by the LLM and merged into " +
+          "CONSOLIDATED.md, then the source logs are deleted. Use when memory " +
+          "feels bloated or when the user asks to clean up history.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            age_days: {
+              type: "number",
+              description:
+                "Minimum age in days for logs to consolidate. Default: 3.",
+            },
+          },
+        }),
+        execute: async (args: { age_days?: number }) => {
+          const ageDays = args.age_days ?? 3;
+          const memRef = memory!;
+          const model = this.mainModel;
+
+          const summarize = async (content: string, existing: string): Promise<string> => {
+            const res = await generateText({
+              model,
+              system: [
+                "You are a memory consolidation agent for a sports AI assistant.",
+                "Your job is to compress old conversation logs into concise,",
+                "structured knowledge that the agent can reference in future sessions.",
+                "",
+                "Rules:",
+                "- Extract key facts: teams discussed, scores, predictions made,",
+                "  user preferences discovered, tools that failed, notable moments",
+                "- Organize by topic (teams, events, user preferences, insights)",
+                "- Remove redundancy — if the same fact appears multiple times,",
+                "  keep the most recent version",
+                "- Keep the output under 2000 words",
+                "- Use markdown headers and bullet points for structure",
+                "- If existing consolidated knowledge is provided, merge and",
+                "  update it (don't just append)",
+              ].join("\n"),
+              prompt: [
+                existing ? `## Existing Consolidated Knowledge\n\n${existing}\n\n---\n\n` : "",
+                "## Old Conversation Logs to Consolidate\n\n",
+                content,
+              ].join(""),
+              maxOutputTokens: 4096,
+            });
+            return res.text?.trim() ?? "";
+          };
+
+          try {
+            const count = await memRef.consolidateOldLogs(summarize, ageDays);
+            if (count === 0) {
+              return "No logs old enough to consolidate. Current threshold: " +
+                `${ageDays} days.`;
+            }
+            return `Consolidated ${count} daily log file(s) into CONSOLIDATED.md. ` +
+              "Old logs have been deleted. Memory is now leaner.";
+          } catch (err) {
+            return `Consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        },
+      });
+    }
 
     // -----------------------------------------------------------------
     // Image + Video generation tools
