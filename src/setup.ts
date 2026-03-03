@@ -14,6 +14,7 @@ import {
   jsonSchema,
   stepCountIs,
   type ToolSet,
+  type ModelMessage,
 } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { openai } from "@ai-sdk/openai";
@@ -83,6 +84,7 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
   for (const { provider, envVar } of checks) {
     const val = process.env[envVar];
     if (val && val.trim().length > 0) {
+      console.log(pc.dim(`Using existing ${envVar} from environment.`));
       return { provider, apiKey: val.trim() };
     }
   }
@@ -410,7 +412,7 @@ export async function runSetup(initialPrompt?: string): Promise<void> {
   const system = buildSystemPrompt();
 
   // Conversation state
-  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
+  const messages: ModelMessage[] = [];
   const firstMessage = initialPrompt || "Help me set up sportsclaw.";
   messages.push({ role: "user", content: firstMessage });
 
@@ -436,7 +438,8 @@ export async function runSetup(initialPrompt?: string): Promise<void> {
         console.log("");
       }
 
-      messages.push({ role: "assistant", content: text });
+      // Append full response (assistant + tool messages) to preserve tool call context
+      messages.push(...result.response.messages);
 
       // Check for completion signal
       if (text.toLowerCase().includes("setup complete")) {

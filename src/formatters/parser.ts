@@ -170,6 +170,81 @@ export function isGameRelatedResponse(
 }
 
 // ---------------------------------------------------------------------------
+// Table formatting utilities (shared by Discord + Telegram renderers)
+// ---------------------------------------------------------------------------
+
+/** Strip markdown bold markers (don't render inside code/pre blocks) */
+export function stripBold(s: string): string {
+  return s.replace(/\*\*/g, "").trim();
+}
+
+/** Center a string within a given width */
+export function centerPad(s: string, width: number): string {
+  if (s.length >= width) return s;
+  const left = Math.floor((width - s.length) / 2);
+  return " ".repeat(left) + s + " ".repeat(width - s.length - left);
+}
+
+/** Check if a table is a head-to-head comparison (3 columns: stat, team1, team2) */
+export function isComparisonTable(rows: string[][]): boolean {
+  return rows.length >= 3 && rows.every((r) => r.length === 3);
+}
+
+/**
+ * Render a 3-column comparison table as center-aligned plain text:
+ *
+ *   Real Madrid  vs  Getafe
+ *   ────────────────────────────
+ *      77.7%  Possession  22.3%
+ *        554  Total Passes  158
+ */
+export function renderComparisonText(
+  rows: string[][],
+  headerIndex: number
+): string {
+  const hIdx = headerIndex >= 0 ? headerIndex : 0;
+  const headerRow = rows[hIdx];
+  const dataRows = rows.filter((_, i) => i !== hIdx);
+
+  if (dataRows.length === 0) {
+    return rows.map((r) => r.map(stripBold).join("  |  ")).join("\n");
+  }
+
+  const team1 = stripBold(headerRow[1] || "Home");
+  const team2 = stripBold(headerRow[2] || "Away");
+
+  const data = dataRows.map((r) => [
+    stripBold(r[0] || ""),
+    stripBold(r[1] || ""),
+    stripBold(r[2] || ""),
+  ]);
+
+  const val1W = Math.max(team1.length, ...data.map((r) => r[1].length));
+  const statW = Math.max(...data.map((r) => r[0].length));
+  const val2W = Math.max(team2.length, ...data.map((r) => r[2].length));
+
+  const gap = "  ";
+  const totalW = val1W + gap.length + statW + gap.length + val2W;
+
+  const lines: string[] = [];
+
+  // Team header
+  lines.push(
+    team1.padStart(val1W) + gap + centerPad("vs", statW) + gap + team2
+  );
+
+  // Separator
+  lines.push("─".repeat(totalW));
+
+  // Data rows
+  for (const [stat, v1, v2] of data) {
+    lines.push(v1.padStart(val1W) + gap + centerPad(stat, statW) + gap + v2);
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

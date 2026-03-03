@@ -13,6 +13,7 @@ import { renderCli } from "./cli.js";
 
 // Re-export types that consumers need
 export type { DiscordEmbed } from "./discord.js";
+export { formatTextForDiscord } from "./discord.js";
 export type { ParsedBlock, ParsedResponse } from "./parser.js";
 export { isGameRelatedResponse } from "./parser.js";
 

@@ -3,8 +3,16 @@
  *
  * Converts a ParsedResponse into a DiscordEmbed object.
  * Tables → code blocks, headers → embed fields, source → footer.
+ * Also exports formatTextForDiscord() for rendering LLM responses
+ * as Discord-friendly plain text (comparison tables → code blocks).
  */
 
+import {
+  parseBlocks,
+  stripBold,
+  isComparisonTable,
+  renderComparisonText,
+} from "./parser.js";
 import type { ParsedResponse } from "./parser.js";
 
 // ---------------------------------------------------------------------------
@@ -88,6 +96,26 @@ export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
 }
 
 // ---------------------------------------------------------------------------
+// formatTextForDiscord — render LLM response as Discord-friendly text
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses an LLM response and re-renders it for Discord:
+ * - Comparison tables (3 columns) → center-aligned code block
+ * - Other tables → padded code block
+ * - Everything else preserved as-is (bold, italic, etc.)
+ */
+export function formatTextForDiscord(response: string): string {
+  const parsed = parseBlocks(response);
+  const rendered = parsed.blocks.map(renderBlockForDiscord).join("\n");
+
+  if (parsed.source) {
+    return rendered + "\n*Source: " + parsed.source + "*";
+  }
+  return rendered;
+}
+
+// ---------------------------------------------------------------------------
 // Internal: render a single block for Discord context
 // ---------------------------------------------------------------------------
 
@@ -101,7 +129,17 @@ function renderBlockForDiscord(block: ParsedResponse["blocks"][number]): string 
       return `**${block.text}**`;
 
     case "table": {
-      const lines = block.rows.map((cells) => cells.join("  |  "));
+      if (isComparisonTable(block.rows)) {
+        return (
+          "```\n" +
+          renderComparisonText(block.rows, block.headerIndex) +
+          "\n```"
+        );
+      }
+      // Fallback: generic table in code block with aligned columns
+      const lines = block.rows.map((cells) =>
+        cells.map(stripBold).join("  |  ")
+      );
       return "```\n" + lines.join("\n") + "\n```";
     }
 

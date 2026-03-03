@@ -18,7 +18,21 @@ echo -e "\n🦞 ${BOLD}Installing sportsclaw...${NC}\n"
 # 1. Dependency Checks
 if ! command -v node &> /dev/null; then
     echo -e "${RED}❌ Error: Node.js is required but not installed.${NC}"
-    echo "Please install Node.js (v18+) from https://nodejs.org"
+    echo -e "   Install options:"
+    echo -e "   • macOS (Homebrew): ${BOLD}brew install node${NC}"
+    echo -e "   • nvm:              ${BOLD}nvm install 22${NC}"
+    echo -e "   • Download:         https://nodejs.org"
+    exit 1
+fi
+
+# Check Node.js version (>= 18 required)
+NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+    echo -e "${RED}❌ Error: Node.js v18+ is required but found $(node -v).${NC}"
+    echo -e "   Upgrade options:"
+    echo -e "   • macOS (Homebrew): ${BOLD}brew install node${NC}"
+    echo -e "   • nvm:              ${BOLD}nvm install 22${NC}"
+    echo -e "   • Download:         https://nodejs.org"
     exit 1
 fi
 
@@ -38,12 +52,23 @@ PYTHON_BIN="$(command -v python3)"
 if [ -x "/opt/homebrew/bin/python3" ]; then
     PYTHON_BIN="/opt/homebrew/bin/python3"
 fi
-echo -e "${BLUE}🐍 Using Python: ${PYTHON_BIN}${NC}"
+echo -e "${BLUE}📦 Node.js $(node -v) — npm $(npm -v)${NC}"
+echo -e "${BLUE}🐍 Python:  ${PYTHON_BIN}${NC}\n"
 
 # 2. Install Node Package (Engine) + PM2 (Daemon Manager)
 echo -e "${BLUE}📦 Installing TypeScript Execution Engine + PM2...${NC}"
-npm install -g sportsclaw-engine-core@latest pm2@latest || {
+
+# Detect if sudo is needed for global npm install
+NPM_PREFIX="$(npm prefix -g 2>/dev/null)"
+SUDO=""
+if [ -n "$NPM_PREFIX" ] && [ ! -w "${NPM_PREFIX}/lib" ]; then
+    echo -e "${YELLOW}⚠️  Global npm directory requires elevated permissions, using sudo...${NC}"
+    SUDO="sudo"
+fi
+
+$SUDO npm install -g sportsclaw-engine-core@latest pm2@latest || {
     echo -e "${RED}❌ Failed to install Node packages.${NC}"
+    echo -e "   If you see permission errors, try: ${BOLD}sudo npm install -g sportsclaw-engine-core@latest pm2@latest${NC}"
     exit 1
 }
 echo -e "${GREEN}✓ Engine + PM2 installed.${NC}\n"

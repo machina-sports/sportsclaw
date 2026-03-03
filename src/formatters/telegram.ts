@@ -5,6 +5,11 @@
  * Headers → <b>, tables → <pre>, code → <pre>, bold → <b>, inline code → <code>.
  */
 
+import {
+  stripBold,
+  isComparisonTable,
+  renderComparisonText,
+} from "./parser.js";
 import type { ParsedResponse } from "./parser.js";
 
 // ---------------------------------------------------------------------------
@@ -21,10 +26,15 @@ export function renderTelegram(parsed: ParsedResponse): string {
         break;
 
       case "table": {
-        const lines = block.rows.map((cells) =>
-          cells.map((c) => escapeHtml(c)).join("  |  ")
-        );
-        result.push(`<pre>${lines.join("\n")}</pre>`);
+        if (isComparisonTable(block.rows)) {
+          const text = renderComparisonText(block.rows, block.headerIndex);
+          result.push(`<pre>${escapeHtml(text)}</pre>`);
+        } else {
+          const lines = block.rows.map((cells) =>
+            cells.map((c) => escapeHtml(stripBold(c))).join("  |  ")
+          );
+          result.push(`<pre>${lines.join("\n")}</pre>`);
+        }
         break;
       }
 

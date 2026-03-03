@@ -24,7 +24,7 @@ import { spawn } from "node:child_process";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
-import { isGameRelatedResponse } from "../formatters/index.js";
+import { isGameRelatedResponse, formatTextForDiscord } from "../formatters/index.js";
 import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
 import { loadConfig } from "../config.js";
@@ -399,7 +399,8 @@ export async function startDiscordListener(): Promise<void> {
       const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
       const response = await engine.run(followUpPrompt, { userId: ctx.userId, sessionId: ctx.userId });
 
-      const chunks = splitMessage(response, 2000);
+      const formatted = formatTextForDiscord(response);
+      const chunks = splitMessage(formatted, 2000);
       await interaction.editReply(chunks[0] ?? "No data available.");
       for (const chunk of chunks.slice(1)) {
         await interaction.followUp(chunk);
@@ -579,7 +580,8 @@ export async function startDiscordListener(): Promise<void> {
     userId: string,
     message: import("discord.js").Message
   ): Promise<void> {
-    const chunks = splitMessage(response, 2000);
+    const formatted = formatTextForDiscord(response);
+    const chunks = splitMessage(formatted, 2000);
 
     // Build action buttons for game-related responses
     let actionRow: import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> | null = null;
