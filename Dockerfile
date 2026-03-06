@@ -3,21 +3,6 @@
 #
 # A single container with Node.js (engine) + Python 3 (sports-skills).
 # Developers can run the agent, CLI commands, or chat listeners out of the box.
-#
-# Build:
-#   docker build -t sportsclaw .
-#
-# Run (one-shot query):
-#   docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"
-#
-# Run (add a sport schema):
-#   docker run --rm sportsclaw add nfl
-#
-# Run (Discord listener):
-#   docker run --rm -e ANTHROPIC_API_KEY=sk-... -e DISCORD_BOT_TOKEN=... sportsclaw listen discord
-#
-# Run (Telegram listener):
-#   docker run --rm -e ANTHROPIC_API_KEY=sk-... -e TELEGRAM_BOT_TOKEN=... sportsclaw listen telegram
 # =============================================================================
 
 FROM node:20-slim AS base
@@ -36,6 +21,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN python3 -c "import sys; assert sys.version_info >= (3, 10), f'Python too old: {sys.version_info}'"
 
 WORKDIR /app
+
+# Change ownership to the non-root 'node' user that comes with the node image
+# Also change ownership of the venv directory so the node user can use/modify it
+RUN chown -R node:node /app && \
+    chown -R node:node /opt/venv
 
 # ---------------------------------------------------------------------------
 # Stage 1: Install Node.js dependencies and build TypeScript
@@ -61,7 +51,8 @@ RUN pip install sports-skills 2>/dev/null || \
 
 # Schema storage inside the container
 ENV SPORTSCLAW_SCHEMA_DIR=/app/.sportsclaw/schemas
-RUN mkdir -p /app/.sportsclaw/schemas
+RUN mkdir -p /app/.sportsclaw/schemas && \
+    chown -R node:node /app/.sportsclaw
 
 # ---------------------------------------------------------------------------
 # Bootstrap: pre-load all 14 default sport schemas into the image
@@ -69,6 +60,9 @@ RUN mkdir -p /app/.sportsclaw/schemas
 
 RUN node dist/index.js init --verbose 2>&1 || \
     echo "[sportsclaw] Warning: schema bootstrap incomplete. Some skills may need manual setup."
+
+# Switch to the non-root user for runtime
+USER node
 
 # The entrypoint is the sportsclaw CLI
 ENTRYPOINT ["node", "dist/index.js"]
