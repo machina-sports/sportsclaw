@@ -69,6 +69,7 @@ import {
 import { AskUserQuestionHalt } from "./ask.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
+import { renderChart, type ChartType } from "./charts.js";
 import { subagentManager, type SubagentResult } from "./subagent.js";
 import { heartbeatService } from "./heartbeat.js";
 
@@ -115,6 +116,13 @@ Your core directives:
    - League standings
    - Recent news
    Issue all tool calls together. Do NOT call them one at a time.
+7b. VISUALIZE DATA — When you have tabular or time-series data (standings points, scoring trends, player stat comparisons), use the \`render_chart\` tool to produce a visual chart instead of listing raw numbers. Choose the right chart type:
+   - \`ascii\`: line charts for trends over time (e.g., win probability, scoring runs)
+   - \`spark\`: compact sparkline for inline trend summaries
+   - \`bars\`: horizontal bars for comparing named categories (e.g., team stats)
+   - \`columns\`: vertical columns for small datasets
+   - \`braille\`: high-density dot plot for compact trend visualization
+   Always fetch the data with sports tools first, then visualize the results. Do not use render_chart without data.
 8. FAN PROFILE — When you see a Fan Profile in [MEMORY], use it to:
    - Skip lookup steps (use stored team_id/competition_id directly)
    - Proactively fetch data for high-interest entities only on truly vague queries
@@ -2057,6 +2065,96 @@ export class sportsclawEngine {
           return `Video generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
           return `Failed to generate video: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
+    // -----------------------------------------------------------------
+    // Chart visualization tool
+    // -----------------------------------------------------------------
+
+    toolMap["render_chart"] = defineTool({
+      description:
+        "Render a terminal-friendly chart from numeric data. Use this to visualize " +
+        "trends, comparisons, and distributions instead of listing raw numbers.\n" +
+        "Chart types:\n" +
+        "- ascii: Line chart with box-drawing characters (best for trends over time)\n" +
+        "- spark: Compact single-row sparkline (best for inline trend summaries)\n" +
+        "- bars: Horizontal bar chart (best for comparing named categories)\n" +
+        "- columns: Vertical column chart (best for small datasets)\n" +
+        "- braille: High-resolution braille dot plot (compact trend visualization)\n" +
+        "- svg: Raw SVG output (for downstream rendering in chat apps)",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          data: {
+            oneOf: [
+              { type: "array", items: { type: "number" } },
+              {
+                type: "array",
+                items: { type: "array", items: { type: "number" } },
+              },
+            ],
+            description:
+              "Array of numbers (single series) or array of arrays (multi-series).",
+          },
+          chartType: {
+            type: "string",
+            enum: ["ascii", "spark", "bars", "columns", "braille", "svg"],
+            description: "Type of chart to render.",
+          },
+          xAxisLabel: {
+            type: "string",
+            description: "Label for the X axis.",
+          },
+          yAxisLabel: {
+            type: "string",
+            description: "Label for the Y axis.",
+          },
+          xLabels: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Labels for each data point (used in bars/columns charts).",
+          },
+          height: {
+            type: "number",
+            description: "Chart height in terminal rows. Default: 12 for ascii, 8 for columns/braille.",
+          },
+        },
+        required: ["data", "chartType"],
+      }),
+      execute: async (args: {
+        data?: number[] | number[][];
+        chartType?: string;
+        xAxisLabel?: string;
+        yAxisLabel?: string;
+        xLabels?: string[];
+        height?: number;
+      }) => {
+        if (!args.data || !Array.isArray(args.data) || args.data.length === 0) {
+          return "Error: data must be a non-empty array of numbers.";
+        }
+        if (!args.chartType) {
+          return "Error: chartType is required.";
+        }
+        const validTypes = ["ascii", "spark", "bars", "columns", "braille", "svg"];
+        if (!validTypes.includes(args.chartType)) {
+          return `Error: unknown chartType "${args.chartType}". Valid: ${validTypes.join(", ")}`;
+        }
+
+        try {
+          const result = renderChart({
+            data: args.data,
+            chartType: args.chartType as ChartType,
+            xAxisLabel: args.xAxisLabel,
+            yAxisLabel: args.yAxisLabel,
+            xLabels: args.xLabels,
+            height: args.height,
+          });
+          return "```\n" + result + "\n```";
+        } catch (error) {
+          return `Chart rendering failed: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
     });
