@@ -93,8 +93,8 @@ function renderSpark(opts: ChartOptions): string {
   const values = flatSeries(opts.data);
   if (values.length === 0) return "(no data)";
 
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = values.reduce((a, b) => Math.min(a, b), Infinity);
+  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
 
   const spark = values
     .map((v) => {
@@ -118,8 +118,8 @@ function renderBars(opts: ChartOptions): string {
   if (values.length === 0) return "(no data)";
 
   const labels = opts.xLabels ?? values.map((_, i) => String(i + 1));
-  const maxLabelLen = Math.max(...labels.map((l) => l.length));
-  const max = Math.max(...values);
+  const maxLabelLen = labels.map((l) => l.length).reduce((a, b) => Math.max(a, b), -Infinity);
+  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
   const BAR_WIDTH = 40;
   const FILL = "█";
 
@@ -144,7 +144,7 @@ function renderColumns(opts: ChartOptions): string {
   if (values.length === 0) return "(no data)";
 
   const labels = opts.xLabels ?? values.map((_, i) => String(i + 1));
-  const max = Math.max(...values);
+  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
   const height = opts.height ?? 8;
 
   const rows: string[] = [];
@@ -182,8 +182,8 @@ function renderBraille(opts: ChartOptions): string {
   const values = flatSeries(opts.data);
   if (values.length === 0) return "(no data)";
 
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = values.reduce((a, b) => Math.min(a, b), Infinity);
+  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
   const height = opts.height ?? 8;
 
   // Braille: each character is a 2×4 dot matrix (2 cols, 4 rows)
@@ -222,7 +222,7 @@ function renderBraille(opts: ChartOptions): string {
         if (x >= values.length) continue;
         for (let dr = 0; dr < 4; dr++) {
           const y = cr * 4 + dr;
-          if (y >= rows && !grid[y]?.[x]) continue;
+          if (!grid[y]?.[x]) continue;
           if (grid[y]?.[x]) {
             code |= DOT_MAP[dc][dr];
           }
@@ -240,6 +240,11 @@ function renderBraille(opts: ChartOptions): string {
   return parts.join("\n");
 }
 
+/** Escape special characters for safe SVG text content. */
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 /** SVG line chart — raw SVG string for downstream rendering. */
 function renderSvg(opts: ChartOptions): string {
   const values = flatSeries(opts.data);
@@ -248,8 +253,8 @@ function renderSvg(opts: ChartOptions): string {
   const W = 600;
   const H = 300;
   const PAD = 40;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = values.reduce((a, b) => Math.min(a, b), Infinity);
+  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
   const xStep = values.length > 1 ? (W - PAD * 2) / (values.length - 1) : 0;
 
   const points = values
@@ -273,12 +278,12 @@ function renderSvg(opts: ChartOptions): string {
   // Axis labels
   if (opts.xAxisLabel) {
     svgParts.push(
-      `  <text x="${W / 2}" y="${H - 8}" text-anchor="middle" fill="#aaa" font-size="12">${opts.xAxisLabel}</text>`
+      `  <text x="${W / 2}" y="${H - 8}" text-anchor="middle" fill="#aaa" font-size="12">${escapeXml(opts.xAxisLabel)}</text>`
     );
   }
   if (opts.yAxisLabel) {
     svgParts.push(
-      `  <text x="12" y="${H / 2}" text-anchor="middle" fill="#aaa" font-size="12" transform="rotate(-90,12,${H / 2})">${opts.yAxisLabel}</text>`
+      `  <text x="12" y="${H / 2}" text-anchor="middle" fill="#aaa" font-size="12" transform="rotate(-90,12,${H / 2})">${escapeXml(opts.yAxisLabel)}</text>`
     );
   }
 
