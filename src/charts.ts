@@ -30,6 +30,25 @@ export interface ChartOptions {
 }
 
 // ---------------------------------------------------------------------------
+// ANSI Colors
+// ---------------------------------------------------------------------------
+
+const ANSI = {
+  reset: "\x1b[0m",
+  cyan: "\x1b[36m",
+  magenta: "\x1b[35m",
+  yellow: "\x1b[33m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  blue: "\x1b[34m",
+  white: "\x1b[37m",
+  dim: "\x1b[2m",
+};
+
+const SERIES_COLORS = [ANSI.cyan, ANSI.magenta, ANSI.yellow, ANSI.green, ANSI.red, ANSI.blue];
+const SERIES_BLOCKS = ["█", "▓", "▒", "░"];
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -105,75 +124,143 @@ function renderSpark(opts: ChartOptions): string {
     .join("");
 
   const parts: string[] = [];
-  if (opts.yAxisLabel) parts.push(`${opts.yAxisLabel}: `);
-  parts.push(spark);
-  parts.push(`  (${min}–${max})`);
-  if (opts.xAxisLabel) parts.push(`\n  ${opts.xAxisLabel}`);
+  if (opts.yAxisLabel) parts.push(`${ANSI.dim}${opts.yAxisLabel}:${ANSI.reset} `);
+  parts.push(`${ANSI.cyan}${spark}${ANSI.reset}`);
+  parts.push(`  ${ANSI.dim}(${min}–${max})${ANSI.reset}`);
+  if (opts.xAxisLabel) parts.push(`\n  ${ANSI.dim}${opts.xAxisLabel}${ANSI.reset}`);
   return parts.join("");
 }
 
-/** Horizontal bar chart. */
+/** Horizontal bar chart with ANSI colors and multi-series support. */
 function renderBars(opts: ChartOptions): string {
-  const values = flatSeries(opts.data);
-  if (values.length === 0) return "(no data)";
+  const series = allSeries(opts.data);
+  if (series.length === 0 || series[0].length === 0) return "(no data)";
 
-  const labels = opts.xLabels ?? values.map((_, i) => String(i + 1));
-  const maxLabelLen = labels.map((l) => l.length).reduce((a, b) => Math.max(a, b), -Infinity);
-  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
+  const numPoints = series[0].length;
+  const labels = opts.xLabels ?? Array.from({ length: numPoints }, (_, i) => String(i + 1));
+  const maxLabelLen = labels.map((l) => l.length).reduce((a, b) => Math.max(a, b), 0);
+  const globalMax = series.flat().reduce((a, b) => Math.max(a, b), -Infinity);
   const BAR_WIDTH = 40;
-  const FILL = "█";
+  const multiSeries = series.length > 1;
 
-  const lines = values.map((v, i) => {
+  const lines: string[] = [];
+
+  for (let i = 0; i < numPoints; i++) {
     const label = (labels[i] ?? String(i + 1)).padStart(maxLabelLen);
-    const barLen = max === 0 ? 0 : Math.round((v / max) * BAR_WIDTH);
-    const bar = FILL.repeat(barLen);
-    return `${label} │ ${bar} ${v}`;
-  });
+    for (let s = 0; s < series.length; s++) {
+      const v = series[s][i] ?? 0;
+      const barLen = globalMax === 0 ? 0 : Math.round((v / globalMax) * BAR_WIDTH);
+      const color = SERIES_COLORS[s % SERIES_COLORS.length];
+      const fill = SERIES_BLOCKS[s % SERIES_BLOCKS.length];
+      const bar = fill.repeat(barLen);
+      const prefix = s === 0 ? `${label} │ ` : `${"".padStart(maxLabelLen)} │ `;
+      lines.push(`${prefix}${color}${bar}${ANSI.reset} ${ANSI.dim}${v}${ANSI.reset}`);
+    }
+    if (multiSeries && i < numPoints - 1) {
+      lines.push(`${"".padStart(maxLabelLen)} │`);
+    }
+  }
+
+  // Legend for multi-series
+  if (multiSeries) {
+    lines.push("");
+    const legend = series
+      .map((_, s) => {
+        const color = SERIES_COLORS[s % SERIES_COLORS.length];
+        const fill = SERIES_BLOCKS[s % SERIES_BLOCKS.length];
+        return `${color}${fill}${fill}${ANSI.reset} Series ${s + 1}`;
+      })
+      .join("  ");
+    lines.push(`  ${legend}`);
+  }
 
   const parts: string[] = [];
-  if (opts.yAxisLabel) parts.push(`  ${opts.yAxisLabel}`);
+  if (opts.yAxisLabel) parts.push(`  ${ANSI.dim}${opts.yAxisLabel}${ANSI.reset}`);
   parts.push(...lines);
-  if (opts.xAxisLabel) parts.push(`  ${opts.xAxisLabel}`);
+  if (opts.xAxisLabel) parts.push(`  ${ANSI.dim}${opts.xAxisLabel}${ANSI.reset}`);
   return parts.join("\n");
 }
 
-/** Vertical column chart. */
+/** Vertical column chart with ANSI colors and multi-series support. */
 function renderColumns(opts: ChartOptions): string {
   const BLOCKS = "▁▂▃▄▅▆▇█";
-  const values = flatSeries(opts.data);
-  if (values.length === 0) return "(no data)";
+  const series = allSeries(opts.data);
+  if (series.length === 0 || series[0].length === 0) return "(no data)";
 
-  const labels = opts.xLabels ?? values.map((_, i) => String(i + 1));
-  const max = values.reduce((a, b) => Math.max(a, b), -Infinity);
+  const numPoints = series[0].length;
+  const labels = opts.xLabels ?? Array.from({ length: numPoints }, (_, i) => String(i + 1));
+  const globalMax = series.flat().reduce((a, b) => Math.max(a, b), -Infinity);
   const height = opts.height ?? 8;
+  const multiSeries = series.length > 1;
+  // Each data point gets one column per series, separated by a gap between points
+  const colsPerPoint = series.length;
+  const totalCols = numPoints * colsPerPoint + (numPoints - 1); // gaps between points
 
   const rows: string[] = [];
 
   // Build column grid top-down
   for (let row = height; row >= 1; row--) {
-    const threshold = (row / height) * max;
-    const prevThreshold = ((row - 1) / height) * max;
-    const cells = values.map((v) => {
-      if (v >= threshold) return "█";
-      if (v > prevThreshold) {
-        const frac = (v - prevThreshold) / (threshold - prevThreshold);
-        const idx = Math.round(frac * (BLOCKS.length - 1));
-        return BLOCKS[idx];
+    const threshold = (row / height) * globalMax;
+    const prevThreshold = ((row - 1) / height) * globalMax;
+    let line = "  ";
+    for (let p = 0; p < numPoints; p++) {
+      if (p > 0) line += " "; // gap between points
+      for (let s = 0; s < series.length; s++) {
+        const v = series[s][p] ?? 0;
+        const color = SERIES_COLORS[s % SERIES_COLORS.length];
+        if (v >= threshold) {
+          line += `${color}█${ANSI.reset}`;
+        } else if (v > prevThreshold) {
+          const frac = (v - prevThreshold) / (threshold - prevThreshold);
+          const idx = Math.round(frac * (BLOCKS.length - 1));
+          line += `${color}${BLOCKS[idx]}${ANSI.reset}`;
+        } else {
+          line += " ";
+        }
       }
-      return " ";
-    });
-    rows.push("  " + cells.join(" "));
+    }
+    rows.push(line);
   }
 
+  // Values row
+  const valRow = series[0].map((v, p) => {
+    if (multiSeries) {
+      return series.map((ser) => String(ser[p] ?? 0)).join("/");
+    }
+    return String(v);
+  });
+  const maxValLen = Math.max(colsPerPoint, ...valRow.map((v) => v.length));
+
   // Baseline
-  rows.push("  " + "─".repeat(values.length * 2 - 1));
-  // Labels
-  rows.push("  " + labels.map((l) => l.charAt(0)).join(" "));
+  rows.push("  " + "─".repeat(totalCols));
+  // Labels (truncated to fit column width)
+  const labelRow = labels.map((l) => {
+    const width = multiSeries ? colsPerPoint : 1;
+    return l.substring(0, width).padEnd(width);
+  });
+  rows.push("  " + labelRow.join(" "));
+  // Value row below labels
+  rows.push("  " + valRow.map((v) => {
+    const width = multiSeries ? colsPerPoint : 1;
+    return `${ANSI.dim}${v.substring(0, Math.max(width, v.length)).padEnd(width)}${ANSI.reset}`;
+  }).join(" "));
+
+  // Legend for multi-series
+  if (multiSeries) {
+    rows.push("");
+    const legend = series
+      .map((_, s) => {
+        const color = SERIES_COLORS[s % SERIES_COLORS.length];
+        return `${color}██${ANSI.reset} Series ${s + 1}`;
+      })
+      .join("  ");
+    rows.push(`  ${legend}`);
+  }
 
   const parts: string[] = [];
-  if (opts.yAxisLabel) parts.push(`  ${opts.yAxisLabel}`);
+  if (opts.yAxisLabel) parts.push(`  ${ANSI.dim}${opts.yAxisLabel}${ANSI.reset}`);
   parts.push(...rows);
-  if (opts.xAxisLabel) parts.push(`  ${opts.xAxisLabel}`);
+  if (opts.xAxisLabel) parts.push(`  ${ANSI.dim}${opts.xAxisLabel}${ANSI.reset}`);
   return parts.join("\n");
 }
 
