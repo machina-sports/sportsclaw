@@ -15,6 +15,8 @@
  *   sportsclaw stop <platform>  — Stop a running daemon
  *   sportsclaw status           — Show daemon status
  *   sportsclaw logs <platform>  — Tail daemon log output
+ *   sportsclaw plugin install <name> — Install an optional plugin (e.g. auto-clipper)
+ *   sportsclaw plugin list        — List installed plugins
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
  *
  * Or import as a library:
@@ -75,6 +77,7 @@ import {
   getAggregateStats,
   getToolMetrics,
 } from "./analytics.js";
+import { cmdPlugin } from "./plugin.js";
 import {
   daemonStart,
   daemonStop,
@@ -1415,6 +1418,8 @@ function printHelp(): void {
   console.log("  sportsclaw restart <platform>      Restart a running daemon");
   console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
+  console.log("  sportsclaw plugin install <name>   Install an optional plugin");
+  console.log("  sportsclaw plugin list             List installed plugins");
   console.log("");
   console.log("Default skills (selected during first-run config):");
   console.log("  football-data, nfl-data, nba-data, nhl-data, mlb-data, wnba-data,");
@@ -1617,6 +1622,8 @@ async function main(): Promise<void> {
       return cmdAgents();
     case "analytics":
       return cmdAnalytics(subArgs);
+    case "plugin":
+      return cmdPlugin(subArgs);
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);
