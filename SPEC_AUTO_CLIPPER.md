@@ -34,3 +34,18 @@ The `auto-clipper` MUST support dual output modes:
 
 ## 6. Global Agentic Flag
 The `--yes` (or `--non-interactive`) flag MUST NOT be isolated to just this plugin. It must be implemented globally across the entire `sportsclaw` CLI harness so that AI agents can run *any* setup, install, or config command autonomously without hanging on stdin prompts.
+
+## 7. Multi-Provider LLM Authentication
+The `sportsclaw` engine MUST support a multi-provider credential keychain (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` stored concurrently). 
+Since the `auto-clipper` plugin strictly relies on Gemini's multimodal vision capabilities:
+- If the user's primary/active LLM in `sportsclaw` is already Gemini, proceed seamlessly.
+- If the user is running Claude/OpenAI and triggers the clipper, the CLI MUST intercept the execution and prompt: "Auto-Clipper requires Gemini Vision models. Please authenticate with a Gemini API key to continue." It then securely stores this key alongside their existing provider keys.
+
+## 8. "Smart" Local File Sync (Zero-Input)
+Users should NOT have to manually provide a `--sync-start` offset. 
+Instead, the CLI utilizes **Gemini Vision OCR**:
+1. It extracts a few sampled frames from the first 10 minutes of the video.
+2. It passes them to Gemini with the prompt: *"Read the on-screen broadcast scorebug. Find the exact video timestamp where the match clock starts (e.g., 00:00 for Q1/H1)."*
+3. Gemini returns the exact video timestamp of kickoff/tip-off.
+4. The engine automatically maps this anchor point to the Play-by-Play (PBP) data API timestamps. 
+Result: The user simply runs `sportsclaw clip ./match.mp4 --match-id epl_9876 --query "All goals"`, and the engine handles the temporal alignment autonomously.
