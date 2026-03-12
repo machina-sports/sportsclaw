@@ -26,3 +26,11 @@ The installer must be best-in-class for both human developers and autonomous AI 
 3. Implement the dependency checker (`which ffmpeg`) and auto-installer functions.
 4. Implement the model downloader (fetches the ONNX model to the local cache).
 5. Ensure the code follows strict TypeScript guidelines and error handling.
+
+## 5. Output Formats (Landscape vs Vertical)
+The `auto-clipper` MUST support dual output modes:
+1. **Original Ratio (Landscape):** Just cut the video based on the PBP event timestamps (e.g., T-5s to T+3s) and keep the original 16:9 broadcast ratio. Fast and simple.
+2. **Auto-Track (Vertical):** Cut the video AND run the YOLOv8 tracking to crop to 9:16 vertical format (TikTok/Reels), keeping the tracked subject in the center.
+
+## 6. Global Agentic Flag
+The `--yes` (or `--non-interactive`) flag MUST NOT be isolated to just this plugin. It must be implemented globally across the entire `sportsclaw` CLI harness so that AI agents can run *any* setup, install, or config command autonomously without hanging on stdin prompts.
