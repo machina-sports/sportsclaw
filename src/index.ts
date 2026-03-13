@@ -78,6 +78,7 @@ import {
   getToolMetrics,
 } from "./analytics.js";
 import { cmdPlugin } from "./plugin.js";
+import { cmdClip } from "./clipper.js";
 import {
   daemonStart,
   daemonStop,
@@ -1622,7 +1623,11 @@ async function main(): Promise<void> {
       return cmdAgents();
     case "analytics":
       return cmdAnalytics(subArgs);
-    case "plugin":
+    
+    case "clip":
+      await cmdClip();
+      break;
+case "plugin":
       return cmdPlugin(subArgs);
     default:
       // Not a subcommand — treat the entire args as a query prompt

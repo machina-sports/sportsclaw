@@ -9,6 +9,29 @@ const CRED_DIR = path.join(os.homedir(), ".sportsclaw");
 const CRED_FILE = path.join(CRED_DIR, "credentials.json");
 
 // Multi-LLM Credential Manager
+
+function migrateLegacyConfig() {
+  const CONFIG_FILE = path.join(CRED_DIR, "config.json");
+  if (!fs.existsSync(CONFIG_FILE)) return;
+  try {
+    const legacy = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+    if (legacy.apiKey && legacy.provider) {
+      const providerToKey: Record<string, string> = {
+        google: "GEMINI_API_KEY",
+        anthropic: "ANTHROPIC_API_KEY",
+        openai: "OPENAI_API_KEY",
+      };
+      const keyName = providerToKey[legacy.provider];
+      if (keyName) {
+        saveCredentials({ [keyName]: legacy.apiKey });
+        p.log.info(`Migrated legacy ${legacy.provider} API key to the new multi-LLM keychain.`);
+      }
+    }
+  } catch (e) {
+    // ignore parse errors
+  }
+}
+
 function getCredentials() {
   if (!fs.existsSync(CRED_FILE)) return {};
   return JSON.parse(fs.readFileSync(CRED_FILE, "utf-8"));
@@ -21,12 +44,13 @@ function saveCredentials(creds: Record<string, string>) {
 }
 
 async function ensureGeminiAuth() {
+  migrateLegacyConfig();
   const creds = getCredentials();
   if (creds.GEMINI_API_KEY || process.env.GEMINI_API_KEY) {
     return creds.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   }
 
-  p.log.warn("The Auto-Clipper requires Gemini's Vision models (Twelve Labs parity).");
+  p.log.warn("The Auto-Clipper requires Gemini's Vision models for multimodal analysis.");
   const key = await p.text({
     message: "Please authenticate with a Gemini API key to continue:",
     placeholder: "AIzaSy...",
