@@ -1625,7 +1625,7 @@ async function main(): Promise<void> {
       return cmdAnalytics(subArgs);
     
     case "clip":
-      await cmdClip();
+      await cmdClip(subArgs);
       break;
 case "plugin":
       return cmdPlugin(subArgs);
