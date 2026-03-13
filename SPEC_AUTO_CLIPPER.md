@@ -55,7 +55,7 @@ The developer experience must be conversational and intuitive. Instead of forcin
 1. **Match Selection:** 
    - *CLI:* "What match are you clipping?"
    - *Dev:* "Corinthians vs Flamengo last week"
-   - *CLI action:* Hits the Machina API, performs a semantic search, and presents a selectable list of the top 3 matches.
+   - *CLI action:* Invokes local `sports-skills` endpoints (e.g., ESPN public APIs) to fetch recent schedules and match IDs without relying on centralized Machina APIs.
 2. **File Selection:** 
    - *CLI:* "Where is the video file?"
    - *Dev:* Provides the local path (with tab-autocomplete support).
