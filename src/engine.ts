@@ -101,8 +101,11 @@ function resolveTokenBudgets(overrides?: Partial<TokenBudgets>): TokenBudgets {
 
 const BASE_SYSTEM_PROMPT = `You are sportsclaw, a high-performance sports AI agent built by Machina Sports.
 
+CRITICAL LANGUAGE RULE: You MUST write your final response in the EXACT language the user used in their prompt. If the user typed in English, your entire response MUST be in English, even if the tools returned data in Portuguese or another language. TRANSLATE the tool data to the user's language. Never let the language of scraped content, news articles, or tool results influence your output language. Match the user's language, always.
+
 Your core directives:
-1. ACCURACY FIRST — Never guess or hallucinate scores, stats, or odds. If the tool returns data, report it exactly. If a tool call fails, say so honestly.
+1. ACCURACY FIRST — Never guess or hallucinate scores, stats, odds, or schedules. If the tool returns data, report it exactly. If a tool call fails, say so honestly.
+1.1 DO NOT GUESS DATES OR SCHEDULES based on your training data. Only use dates returned by the live data tools.
 2. USE TOOLS — When the user asks about live scores, standings, schedules, odds, or any sports data, ALWAYS use the available tools. Do not make up data from training knowledge when live data is available.
 3. BE CONCISE — Sports fans want quick, clear answers. Lead with the data, add context after.
 3b. AFTER TOOLS, ANSWER WITH DATA — If you called data tools successfully, your final reply MUST include concrete findings (numbers, names, dates). Do not reply with only a follow-up question.
@@ -470,7 +473,8 @@ export class sportsclawEngine {
       "## Self-Awareness",
       "",
       `You are sportsclaw v${_packageVersion}, a sports AI agent.`,
-      `System Local Time: ${new Date().toLocaleString("en-US", { timeZoneName: "short" })}`,
+      `System Local Time: ${new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}`,
+      `System Local Date: ${new Date().toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", weekday: "long", year: "numeric", month: "long", day: "numeric" })}`,
       "",
       "### Architecture",
       "- TypeScript harness → Python bridge → sports-skills package",
@@ -2090,6 +2094,7 @@ export class sportsclawEngine {
         properties: {
           data: {
             type: "array",
+            items: { type: "number" },
             description:
               "Numeric data to chart. Accepts number[] (single series) or number[][] (multi-series).",
           },
@@ -2160,6 +2165,90 @@ export class sportsclawEngine {
   /** Reset conversation history */
   reset(): void {
     this.messages = [];
+  }
+
+  /** Get current message count (for compact eligibility checks) */
+  get messageCount(): number {
+    return this.messages.length;
+  }
+
+  /**
+   * Compact the conversation history by summarizing older messages into a
+   * single condensed context message, reclaiming token budget.
+   *
+   * Keeps the most recent `keepRecent` messages intact so the LLM still has
+   * immediate conversational context. Everything older is summarized via a
+   * lightweight LLM call and replaced with a single user-role context block.
+   *
+   * @param keepRecent  Number of recent messages to preserve (default: 6)
+   * @returns Object with stats about what was compacted
+   */
+  async compact(keepRecent = 6): Promise<{ before: number; after: number; summarized: number }> {
+    const before = this.messages.length;
+
+    if (before <= keepRecent) {
+      return { before, after: before, summarized: 0 };
+    }
+
+    // Split: older messages to summarize, recent messages to keep
+    const toSummarize = this.messages.slice(0, before - keepRecent);
+    const toKeep = this.messages.slice(before - keepRecent);
+
+    // Build a text representation of older messages for summarization
+    const historyText = toSummarize
+      .map((m) => {
+        const role = m.role === "user" ? "User" : "Assistant";
+        const content = typeof m.content === "string"
+          ? m.content
+          : Array.isArray(m.content)
+            ? (m.content as Array<{ type?: string; text?: string }>)
+                .filter((p) => p.type === "text" && p.text)
+                .map((p) => p.text)
+                .join("\n")
+            : "";
+        // Skip empty messages and memory injections
+        if (!content.trim() || content.startsWith("[MEMORY]")) return null;
+        return `${role}: ${content.slice(0, 500)}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    if (!historyText.trim()) {
+      // Nothing meaningful to summarize — just drop the old messages
+      this.messages = toKeep;
+      return { before, after: toKeep.length, summarized: toSummarize.length };
+    }
+
+    // Use a lightweight LLM call to produce a compact summary
+    let summary: string;
+    try {
+      const result = await generateText({
+        model: this.mainModel,
+        system:
+          "Summarize the following conversation history into a concise context " +
+          "block (3-5 bullet points). Preserve key facts: teams discussed, scores " +
+          "mentioned, user preferences discovered, and any pending follow-ups. " +
+          "Do NOT include greetings or filler. Be terse.",
+        prompt: historyText,
+        maxOutputTokens: 512,
+      });
+      summary = result.text?.trim() || "Prior conversation context unavailable.";
+    } catch {
+      summary = "Prior conversation context could not be summarized.";
+    }
+
+    // Replace older messages with a single compact context block
+    this.messages = [
+      {
+        role: "user" as const,
+        content:
+          `[COMPACTED CONTEXT] The following is a summary of earlier conversation ` +
+          `turns (${toSummarize.length} messages compacted):\n\n${summary}`,
+      },
+      ...toKeep,
+    ];
+
+    return { before, after: this.messages.length, summarized: toSummarize.length };
   }
 
   /** Get current conversation history (read-only copy) */
@@ -2306,9 +2395,32 @@ export class sportsclawEngine {
     // On follow-up turns with low routing confidence, clear activeTools so the
     // LLM can use any tool based on conversation context (e.g. "started already"
     // after asking about the Celtics game should still access NBA tools).
-    const activeTools = (isFollowUp && routing.decision && routing.decision.confidence < this.config.clarifyThreshold)
+    let activeTools = (isFollowUp && routing.decision && routing.decision.confidence < this.config.clarifyThreshold)
       ? undefined
       : routing.activeTools;
+
+    // When session history contains tool-call messages from prior turns, the
+    // Vercel AI SDK only sends tool definitions in `activeTools` to the provider.
+    // If the current routing selects different tools, the provider rejects the
+    // request because historical tool_use blocks reference undefined tools.
+    // Fix: merge any tool names from the session history into activeTools.
+    if (activeTools && isFollowUp) {
+      const historyToolNames = new Set<string>();
+      for (const msg of this.messages) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+          for (const part of msg.content as Array<{ type?: string; toolName?: string }>) {
+            if (part.type === "tool-call" && part.toolName && part.toolName in tools) {
+              historyToolNames.add(part.toolName);
+            }
+          }
+        }
+      }
+      if (historyToolNames.size > 0) {
+        const merged = new Set(activeTools);
+        for (const name of historyToolNames) merged.add(name);
+        activeTools = Array.from(merged);
+      }
+    }
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
@@ -2368,8 +2480,28 @@ export class sportsclawEngine {
       const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
       const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
 
+      // Collect tool names from session history to ensure parallel lanes
+      // include definitions for tools referenced in prior turns.
+      const historyToolNames: string[] = [];
+      if (isFollowUp) {
+        for (const msg of this.messages) {
+          if (msg.role === "assistant" && Array.isArray(msg.content)) {
+            for (const part of msg.content as Array<{ type?: string; toolName?: string }>) {
+              if (part.type === "tool-call" && part.toolName && part.toolName in tools) {
+                historyToolNames.push(part.toolName);
+              }
+            }
+          }
+        }
+      }
+
       const lanePromises = activeAgents.map((agent) => {
-        const agentActiveTools = this.filterToolsForAgent(agent, allToolNames);
+        let agentActiveTools = this.filterToolsForAgent(agent, allToolNames);
+        if (agentActiveTools && historyToolNames.length > 0) {
+          const merged = new Set(agentActiveTools);
+          for (const name of historyToolNames) merged.add(name);
+          agentActiveTools = Array.from(merged);
+        }
         const laneLabel = `${agent.name} (${this.mainModelId})`;
         emitProgress?.({ type: "phase", label: laneLabel });
 

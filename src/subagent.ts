@@ -97,6 +97,8 @@ const RESTRICTED_TOOLS = new Set([
 
 export class SubagentManager {
   private activeTasks = new Map<string, SubagentTask>();
+  private abortControllers = new Map<string, AbortController>();
+  private cleanupTimer: NodeJS.Timeout | null = null;
   private maxPerUser: number;
   private maxTurns: number;
   private maxTokens: number;
@@ -107,6 +109,12 @@ export class SubagentManager {
     this.maxTurns = options?.maxTurns ?? 10;
     this.maxTokens = options?.maxTokens ?? 4096;
     this.onResult = options?.onResult;
+
+    // Periodic cleanup of completed tasks (every 10 minutes).
+    // unref() so this timer never prevents the Node.js event loop
+    // from exiting — critical for IPC-only / pipe-mode usage.
+    this.cleanupTimer = setInterval(() => this.cleanup(), 10 * 60 * 1000);
+    this.cleanupTimer.unref();
   }
 
   /** Register or replace the result callback */
@@ -129,6 +137,21 @@ export class SubagentManager {
   /** List all tasks (active + recent completed) */
   getAllTasks(): SubagentTask[] {
     return Array.from(this.activeTasks.values());
+  }
+
+  /**
+   * Gracefully shut down the manager: abort all in-flight subagents
+   * and stop the cleanup timer so the event loop can exit.
+   */
+  shutdown(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    for (const [id, controller] of this.abortControllers) {
+      controller.abort();
+      this.abortControllers.delete(id);
+    }
   }
 
   /**
@@ -167,8 +190,13 @@ export class SubagentManager {
 
     this.activeTasks.set(id, task);
 
+    // Create an AbortController for this subagent so shutdown() can
+    // cancel in-flight LLM calls and let the event loop exit cleanly.
+    const ac = new AbortController();
+    this.abortControllers.set(id, ac);
+
     // Fire and forget — run in background
-    this.executeSubagent(task, params).catch((err) => {
+    this.executeSubagent(task, params, ac.signal).catch((err) => {
       console.error(
         `[sportsclaw:subagent] Fatal error in ${id}: ${err instanceof Error ? err.message : err}`
       );
@@ -206,7 +234,8 @@ export class SubagentManager {
       config: sportsclawConfig;
       registry: ToolRegistry;
       thinkingBudget?: number;
-    }
+    },
+    abortSignal?: AbortSignal
   ): Promise<void> {
     const startTime = Date.now();
 
@@ -225,6 +254,7 @@ export class SubagentManager {
         system: systemPrompt,
         prompt: task.prompt,
         tools,
+        abortSignal,
         stopWhen: stepCountIs(this.maxTurns),
         maxOutputTokens: this.maxTokens,
         ...(providerOpts ? { providerOptions: providerOpts } : {}),
@@ -236,12 +266,14 @@ export class SubagentManager {
       task.result = text;
       task.completedAt = new Date().toISOString();
 
+      this.abortControllers.delete(task.id);
       this.deliverResult(task, startTime);
     } catch (err) {
       task.status = "failed";
       task.error = err instanceof Error ? err.message : String(err);
       task.completedAt = new Date().toISOString();
 
+      this.abortControllers.delete(task.id);
       this.deliverResult(task, startTime);
     }
   }

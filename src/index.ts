@@ -679,7 +679,7 @@ function createToolTracker(
 // CLI: `sportsclaw add <sport>`
 // ---------------------------------------------------------------------------
 
-async function cmdAdd(args: string[]): Promise<void> {
+async function cmdAdd(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
   const sport = args[0];
   if (!sport) {
     console.error("Usage: sportsclaw add <sport>");
@@ -713,7 +713,7 @@ async function cmdAdd(args: string[]): Promise<void> {
 // CLI: `sportsclaw remove <sport>`
 // ---------------------------------------------------------------------------
 
-function cmdRemove(args: string[]): void {
+function cmdRemove(args: string[], opts?: { fromChat?: boolean }): void {
   const sport = args[0];
   if (!sport) {
     console.error("Usage: sportsclaw remove <sport>");
@@ -732,7 +732,7 @@ function cmdRemove(args: string[]): void {
 // CLI: `sportsclaw list`
 // ---------------------------------------------------------------------------
 
-function cmdList(): void {
+function cmdList(opts?: { fromChat?: boolean }): void {
   const schemas = listSchemas();
   if (schemas.length === 0) {
     console.log("No sport schemas installed.");
@@ -750,7 +750,7 @@ function cmdList(): void {
 // CLI: `sportsclaw doctor` — diagnose and fix common issues
 // ---------------------------------------------------------------------------
 
-async function cmdDoctor(): Promise<void> {
+async function cmdDoctor(opts?: { fromChat?: boolean }): Promise<void> {
   const { pythonPath, provider, model, apiKey } = resolveConfig();
   let allGood = true;
 
@@ -869,7 +869,7 @@ async function cmdDoctor(): Promise<void> {
 // CLI: `sportsclaw init`
 // ---------------------------------------------------------------------------
 
-async function cmdInit(args: string[]): Promise<void> {
+async function cmdInit(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const all = args.includes("--all") || args.includes("-a");
   const { pythonPath } = resolveConfig();
@@ -995,6 +995,125 @@ async function cmdListen(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Slash-command hotkey interception
+// ---------------------------------------------------------------------------
+
+type PromptResult =
+  | { type: "input"; value: string; history: string[] }
+  | { type: "slash" }
+  | null;
+
+/**
+ * Prompt for user input with live "/" hotkey interception.
+ * When "/" is the first character typed on an empty line, immediately
+ * cancels readline and returns `{ type: "slash" }` so the caller can
+ * show the slash-command menu without requiring Enter.
+ */
+function promptWithSlashIntercept(
+  promptText: string,
+  history: string[],
+): Promise<PromptResult> {
+  return new Promise((resolve) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      history,
+      historySize: 200,
+      removeHistoryDuplicates: false,
+      terminal: true,
+    });
+
+    let settled = false;
+
+    const onKeypress = (ch: string | undefined) => {
+      if (settled) return;
+      const line = (rl as unknown as { line: string }).line;
+      if (ch === "/" && line === "/") {
+        settled = true;
+        process.stdin.removeListener("keypress", onKeypress);
+        rl.close();
+        // Clear the prompt + "/" from the terminal line
+        process.stdout.write("\r\x1B[K");
+        resolve({ type: "slash" });
+      }
+    };
+
+    process.stdin.on("keypress", onKeypress);
+
+    rl.question(promptText)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        process.stdin.removeListener("keypress", onKeypress);
+        const snap = [...(rl as unknown as { history: string[] }).history];
+        rl.close();
+        resolve({ type: "input", value, history: snap });
+      })
+      .catch(() => {
+        if (settled) return;
+        settled = true;
+        process.stdin.removeListener("keypress", onKeypress);
+        rl.close();
+        resolve(null);
+      });
+  });
+}
+
+/**
+ * Show the interactive slash-command select menu.
+ * Returns the selected command string (e.g. "/reset") when the caller
+ * needs to handle it, or `true` if the command was fully handled here.
+ */
+async function handleSlashMenu(): Promise<true | string> {
+  const selection = await p.select({
+    message: "Select a command:",
+    options: [
+      { value: "/clip", label: "/clip", hint: "Launch the auto-clipper conversational wizard" },
+      { value: "/skills", label: "/skills", hint: "List and manage installed sports-skills" },
+      { value: "/channels", label: "/channels", hint: "Configure chat integrations (Discord, Telegram)" },
+      { value: "/stats", label: "/stats", hint: "View usage statistics and token consumption" },
+      { value: "/compact", label: "/compact", hint: "Summarize older messages to reclaim token budget" },
+      { value: "/reset", label: "/reset", hint: "Clear conversation history and memory state" },
+      { value: "/help", label: "/help", hint: "Open the interactive guide" },
+      { value: "/deploy", label: pc.dim("/deploy (soon)"), hint: pc.dim("Direct deployment of workflows to Machina Cloud") },
+      { value: "/live", label: pc.dim("/live (soon)"), hint: pc.dim("Real-time live-streaming monitor mode") },
+    ],
+  });
+
+  if (p.isCancel(selection)) {
+    console.log("");
+    return true;
+  }
+
+  if (selection === "/deploy" || selection === "/live") {
+    console.log(pc.dim("\n  Coming Soon — " + selection + " is on the roadmap.\n"));
+    return true;
+  }
+
+  // Commands the caller needs to handle (they mutate local state)
+  if (selection === "/reset") {
+    return "/reset";
+  }
+  if (selection === "/compact") {
+    return "/compact";
+  }
+
+  if (selection === "/clip") {
+    await cmdClip([], { fromChat: true });
+  } else if (selection === "/skills") {
+    cmdList({ fromChat: true });
+  } else if (selection === "/channels") {
+    await cmdChannels({ fromChat: true });
+  } else if (selection === "/stats") {
+    cmdAnalytics(["summary"], { fromChat: true });
+  } else if (selection === "/help") {
+    printHelp();
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw chat` — persistent REPL conversation
 // ---------------------------------------------------------------------------
 
@@ -1068,35 +1187,112 @@ async function cmdChat(args: string[]): Promise<void> {
 
   // REPL loop — each turn feeds history back through the same engine instance
   while (true) {
-    const rl = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      history: chatHistory,
-      historySize: 200,
-      removeHistoryDuplicates: false,
-      terminal: true,
-    });
+    const promptResult = await promptWithSlashIntercept(
+      `${pc.dim("You")}  `,
+      chatHistory,
+    );
 
-    let input: string;
-    try {
-      input = await rl.question(`${pc.dim("You")}  `);
-    } catch {
-      rl.close();
+    // EOF / Ctrl-C
+    if (!promptResult) {
       p.outro("See you.");
       break;
     }
 
-    // Preserve history across readline instances (property exists at runtime)
-    const snapshot = [...(rl as unknown as { history: string[] }).history];
-    rl.close();
-    chatHistory.length = 0;
-    chatHistory.push(...snapshot);
+    // "/" hotkey intercepted — show slash-command menu immediately
+    if (promptResult.type === "slash") {
+      const menuResult = await handleSlashMenu();
+      if (menuResult === "/reset") {
+        engine.reset();
+        await memory.writeContext("");
+        await memory.writeThread([]);
+        console.log(pc.green("✔ Conversation history and memory cleared."));
+      } else if (menuResult === "/compact") {
+        const msgCount = engine.messageCount;
+        if (msgCount <= 6) {
+          console.log(pc.dim(`\n  Nothing to compact (${msgCount} messages in history).\n`));
+        } else {
+          const s = p.spinner();
+          s.start("Compacting conversation history...");
+          const compactResult = await engine.compact();
+          s.stop(
+            pc.green("✔") +
+            ` Compacted: ${compactResult.before} → ${compactResult.after} messages ` +
+            `(${compactResult.summarized} summarized)`
+          );
+        }
+      }
+      continue;
+    }
 
-    const prompt = input.trim();
+    // Normal text input — preserve history across readline instances
+    chatHistory.length = 0;
+    chatHistory.push(...promptResult.history);
+
+    const prompt = promptResult.value.trim();
     if (!prompt) continue;
     if (prompt === "exit" || prompt === "quit") {
       p.outro("See you.");
       break;
+    }
+
+    // Fallback: "/" or "sportsclaw /" typed and submitted with Enter
+    if (prompt === "sportsclaw /" || prompt === "/") {
+      const menuResult = await handleSlashMenu();
+      if (menuResult === "/reset") {
+        engine.reset();
+        await memory.writeContext("");
+        await memory.writeThread([]);
+        console.log(pc.green("✔ Conversation history and memory cleared."));
+      } else if (menuResult === "/compact") {
+        const msgCount = engine.messageCount;
+        if (msgCount <= 6) {
+          console.log(pc.dim(`\n  Nothing to compact (${msgCount} messages in history).\n`));
+        } else {
+          const s = p.spinner();
+          s.start("Compacting conversation history...");
+          const compactResult = await engine.compact();
+          s.stop(
+            pc.green("✔") +
+            ` Compacted: ${compactResult.before} → ${compactResult.after} messages ` +
+            `(${compactResult.summarized} summarized)`
+          );
+        }
+      }
+      continue;
+    }
+
+    // Direct slash command shortcuts (without dropdown)
+    if (prompt === "/clip") { await cmdClip([], { fromChat: true }); continue; }
+    if (prompt === "/skills") { cmdList({ fromChat: true }); continue; }
+    if (prompt === "/channels") { await cmdChannels({ fromChat: true }); continue; }
+    if (prompt === "/stats") { cmdAnalytics(["summary"], { fromChat: true }); continue; }
+    if (prompt === "/compact") {
+      const msgCount = engine.messageCount;
+      if (msgCount <= 6) {
+        console.log(pc.dim(`\n  Nothing to compact (${msgCount} messages in history).\n`));
+      } else {
+        const s = p.spinner();
+        s.start("Compacting conversation history...");
+        const result = await engine.compact();
+        s.stop(
+          pc.green("✔") +
+          ` Compacted: ${result.before} → ${result.after} messages ` +
+          `(${result.summarized} summarized)`
+        );
+      }
+      continue;
+    }
+    if (prompt === "/reset") {
+      engine.reset();
+      await memory.writeContext("");
+      await memory.writeThread([]);
+      console.log(pc.green("✔ Conversation history and memory cleared."));
+      continue;
+    }
+    if (prompt === "/help") { printHelp(); continue; }
+    if (prompt === "/deploy" || prompt === "/live") {
+      console.log(pc.dim("\n  Coming Soon — " + prompt + " is on the roadmap.\n"));
+      continue;
     }
 
     if (prompt === "restart" || prompt === "/restart" || prompt === "/claw restart") {
@@ -1118,60 +1314,57 @@ async function cmdChat(args: string[]): Promise<void> {
       continue;
     }
 
-    // Skip the old exit logic to avoid duping
-
-      if (verbose) {
-        try {
-          const result = await engine.run(prompt, { userId });
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
-          await saveGeneratedImages(engine);
-          await saveGeneratedVideos(engine);
-        } catch (error: unknown) {
-          if (error instanceof Error) {
-            console.error(`Error: ${error.message}`);
-          } else {
-            console.error("An unknown error occurred:", error);
-          }
-        }
-      } else {
-        // In chat REPL, ESC cancellation can cause duplicate user input echoes
-        // with readline on some terminals. Keep cancellation disabled here.
-        const cancel = setupEscCancellation({ enabled: false });
-        // readline already echoed "You  <input>" — just start the spinner below
-        const s = p.spinner();
-        const tracker = createToolTracker(s, {
-          showCancelHint: cancel.showCancelHint,
-        });
-        s.start("Thinking");
-        tracker.start();
-        try {
-          const result = await engine.run(prompt, {
-            userId,
-            onProgress: tracker.handler,
-            abortSignal: cancel.abortSignal,
-          });
-          s.stop(tracker.doneSummary());
-          console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
-          await saveGeneratedImages(engine);
-          await saveGeneratedVideos(engine);
-        } catch (error: unknown) {
-          if (cancel.wasCancelled() || isAbortError(error)) {
-            s.stop(tracker.cancelledSummary());
-            console.log("");
-            continue;
-          }
-          s.stop(tracker.errorSummary());
-          if (error instanceof Error) {
-            console.error(`Error: ${error.message}`);
-          } else {
-            console.error("An unknown error occurred:", error);
-          }
-        } finally {
-          tracker.stop();
-          cancel.cleanup();
+    if (verbose) {
+      try {
+        const result = await engine.run(prompt, { userId });
+        console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+        await saveGeneratedImages(engine);
+        await saveGeneratedVideos(engine);
+      } catch (error: unknown) {
+        if (error instanceof Error) {
+          console.error(`Error: ${error.message}`);
+        } else {
+          console.error("An unknown error occurred:", error);
         }
       }
+    } else {
+      // In chat REPL, ESC cancellation can cause duplicate user input echoes
+      // with readline on some terminals. Keep cancellation disabled here.
+      const cancel = setupEscCancellation({ enabled: false });
+      const s = p.spinner();
+      const tracker = createToolTracker(s, {
+        showCancelHint: cancel.showCancelHint,
+      });
+      s.start("Thinking");
+      tracker.start();
+      try {
+        const result = await engine.run(prompt, {
+          userId,
+          onProgress: tracker.handler,
+          abortSignal: cancel.abortSignal,
+        });
+        s.stop(tracker.doneSummary());
+        console.log(`\n${pc.bold(pc.cyan("sportsclaw"))}\n${renderMarkdown(result)}\n`);
+        await saveGeneratedImages(engine);
+        await saveGeneratedVideos(engine);
+      } catch (error: unknown) {
+        if (cancel.wasCancelled() || isAbortError(error)) {
+          s.stop(tracker.cancelledSummary());
+          console.log("");
+          continue;
+        }
+        s.stop(tracker.errorSummary());
+        if (error instanceof Error) {
+          console.error(`Error: ${error.message}`);
+        } else {
+          console.error("An unknown error occurred:", error);
+        }
+      } finally {
+        tracker.stop();
+        cancel.cleanup();
+      }
     }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,23 +1649,23 @@ function printHelp(): void {
 // CLI: `sportsclaw config` — interactive configuration wizard
 // ---------------------------------------------------------------------------
 
-async function cmdConfig(): Promise<void> {
-  await runConfigFlow();
+async function cmdConfig(opts?: { fromChat?: boolean }): Promise<void> {
+  await runConfigFlow(opts);
 }
 
 // ---------------------------------------------------------------------------
 // CLI: `sportsclaw channels` — channel token wizard
 // ---------------------------------------------------------------------------
 
-async function cmdChannels(): Promise<void> {
-  await runChannelsFlow();
+async function cmdChannels(opts?: { fromChat?: boolean }): Promise<void> {
+  await runChannelsFlow(opts);
 }
 
 // ---------------------------------------------------------------------------
 // CLI: `sportsclaw agents` — list installed agents
 // ---------------------------------------------------------------------------
 
-function cmdAgents(): void {
+function cmdAgents(opts?: { fromChat?: boolean }): void {
   if (needsAgentBootstrap()) {
     bootstrapDefaultAgents();
   }
@@ -1499,16 +1692,16 @@ function cmdAgents(): void {
 // CLI: `sportsclaw setup [prompt]` — AI-native setup wizard
 // ---------------------------------------------------------------------------
 
-async function cmdSetup(args: string[]): Promise<void> {
+async function cmdSetup(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
   const prompt = args.filter((a) => !a.startsWith("-")).join(" ").trim() || undefined;
-  await runSetup(prompt);
+  await runSetup(prompt, opts);
 }
 
 // ---------------------------------------------------------------------------
 // Analytics Command
 // ---------------------------------------------------------------------------
 
-function cmdAnalytics(args: string[]): void {
+function cmdAnalytics(args: string[], opts?: { fromChat?: boolean }): void {
   const subCmd = args[0];
 
   if (subCmd === "report" || !subCmd) {

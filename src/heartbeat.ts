@@ -157,6 +157,12 @@ export class HeartbeatService {
         );
       });
     }, this.intervalMs);
+
+    // Allow the Node.js event loop to exit naturally even while the
+    // heartbeat is running. Without unref(), this timer keeps the process
+    // alive indefinitely — problematic for IPC-only / pipe-mode usage
+    // where the parent orchestrator controls the lifecycle.
+    this.timer.unref();
   }
 
   /** Stop the heartbeat polling loop */
@@ -440,6 +446,7 @@ export class HeartbeatService {
           );
         });
       }, job.intervalMs);
+      timer.unref();
       this.cronTimers.set(job.id, timer);
     }
   }
