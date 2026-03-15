@@ -1000,7 +1000,6 @@ async function cmdListen(args: string[]): Promise<void> {
 
 type PromptResult =
   | { type: "input"; value: string; history: string[] }
-  | { type: "slash" }
   | null;
 
 /**
@@ -1023,18 +1022,40 @@ function promptWithSlashIntercept(
       terminal: true,
     });
 
-    let settled = false;
+    // Command hints to show when user types /
+    const commands = [
+      { cmd: "/clip", hint: "Launch auto-clipper" },
+      { cmd: "/skills", hint: "List sports-skills" },
+      { cmd: "/channels", hint: "Configure integrations" },
+      { cmd: "/stats", hint: "View usage stats" },
+      { cmd: "/compact", hint: "Summarize messages" },
+      { cmd: "/reset", hint: "Clear history" },
+      { cmd: "/help", hint: "Show help" },
+    ];
 
-    const onKeypress = (ch: string | undefined) => {
+    let settled = false;
+    let slashShown = false;
+
+    const showCommandHints = () => {
+      if (slashShown) return;
+      slashShown = true;
+      console.log(pc.dim("\n  Commands: ") + commands.map(c => pc.cyan(c.cmd) + pc.dim(` (${c.hint})`)).join(pc.dim(" | ")));
+      console.log(pc.dim("  Or type any command directly. Press Tab to autocomplete.\n"));
+    };
+
+    const onKeypress = (ch: string | undefined, key: { name?: string }) => {
       if (settled) return;
       const line = (rl as unknown as { line: string }).line;
+      
+      // Show hints on /, but don't block - let user keep typing
       if (ch === "/" && line === "/") {
-        settled = true;
-        process.stdin.removeListener("keypress", onKeypress);
-        rl.close();
-        // Clear the prompt + "/" from the terminal line
-        process.stdout.write("\r\x1B[K");
-        resolve({ type: "slash" });
+        showCommandHints();
+        // Don't intercept - let them keep typing!
+      }
+      
+      // Tab autocomplete (if we implement later)
+      if (key?.name === "tab") {
+        // Future: implement tab autocomplete
       }
     };
 
@@ -1196,32 +1217,6 @@ async function cmdChat(args: string[]): Promise<void> {
     if (!promptResult) {
       p.outro("See you.");
       break;
-    }
-
-    // "/" hotkey intercepted — show slash-command menu immediately
-    if (promptResult.type === "slash") {
-      const menuResult = await handleSlashMenu();
-      if (menuResult === "/reset") {
-        engine.reset();
-        await memory.writeContext("");
-        await memory.writeThread([]);
-        console.log(pc.green("✔ Conversation history and memory cleared."));
-      } else if (menuResult === "/compact") {
-        const msgCount = engine.messageCount;
-        if (msgCount <= 6) {
-          console.log(pc.dim(`\n  Nothing to compact (${msgCount} messages in history).\n`));
-        } else {
-          const s = p.spinner();
-          s.start("Compacting conversation history...");
-          const compactResult = await engine.compact();
-          s.stop(
-            pc.green("✔") +
-            ` Compacted: ${compactResult.before} → ${compactResult.after} messages ` +
-            `(${compactResult.summarized} summarized)`
-          );
-        }
-      }
-      continue;
     }
 
     // Normal text input — preserve history across readline instances
