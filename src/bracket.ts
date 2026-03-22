@@ -54,6 +54,7 @@ export interface BracketTeam {
   name: string;
   teamId?: string;
   region: BracketRegionName;
+  bpi?: number;
 }
 
 export interface BracketMatchup {
@@ -65,6 +66,10 @@ export interface BracketMatchup {
   topSeed: BracketTeam | null;
   bottomSeed: BracketTeam | null;
   pick: "top" | "bottom" | null;
+  simTopWinPct?: number;
+  simBottomWinPct?: number;
+  simRecommendedPick?: "top" | "bottom";
+  simConfidence?: "lock" | "strong" | "lean" | "tossup";
 }
 
 export interface BracketSession {
@@ -80,6 +85,16 @@ export interface BracketSession {
   picksCompleted: number;
   totalMatchups: number;
   seedSource: "manual" | "espn" | "rankings";
+  simulation?: {
+    ranAt: string;
+    iterations: number;
+    topContenders: Array<{
+      name: string;
+      seed: number;
+      region: string;
+      championPct: number;
+    }>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -617,4 +632,81 @@ export function toBracketChartData(
       winner,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Simulation integration
+// ---------------------------------------------------------------------------
+
+import type { SimulationResult, SimBracketStrategy } from "./bracket-sim.js";
+
+/**
+ * Annotate bracket matchups with Monte Carlo simulation data and save
+ * top contenders to the session metadata. Does NOT modify picks.
+ */
+export function applySimulationToBracket(
+  session: BracketSession,
+  simResult: SimulationResult,
+): void {
+  const simMap = new Map(simResult.matchups.map((m) => [m.matchId, m]));
+
+  for (const matchup of session.matchups) {
+    const sim = simMap.get(matchup.matchId);
+    if (sim) {
+      matchup.simTopWinPct = sim.topWinPct;
+      matchup.simBottomWinPct = sim.bottomWinPct;
+      matchup.simRecommendedPick = sim.recommendedPick;
+      matchup.simConfidence = sim.confidence;
+    }
+  }
+
+  session.simulation = {
+    ranAt: new Date().toISOString(),
+    iterations: simResult.config.iterations,
+    topContenders: simResult.topContenders.map((t) => ({
+      name: t.name,
+      seed: t.seed,
+      region: t.region,
+      championPct: t.championPct,
+    })),
+  };
+}
+
+/**
+ * Auto-fill all bracket picks from a simulation strategy.
+ * Processes round by round so that winners cascade correctly.
+ */
+export function autoFillBracketFromSim(
+  session: BracketSession,
+  strategy: SimBracketStrategy,
+  simResult: SimulationResult,
+): { filled: number; cascadeCleared: string[] } {
+  const strategyPicks = simResult.strategies[strategy]?.picks;
+  if (!strategyPicks) {
+    return { filled: 0, cascadeCleared: [] };
+  }
+
+  const pickMap = new Map(strategyPicks.map((p) => [p.matchId, p.pick]));
+  let filled = 0;
+  const allCascadeCleared: string[] = [];
+
+  // Process round by round (1→6) so cascading works
+  for (let round = 1; round <= 6; round++) {
+    const roundMatchups = session.matchups
+      .filter((m) => m.round === round)
+      .sort((a, b) => a.matchIndex - b.matchIndex);
+
+    for (const matchup of roundMatchups) {
+      if (!matchup.topSeed || !matchup.bottomSeed) continue;
+
+      const pick = pickMap.get(matchup.matchId);
+      if (!pick) continue;
+
+      const { cascadeCleared } = makePick(session, matchup.matchId, pick);
+      filled++;
+      allCascadeCleared.push(...cascadeCleared);
+    }
+  }
+
+  return { filled, cascadeCleared: allCascadeCleared };
 }

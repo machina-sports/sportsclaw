@@ -344,7 +344,7 @@ export class ToolRegistry {
    * Internal tools should skip caching.
    */
   private shouldSkipCache(toolName: string): boolean {
-    return this.isInternalTool(toolName);
+    return this.isInternalTool(toolName) || toolName.startsWith("mcp__");
   }
 
   /**

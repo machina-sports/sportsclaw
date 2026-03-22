@@ -15,6 +15,9 @@
  *   sportsclaw stop <platform>  — Stop a running daemon
  *   sportsclaw status           — Show daemon status
  *   sportsclaw logs <platform>  — Tail daemon log output
+ *   sportsclaw mcp add <url>        — Connect an MCP server
+ *   sportsclaw mcp remove <name>   — Disconnect an MCP server
+ *   sportsclaw mcp list            — List configured MCP servers
  *   sportsclaw plugin install <name> — Install an optional plugin (e.g. auto-clipper)
  *   sportsclaw plugin list        — List installed plugins
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
@@ -29,6 +32,7 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
+import { Transform, type TransformCallback } from "node:stream";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
@@ -47,7 +51,7 @@ import {
   getCachedSchemaVersion,
   DEFAULT_SKILLS,
 } from "./schema.js";
-import type { LLMProvider, ToolProgressEvent } from "./types.js";
+import type { LLMProvider, ToolProgressEvent, McpServerConfig } from "./types.js";
 import {
   loadConfig,
   saveConfig,
@@ -56,6 +60,8 @@ import {
   runConfigFlow,
   runChannelsFlow,
   runSportSelectionFlow,
+  writeEnvVar,
+  ENV_PATH,
   ASCII_LOGO,
 } from "./config.js";
 import {
@@ -88,6 +94,12 @@ import {
   isValidPlatform,
 } from "./daemon.js";
 import { runSetup } from "./setup.js";
+import {
+  loadMcpConfigs,
+  saveMcpConfigs,
+  removeMcpConfig,
+  getMcpConfigPath,
+} from "./mcp.js";
 
 
 // ---------------------------------------------------------------------------
@@ -188,6 +200,11 @@ export {
   REGIONS, ROUND_NAMES,
 } from "./bracket.js";
 export type { BracketTeam, BracketMatchup, BracketSession } from "./bracket.js";
+export { applySimulationToBracket, autoFillBracketFromSim } from "./bracket.js";
+
+// Monte Carlo bracket simulation
+export { simulateBracket, fetchTournamentField } from "./bracket-sim.js";
+export type { SimTeam, SimConfig, SimulationResult } from "./bracket-sim.js";
 
 // Sprint 3: Subagent spawning
 export {
@@ -1022,8 +1039,75 @@ const SLASH_COMMANDS = [
 ];
 
 /**
- * Simple readline-based prompt with slash-command tab completion
- * and a one-line hint when "/" is typed.
+ * A newline placeholder that is extremely unlikely to appear in real
+ * user input.  During a bracketed paste we replace \n with this so
+ * readline sees a single long "line".  After readline delivers the
+ * value we restore the original newlines.
+ */
+const PASTE_NL = "\x00\x1F\x00";
+
+/**
+ * Transform stream that sits between process.stdin and readline.
+ *
+ * - Enables bracketed paste mode on the terminal.
+ * - Strips the \x1B[200~ (start) and \x1B[201~ (end) escape sequences.
+ * - While inside a paste bracket, replaces \r\n and \n with PASTE_NL
+ *   so readline never sees a newline and therefore never fires "line"
+ *   until the user presses Enter after the paste.
+ */
+class BracketedPasteTransform extends Transform {
+  private pasting = false;
+  private buf = "";
+
+  _transform(chunk: Buffer, _encoding: string, cb: TransformCallback): void {
+    let str = chunk.toString();
+
+    // Process bracket open/close — they may be split across chunks so
+    // we accumulate in this.buf, but in practice terminals send them in
+    // one write.
+    str = this.buf + str;
+    this.buf = "";
+
+    while (str.length > 0) {
+      const openIdx = str.indexOf("\x1B[200~");
+      const closeIdx = str.indexOf("\x1B[201~");
+
+      if (!this.pasting) {
+        if (openIdx === -1) {
+          // No paste start — pass through verbatim
+          this.push(str);
+          str = "";
+        } else {
+          // Pass text before the bracket, then enter paste mode
+          if (openIdx > 0) this.push(str.slice(0, openIdx));
+          str = str.slice(openIdx + 6); // skip \x1B[200~
+          this.pasting = true;
+        }
+      } else {
+        // Inside a paste
+        if (closeIdx === -1) {
+          // No close bracket yet — buffer newlines and push rest
+          str = str.replace(/\r?\n/g, PASTE_NL);
+          this.push(str);
+          str = "";
+        } else {
+          // Close bracket found — replace newlines in the pasted part
+          const pasted = str.slice(0, closeIdx).replace(/\r?\n/g, PASTE_NL);
+          this.push(pasted);
+          str = str.slice(closeIdx + 6); // skip \x1B[201~
+          this.pasting = false;
+        }
+      }
+    }
+
+    cb();
+  }
+}
+
+/**
+ * Simple readline-based prompt with slash-command tab completion,
+ * a one-line hint when "/" is typed, and **bracketed-paste** support
+ * so multi-line pastes (paragraphs, JSON, etc.) arrive as one input.
  */
 function promptWithSlashIntercept(
   promptText: string,
@@ -1056,8 +1140,16 @@ function promptWithSlashIntercept(
       return [hits.length ? hits : SLASH_COMMANDS.map(c => c.cmd), line];
     };
 
+    // Pipe stdin through the bracketed-paste transform so readline
+    // never sees newlines inside a paste.
+    const pasteTransform = new BracketedPasteTransform();
+    process.stdin.pipe(pasteTransform);
+
+    // Enable bracketed paste mode on the terminal
+    process.stdout.write("\x1B[?2004h");
+
     const rl = createInterface({
-      input: process.stdin,
+      input: pasteTransform,
       output: process.stdout,
       terminal: true,
       completer,
@@ -1081,12 +1173,23 @@ function promptWithSlashIntercept(
     };
     process.stdin.on("keypress", onKeypress);
 
-    rl.question(promptText).then((value: string) => {
+    const cleanup = () => {
       process.stdin.removeListener("keypress", onKeypress);
+      process.stdin.unpipe(pasteTransform);
+      pasteTransform.destroy();
+      // Disable bracketed paste mode
+      process.stdout.write("\x1B[?2004l");
+    };
+
+    rl.question(promptText).then((raw: string) => {
+      cleanup();
       // Clear any leftover hint line
       if (hintShown) {
         process.stdout.write(`\x1B[1B\x1B[2K\x1B[1A`);
       }
+      // Restore real newlines from the paste placeholder
+      const value = raw.replaceAll(PASTE_NL, "\n");
+
       // Snapshot history from the readline instance
       const updatedHistory = (rl as unknown as { history: string[] }).history
         ? [...(rl as unknown as { history: string[] }).history]
@@ -1094,7 +1197,7 @@ function promptWithSlashIntercept(
       rl.close();
       resolve({ type: "input", value, history: updatedHistory });
     }).catch(() => {
-      process.stdin.removeListener("keypress", onKeypress);
+      cleanup();
       rl.close();
       resolve(null);
     });
@@ -1603,6 +1706,149 @@ function cmdLogs(args: string[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw mcp` — MCP server management
+// ---------------------------------------------------------------------------
+
+function serverNameFromUrl(url: string): string {
+  try {
+    const hostname = new URL(url).hostname;
+    // e.g. "machina-podcasts-adidas-tracker.org.machina.gg" → "adidas-tracker"
+    const parts = hostname.split(".");
+    const sub = parts[0];
+    // Strip common prefixes like "machina-podcasts-"
+    return sub.replace(/^machina-podcasts-/, "").replace(/^mcp-/, "") || sub;
+  } catch {
+    return "mcp-server";
+  }
+}
+
+async function cmdMcp(args: string[]): Promise<void> {
+  const sub = args[0];
+
+  if (sub === "add") {
+    const url = args[1];
+    if (!url) {
+      console.error("Usage: sportsclaw mcp add <url> [--name <name>] [--token <token>] [--description <desc>]");
+      console.error("Example: sportsclaw mcp add https://my-pod.machina.gg/mcp/sse --name my-pod");
+      process.exit(1);
+    }
+
+    // Parse optional flags
+    let name: string | undefined;
+    let token: string | undefined;
+    let description: string | undefined;
+    let timeoutMs: number | undefined;
+
+    for (let i = 2; i < args.length; i++) {
+      if ((args[i] === "--name" || args[i] === "-n") && args[i + 1]) {
+        name = args[++i];
+      } else if ((args[i] === "--token" || args[i] === "-t") && args[i + 1]) {
+        token = args[++i];
+      } else if ((args[i] === "--description" || args[i] === "-d") && args[i + 1]) {
+        description = args[++i];
+      } else if (args[i] === "--timeout" && args[i + 1]) {
+        timeoutMs = Number.parseInt(args[++i], 10);
+      }
+    }
+
+    // Auto-derive name from URL if not provided
+    if (!name) {
+      name = serverNameFromUrl(url);
+    }
+
+    // Validate name
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      console.error(`Invalid server name "${name}". Use only alphanumeric, hyphens, and underscores.`);
+      process.exit(1);
+    }
+
+    // Build server config
+    const configs = loadMcpConfigs();
+    const isUpdate = name in configs;
+    const config: McpServerConfig = {
+      url,
+      ...(description ? { description } : {}),
+      ...(timeoutMs && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+    };
+
+    configs[name] = config;
+    saveMcpConfigs(configs);
+
+    // Store token in ~/.sportsclaw/.env (not in mcp.json — keep secrets separate)
+    if (token) {
+      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      writeEnvVar(ENV_PATH, envKey, token);
+      console.log(pc.dim(`Token saved to ${ENV_PATH} as ${envKey}`));
+    }
+
+    console.log(
+      isUpdate
+        ? pc.green(`Updated MCP server "${name}"`)
+        : pc.green(`Added MCP server "${name}"`)
+    );
+    console.log(`  URL: ${url}`);
+    if (description) console.log(`  Description: ${description}`);
+    if (timeoutMs) console.log(`  Timeout: ${timeoutMs}ms`);
+    console.log(pc.dim(`Config: ${getMcpConfigPath()}`));
+
+    if (!token) {
+      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      console.log("");
+      console.log(pc.yellow("No token provided. If the server requires auth, add one:"));
+      console.log(`  sportsclaw mcp add ${url} --name ${name} --token <your-token>`);
+      console.log(pc.dim(`  Or set ${envKey} in your environment`));
+    }
+
+  } else if (sub === "remove") {
+    const name = args[1];
+    if (!name) {
+      console.error("Usage: sportsclaw mcp remove <name>");
+      process.exit(1);
+    }
+
+    if (removeMcpConfig(name)) {
+      console.log(pc.green(`Removed MCP server "${name}"`));
+    } else {
+      console.error(`No MCP server found with name "${name}".`);
+      const configs = loadMcpConfigs();
+      if (Object.keys(configs).length > 0) {
+        console.error(`Available: ${Object.keys(configs).join(", ")}`);
+      }
+      process.exit(1);
+    }
+
+  } else if (sub === "list" || !sub) {
+    const configs = loadMcpConfigs();
+    const names = Object.keys(configs);
+
+    if (names.length === 0) {
+      console.log("No MCP servers configured.");
+      console.log("");
+      console.log("Add one with:");
+      console.log("  sportsclaw mcp add <url> --name <name> --token <token>");
+      return;
+    }
+
+    console.log(pc.bold(`MCP Servers (${names.length})`) + `  ${pc.dim(getMcpConfigPath())}`);
+    console.log("");
+    for (const [name, config] of Object.entries(configs)) {
+      const desc = config.description ? pc.dim(` — ${config.description}`) : "";
+      const timeout = config.timeoutMs ? pc.dim(` [${config.timeoutMs}ms]`) : "";
+      console.log(`  ${pc.cyan(name.padEnd(24))} ${config.url}${desc}${timeout}`);
+      if (config.tools?.length) {
+        console.log(`  ${" ".repeat(24)} ${pc.dim(`tools: ${config.tools.join(", ")}`)}`);
+      }
+    }
+    console.log("");
+
+  } else {
+    console.error(`Unknown mcp subcommand: "${sub}"`);
+    console.error("Usage: sportsclaw mcp [add|remove|list]");
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw --help` — usage text
 // ---------------------------------------------------------------------------
 
@@ -1628,6 +1874,9 @@ function printHelp(): void {
   console.log("  sportsclaw restart <platform>      Restart a running daemon");
   console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
+  console.log("  sportsclaw mcp add <url>           Connect an MCP server (Machina pod, etc.)");
+  console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
+  console.log("  sportsclaw mcp list                List configured MCP servers");
   console.log("  sportsclaw plugin install <name>   Install an optional plugin");
   console.log("  sportsclaw plugin list             List installed plugins");
   console.log("");
@@ -1838,6 +2087,8 @@ async function main(): Promise<void> {
       break;
 case "plugin":
       return cmdPlugin(subArgs);
+    case "mcp":
+      return cmdMcp(subArgs);
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);

@@ -326,6 +326,10 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   /** Whitelist of tool names to register. If omitted, all tools are registered. */
   tools?: string[];
+  /** Per-server call timeout in ms (default: 30000) */
+  timeoutMs?: number;
+  /** Server description injected into LLM system prompt for tool context */
+  description?: string;
 }
 
 // ---------------------------------------------------------------------------

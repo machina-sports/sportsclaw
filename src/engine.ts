@@ -79,8 +79,13 @@ import { renderChart, type ChartType, type BracketMatch } from "./charts.js";
 import {
   createBracket, loadBracket, saveBracket, listBrackets, deleteBracket,
   makePick, getBracketProgress, getNextMatchups, toBracketChartData,
+  applySimulationToBracket, autoFillBracketFromSim,
   type BracketTeam, type BracketSession, type BracketRegionName, REGIONS,
 } from "./bracket.js";
+import {
+  fetchTournamentField, simulateBracket,
+  type SimConfig, type SimBracketStrategy,
+} from "./bracket-sim.js";
 import { subagentManager, type SubagentResult } from "./subagent.js";
 import { heartbeatService } from "./heartbeat.js";
 
@@ -172,6 +177,12 @@ Your core directives:
     - After completing each region, show bracket_view for that region
     - The user can resume later — bracket state persists across sessions
     - When user says "show my bracket" or "resume bracket", call bracket_status first
+12.7 BRACKET SIMULATION — When the user wants AI help picking their bracket:
+    - Run bracket_simulate to get Monte Carlo analysis (uses BPI + ESPN projections + sportsbook odds)
+    - Present top 10 championship contenders with percentages
+    - For each matchup, show the sim recommendation and confidence level
+    - Offer "most_likely", "best_upset", or "kalshi_optimal" strategies
+    - User can auto-fill from a strategy or pick manually with sim guidance
 13. FAILURE DISCIPLINE — If any requested data tool fails, you MUST:
     - Explicitly mark that section as unavailable.
     - Avoid analysis or conclusions for the failed data dimension.
@@ -235,6 +246,24 @@ const CONVERSATIONAL_INTENT_PATTERNS = [
 /** Returns true when the prompt is purely conversational */
 function isConversationalIntent(prompt: string): boolean {
   return CONVERSATIONAL_INTENT_PATTERNS.some((p) => p.test(prompt));
+}
+
+/** Patterns that indicate MCP/pod-related intents — not sport queries */
+const MCP_INTENT_PATTERNS = [
+  // CRUD + pod entity noun
+  /\b(search|list|find|show|get|browse|create|save|store|update|delete|remove|execute|run)\b.*\b(document|workflow|agent|connector|prompt|template)\b/i,
+  // Pod entity noun + CRUD
+  /\b(document|workflow|agent|connector|prompt|template)\b.*\b(search|list|find|show|get|create|save|store|update|delete|remove|execute|run)\b/i,
+  // Direct pod/machina references
+  /\b(pod|machina|mcp)\b/i,
+  // "what's in the pod" / "what do I have" patterns
+  /\bwhat\b.*\b(document|workflow|agent|connector|capabilities?|installed|available)\b/i,
+  // Template operations
+  /\b(install|import).*template\b/i,
+];
+
+function isMcpIntent(prompt: string): boolean {
+  return MCP_INTENT_PATTERNS.some((p) => p.test(prompt));
 }
 
 /** Filter out undefined values so they don't override defaults during merge */
@@ -421,7 +450,10 @@ export class sportsclawEngine {
     });
     this.loadDynamicSchemas();
     this.agents = loadAgents();
-    this.mcpManager = new McpManager(this.config.verbose);
+    this.mcpManager = new McpManager(
+      this.config.verbose,
+      process.argv.includes("--refresh-mcp")
+    );
     this.skillGuides = loadSkillGuides(this.config.verbose);
 
     if (this.config.verbose && this.agents.length > 0) {
@@ -537,15 +569,96 @@ export class sportsclawEngine {
     ];
     parts.push(...selfAwareness);
 
-    // List available tools for the LLM
+    // List available tools for the LLM — group MCP tools with descriptions
     const allSpecs = this.registry.getAllToolSpecs();
-    const toolNames = allSpecs.map((s) => s.name);
-    if (toolNames.length > 1) {
+    const pythonTools = allSpecs.filter((s) => !s.name.startsWith("mcp__"));
+    const mcpTools = allSpecs.filter((s) => s.name.startsWith("mcp__"));
+
+    if (pythonTools.length > 0) {
       parts.push(
         "",
-        `Available tools: ${toolNames.join(", ")}`,
+        `Available tools: ${pythonTools.map((s) => s.name).join(", ")}`,
         "Use the most specific tool available for each query."
       );
+    }
+
+    if (mcpTools.length > 0) {
+      const serverDescs = this.mcpManager.getServerDescriptions();
+      // Group MCP tools by server
+      const byServer = new Map<string, typeof mcpTools>();
+      for (const spec of mcpTools) {
+        const serverName = spec.name.split("__")[1];
+        if (!byServer.has(serverName)) byServer.set(serverName, []);
+        byServer.get(serverName)!.push(spec);
+      }
+
+      parts.push("", "### MCP Server Tools (Cloud Pods)");
+      for (const [server, tools] of byServer) {
+        const desc = serverDescs.get(server);
+        parts.push(`\n**${server}**${desc ? ` — ${desc}` : ""}`);
+        for (const tool of tools) {
+          parts.push(`- ${tool.name}: ${tool.description}`);
+        }
+      }
+      parts.push(
+        "",
+        "MCP tools connect to cloud services. They may be slower than local tools. " +
+          "If an MCP tool returns an error_code, check the hint field before retrying."
+      );
+
+      // Pod strategy — decision tree for when to use MCP vs Python tools
+      parts.push(
+        "",
+        "### Pod Strategy",
+        "When answering queries, follow this decision order:",
+        "1. **CHECK POD FIRST** — use search_documents, search_agents, search_workflows to see what stored data/capabilities exist",
+        "2. **USE PYTHON SKILLS** for live/real-time data — scores, standings, odds, schedules change constantly",
+        "3. **COMBINE BOTH** for rich answers — pod context (analyses, research) alongside live Python data",
+        "4. **SAVE TO POD** — use create_document to persist valuable insights for future queries",
+        "5. **USE WORKFLOWS/AGENTS** — execute_workflow and execute_agent for complex multi-step tasks",
+        "",
+        "Rules:",
+        "- Pod queries (documents, workflows, agents, connectors, templates) → MCP tools only",
+        "- Live sports data (scores, standings, real-time odds) → Python skills",
+        "- Analysis, research, historical context → check pod first, supplement with live data",
+        "- Never ask 'which sport?' for pod-related queries — they are not sport queries"
+      );
+
+      // Machina entity reference
+      parts.push(
+        "",
+        "### Machina Pod Entities",
+        "- **Documents**: Persistent data store. `search_documents` to query, `create_document` to save, `update_document` to modify. Documents have name, description, filters (tags), and value (JSON payload).",
+        "- **Workflows**: Multi-step pipelines chaining tasks (prompts, docs, connectors). Use `execute_workflow` with inputs. Check `workflow-status` in response.",
+        "- **Agents**: Orchestrators chaining workflows in sequence with conditional logic. Use `execute_agent` for complex multi-workflow tasks.",
+        "- **Connectors**: External service integrations (Python or REST). `connector_search` to discover, `connector_executor` to call.",
+        "- **Prompts**: Reusable LLM templates with structured output. `execute_prompt` for one-shot reasoning.",
+        "- **Templates**: Bundles of agents+workflows+connectors+prompts. `import_template_from_git` to install."
+      );
+
+      // Pod inventory — what's actually installed
+      const podCaps = this.mcpManager.getPodCapabilities();
+      if (podCaps.size > 0) {
+        const sections: string[] = [];
+        for (const [server, caps] of podCaps) {
+          const prefix = podCaps.size > 1 ? `[${server}] ` : "";
+          if (caps.workflows.length > 0)
+            sections.push(`${prefix}**Workflows:** ${caps.workflows.map((w) => w.name).join(", ")}`);
+          if (caps.agents.length > 0)
+            sections.push(`${prefix}**Agents:** ${caps.agents.map((a) => a.name).join(", ")}`);
+          if (caps.connectors.length > 0)
+            sections.push(`${prefix}**Connectors:** ${caps.connectors.map((c) => c.name).join(", ")}`);
+        }
+        if (sections.length > 0) {
+          parts.push(
+            "",
+            "### Pod Inventory (discovered at startup)",
+            ...sections,
+            "",
+            "These are pre-installed capabilities you can execute directly."
+          );
+        }
+      }
     }
 
     // Inject evolved strategies as system-level directives (above memory/agent sections).
@@ -672,7 +785,31 @@ export class sportsclawEngine {
     memoryBlock?: string
   ): Promise<{ activeTools?: string[]; decision?: RouteDecision; routeMeta?: RouteMeta }> {
     const installedSkills = this.registry.getInstalledSkills();
-    if (installedSkills.length === 0) return {};
+    if (installedSkills.length === 0) {
+      // No Python sport schemas installed — but MCP tools may still be available
+      const mcpToolNames = toolNames.filter((n) => n.startsWith("mcp__"));
+      if (mcpToolNames.length > 0) {
+        // Include internal tools alongside MCP tools
+        const internalNames = toolNames.filter((n) =>
+          n === "generate_image" || n === "generate_video" ||
+          n.startsWith("update_") || n === "reflect" || n === "evolve_strategy" ||
+          n === "get_agent_config" || n === "install_sport" || n === "remove_sport" ||
+          n === "upgrade_sports_skills" || n === "spawn_subagent" || n === "list_subagents" ||
+          n === "schedule_task" || n === "list_scheduled_tasks" || n === "cancel_scheduled_task" ||
+          n === "consolidate_memory"
+        );
+        return {
+          activeTools: [...internalNames, ...mcpToolNames],
+          decision: {
+            selectedSkills: [],
+            mode: "focused" as const,
+            confidence: 0.8,
+            reason: "MCP-only mode — no sport schemas installed",
+          },
+        };
+      }
+      return {};
+    }
 
     // Build recent conversation context from user messages (excluding memory
     // injections) so the LLM router can infer which sport is being discussed
@@ -1032,9 +1169,11 @@ export class sportsclawEngine {
           // 30 000 chars ≈ ~8 000 tokens — plenty for any single tool result.
           const MAX_TOOL_CHARS = 30_000;
           if (result.content.length > MAX_TOOL_CHARS) {
+            const totalChars = result.content.length;
             return (
               result.content.slice(0, MAX_TOOL_CHARS) +
-              "\n\n[... output truncated — result was too large to fit in context]"
+              `\n\n[... output truncated: showing ${MAX_TOOL_CHARS.toLocaleString()} of ${totalChars.toLocaleString()} chars. ` +
+              `Re-query with more specific filters or pagination to get the remaining data.]`
             );
           }
           return result.content;
@@ -2225,6 +2364,17 @@ export class sportsclawEngine {
       },
     });
 
+    // Helper: count confidence levels in a strategy's picks
+    function countConfidence(
+      picks: Array<{ confidence: string }>,
+    ): Record<string, number> {
+      const counts: Record<string, number> = {};
+      for (const p of picks) {
+        counts[p.confidence] = (counts[p.confidence] ?? 0) + 1;
+      }
+      return counts;
+    }
+
     // -----------------------------------------------------------------
     // March Madness Bracket Builder
     // -----------------------------------------------------------------
@@ -2588,6 +2738,187 @@ export class sportsclawEngine {
       },
     });
 
+    toolMap["bracket_simulate"] = defineTool({
+      description:
+        "Run a Monte Carlo simulation on a bracket using BPI ratings, " +
+        "ESPN tournament projections, and sportsbook futures. Returns " +
+        "championship contenders, per-matchup win probabilities, and " +
+        "strategy recommendations. Can optionally auto-fill all picks.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          bracket_id: {
+            type: "string",
+            description: "The bracket session ID to simulate.",
+          },
+          iterations: {
+            type: "number",
+            description:
+              "Number of Monte Carlo iterations (default 10,000). " +
+              "Higher = more accurate but slower.",
+          },
+          strategy: {
+            type: "string",
+            enum: ["most_likely", "best_upset", "kalshi_optimal"],
+            description:
+              "Strategy to generate. 'most_likely' always picks " +
+              "the higher-probability team. 'best_upset' picks " +
+              "calculated upsets in early rounds, chalk in late rounds. " +
+              "'kalshi_optimal' maximizes expected Kalshi scoring points " +
+              "(10/20/40/80/160/320 per round) by favoring teams with " +
+              "high downstream advancement value.",
+          },
+          auto_fill: {
+            type: "boolean",
+            description:
+              "If true AND strategy is set, auto-fill all bracket " +
+              "picks from the strategy (with cascading).",
+          },
+        },
+        required: ["bracket_id"],
+      }),
+      execute: async (args: {
+        bracket_id?: string;
+        iterations?: number;
+        strategy?: string;
+        auto_fill?: boolean;
+      }) => {
+        if (!args.bracket_id) {
+          return "Error: bracket_id is required.";
+        }
+        try {
+          const session = await loadBracket(bracketUserId, args.bracket_id);
+          if (!session) {
+            return `Error: bracket "${args.bracket_id}" not found.`;
+          }
+
+          // Fetch tournament field data from Python bridge
+          const { teams: fieldData, sources, weights } =
+            await fetchTournamentField(config);
+
+          // Build enriched team map from bracket + fetched data
+          const normalize = (s: string) =>
+            s.toLowerCase().replace(/[^a-z0-9]/g, "");
+          const dataByName = new Map(
+            fieldData.map((t) => [normalize(t.name), t]),
+          );
+
+          // Match bracket teams to fetched data
+          const teamData = new Map<
+            string,
+            import("./bracket-sim.js").SimTeam
+          >();
+          for (const m of session.matchups) {
+            if (m.round !== 1) continue;
+            for (const team of [m.topSeed, m.bottomSeed]) {
+              if (!team || teamData.has(team.name)) continue;
+              const key = normalize(team.name);
+              const match = dataByName.get(key);
+              if (match) {
+                teamData.set(team.name, {
+                  ...match,
+                  seed: team.seed,
+                  region: team.region,
+                  name: team.name,
+                  teamId: team.teamId ?? match.teamId,
+                });
+              } else {
+                // Seed-based BPI fallback
+                teamData.set(team.name, {
+                  seed: team.seed,
+                  name: team.name,
+                  teamId: team.teamId ?? "",
+                  region: team.region,
+                  bpi: 95 - ((team.seed - 1) / 15) * 30,
+                });
+              }
+            }
+          }
+
+          // Run simulation
+          const simConfig: SimConfig = {
+            iterations: args.iterations ?? 10_000,
+            weights,
+          };
+          const simResult = simulateBracket(session, teamData, simConfig);
+
+          // Apply sim annotations to bracket matchups
+          applySimulationToBracket(session, simResult);
+          await saveBracket(session);
+
+          // Auto-fill if requested
+          let autoFillResult: {
+            filled: number;
+            cascadeCleared: string[];
+          } | null = null;
+          if (
+            args.auto_fill &&
+            args.strategy &&
+            (args.strategy === "most_likely" || args.strategy === "best_upset" || args.strategy === "kalshi_optimal")
+          ) {
+            autoFillResult = autoFillBracketFromSim(
+              session,
+              args.strategy as SimBracketStrategy,
+              simResult,
+            );
+            await saveBracket(session);
+          }
+
+          // Build response
+          const response: Record<string, unknown> = {
+            status: "simulation_complete",
+            bracketId: session.id,
+            iterations: simConfig.iterations,
+            dataSources: sources,
+            topContenders: simResult.topContenders.map((t) => ({
+              name: t.name,
+              seed: t.seed,
+              region: t.region,
+              championPct: t.championPct,
+              finalFourPct: t.advancementPct["Final Four"] ?? 0,
+            })),
+            strategies: {
+              most_likely: {
+                description:
+                  "Always picks the higher-probability team in every matchup.",
+                sampleConfidence: countConfidence(
+                  simResult.strategies.most_likely.picks,
+                ),
+              },
+              best_upset: {
+                description:
+                  "Takes calculated upsets in early rounds, chalk in late rounds.",
+                sampleConfidence: countConfidence(
+                  simResult.strategies.best_upset.picks,
+                ),
+              },
+            },
+          };
+
+          if (autoFillResult) {
+            response.autoFill = {
+              strategy: args.strategy,
+              picksFilled: autoFillResult.filled,
+              cascadeCleared: autoFillResult.cascadeCleared.length,
+            };
+            const progress = getBracketProgress(session);
+            response.progress = {
+              picksCompleted: progress.picksCompleted,
+              totalMatchups: progress.totalMatchups,
+              percentage: progress.percentage,
+            };
+            if (session.champion) {
+              response.champion = `${session.champion.name} (${session.champion.seed} seed, ${session.champion.region})`;
+            }
+          }
+
+          return JSON.stringify(response);
+        } catch (error) {
+          return `Error running simulation: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+
     // -----------------------------------------------------------------
     // Agentic Tools — write_file and execute_command
     // These tools require explicit user approval before execution.
@@ -2874,6 +3205,7 @@ export class sportsclawEngine {
     }
 
     // --- MCP: lazy async init (connects to remote servers on first run) ---
+    this.mcpManager.setUserId(options?.userId);
     await this.initAsync();
 
     // --- Memory: read before LLM call (async, non-blocking) ---
@@ -3010,7 +3342,8 @@ export class sportsclawEngine {
       routing.decision.confidence < this.config.clarifyThreshold &&
       routing.decision.mode === "ambiguous" &&
       !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt)
+      !isConversationalIntent(sanitizedPrompt) &&
+      !isMcpIntent(sanitizedPrompt)
     ) {
       const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
       // Push a matching assistant message so history stays coherent
