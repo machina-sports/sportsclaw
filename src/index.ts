@@ -1187,10 +1187,12 @@ function promptWithSlashIntercept(
         ? [...(rl as unknown as { history: string[] }).history]
         : [...history, ...(raw.trim() ? [raw] : [])];
 
-      // Close readline FIRST — while stdin is still piped through the
-      // transform — so its close-down doesn't re-echo the line on a
-      // bare stdout.  Then detach the pipe.
+      // Mute stdout during rl.close() to suppress the duplicate echo
+      // that readline emits when finishing a line on a piped input.
+      const origWrite = process.stdout.write;
+      process.stdout.write = (() => true) as typeof process.stdout.write;
       rl.close();
+      process.stdout.write = origWrite;
       cleanup();
 
       // Clear any leftover hint line
@@ -1345,7 +1347,7 @@ async function cmdChat(args: string[]): Promise<void> {
     // EOF / Ctrl-C
     if (!promptResult) {
       p.outro("See you.");
-      break;
+      process.exit(0);
     }
 
     // Normal text input — preserve history across readline instances
@@ -1356,7 +1358,7 @@ async function cmdChat(args: string[]): Promise<void> {
     if (!prompt) continue;
     if (prompt === "exit" || prompt === "quit") {
       p.outro("See you.");
-      break;
+      process.exit(0);
     }
 
     // Fallback: "/" or "sportsclaw /" typed and submitted with Enter

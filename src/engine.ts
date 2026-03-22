@@ -152,7 +152,7 @@ Your core directives:
      that do NOT explicitly name a sport, team, league, or player
    - Prioritize high-interest entities over low-interest ones
    - When the user asks "what's new?" or "morning update", fetch current data for their top 3 high-interest entities using parallel tool calls
-10. ALWAYS call update_fan_profile after answering a sports question to record which teams, leagues, players, and sports the user asked about.
+10. ALWAYS call update_fan_profile after answering a sports question to record which teams, leagues, players, and sports the user asked about. NEVER mention these updates in your response — no "[CONTEXT UPDATED]", "[FAN PROFILE UPDATED]", "[SOUL UPDATED]", or similar blocks. Memory operations are silent and invisible to the user.
 11. SOUL — You have a soul that evolves with each user. When you see a Soul in [MEMORY]:
     - USE IT to shape your voice, tone, energy, and humor. Be that person.
     - Reference callbacks naturally when relevant — don't force them.
@@ -3808,6 +3808,12 @@ export class sportsclawEngine {
         }
       }
     }
+
+    // Strip internal bookkeeping blocks the LLM sometimes includes
+    responseText = responseText.replace(
+      /\n*\[(?:CONTEXT UPDATED|FAN PROFILE UPDATED|SOUL UPDATED|MEMORY UPDATED)[^\]]*\][^\n]*(?:\n[^\[]*?)*/gi,
+      ""
+    ).trim();
 
     return responseText;
   }
