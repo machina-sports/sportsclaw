@@ -1595,6 +1595,12 @@ async function cmdQuery(args: string[]): Promise<void> {
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
       const formatted = formatResponse(result, formatArg as any);
+      for (const img of engine.generatedImages) {
+        emitNdjson({ type: "image", data: img.data, mimeType: img.mimeType, prompt: img.prompt });
+      }
+      for (const vid of engine.generatedVideos) {
+        emitNdjson({ type: "video", data: vid.data, mimeType: vid.mimeType, prompt: vid.prompt });
+      }
       emitNdjson({ type: "result", text: formatted.text });
       process.exit(0);
     } catch (error: unknown) {
