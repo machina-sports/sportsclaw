@@ -234,16 +234,31 @@ async def query_sync(request: web.Request) -> web.Response:
         # Parse NDJSON lines from engine output
         result_text = None
         error_text = None
+        images = []
+        videos = []
         for line in stdout_text.splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
                 event = json.loads(line)
-                if event.get("type") == "result":
+                etype = event.get("type")
+                if etype == "result":
                     result_text = event.get("text", "")
-                elif event.get("type") == "error":
+                elif etype == "error":
                     error_text = event.get("error", "Unknown error")
+                elif etype == "image":
+                    images.append({
+                        "data": event.get("data", ""),
+                        "mimeType": event.get("mimeType", "image/png"),
+                        "prompt": event.get("prompt", ""),
+                    })
+                elif etype == "video":
+                    videos.append({
+                        "data": event.get("data", ""),
+                        "mimeType": event.get("mimeType", "video/mp4"),
+                        "prompt": event.get("prompt", ""),
+                    })
             except json.JSONDecodeError:
                 continue
 
@@ -256,12 +271,17 @@ async def query_sync(request: web.Request) -> web.Response:
             }, status=500)
 
         if result_text is not None:
-            return web.json_response({
+            resp = {
                 "status": True,
                 "text": result_text,
                 "user_id": user_id,
                 "elapsed_ms": elapsed_ms,
-            })
+            }
+            if images:
+                resp["images"] = images
+            if videos:
+                resp["videos"] = videos
+            return web.json_response(resp)
 
         # Fallback: no NDJSON parsed (shouldn't happen with pipe mode)
         if proc.returncode == 0:
