@@ -3493,7 +3493,6 @@ export class sportsclawEngine {
         try {
           await memory.appendToThread(sanitizedPrompt, responseText);
           await memory.appendExchange(sanitizedPrompt, responseText);
-          await memory.incrementSoulExchanges();
         } catch (err) {
           console.error(
             `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
@@ -3778,8 +3777,6 @@ export class sportsclawEngine {
       try {
         await memory.appendToThread(sanitizedPrompt, responseText);
         await memory.appendExchange(sanitizedPrompt, responseText);
-        // Evolve: increment soul exchange counter (only thing code touches)
-        await memory.incrementSoulExchanges();
       } catch (err) {
         console.error(
           `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
