@@ -421,6 +421,7 @@ export class sportsclawEngine {
   private mcpManager: McpManager;
   private skillGuides: SkillGuide[] = [];
   private _mcpReady = false;
+  private _threadLoaded = false;
 
   /** Images produced by the generate_image tool during the last run. */
   get generatedImages(): readonly GeneratedImage[] {
@@ -3253,13 +3254,21 @@ export class sportsclawEngine {
     }
 
     // Load conversation history from disk for multi-turn context.
-    // Only load if messages array is empty (fresh process — relay/pipe/telegram).
-    // In chat mode the engine instance stays alive and this.messages accumulates
-    // naturally, so we skip to avoid duplicating history.
-    if (memory && this.messages.length <= 1) {
+    // Only load on the first run() of this engine instance (fresh process —
+    // relay/pipe mode). In chat mode the engine stays alive and this.messages
+    // accumulates naturally via subsequent run() calls, so skip to avoid
+    // duplicating history. The _threadLoaded flag distinguishes "first run
+    // with memory/system messages" from "second run with real history".
+    if (memory && !this._threadLoaded) {
+      this._threadLoaded = true;
       const threadHistory = await memory.readThread();
-      for (const msg of threadHistory) {
-        this.messages.push({ role: msg.role, content: msg.content });
+      if (threadHistory.length > 0) {
+        for (const msg of threadHistory) {
+          this.messages.push({ role: msg.role, content: msg.content });
+        }
+        if (this.config.verbose) {
+          console.error(`[sportsclaw] thread restored: ${threadHistory.length} messages`);
+        }
       }
     }
 
