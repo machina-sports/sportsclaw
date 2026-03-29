@@ -71,6 +71,20 @@ const SKILL_ALIASES: Record<string, string[]> = {
   cbb: ["college basketball", "march madness", "ncaab"],
 };
 
+/** MCP/pod intent patterns — matches queries targeting pod entities, not sports */
+const MCP_INTENT_PATTERNS = [
+  /\b(search|list|find|show|get|browse|create|save|store|update|delete|remove|execute|run)\b.*\b(document|workflow|agent|connector|prompt|template)\b/,
+  /\b(document|workflow|agent|connector|prompt|template)\b.*\b(search|list|find|show|get|create|save|store|update|delete|remove|execute|run)\b/,
+  /\b(pod|machina|mcp)\b/,
+  /\bwhat\b.*\b(document|workflow|agent|connector|capabilities?|installed|available)\b/,
+  /\b(install|import).*template\b/,
+  /\b(deep.?research|execute.?workflow|execute.?agent)\b/,
+];
+
+function isMcpIntent(normalizedPrompt: string): boolean {
+  return MCP_INTENT_PATTERNS.some((p) => p.test(normalizedPrompt));
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -289,6 +303,30 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
   }
 
   const promptNorm = normalizeText(input.prompt);
+
+  // --- MCP intent early exit ---
+  // If the prompt targets pod/MCP entities and MCP tools are present in the
+  // tool specs, return immediately with high confidence and zero sport skills.
+  // This skips the expensive LLM router call for non-sport queries like
+  // "list my workflows", "what documents are stored?", or "execute agent X".
+  const hasMcpTools = input.toolSpecs.some((s) => s.name.startsWith("mcp__"));
+  if (hasMcpTools && isMcpIntent(promptNorm)) {
+    return {
+      decision: {
+        selectedSkills: [],
+        mode: "focused",
+        confidence: 0.95,
+        reason: "MCP pod intent detected — routing to MCP tools, skipping sport selection",
+      },
+      meta: {
+        modelUsed: null,
+        llmAttempted: false,
+        llmSucceeded: false,
+        llmDurationMs: 0,
+      },
+    };
+  }
+
   const helperSkills = inferHelperSkills(promptNorm, installedSet);
   const fanProfile = extractFanProfileSection(input.memoryBlock);
   const toolTokens = buildToolTokensBySkill(input.installedSkills, input.toolSpecs);
