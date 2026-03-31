@@ -418,3 +418,48 @@ export interface WatcherTask {
   /** ISO timestamp when the task was completed (if applicable) */
   completedAt?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Universal Watcher — generic endpoint polling with structural diffing
+// ---------------------------------------------------------------------------
+
+/** A single field-level change detected between two snapshots. */
+export interface WatchChange {
+  /** JSON path to the changed field (e.g. "games.0.status") */
+  path: string;
+  before: unknown;
+  after: unknown;
+  type: "added" | "removed" | "modified";
+}
+
+/** Emitted when a watcher detects changes in its polled endpoint. */
+export interface WatchEvent {
+  watcherId: string;
+  timestamp: string;
+  sport: string;
+  command: string;
+  args?: Record<string, unknown>;
+  changes: WatchChange[];
+  changesSummary: string;
+  snapshot: unknown;
+}
+
+export type WatchOutputMode = "relay" | "stdout" | "file";
+
+/** Configuration for a single watcher instance. */
+export interface WatcherConfig {
+  /** Sport module to poll (e.g. "nba", "nfl", "soccer") */
+  sport: string;
+  /** Command within the sport module (e.g. "get_scoreboard", "get_standings") */
+  command: string;
+  /** Optional args passed to executePythonBridge */
+  args?: Record<string, unknown>;
+  /** Poll interval in seconds (default: 30, minimum: 5) */
+  intervalSeconds: number;
+  /** Where to send change events */
+  output: WatchOutputMode;
+  /** Relay channel name when output is "relay" (default: "watch") */
+  channel?: string;
+  /** File path when output is "file" */
+  filePath?: string;
+}

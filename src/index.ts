@@ -18,6 +18,8 @@
  *   sportsclaw mcp add <url>        — Connect an MCP server
  *   sportsclaw mcp remove <name>   — Disconnect an MCP server
  *   sportsclaw mcp list            — List configured MCP servers
+ *   sportsclaw watch <sport> <cmd> — Watch an endpoint for realtime changes
+ *   sportsclaw watch --config=... — Run multiple watchers from config file
  *   sportsclaw plugin install <name> — Install an optional plugin (e.g. auto-clipper)
  *   sportsclaw plugin list        — List installed plugins
  *   sportsclaw "<prompt>"        — Run a one-shot query (default)
@@ -100,6 +102,8 @@ import {
   removeMcpConfig,
   getMcpConfigPath,
 } from "./mcp.js";
+import { WatchManager } from "./watch.js";
+import type { WatchOutputMode, WatcherConfig } from "./types.js";
 
 
 // ---------------------------------------------------------------------------
@@ -172,6 +176,10 @@ export type {
   AskUserQuestionRequest,
   SuspendedState,
   WatcherTask,
+  WatchEvent,
+  WatchChange,
+  WatcherConfig,
+  WatchOutputMode,
   ImageAttachment,
   GeneratedImage,
   GeneratedVideo,
@@ -192,6 +200,14 @@ export {
   deleteTask,
   expireOldTasks,
 } from "./taskbus.js";
+
+// Universal Watcher
+export {
+  Watcher,
+  WatchManager,
+  computeWatcherId,
+  structuralDiff,
+} from "./watch.js";
 
 // Bracket Builder
 export {
@@ -1684,7 +1700,7 @@ async function cmdQuery(args: string[]): Promise<void> {
 function cmdStart(args: string[]): void {
   const platform = args[0]?.toLowerCase();
   if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw start <discord|telegram>");
+    console.error("Usage: sportsclaw start <discord|telegram|watch>");
     process.exit(1);
   }
   daemonStart(platform);
@@ -1697,7 +1713,7 @@ function cmdStart(args: string[]): void {
 function cmdStop(args: string[]): void {
   const platform = args[0]?.toLowerCase();
   if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw stop <discord|telegram>");
+    console.error("Usage: sportsclaw stop <discord|telegram|watch>");
     process.exit(1);
   }
   daemonStop(platform);
@@ -1717,8 +1733,8 @@ function cmdStatus(): void {
 
 function cmdRestart(args: string[]): void {
   const platform = args[0]?.toLowerCase();
-  if (!platform || !["discord", "telegram"].includes(platform)) {
-    console.error("Usage: sportsclaw restart <discord|telegram>");
+  if (!platform || !["discord", "telegram", "watch"].includes(platform)) {
+    console.error("Usage: sportsclaw restart <discord|telegram|watch>");
     process.exit(1);
   }
   daemonRestart(platform as any);
@@ -1731,11 +1747,110 @@ function cmdRestart(args: string[]): void {
 function cmdLogs(args: string[]): void {
   const platform = args[0]?.toLowerCase();
   if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw logs <discord|telegram>");
+    console.error("Usage: sportsclaw logs <discord|telegram|watch>");
     process.exit(1);
   }
   const lines = args[1] ? Number.parseInt(args[1], 10) : 50;
   daemonLogs(platform, Number.isFinite(lines) && lines > 0 ? lines : 50);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw watch` — realtime data watcher
+// ---------------------------------------------------------------------------
+
+async function cmdWatch(args: string[]): Promise<void> {
+  // Parse flags
+  const flags = new Map<string, string>();
+  const positional: string[] = [];
+
+  for (const arg of args) {
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq > 0) {
+        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+      } else {
+        flags.set(arg.slice(2), "true");
+      }
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  const configPath = flags.get("config");
+
+  // Resolve engine config for Python bridge
+  const resolved = resolveConfig();
+  applyConfigToEnv();
+  const engineConfig = { pythonPath: resolved.pythonPath };
+
+  let manager: WatchManager;
+
+  if (configPath) {
+    // Multi-watcher mode from config file
+    try {
+      manager = await WatchManager.fromConfigFile(configPath, engineConfig);
+    } catch (err) {
+      console.error(
+        `Failed to load watch config from ${configPath}:`,
+        err instanceof Error ? err.message : err,
+      );
+      process.exit(1);
+    }
+  } else {
+    // Single watcher mode: sportsclaw watch <sport> <command> [flags]
+    const sport = positional[0];
+    const command = positional[1];
+
+    if (!sport || !command) {
+      console.log("Usage:");
+      console.log("  sportsclaw watch <sport> <command> [--interval=30] [--output=stdout|relay|file]");
+      console.log("  sportsclaw watch --config=~/.sportsclaw/watchers.json");
+      console.log("");
+      console.log("Examples:");
+      console.log("  sportsclaw watch nba get_scoreboard --interval=10");
+      console.log("  sportsclaw watch nfl get_standings --interval=60 --output=relay");
+      console.log("  sportsclaw watch soccer get_season_standings --interval=300 --output=file");
+      process.exit(1);
+    }
+
+    const config: WatcherConfig = {
+      sport,
+      command,
+      intervalSeconds: parseInt(flags.get("interval") ?? "30", 10),
+      output: (flags.get("output") as WatchOutputMode) ?? "stdout",
+      channel: flags.get("channel"),
+      filePath: flags.get("file"),
+    };
+
+    // Parse extra args for the Python bridge (--arg_name=value)
+    const bridgeArgs: Record<string, unknown> = {};
+    for (const [key, value] of flags) {
+      if (!["interval", "output", "channel", "file", "config"].includes(key)) {
+        bridgeArgs[key] = value === "true" ? true : value;
+      }
+    }
+    if (Object.keys(bridgeArgs).length > 0) {
+      config.args = bridgeArgs;
+    }
+
+    manager = new WatchManager();
+    manager.addWatcher(config, engineConfig);
+  }
+
+  console.log(`\n${manager.size} watcher(s) running. Press Ctrl+C to stop.\n`);
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log("\nShutting down watchers...");
+    await manager.stopAll();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  // Keep process alive
+  await new Promise(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -1910,6 +2025,8 @@ function printHelp(): void {
   console.log("  sportsclaw mcp add <url>           Connect an MCP server (Machina pod, etc.)");
   console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
   console.log("  sportsclaw mcp list                List configured MCP servers");
+  console.log("  sportsclaw watch <sport> <command>  Watch an endpoint for realtime changes");
+  console.log("  sportsclaw watch --config=<path>   Run multiple watchers from config file");
   console.log("  sportsclaw plugin install <name>   Install an optional plugin");
   console.log("  sportsclaw plugin list             List installed plugins");
   console.log("");
@@ -2122,6 +2239,8 @@ case "plugin":
       return cmdPlugin(subArgs);
     case "mcp":
       return cmdMcp(subArgs);
+    case "watch":
+      return cmdWatch(subArgs);
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);

@@ -1,69 +1,69 @@
 /**
- * sportsclaw — Relay Pub/Sub Integration Test (IPTC Schema)
+ * sportsclaw — Relay Pub/Sub Integration Test (Watch Module)
  *
- * Starts the GameMonitor polling ESPN for live NBA games and the
- * GamePresenter listening for relay events. Uses console output only
- * (no Discord/Telegram targets) to verify the end-to-end IPTC pipeline.
+ * Starts a Watcher polling NBA scoreboard data via the Python bridge and
+ * publishes WatchEvents to the relay. Uses console output to verify the
+ * end-to-end watch→relay pipeline.
  *
  * Usage:
  *   npx tsc && node dist/test-relay.js
  */
 
-import { gameMonitor } from "./game-monitor.js";
+import { WatchManager } from "./watch.js";
 import { gamePresenter } from "./game-presenter.js";
-import { relayManager, iptcGameId, iptcHome, iptcAway, iptcSportCode, iptcStatus } from "./relay.js";
-import type { LiveGameEnvelope } from "./relay.js";
+import { relayManager } from "./relay.js";
+import type { WatchEvent } from "./types.js";
 
 async function run() {
-  console.log("Starting sportsclaw Relay Pub/Sub Architecture Test (IPTC Schema)...\n");
+  console.log("Starting sportsclaw Relay Pub/Sub Architecture Test (Watch Module)...\n");
 
   // 1. Initialize the presenter (subscribes to relay channel)
   await gamePresenter.initialize();
 
-  // 2. Add a console-only handler to see all IPTC events in stdout
-  relayManager.on("live-games", (envelope: LiveGameEnvelope) => {
-    const home = iptcHome(envelope.data);
-    const away = iptcAway(envelope.data);
-    const gameId = iptcGameId(envelope.data);
-    const sportCode = iptcSportCode(envelope.data);
-    const status = iptcStatus(envelope.data);
-
+  // 2. Add a console-only handler to see all watch events in stdout
+  relayManager.on("watch", (event: WatchEvent) => {
     console.log(
-      `\n[Test] Received ${envelope.event} for ${gameId} (${sportCode}):`,
-      `${away["sport:code"]} ${away["spstat:score"] ?? 0} @ ` +
-        `${home["sport:code"]} ${home["spstat:score"] ?? 0}`,
-      `(${envelope.data["sport:statusDetail"]}) [${status}]`
+      `\n[Test] WatchEvent ${event.watcherId}: ${event.changesSummary}`,
+      `(${event.sport} ${event.command})`
     );
-
-    if (envelope.delta) {
-      console.log("[Test] Delta:", JSON.stringify(envelope.delta));
-    }
-
-    // Log machina: extensions if present (live-games carries light win probability)
-    if (envelope.data["machina:winProbability"]) {
-      console.log("[Test] machina:winProbability:", JSON.stringify(envelope.data["machina:winProbability"]));
+    if (event.changes.length > 0) {
+      for (const c of event.changes.slice(0, 5)) {
+        console.log(`  ${c.type}: ${c.path}`);
+      }
+      if (event.changes.length > 5) {
+        console.log(`  ... and ${event.changes.length - 5} more`);
+      }
     }
   });
 
-  // 3. Start monitoring NBA (all live games today)
-  await gameMonitor.startMonitoring("nba");
+  // 3. Start watching NBA scoreboard
+  const manager = new WatchManager();
+  manager.addWatcher({
+    sport: "nba",
+    command: "get_scoreboard",
+    intervalSeconds: 30,
+    output: "relay",
+    channel: "watch",
+  });
 
-  console.log("\nMonitoring NBA games (IPTC schema). Press Ctrl+C to stop.\n");
+  console.log("\nWatching NBA scoreboard. Press Ctrl+C to stop.\n");
 
   // Auto-stop after 2 minutes for testing
-  setTimeout(() => {
+  setTimeout(async () => {
     console.log("\n[Test] 2-minute timeout reached. Shutting down...");
-    gameMonitor.stopAll();
+    await manager.stopAll();
     gamePresenter.shutdown();
-    relayManager.shutdown().then(() => process.exit(0));
+    await relayManager.shutdown();
+    process.exit(0);
   }, 120_000);
 
   // Graceful shutdown on Ctrl+C
-  process.on("SIGINT", () => {
+  process.on("SIGINT", async () => {
     console.log("\n[Test] Shutting down...");
-    gameMonitor.stopAll();
+    await manager.stopAll();
     gamePresenter.shutdown();
-    relayManager.shutdown().then(() => process.exit(0));
+    await relayManager.shutdown();
+    process.exit(0);
   });
 }
 

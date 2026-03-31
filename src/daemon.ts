@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 // Types
 // ---------------------------------------------------------------------------
 
-export type DaemonPlatform = "discord" | "telegram";
-const VALID_PLATFORMS: DaemonPlatform[] = ["discord", "telegram"];
+export type DaemonPlatform = "discord" | "telegram" | "watch";
+const VALID_PLATFORMS: DaemonPlatform[] = ["discord", "telegram", "watch"];
 
 export function isValidPlatform(value: string): value is DaemonPlatform {
   return VALID_PLATFORMS.includes(value as DaemonPlatform);
@@ -80,7 +80,10 @@ export function daemonStart(platform: DaemonPlatform): void {
   }
 
   // Start via PM2 — args after `--` are forwarded to the script
-  execSync(`pm2 start ${entry} --name ${name} -- listen ${platform}`, {
+  const pmArgs = platform === "watch"
+    ? `watch --config=~/.sportsclaw/watchers.json`
+    : `listen ${platform}`;
+  execSync(`pm2 start ${entry} --name ${name} -- ${pmArgs}`, {
     stdio: "inherit",
   });
 
@@ -122,7 +125,7 @@ export function daemonStatus(): void {
   if (!raw) {
     console.log("No daemons running.");
     console.log("");
-    console.log("Start one with: sportsclaw start <discord|telegram>");
+    console.log("Start one with: sportsclaw start <discord|telegram|watch>");
     return;
   }
 
@@ -140,7 +143,7 @@ export function daemonStatus(): void {
   if (ours.length === 0) {
     console.log("No daemons running.");
     console.log("");
-    console.log("Start one with: sportsclaw start <discord|telegram>");
+    console.log("Start one with: sportsclaw start <discord|telegram|watch>");
     return;
   }
 
