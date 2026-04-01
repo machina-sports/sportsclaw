@@ -59,7 +59,7 @@ export function parseBlocks(markdown: string): ParsedResponse {
       continue;
     }
 
-    // Fenced code blocks
+    // Fenced code blocks — detect embedded tables inside them
     if (line.startsWith("```")) {
       flushText();
       const language = line.slice(3).trim();
@@ -70,12 +70,24 @@ export function parseBlocks(markdown: string): ParsedResponse {
         i++;
       }
       if (i < lines.length) i++; // skip closing ```
+
+      // If most lines contain pipes, treat as a table instead of code
+      const nonEmpty = codeLines.filter((l) => l.trim().length > 0);
+      const pipeLines = nonEmpty.filter((l) => l.includes("|"));
+      if (nonEmpty.length >= 2 && pipeLines.length / nonEmpty.length >= 0.7) {
+        const parsed = parsePipeLines(codeLines);
+        if (parsed) {
+          blocks.push(parsed);
+          continue;
+        }
+      }
+
       blocks.push({ type: "code", language, lines: codeLines });
       continue;
     }
 
-    // Pipe tables
-    if (line.includes("|") && line.trim().startsWith("|")) {
+    // Pipe tables (with or without leading |)
+    if (line.includes("|") && looksLikeTableRow(line)) {
       flushText();
       const rows: string[][] = [];
       let headerIndex = -1;
@@ -84,8 +96,8 @@ export function parseBlocks(markdown: string): ParsedResponse {
         i < lines.length &&
         (lines[i].includes("|") || /^\s*[-:|]+\s*$/.test(lines[i]))
       ) {
-        // Separator row (|---|---|)
-        if (/^\|[\s\-:|]+\|$/.test(lines[i])) {
+        // Separator row (|---|---| or ---|---)
+        if (/^[\s|]*[-:|][-:\s|]+$/.test(lines[i])) {
           headerIndex = rows.length - 1;
           i++;
           continue;
@@ -96,10 +108,7 @@ export function parseBlocks(markdown: string): ParsedResponse {
           continue;
         }
 
-        const cells = lines[i]
-          .split("|")
-          .slice(1, -1)
-          .map((c) => c.trim());
+        const cells = splitPipeRow(lines[i]);
         rows.push(cells);
         i++;
       }
@@ -266,4 +275,60 @@ function removeSourceLine(text: string): string {
 
 function hasScores(text: string): boolean {
   return /\d+\s*-\s*\d+/.test(text);
+}
+
+// ---------------------------------------------------------------------------
+// Pipe table helpers — handle tables with or without leading/trailing |
+// ---------------------------------------------------------------------------
+
+/** Check if a line looks like a table row (has pipes separating 2+ cells). */
+function looksLikeTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  // Must have at least one pipe that's not at the very start/end only
+  const parts = trimmed.split("|").filter((p) => p.trim().length > 0);
+  return parts.length >= 2;
+}
+
+/** Split a pipe-delimited row into cells, handling both |a|b| and a|b formats. */
+function splitPipeRow(line: string): string[] {
+  const trimmed = line.trim();
+  // If it starts and ends with |, slice off the outer pipes
+  if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+    return trimmed.split("|").slice(1, -1).map((c) => c.trim());
+  }
+  // Otherwise split on | and trim each cell
+  return trimmed.split("|").map((c) => c.trim());
+}
+
+/**
+ * Parse an array of lines (e.g. from inside a code block) as a pipe table.
+ * Returns a table block if successful, null otherwise.
+ */
+function parsePipeLines(
+  lines: string[]
+): (ParsedBlock & { type: "table" }) | null {
+  const rows: string[][] = [];
+  let headerIndex = -1;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+
+    // Separator row
+    if (/^[\s|]*[-:|][-:\s|]+$/.test(trimmed)) {
+      headerIndex = rows.length - 1;
+      continue;
+    }
+
+    if (!trimmed.includes("|")) continue;
+
+    rows.push(splitPipeRow(trimmed));
+  }
+
+  if (rows.length < 2) return null;
+
+  // If no explicit separator, assume first row is header
+  if (headerIndex < 0) headerIndex = 0;
+
+  return { type: "table", rows, headerIndex };
 }
