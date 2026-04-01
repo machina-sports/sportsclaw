@@ -32,7 +32,7 @@ RUN chown -R node:node /app && \
 # ---------------------------------------------------------------------------
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --include=optional
+RUN npm ci --include=optional
 
 COPY tsconfig.json ./
 COPY src/ ./src/
