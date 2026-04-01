@@ -10,7 +10,7 @@ import {
   isComparisonTable,
   renderComparisonText,
 } from "./parser.js";
-import type { ParsedResponse } from "./parser.js";
+import type { ParsedResponse, ParsedBlock } from "./parser.js";
 
 // ---------------------------------------------------------------------------
 // renderTelegram
@@ -30,10 +30,7 @@ export function renderTelegram(parsed: ParsedResponse): string {
           const text = renderComparisonText(block.rows, block.headerIndex);
           result.push(`<pre>${escapeHtml(text)}</pre>`);
         } else {
-          const lines = block.rows.map((cells) =>
-            cells.map((c) => escapeHtml(stripBold(c))).join("  |  ")
-          );
-          result.push(`<pre>${lines.join("\n")}</pre>`);
+          result.push(`<pre>${escapeHtml(renderAlignedTable(block))}</pre>`);
         }
         break;
       }
@@ -68,6 +65,46 @@ export function renderTelegram(parsed: ParsedResponse): string {
   }
 
   return result.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// renderAlignedTable — fixed-width column alignment for monospace <pre>
+// ---------------------------------------------------------------------------
+
+function renderAlignedTable(block: ParsedBlock & { type: "table" }): string {
+  const stripped = block.rows.map((row) => row.map((c) => stripBold(c)));
+
+  // Compute max width per column
+  const colCount = Math.max(...stripped.map((r) => r.length));
+  const colWidths: number[] = Array(colCount).fill(0);
+  for (const row of stripped) {
+    for (let c = 0; c < row.length; c++) {
+      colWidths[c] = Math.max(colWidths[c], row[c].length);
+    }
+  }
+
+  const lines: string[] = [];
+  for (let r = 0; r < stripped.length; r++) {
+    const row = stripped[r];
+    const padded = row.map((cell, c) => {
+      // Right-align if the cell looks numeric, left-align otherwise
+      const w = colWidths[c];
+      return looksNumeric(cell) ? cell.padStart(w) : cell.padEnd(w);
+    });
+    lines.push(padded.join("  "));
+
+    // Add separator after header row
+    if (r === block.headerIndex) {
+      lines.push(colWidths.map((w) => "─".repeat(w)).join("──"));
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** Check if a string looks like a number, score, percentage, or stat. */
+function looksNumeric(s: string): boolean {
+  return /^\s*[-+]?\d[\d.,]*%?\s*$/.test(s) || /^\d+\s*-\s*\d+$/.test(s);
 }
 
 // ---------------------------------------------------------------------------
