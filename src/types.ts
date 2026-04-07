@@ -142,6 +142,23 @@ export interface sportsclawConfig {
   tokenBudgets?: Partial<TokenBudgets>;
   /** Run multiple routed agents in parallel with synthesis. Default: false */
   parallelAgents?: boolean;
+  /**
+   * YOLO mode — bypass all interactive approval gates and clarification
+   * prompts without halting.  Dangerous tools (write_file, execute_command)
+   * execute immediately; ask_user_question auto-selects the first option.
+   * When a dangerous tool is called *without* yolo mode, the engine returns
+   * a hard error to the LLM instead of blocking on stdin.
+   *
+   * Designed for headless / CI / autonomous execution.  Default: false.
+   */
+  yoloMode?: boolean;
+  /**
+   * Maximum number of messages to keep in the conversation history before
+   * automatic context pruning kicks in.  When the message array exceeds
+   * this limit, older messages are dropped to stay within budget.
+   * Set to 0 to disable automatic pruning.  Default: 80.
+   */
+  contextPruneThreshold?: number;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -166,6 +183,8 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   thinkingBudget: 8192,
   tokenBudgets: {},
   parallelAgents: false,
+  yoloMode: false,
+  contextPruneThreshold: 80,
 };
 
 // ---------------------------------------------------------------------------

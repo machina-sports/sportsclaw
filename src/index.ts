@@ -1287,6 +1287,7 @@ async function handleSlashMenu(): Promise<true | string> {
 
 async function cmdChat(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
+  const yoloMode = args.includes("--yolo");
   const userId = "cli-chat";
 
   // Merge config file + env vars, push into process.env
@@ -1318,13 +1319,14 @@ async function cmdChat(args: string[]): Promise<void> {
     routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
     allowTrading: true,
+    yoloMode,
   });
 
   // Clear screen for a fresh start
   process.stdout.write("\x1B[2J\x1B[H");
 
   console.log(pc.bold(pc.blue(ASCII_LOGO)));
-  p.intro("sportsclaw chat — type 'exit' or 'quit' to leave");
+  p.intro(`sportsclaw chat${yoloMode ? " [YOLO]" : ""} — type 'exit' or 'quit' to leave`);
 
   // Welcome message — evolves with the relationship
   const memory = new MemoryManager(userId);
@@ -1451,6 +1453,7 @@ async function cmdChat(args: string[]): Promise<void> {
         routingAllowSpillover: newConfig.routingAllowSpillover,
         verbose,
         allowTrading: true,
+        yoloMode,
       });
       console.log(pc.green("✔ Engine restarted successfully."));
       continue;
@@ -1543,8 +1546,13 @@ function emitNdjson(event: Record<string, unknown>): void {
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
+  if (forcePipe) {
+    console.error("[sportsclaw] WARNING: --pipe is deprecated, use --json instead.");
+  }
+  const forceJson = args.includes("--json");
+  const yoloMode = args.includes("--yolo");
   const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];
-  const formatArg = explicitFormat ?? (forcePipe ? "markdown" : "cli");
+  const formatArg = explicitFormat ?? (forcePipe || forceJson ? "markdown" : "cli");
 
   // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
   let userId: string | undefined;
@@ -1562,7 +1570,10 @@ async function cmdQuery(args: string[]): Promise<void> {
     args.splice(systemPromptIdx, 2);
   }
 
-  const filteredArgs = args.filter((a) => a !== "--verbose" && a !== "-v" && a !== "--pipe" && !a.startsWith("--format="));
+  const filteredArgs = args.filter((a) =>
+    a !== "--verbose" && a !== "-v" && a !== "--pipe" &&
+    a !== "--json" && a !== "--yolo" && !a.startsWith("--format=")
+  );
   const prompt = filteredArgs.join(" ");
 
   if (!prompt) {
@@ -1573,8 +1584,12 @@ async function cmdQuery(args: string[]): Promise<void> {
   // Merge config file + env vars (env wins), push into process.env
   let resolved = applyConfigToEnv();
 
-  // No API key anywhere → interactive setup
+  // No API key anywhere → interactive setup (skip in headless mode)
   if (!resolved.apiKey) {
+    if (forceJson || !process.stdout.isTTY) {
+      emitNdjson({ type: "error", error: "No API key configured. Run `sportsclaw config` interactively first." });
+      process.exit(1);
+    }
     await runConfigFlow();
     resolved = applyConfigToEnv();
   }
@@ -1597,13 +1612,15 @@ async function cmdQuery(args: string[]): Promise<void> {
     routingAllowSpillover: resolved.routingAllowSpillover,
     verbose,
     allowTrading: true,
+    yoloMode,
   });
 
-  // Pipe mode: emit NDJSON events (for relay/programmatic use)
-  const pipeMode = forcePipe || !process.stdout.isTTY;
+  // Headless NDJSON streaming: --json flag, --pipe flag, or non-TTY stdout.
+  // Strips all clack/spinners and emits structured NDJSON lines to stdout.
+  const headlessMode = forceJson || forcePipe || !process.stdout.isTTY;
 
-  if (pipeMode) {
-    emitNdjson({ type: "start", timestamp: new Date().toISOString() });
+  if (headlessMode) {
+    emitNdjson({ type: "start", timestamp: new Date().toISOString(), yolo: yoloMode });
     try {
       const result = await engine.run(prompt, {
         userId,
@@ -2038,6 +2055,9 @@ function printHelp(): void {
   console.log("");
   console.log("Options:");
   console.log("  --verbose, -v    Enable verbose logging");
+  console.log("  --yolo           Bypass all Y/n approval prompts (autonomous execution)");
+  console.log("  --json           Force headless NDJSON output (no spinners/clack)");
+  console.log("  --pipe           Alias for --json (legacy)");
   console.log("  --help, -h       Show this help message");
   console.log("");
   console.log("Configuration:");

@@ -71,6 +71,29 @@ const SKILL_ALIASES: Record<string, string[]> = {
   cbb: ["college basketball", "march madness", "ncaab"],
 };
 
+/** MCP/pod intent patterns — matches queries targeting pod entities, not sports.
+ *  Patterns use word boundaries and require MCP-specific entity nouns to avoid
+ *  false positives on sport queries like "search documents about basketball". */
+const MCP_INTENT_PATTERNS = [
+  // Explicit MCP/pod keywords — always match
+  /\b(pod|machina|mcp)\b/,
+  // CRUD verbs targeting MCP entities — require "my/the/stored/saved" qualifier
+  // or a possessive to disambiguate from general queries
+  /\b(list|show|get|browse|delete|remove)\b.*\b(my|the|stored|saved|all)\b.*\b(documents?|workflows?|agents?|connectors?|prompts?|templates?)\b/,
+  /\b(create|save|store|update)\b\s+(a\s+)?(new\s+)?(document|workflow|agent|connector|prompt|template)\b/,
+  // Entity-first patterns: "workflow list", "agent execute"
+  /\b(workflow|agent|connector)\b\s+(list|execute|run|delete|update|create|search)\b/,
+  // Unambiguous MCP operations
+  /\b(install|import)\b.*\btemplate\b/,
+  /\b(deep.?research|execute.?workflow|execute.?agent)\b/,
+  // "what workflows/agents do I have" style
+  /\bwhat\b.*\b(workflows?|agents?|connectors?|capabilities?|installed|available)\b/,
+];
+
+function isMcpIntent(normalizedPrompt: string): boolean {
+  return MCP_INTENT_PATTERNS.some((p) => p.test(normalizedPrompt));
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -289,6 +312,30 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
   }
 
   const promptNorm = normalizeText(input.prompt);
+
+  // --- MCP intent early exit ---
+  // If the prompt targets pod/MCP entities and MCP tools are present in the
+  // tool specs, return immediately with high confidence and zero sport skills.
+  // This skips the expensive LLM router call for non-sport queries like
+  // "list my workflows", "what documents are stored?", or "execute agent X".
+  const hasMcpTools = input.toolSpecs.some((s) => s.name.startsWith("mcp__"));
+  if (hasMcpTools && isMcpIntent(promptNorm)) {
+    return {
+      decision: {
+        selectedSkills: [],
+        mode: "focused",
+        confidence: 0.95,
+        reason: "MCP pod intent detected — routing to MCP tools, skipping sport selection",
+      },
+      meta: {
+        modelUsed: null,
+        llmAttempted: false,
+        llmSucceeded: false,
+        llmDurationMs: 0,
+      },
+    };
+  }
+
   const helperSkills = inferHelperSkills(promptNorm, installedSet);
   const fanProfile = extractFanProfileSection(input.memoryBlock);
   const toolTokens = buildToolTokensBySkill(input.installedSkills, input.toolSpecs);
