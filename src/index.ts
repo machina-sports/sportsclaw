@@ -1530,6 +1530,9 @@ function emitNdjson(event: Record<string, unknown>): void {
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
+  if (forcePipe) {
+    console.error("[sportsclaw] WARNING: --pipe is deprecated, use --json instead.");
+  }
   const forceJson = args.includes("--json");
   const yoloMode = args.includes("--yolo");
   const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];

@@ -71,14 +71,23 @@ const SKILL_ALIASES: Record<string, string[]> = {
   cbb: ["college basketball", "march madness", "ncaab"],
 };
 
-/** MCP/pod intent patterns — matches queries targeting pod entities, not sports */
+/** MCP/pod intent patterns — matches queries targeting pod entities, not sports.
+ *  Patterns use word boundaries and require MCP-specific entity nouns to avoid
+ *  false positives on sport queries like "search documents about basketball". */
 const MCP_INTENT_PATTERNS = [
-  /\b(search|list|find|show|get|browse|create|save|store|update|delete|remove|execute|run)\b.*\b(document|workflow|agent|connector|prompt|template)\b/,
-  /\b(document|workflow|agent|connector|prompt|template)\b.*\b(search|list|find|show|get|create|save|store|update|delete|remove|execute|run)\b/,
+  // Explicit MCP/pod keywords — always match
   /\b(pod|machina|mcp)\b/,
-  /\bwhat\b.*\b(document|workflow|agent|connector|capabilities?|installed|available)\b/,
-  /\b(install|import).*template\b/,
+  // CRUD verbs targeting MCP entities — require "my/the/stored/saved" qualifier
+  // or a possessive to disambiguate from general queries
+  /\b(list|show|get|browse|delete|remove)\b.*\b(my|the|stored|saved|all)\b.*\b(documents?|workflows?|agents?|connectors?|prompts?|templates?)\b/,
+  /\b(create|save|store|update)\b\s+(a\s+)?(new\s+)?(document|workflow|agent|connector|prompt|template)\b/,
+  // Entity-first patterns: "workflow list", "agent execute"
+  /\b(workflow|agent|connector)\b\s+(list|execute|run|delete|update|create|search)\b/,
+  // Unambiguous MCP operations
+  /\b(install|import)\b.*\btemplate\b/,
   /\b(deep.?research|execute.?workflow|execute.?agent)\b/,
+  // "what workflows/agents do I have" style
+  /\bwhat\b.*\b(workflows?|agents?|connectors?|capabilities?|installed|available)\b/,
 ];
 
 function isMcpIntent(normalizedPrompt: string): boolean {
