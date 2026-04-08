@@ -12,6 +12,9 @@
 import {
   stripBold,
   isComparisonTable,
+  renderComparisonText,
+  renderTableAligned,
+  columnWidths,
 } from "./parser.js";
 import type { ParsedResponse, ParsedBlock } from "./parser.js";
 
@@ -66,17 +69,15 @@ export function renderTelegram(parsed: ParsedResponse): string {
 }
 
 // ---------------------------------------------------------------------------
-// renderTableAsText — render tables as flowing text, not <pre> codeblocks
+// renderTableAsText — render tables as monospace-aligned <pre> blocks
 // ---------------------------------------------------------------------------
 
 /**
- * Render a table as formatted Telegram HTML text.
+ * Render a table as Telegram HTML.
  *
- * - Comparison tables (3 columns): center-aligned key-value layout
- * - Small tables (≤5 cols): each row as "Col1: Val1 · Col2: Val2" lines
- * - Wide tables (>5 cols): each row joined with " · " separators
- *
- * No <pre> tags — everything flows as normal Telegram text.
+ * - Comparison tables (3 cols): center-aligned in <pre> for readable match stats
+ * - Compact tables (≤6 cols, ≤15 data rows): column-padded in <pre>
+ * - Wide tables (>6 cols): flowing text with bold first column and | separators
  */
 function renderTableAsText(block: ParsedBlock & { type: "table" }): string {
   const rows = block.rows.map((row) => row.map((c) => stripBold(c)));
@@ -85,66 +86,35 @@ function renderTableAsText(block: ParsedBlock & { type: "table" }): string {
   const dataRows = rows.filter((_, i) => i !== headerIdx);
 
   if (dataRows.length === 0) {
-    // Single-row table — just render it as a bold line
-    return `<b>${escapeHtml(headerRow.join(" · "))}</b>`;
+    return `<b>${escapeHtml(headerRow.join("  "))}</b>`;
   }
 
-  // Comparison tables: centered key-value layout
+  // Comparison tables (3 columns): center-aligned in <pre>
   if (isComparisonTable(rows)) {
-    return renderComparisonAsText(headerRow, dataRows);
+    return `<pre>${escapeHtml(renderComparisonText(rows, block.headerIndex))}</pre>`;
   }
 
+  const numCols = Math.max(...rows.map((r) => r.length));
+
+  // Compact tables: column-padded in <pre> for proper alignment.
+  // Also check total rendered width — wide tables overflow mobile monospace
+  // (Telegram's <pre> scrolls horizontally but >42 chars reads poorly).
+  const widths = columnWidths(rows);
+  const totalWidth = widths.reduce((s, w) => s + w, 0) + Math.max(0, numCols - 1) * 3;
+  if (numCols <= 6 && dataRows.length <= 15 && totalWidth <= 42) {
+    return `<pre>${escapeHtml(renderTableAligned(rows, block.headerIndex))}</pre>`;
+  }
+
+  // Wide tables: flowing text with bold first column
   const lines: string[] = [];
-
-  // For tables with a clear first-column identifier (matchup, name, team),
-  // render each row as: bold first cell, then remaining values with headers
-  const hasIdentifier = headerRow.length >= 2;
-
   for (const row of dataRows) {
-    if (hasIdentifier && headerRow.length <= 5) {
-      // "BOS @ MIA · 7:30 PM · BOS –4.5 · O/U 229.5" style
-      const parts: string[] = [];
-      for (let c = 0; c < row.length; c++) {
-        const val = row[c] || "";
-        if (c === 0) {
-          // First column bold (usually the matchup/name)
-          parts.push(`<b>${escapeHtml(val)}</b>`);
-        } else {
-          parts.push(escapeHtml(val));
-        }
-      }
-      lines.push(parts.join(" · "));
-    } else {
-      // Wide tables: just join with mid-dots
-      lines.push(escapeHtml(row.join(" · ")));
+    const parts: string[] = [];
+    for (let c = 0; c < row.length; c++) {
+      const val = row[c] || "";
+      parts.push(c === 0 ? `<b>${escapeHtml(val)}</b>` : escapeHtml(val));
     }
+    lines.push(parts.join(" | "));
   }
-
-  return lines.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// renderComparisonAsText — 3-column comparison without <pre>
-// ---------------------------------------------------------------------------
-
-function renderComparisonAsText(
-  headerRow: string[],
-  dataRows: string[][],
-): string {
-  const team1 = headerRow[1] || "Home";
-  const team2 = headerRow[2] || "Away";
-
-  const lines: string[] = [];
-  lines.push(`<b>${escapeHtml(team1)}</b> vs <b>${escapeHtml(team2)}</b>`);
-  lines.push("");
-
-  for (const row of dataRows) {
-    const stat = row[0] || "";
-    const v1 = row[1] || "";
-    const v2 = row[2] || "";
-    lines.push(`${escapeHtml(v1)} · <i>${escapeHtml(stat)}</i> · ${escapeHtml(v2)}`);
-  }
-
   return lines.join("\n");
 }
 

@@ -25,7 +25,11 @@ import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider } from "../types.js";
 import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { isGameRelatedResponse, formatTextForDiscord } from "../formatters/index.js";
-import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
+import {
+  detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt,
+  getSportDisplayName, getQuickActionPrompt,
+  SPORT_MENU_ROWS, SPORT_QUICK_ACTION_ROWS,
+} from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
 import { loadConfig } from "../config.js";
 import type { DiscordFeaturesConfig } from "../config.js";
@@ -153,6 +157,9 @@ export async function startDiscordListener(): Promise<void> {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    REST,
+    Routes,
+    SlashCommandBuilder,
   } = Discord;
 
   const features = resolveFeatures();
@@ -288,6 +295,58 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
+  // Sport picker menu builders
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build Discord button rows for the top-level sport picker.
+   * Packs all sport buttons into rows of 5 (Discord limit per row).
+   */
+  function buildDiscordSportPickerRows(): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder>[] {
+    const allButtons = SPORT_MENU_ROWS.flat();
+    const rows: import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder>[] = [];
+    for (let i = 0; i < allButtons.length; i += 5) {
+      const rowButtons = allButtons.slice(i, i + 5);
+      const row = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
+      rowButtons.forEach((btn) => {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(btn.callback)
+            .setLabel(btn.label)
+            .setStyle(ButtonStyle.Secondary)
+        );
+      });
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /**
+   * Build Discord button rows for a sport's quick action menu.
+   * Each inner array from SPORT_QUICK_ACTION_ROWS becomes one Discord row.
+   */
+  function buildDiscordSportQuickRows(sport: string): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder>[] {
+    const actionRows = SPORT_QUICK_ACTION_ROWS[sport];
+    if (!actionRows) return [];
+    return actionRows.map((row) => {
+      const discordRow = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
+      row.forEach((btn, idx) => {
+        discordRow.addComponents(
+          new ButtonBuilder()
+            .setCustomId(btn.callback)
+            .setLabel(btn.label)
+            .setStyle(
+              btn.callback === "sc_menu"
+                ? ButtonStyle.Secondary
+                : idx === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary
+            )
+        );
+      });
+      return discordRow;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Poll creation for "who wins?" questions
   // ---------------------------------------------------------------------------
 
@@ -323,6 +382,17 @@ export async function startDiscordListener(): Promise<void> {
   // ---------------------------------------------------------------------------
 
   client.on("interactionCreate", async (interaction) => {
+    // Slash command: /menu
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === "menu") {
+        await interaction.reply({
+          content: "Pick a sport to get started:",
+          components: buildDiscordSportPickerRows(),
+        });
+      }
+      return;
+    }
+
     if (!interaction.isButton()) return;
 
     const { customId } = interaction;
@@ -375,6 +445,55 @@ export async function startDiscordListener(): Promise<void> {
       return;
     }
 
+    // sc_menu — navigate back to top-level sport picker
+    if (customId === "sc_menu") {
+      await interaction.update({
+        content: "Pick a sport to get started:",
+        components: buildDiscordSportPickerRows(),
+      });
+      return;
+    }
+
+    // sc_sport_<sport> — show quick action menu for selected sport
+    if (customId.startsWith("sc_sport_")) {
+      const sport = customId.slice("sc_sport_".length);
+      const label = getSportDisplayName(sport);
+      await interaction.update({
+        content: `**${label}** — what would you like to know?`,
+        components: buildDiscordSportQuickRows(sport),
+      });
+      return;
+    }
+
+    // sc_qa_<sport>_<action> — fire a quick action engine prompt
+    if (customId.startsWith("sc_qa_")) {
+      const withoutPrefix = customId.slice("sc_qa_".length);
+      const idx = withoutPrefix.indexOf("_");
+      if (idx < 0) return;
+      const sport = withoutPrefix.slice(0, idx);
+      const qaAction = withoutPrefix.slice(idx + 1);
+      const followUp = getQuickActionPrompt(sport, qaAction);
+      if (!followUp) return;
+
+      await interaction.deferReply();
+      const userId = `discord-${interaction.user.id}`;
+      try {
+        const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
+        const response = await engine.run(followUp, { userId, sessionId: userId });
+        const formatted = formatTextForDiscord(response);
+        const chunks = splitMessage(formatted, 2000);
+        await interaction.editReply(chunks[0] ?? "No data available.");
+        for (const chunk of chunks.slice(1)) {
+          await interaction.followUp(chunk);
+        }
+      } catch (error: unknown) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        console.error(`[sportsclaw] Quick action error: ${errMsg}`);
+        await interaction.editReply("Sorry, I encountered an error processing that request.");
+      }
+      return;
+    }
+
     const parts = customId.split("_");
     const action = parts[1]; // boxscore | pbp | stats
     const contextKey = parts[2];
@@ -422,11 +541,31 @@ export async function startDiscordListener(): Promise<void> {
     console.error(`[sportsclaw] Discord client error: ${err.message}`);
   });
 
-  client.once(Discord.Events.ClientReady, () => {
+  client.once(Discord.Events.ClientReady, async () => {
     console.log(`[sportsclaw] Discord bot connected as ${client.user?.tag}`);
     console.log(
       `[sportsclaw] Listening for "${PREFIX}" commands and mentions.`
     );
+
+    // Register /menu slash command globally
+    if (client.user && process.env.DISCORD_BOT_TOKEN) {
+      try {
+        const rest = new REST().setToken(process.env.DISCORD_BOT_TOKEN);
+        const menuCommand = new SlashCommandBuilder()
+          .setName("menu")
+          .setDescription("Browse sports — scores, standings, news & odds")
+          .toJSON();
+        await rest.put(Routes.applicationCommands(client.user.id), {
+          body: [menuCommand],
+        });
+        console.log("[sportsclaw] Registered /menu slash command");
+      } catch (err) {
+        // Non-fatal — prefix commands still work
+        console.error(
+          `[sportsclaw] Slash command registration failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
 
     if (process.env.SPORTSCLAW_RESTART_CHANNEL_ID) {
       const channel = client.channels.cache.get(process.env.SPORTSCLAW_RESTART_CHANNEL_ID);
@@ -464,7 +603,16 @@ export async function startDiscordListener(): Promise<void> {
 
     if (!prompt) return;
 
-    if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "claw restart") {
+    // "menu" — show sport picker
+    if (prompt.toLowerCase() === "menu") {
+      await safeSend(message, {
+        content: "Pick a sport to get started:",
+        components: buildDiscordSportPickerRows(),
+      });
+      return;
+    }
+
+    if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "claw restart") {
       await message.reply("🔄 Restarting Discord daemon to apply new configurations...");
       console.log("[sportsclaw] Restart triggered via Discord chat.");
       const child = spawn(process.execPath, [process.argv[1], "restart", "discord"], {
