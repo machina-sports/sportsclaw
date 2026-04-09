@@ -416,6 +416,9 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       ? `Explicit intent detected for: ${Array.from(explicitSkills).join(", ")}`
       : "No explicit sport detected; using broad routing.";
 
+  let llmIntent: string | undefined;
+  let llmNeedsClarification = false;
+
   if (llmDecision?.selectedSkills && llmDecision.selectedSkills.length > 0) {
     const valid = llmDecision.selectedSkills.filter((skill) =>
       installedSet.has(skill)
@@ -428,6 +431,9 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       confidence = clamp01(llmDecision.confidence);
     }
     if (llmDecision.reason) reason = llmDecision.reason;
+    // Propagate intent classification and clarification signal
+    if (llmDecision.intent) llmIntent = llmDecision.intent;
+    if (llmDecision.needsClarification) llmNeedsClarification = llmDecision.needsClarification;
   }
 
   let primarySkills: string[] = [];
@@ -496,6 +502,8 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       mode,
       confidence: clamp01(confidence),
       reason,
+      ...(llmIntent ? { intent: llmIntent } : {}),
+      needsClarification: llmNeedsClarification,
     },
     meta: {
       modelUsed,

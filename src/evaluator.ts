@@ -42,22 +42,25 @@ export function evaluateResponse(
   const template = getTemplate(intent);
   const lower = response.toLowerCase();
 
-  // Check required keywords (only for intents that specify them)
+  // Check required keywords: at least ONE must appear in the response.
+  // The list represents signal words for the intent — not an exhaustive
+  // checklist. (A cricket score may say "over" not "quarter".)
   const missingKeywords = template.requiredKeywords.filter(
     (kw) => !lower.includes(kw.toLowerCase())
   );
+  const anyKeywordFound =
+    template.requiredKeywords.length === 0 ||
+    missingKeywords.length < template.requiredKeywords.length;
 
   // Check that at least one expected tool pattern matched
   const toolsNotCalled = template.expectedToolPatterns.filter(
     (pattern) => !toolsUsed.some((t) => t.toLowerCase().includes(pattern))
   );
 
-  // Pass if: no required keywords missing, OR at least one tool was called
-  // (A response can be valid even without keyword matches if tools ran and
-  // returned data — the LLM may phrase things differently across sports.)
-  const passed =
-    missingKeywords.length === 0 ||
-    toolsUsed.length > 0;
+  // Pass if: at least one signal keyword found, OR at least one tool ran.
+  // Tools running is the strongest signal — if data was fetched the response is valid
+  // regardless of how the LLM phrased it.
+  const passed = anyKeywordFound || toolsUsed.length > 0;
 
   return { passed, missingKeywords, toolsNotCalled };
 }

@@ -1063,8 +1063,9 @@ export class sportsclawEngine {
     failedTools: string[];
     toolOutputs: Array<{ toolName: string; output: string }>;
     maxOutputTokens: number;
+    queryIntent?: string;
   }): Promise<string> {
-    const { userPrompt, draft, successfulTools, failedTools, toolOutputs, maxOutputTokens } = params;
+    const { userPrompt, draft, successfulTools, failedTools, toolOutputs, maxOutputTokens, queryIntent } = params;
     if (toolOutputs.length === 0) return draft;
 
     const serialized = toolOutputs
@@ -1074,6 +1075,13 @@ export class sportsclawEngine {
           `Tool ${idx + 1} (${item.toolName}) output:\n${item.output}`
       )
       .join("\n\n");
+
+    // Import inline to avoid circular dependency issues at module load time
+    const { buildTemplatePrompt } = await import("./response-templates.js");
+    const intentHint =
+      queryIntent && queryIntent !== "ambiguous"
+        ? buildTemplatePrompt(queryIntent as import("./response-templates.js").QueryIntent)
+        : "";
 
     try {
       const res = await generateText({
@@ -1085,6 +1093,7 @@ export class sportsclawEngine {
           "Do not ask a follow-up question.",
           "If required data is missing, explicitly mark that section unavailable.",
           "Keep the response concise.",
+          ...(intentHint ? [intentHint] : []),
         ].join(" "),
         prompt: [
           `User request: ${userPrompt}`,
@@ -3515,13 +3524,14 @@ export class sportsclawEngine {
     // --- Intent clarification (sport known, query purpose unclear) ---
     // Fires when the router explicitly sets needs_clarification=true,
     // meaning the sport is identified but what the user wants is genuinely
-    // ambiguous (e.g. bare "NBA" with no context). Skip in YOLO and on
-    // follow-up turns where conversation history provides enough context.
+    // ambiguous (e.g. bare "NBA" with no context). Gated behind the same
+    // clarifyOnLowConfidence flag as the sport-ambiguity gate above for
+    // consistency. Skip in YOLO and on follow-up turns.
     if (
+      this.config.clarifyOnLowConfidence &&
       !this.config.yoloMode &&
       !isFollowUp &&
       routing.decision?.needsClarification &&
-      routing.decision.mode !== "ambiguous" &&
       routing.decision.selectedSkills.length > 0 &&
       !isInternalToolIntent(sanitizedPrompt) &&
       !isConversationalIntent(sanitizedPrompt)
@@ -3924,6 +3934,7 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         toolOutputs,
         maxOutputTokens: budgets.synthesis,
+        queryIntent,
       });
     }
 
