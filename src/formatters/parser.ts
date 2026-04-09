@@ -300,6 +300,89 @@ function splitPipeRow(line: string): string[] {
   return trimmed.split("|").map((c) => c.trim());
 }
 
+// ---------------------------------------------------------------------------
+// renderTableAligned — padded monospace table for code blocks
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute max display width of each column across all rows.
+ */
+export function columnWidths(rows: string[][]): number[] {
+  if (rows.length === 0) return [];
+  const numCols = Math.max(...rows.map((r) => r.length));
+  const widths = new Array<number>(numCols).fill(0);
+  for (const row of rows) {
+    for (let c = 0; c < row.length; c++) {
+      widths[c] = Math.max(widths[c], stripBold(row[c] ?? "").length);
+    }
+  }
+  return widths;
+}
+
+/**
+ * Returns true if ≥60% of data values in a column look numeric.
+ * Numeric columns are right-aligned; text columns are left-aligned.
+ */
+export function isNumericColumn(
+  rows: string[][],
+  colIdx: number,
+  headerIdx: number
+): boolean {
+  const dataRows = rows.filter((_, i) => i !== headerIdx);
+  if (dataRows.length === 0) return false;
+  const numericCount = dataRows.filter((r) => {
+    const val = stripBold(r[colIdx] ?? "").trim();
+    // Handles: 11, 1,234, .647, 67.3%, -4.5, +2
+    return val.length > 0 && /^[+-]?(?:[\d,]+\.?\d*|\.\d+)%?$/.test(val);
+  }).length;
+  return numericCount / dataRows.length >= 0.6;
+}
+
+/**
+ * Render a table as aligned monospace text suitable for wrapping in a code block.
+ *
+ * - Text columns: left-aligned
+ * - Numeric columns: right-aligned
+ * - Separator row (─┼─) inserted after the header
+ *
+ * Example:
+ *   Team                  │  W │  L │  PCT
+ *   ──────────────────────┼────┼────┼──────
+ *   Buffalo Bills         │ 11 │  6 │ .647
+ *   New England Patriots  │  8 │  9 │ .471
+ */
+export function renderTableAligned(rows: string[][], headerIndex: number): string {
+  if (rows.length === 0) return "";
+
+  const hIdx = headerIndex >= 0 ? headerIndex : 0;
+  const widths = columnWidths(rows);
+  const numeric = widths.map((_, c) => isNumericColumn(rows, c, hIdx));
+
+  function padCell(val: string, colIdx: number): string {
+    const clean = stripBold(val ?? "");
+    const w = widths[colIdx] ?? clean.length;
+    return numeric[colIdx] ? clean.padStart(w) : clean.padEnd(w);
+  }
+
+  const lines: string[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const cells = widths.map((_, c) => padCell(row[c] ?? "", c));
+    lines.push(cells.join(" │ "));
+
+    // Insert separator row after the header
+    if (i === hIdx) {
+      const sep = widths.map((w) => "─".repeat(w)).join("─┼─");
+      lines.push(sep);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Parse an array of lines (e.g. from inside a code block) as a pipe table.
  * Returns a table block if successful, null otherwise.

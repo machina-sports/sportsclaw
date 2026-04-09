@@ -27,7 +27,7 @@ import type { McpManager } from "./mcp.js";
 // ---------------------------------------------------------------------------
 
 const MEMORY_BASE =
-  process.env.sportsclaw_MEMORY_DIR ||
+  process.env.SPORTSCLAW_MEMORY_DIR ||
   join(homedir(), ".sportsclaw", "memory");
 
 const CONTEXT_FILE = "CONTEXT.md";

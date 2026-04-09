@@ -19,7 +19,7 @@
 
 export type DetectedSport =
   | "nba" | "nfl" | "mlb" | "nhl" | "wnba" | "cbb" | "cfb"
-  | "football" | "tennis" | "golf" | "f1"
+  | "football" | "tennis" | "golf" | "f1" | "volleyball"
   | null;
 
 export type DetectedLeague = string | null;
@@ -36,6 +36,9 @@ export interface ButtonDef {
 // ---------------------------------------------------------------------------
 
 const SPORT_PATTERNS: [DetectedSport, RegExp][] = [
+  // Volleyball — must come before football because both share "Eredivisie"
+  // (Dutch football league vs Dutch volleyball league — "volleyball" keyword is decisive)
+  ["volleyball", /\b(volleyball|nevobo|topdivisie|superdivisie|dutch volleyball)\b/i],
   // Football/Soccer — broad league and keyword coverage
   ["football", /\b(premier league|la liga|bundesliga|serie a(?! brazil)|ligue 1|mls|champions league|europa league|world cup|eredivisie|primeira liga|campeonato brasileiro|libertadores|copa am[eé]rica|fa cup|carabao|efl|soccer|f[uú]tbol|futebol|transfermarkt|fbref|corinthians|flamengo|palmeiras|cruzeiro|s[aã]o paulo|internacional|gr[eê]mio|botafogo|vasco|atletico mineiro|atl[eé]tico|santos|bahia|fortaleza|bragantino|cuiab[aá]|juventude|cear[aá]|sport recife|goi[aá]s|coritiba|am[eé]rica mineiro|arsenal|chelsea|liverpool|manchester|man city|man utd|tottenham|spurs|newcastle|aston villa|west ham|everton|brighton|wolves|bournemouth|nottingham|crystal palace|fulham|brentford|burnley|sheffield|luton|barcelona|real madrid|atletico madrid|sevilla|villarreal|betis|sociedad|athletic bilbao|valencia|bayern|dortmund|leverkusen|leipzig|juventus|milan|inter|napoli|roma|lazio|fiorentina|atalanta|psg|marseille|lyon|monaco|lille)\b/i],
   // NBA
@@ -186,6 +189,13 @@ const F1_BUTTONS: ButtonDef[] = [
   { action: "laptimes", label: "⏱ Lap Times" },
 ];
 
+/** Volleyball (Dutch — Nevobo) */
+const VOLLEYBALL_BUTTONS: ButtonDef[] = [
+  { action: "standings", label: "🏐 Standings" },
+  { action: "schedule", label: "📅 Schedule" },
+  { action: "results", label: "📋 Results" },
+];
+
 /** Generic fallback — works for any sport not explicitly mapped */
 const GENERIC_BUTTONS: ButtonDef[] = [
   { action: "details", label: "📊 More Details" },
@@ -205,6 +215,7 @@ export function getButtons(sport: DetectedSport): ButtonDef[] {
   if (sport === "tennis") return TENNIS_BUTTONS;
   if (sport === "golf") return GOLF_BUTTONS;
   if (sport === "f1") return F1_BUTTONS;
+  if (sport === "volleyball") return VOLLEYBALL_BUTTONS;
   return GENERIC_BUTTONS;
 }
 
@@ -289,6 +300,12 @@ const FOLLOW_UP_PROMPTS: Record<string, (prompt: string) => string> = {
   laptimes: (p) =>
     `Show lap times, sector times, and pit stop data for: ${p}`,
 
+  // Volleyball actions
+  schedule: (p) =>
+    `Show the upcoming schedule for: ${p}`,
+  results: (p) =>
+    `Show the latest match results for: ${p}`,
+
   // Generic fallback actions
   details: (p) =>
     `Show more detailed information and a breakdown for: ${p}`,
@@ -306,3 +323,275 @@ export function getFollowUpPrompt(
   const builder = FOLLOW_UP_PROMPTS[action];
   return builder ? builder(originalPrompt) : null;
 }
+
+// ---------------------------------------------------------------------------
+// Sport picker menu system — pre-conversation buttons
+// ---------------------------------------------------------------------------
+
+/**
+ * A button definition with a fully pre-built callback string.
+ * Used for the sport picker and quick action menus (no context key needed).
+ */
+export interface MenuButtonDef {
+  /** Full callback_data / customId string */
+  callback: string;
+  /** Display label (with emoji) */
+  label: string;
+}
+
+/** Human-readable display name for each sport key */
+const SPORT_DISPLAY_NAMES: Record<string, string> = {
+  football:   "Football",
+  nfl:        "NFL",
+  nba:        "NBA",
+  nhl:        "NHL",
+  mlb:        "MLB",
+  wnba:       "WNBA",
+  cfb:        "College Football",
+  cbb:        "College Basketball",
+  tennis:     "Tennis",
+  golf:       "Golf",
+  f1:         "Formula 1",
+  volleyball: "Volleyball",
+  markets:    "Sports Betting",
+  news:       "Sports",
+};
+
+export function getSportDisplayName(sport: string): string {
+  return SPORT_DISPLAY_NAMES[sport] ?? sport;
+}
+
+/**
+ * Prompts fired when a user clicks a quick action button.
+ * Keyed by action slug; receives the human-readable sport name.
+ */
+const QUICK_ACTION_PROMPTS: Record<string, (sport: string) => string> = {
+  scores:      (s) => `What are today's ${s} scores and results?`,
+  matches:     (s) => `What are today's ${s} matches and results?`,
+  standings:   (s) => `Show me the current ${s} standings`,
+  leaders:     (s) => `Show me the current ${s} statistical leaders`,
+  news:        (s) => `What is the latest ${s} news and headlines?`,
+  odds:        (s) => `Show me the current betting odds for ${s}`,
+  rankings:    (s) => `Show me the current ${s} player rankings`,
+  leaderboard: (s) => `Show me the current ${s} tournament leaderboard`,
+  schedule:    (s) => `Show me the upcoming ${s} schedule`,
+  raceresults: (s) => `Show me the latest ${s} race results and final standings`,
+  driverstnd:  (s) => `Show me the current ${s} driver and constructor championship standings`,
+  laptimes:    (s) => `Show me the latest ${s} lap times, sector data, and tire info`,
+  results:     (s) => `Show me the latest ${s} match results`,
+  markets:     (s) => `Show me active ${s} prediction markets with current odds`,
+  search:      (_s) => `Search for current sports prediction markets on Kalshi and Polymarket`,
+  topstories:  (s) => `What are the top ${s} stories and headlines today?`,
+};
+
+/**
+ * Build the engine prompt for a sport picker quick action.
+ * `sport` is the sport key (e.g. "nba"), `action` is the action slug (e.g. "scores").
+ */
+export function getQuickActionPrompt(sport: string, action: string): string | null {
+  const builder = QUICK_ACTION_PROMPTS[action];
+  if (!builder) return null;
+  const displayName = SPORT_DISPLAY_NAMES[sport] ?? sport;
+  return builder(displayName);
+}
+
+/**
+ * Top-level sport picker — rows of MenuButtonDef for Telegram (3 per row).
+ * For Discord, flatten and repack into rows of 5.
+ */
+export const SPORT_MENU_ROWS: MenuButtonDef[][] = [
+  [
+    { callback: "sc_sport_football",   label: "⚽ Football" },
+    { callback: "sc_sport_nfl",        label: "🏈 NFL" },
+    { callback: "sc_sport_nba",        label: "🏀 NBA" },
+  ],
+  [
+    { callback: "sc_sport_nhl",        label: "🏒 NHL" },
+    { callback: "sc_sport_mlb",        label: "⚾ MLB" },
+    { callback: "sc_sport_tennis",     label: "🎾 Tennis" },
+  ],
+  [
+    { callback: "sc_sport_golf",       label: "🏌️ Golf" },
+    { callback: "sc_sport_f1",         label: "🏎️ F1" },
+    { callback: "sc_sport_volleyball", label: "🏐 Volleyball" },
+  ],
+  [
+    { callback: "sc_sport_cfb",        label: "🏈 CFB" },
+    { callback: "sc_sport_cbb",        label: "🏀 CBB" },
+    { callback: "sc_sport_wnba",       label: "🏀 WNBA" },
+  ],
+  [
+    { callback: "sc_sport_markets",    label: "📊 Betting/Odds" },
+    { callback: "sc_sport_news",       label: "📰 News" },
+  ],
+];
+
+/** Per-sport quick action rows (2 per row — mobile-friendly for Telegram) */
+export const SPORT_QUICK_ACTION_ROWS: Record<string, MenuButtonDef[][]> = {
+  football: [
+    [
+      { callback: "sc_qa_football_matches",   label: "📅 Today's Matches" },
+      { callback: "sc_qa_football_standings", label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_football_leaders",   label: "⚽ Top Scorers" },
+      { callback: "sc_qa_football_news",      label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_qa_football_odds",      label: "💰 Odds" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  nfl: [
+    [
+      { callback: "sc_qa_nfl_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_nfl_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_nfl_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_nfl_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_qa_nfl_odds",           label: "💰 Odds" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  nba: [
+    [
+      { callback: "sc_qa_nba_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_nba_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_nba_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_nba_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_qa_nba_odds",           label: "💰 Odds" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  nhl: [
+    [
+      { callback: "sc_qa_nhl_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_nhl_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_nhl_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_nhl_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_qa_nhl_odds",           label: "💰 Odds" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  mlb: [
+    [
+      { callback: "sc_qa_mlb_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_mlb_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_mlb_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_mlb_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_qa_mlb_odds",           label: "💰 Odds" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  wnba: [
+    [
+      { callback: "sc_qa_wnba_scores",        label: "🎯 Today's Scores" },
+      { callback: "sc_qa_wnba_standings",     label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_wnba_leaders",       label: "📈 Stat Leaders" },
+      { callback: "sc_qa_wnba_news",          label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  cfb: [
+    [
+      { callback: "sc_qa_cfb_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_cfb_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_cfb_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_cfb_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  cbb: [
+    [
+      { callback: "sc_qa_cbb_scores",         label: "🎯 Today's Scores" },
+      { callback: "sc_qa_cbb_standings",      label: "🏆 Standings" },
+    ],
+    [
+      { callback: "sc_qa_cbb_leaders",        label: "📈 Stat Leaders" },
+      { callback: "sc_qa_cbb_news",           label: "📰 Latest News" },
+    ],
+    [
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  tennis: [
+    [
+      { callback: "sc_qa_tennis_matches",     label: "🎾 Live Matches" },
+      { callback: "sc_qa_tennis_rankings",    label: "🏆 Rankings" },
+    ],
+    [
+      { callback: "sc_qa_tennis_news",        label: "📰 Latest News" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  golf: [
+    [
+      { callback: "sc_qa_golf_leaderboard",   label: "📊 Leaderboard" },
+      { callback: "sc_qa_golf_schedule",      label: "📅 Schedule" },
+    ],
+    [
+      { callback: "sc_qa_golf_news",          label: "📰 Latest News" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  f1: [
+    [
+      { callback: "sc_qa_f1_raceresults",     label: "🏁 Race Results" },
+      { callback: "sc_qa_f1_driverstnd",      label: "🏆 Driver Standings" },
+    ],
+    [
+      { callback: "sc_qa_f1_laptimes",        label: "⏱️ Lap Times" },
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  volleyball: [
+    [
+      { callback: "sc_qa_volleyball_standings", label: "🏐 Standings" },
+      { callback: "sc_qa_volleyball_schedule",  label: "📅 Schedule" },
+    ],
+    [
+      { callback: "sc_qa_volleyball_results",   label: "📋 Results" },
+      { callback: "sc_menu",                    label: "⬅️ Back" },
+    ],
+  ],
+  markets: [
+    [
+      { callback: "sc_qa_markets_markets",    label: "📊 Active Markets" },
+      { callback: "sc_qa_markets_search",     label: "🔍 Search Markets" },
+    ],
+    [
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+  news: [
+    [
+      { callback: "sc_qa_news_topstories",    label: "📰 Top Sports Stories" },
+    ],
+    [
+      { callback: "sc_menu",                  label: "⬅️ Back" },
+    ],
+  ],
+};

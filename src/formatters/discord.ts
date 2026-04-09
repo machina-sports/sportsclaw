@@ -12,6 +12,7 @@ import {
   stripBold,
   isComparisonTable,
   renderComparisonText,
+  renderTableAligned,
 } from "./parser.js";
 import type { ParsedResponse } from "./parser.js";
 
@@ -136,11 +137,8 @@ function renderBlockForDiscord(block: ParsedResponse["blocks"][number]): string 
           "\n```"
         );
       }
-      // Fallback: generic table in code block with aligned columns
-      const lines = block.rows.map((cells) =>
-        cells.map(stripBold).join("  |  ")
-      );
-      return "```\n" + lines.join("\n") + "\n```";
+      // All other tables: column-padded alignment in a code block
+      return "```\n" + renderTableAligned(block.rows, block.headerIndex) + "\n```";
     }
 
     case "code":

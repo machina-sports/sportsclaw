@@ -16,12 +16,19 @@
  */
 
 import { spawn } from "node:child_process";
+import { readdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { sportsclawEngine } from "../engine.js";
 import type { LLMProvider, sportsclawConfig } from "../types.js";
 import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
-import { detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt } from "../buttons.js";
-import type { DetectedSport } from "../buttons.js";
+import {
+  detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt,
+  getSportDisplayName, getQuickActionPrompt,
+  SPORT_MENU_ROWS, SPORT_QUICK_ACTION_ROWS,
+} from "../buttons.js";
+import type { DetectedSport, MenuButtonDef } from "../buttons.js";
 import {
   AskUserQuestionHalt,
   saveSuspendedState,
@@ -42,8 +49,8 @@ interface TelegramUpdate {
     date: number;
     chat: { id: number; type: string };
     text?: string;
-      caption?: string;
-      photo?: Array<{ file_id: string; width: number; height: number; file_size?: number }>;
+    caption?: string;
+    photo?: Array<{ file_id: string; width: number; height: number; file_size?: number }>;
     from?: { id: number; first_name: string };
   };
   callback_query?: {
@@ -55,6 +62,12 @@ interface TelegramUpdate {
     };
     data?: string;
   };
+  inline_query?: {
+    id: string;
+    from: { id: number; first_name: string };
+    query: string;
+    offset: string;
+  };
 }
 
 interface TelegramResponse {
@@ -64,7 +77,8 @@ interface TelegramResponse {
 
 interface InlineKeyboardButton {
   text: string;
-  callback_data: string;
+  callback_data?: string;
+  switch_inline_query?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +151,173 @@ function buildInlineKeyboard(
 }
 
 // ---------------------------------------------------------------------------
+// Sport picker menu helpers
+// ---------------------------------------------------------------------------
+
+const WELCOME_TEXT =
+  "👋 Welcome to <b>sportsclaw</b>!\n\nPick a sport to get started, or just type any question:";
+
+function buildMenuKeyboard(
+  rows: MenuButtonDef[][]
+): { inline_keyboard: InlineKeyboardButton[][] } {
+  return {
+    inline_keyboard: rows.map((row) =>
+      row.map((btn) => ({ text: btn.label, callback_data: btn.callback }))
+    ),
+  };
+}
+
+function buildSportPickerKeyboard(): { inline_keyboard: InlineKeyboardButton[][] } {
+  return buildMenuKeyboard(SPORT_MENU_ROWS);
+}
+
+function buildSportQuickMenu(sport: string): { inline_keyboard: InlineKeyboardButton[][] } | null {
+  const rows = SPORT_QUICK_ACTION_ROWS[sport];
+  if (!rows) return null;
+  return buildMenuKeyboard(rows);
+}
+
+async function handleStartCommand(apiBase: string, chatId: number): Promise<void> {
+  await sendMessage(apiBase, chatId, WELCOME_TEXT, {
+    parseMode: "HTML",
+    replyMarkup: buildSportPickerKeyboard(),
+  });
+}
+
+async function editMessage(
+  apiBase: string,
+  chatId: number,
+  messageId: number,
+  text: string,
+  replyMarkup?: object
+): Promise<void> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  const res = await fetch(`${apiBase}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    console.error(`[sportsclaw] editMessageText failed: ${await res.text()}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inline query handler — @botname <sport> from any Telegram chat
+// ---------------------------------------------------------------------------
+
+async function processInlineQuery(
+  update: TelegramUpdate,
+  apiBase: string
+): Promise<void> {
+  const iq = update.inline_query;
+  if (!iq) return;
+
+  const query = iq.query.trim().toLowerCase();
+  const allSports = SPORT_MENU_ROWS.flat();
+
+  // Filter sports by query text (empty query → show all)
+  const filtered = query
+    ? allSports.filter(
+        (btn) =>
+          btn.label.toLowerCase().includes(query) ||
+          btn.callback.replace("sc_sport_", "").includes(query) ||
+          getSportDisplayName(btn.callback.replace("sc_sport_", ""))
+            .toLowerCase()
+            .includes(query)
+      )
+    : allSports;
+
+  const results = filtered.map((btn) => {
+    const sport = btn.callback.replace("sc_sport_", "");
+    const displayName = getSportDisplayName(sport);
+    const quickMenu = buildSportQuickMenu(sport);
+
+    return {
+      type: "article",
+      id: sport,
+      title: btn.label,
+      description: `${displayName} — scores, standings, news & more`,
+      // Sends this message into whichever chat the user selects
+      input_message_content: {
+        message_text: `${btn.label} — what would you like to know?`,
+        parse_mode: "HTML",
+      },
+      // The sent message includes the sport's quick action buttons
+      reply_markup: quickMenu ?? undefined,
+      // Small icon so results look clean in the inline list
+      thumb_width: 48,
+      thumb_height: 48,
+    };
+  });
+
+  await fetch(`${apiBase}/answerInlineQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      inline_query_id: iq.id,
+      results: results.slice(0, 50),
+      cache_time: 300, // Cache results for 5 minutes
+      is_personal: false,
+    }),
+  }).catch((err) => {
+    console.error(`[sportsclaw] answerInlineQuery failed: ${err}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Welcome-on-reconnect — notify all known private-chat users
+// ---------------------------------------------------------------------------
+
+async function sendWelcomeToKnownUsers(apiBase: string): Promise<void> {
+  const memoryDir =
+    process.env.SPORTSCLAW_MEMORY_DIR ||
+    join(homedir(), ".sportsclaw", "memory");
+
+  if (!existsSync(memoryDir)) return;
+
+  let entries: string[];
+  try {
+    entries = readdirSync(memoryDir);
+  } catch {
+    return;
+  }
+
+  // Find all telegram-<numericId> directories (private chat users only)
+  const telegramUserIds = entries
+    .filter((e) => /^telegram-\d+$/.test(e))
+    .map((e) => parseInt(e.replace("telegram-", ""), 10))
+    .filter((id) => !isNaN(id));
+
+  if (telegramUserIds.length === 0) return;
+
+  console.log(
+    `[sportsclaw] Sending welcome to ${telegramUserIds.length} known user(s)...`
+  );
+
+  for (const chatId of telegramUserIds) {
+    try {
+      await sendMessage(
+        apiBase,
+        chatId,
+        "✅ sportsclaw is back!\n\n" + WELCOME_TEXT,
+        { parseMode: "HTML", replyMarkup: buildSportPickerKeyboard() }
+      );
+    } catch {
+      // User may have blocked the bot — ignore silently
+    }
+    // Respect Telegram rate limits: 1 msg/sec to different chats
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main listener
 // ---------------------------------------------------------------------------
 
@@ -193,14 +374,13 @@ export async function startTelegramListener(): Promise<void> {
   console.log(`[sportsclaw] Listening for messages...`);
 
   if (process.env.SPORTSCLAW_RESTART_CHAT_ID) {
-    try {
-      const restartChatId = parseInt(process.env.SPORTSCLAW_RESTART_CHAT_ID, 10);
-      await sendMessage(apiBase, restartChatId, "✅ I'm back. New configs loaded.");
-      console.log(`[sportsclaw] Sent restart confirmation to ${restartChatId}`);
-    } catch (e) {
-      console.error("[sportsclaw] Failed to send restart confirmation:", e);
-    }
     delete process.env.SPORTSCLAW_RESTART_CHAT_ID;
+    // Send welcome + sport picker to all known users on reconnect
+    if (process.env.SPORTSCLAW_BROADCAST_ON_STARTUP === "true") {
+      sendWelcomeToKnownUsers(apiBase).catch((e) =>
+        console.error("[sportsclaw] Welcome broadcast failed:", e)
+      );
+    }
   }
 
   // Mark boot time — ignore any messages sent before this to prevent
@@ -227,7 +407,7 @@ export async function startTelegramListener(): Promise<void> {
   while (true) {
     try {
       const res = await fetch(
-        `${apiBase}/getUpdates?timeout=30&offset=${offset}&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query"]))}`,
+        `${apiBase}/getUpdates?timeout=30&offset=${offset}&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query", "inline_query"]))}`,
         { signal: AbortSignal.timeout(60_000) }
       );
       const data = (await res.json()) as TelegramResponse;
@@ -248,6 +428,9 @@ export async function startTelegramListener(): Promise<void> {
             engineConfig,
             allowedUsers
           );
+        }
+        if (update.inline_query) {
+          return processInlineQuery(update, apiBase);
         }
         return processMessage(update, apiBase, engineConfig, allowedUsers, bootEpoch);
       });
@@ -444,6 +627,16 @@ async function processMessage(
   if (!prompt) return;
 
 
+  // /start, /menu, or "menu" — show sport picker without running the engine
+  if (
+    prompt === "/start" ||
+    prompt === "/menu" ||
+    prompt.toLowerCase() === "menu"
+  ) {
+    await handleStartCommand(apiBase, msg.chat.id);
+    return;
+  }
+
   if (prompt.toLowerCase() === "restart" || prompt.toLowerCase() === "/restart" || prompt.toLowerCase() === "/claw restart") {
     await sendMessage(apiBase, msg.chat.id, "🔄 Restarting Telegram daemon to apply new configurations...", {
       replyToMessageId: msg.message_id,
@@ -484,13 +677,33 @@ async function processMessage(
 
     // Build inline keyboard for game-related responses with supported data
     let replyMarkup: object | undefined;
-    if (isGameRelatedResponse(response, prompt)) {
-      const sport = detectSport(response, prompt);
+    const sport = detectSport(response, prompt);
+    if (isGameRelatedResponse(response, prompt) && sport) {
       const contextKey = storeButtonContext(prompt, userId, sport);
       const keyboard = buildInlineKeyboard(contextKey, sport, response, prompt);
-      if (keyboard) {
-        replyMarkup = keyboard;
-      }
+      // Share button: opens inline query mode pre-filled with the sport name
+      const shareRow: InlineKeyboardButton[] = [
+        {
+          text: "📤 Share",
+          switch_inline_query: getSportDisplayName(sport).toLowerCase(),
+        },
+      ];
+      replyMarkup = {
+        inline_keyboard: [
+          ...(keyboard?.inline_keyboard ?? []),
+          shareRow,
+        ],
+      };
+    } else if (sport) {
+      // Sport detected but not game-related — still show share button alone
+      replyMarkup = {
+        inline_keyboard: [[
+          {
+            text: "📤 Share",
+            switch_inline_query: getSportDisplayName(sport).toLowerCase(),
+          },
+        ]],
+      };
     }
 
     // Telegram has a 4096 char limit — split if needed
@@ -643,6 +856,91 @@ async function processCallbackQuery(
       });
     } finally {
       clearInterval(typingInterval);
+    }
+    return;
+  }
+
+  // sc_menu — navigate back to top-level sport picker
+  if (cq.data === "sc_menu") {
+    await fetch(`${apiBase}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cq.id }),
+    });
+    await editMessage(
+      apiBase,
+      cqMessage.chat.id,
+      cqMessage.message_id,
+      WELCOME_TEXT,
+      buildSportPickerKeyboard()
+    );
+    return;
+  }
+
+  // sc_sport_<sport> — show quick action menu for selected sport
+  if (cq.data.startsWith("sc_sport_")) {
+    const sport = cq.data.slice("sc_sport_".length);
+    await fetch(`${apiBase}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cq.id }),
+    });
+    const quickMenu = buildSportQuickMenu(sport);
+    const label = getSportDisplayName(sport);
+    await editMessage(
+      apiBase,
+      cqMessage.chat.id,
+      cqMessage.message_id,
+      `<b>${label}</b> — what would you like to know?`,
+      quickMenu ?? undefined
+    );
+    return;
+  }
+
+  // sc_qa_<sport>_<action> — fire a quick action engine prompt
+  if (cq.data.startsWith("sc_qa_")) {
+    const withoutPrefix = cq.data.slice("sc_qa_".length);
+    const underscoreIdx = withoutPrefix.indexOf("_");
+    if (underscoreIdx < 0) return;
+    const sport = withoutPrefix.slice(0, underscoreIdx);
+    const action = withoutPrefix.slice(underscoreIdx + 1);
+    const followUp = getQuickActionPrompt(sport, action);
+    if (!followUp) return;
+
+    await fetch(`${apiBase}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cq.id, text: "Loading..." }),
+    });
+
+    const sendTypingQA = () =>
+      fetch(`${apiBase}/sendChatAction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: cqMessage.chat.id, action: "typing" }),
+      }).catch(() => {});
+    await sendTypingQA();
+    const typingIntervalQA = setInterval(sendTypingQA, 4000);
+
+    const userId = `telegram-${cq.from.id}`;
+    try {
+      const engine = new sportsclawEngine({ ...engineConfig, skipFanProfile: true });
+      const response = await engine.run(followUp, { userId, sessionId: userId });
+
+      const formatted = formatResponse(response, "telegram");
+      const textToSend = formatted.telegram || formatted.text;
+      const chunks = splitMessage(textToSend, 4096);
+      for (const chunk of chunks) {
+        await sendMessage(apiBase, cqMessage.chat.id, chunk, {
+          parseMode: formatted.telegram ? "HTML" : undefined,
+        });
+      }
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[sportsclaw] Quick action error: ${errMsg}`);
+      await sendMessage(apiBase, cqMessage.chat.id, "Sorry, I encountered an error processing that request.");
+    } finally {
+      clearInterval(typingIntervalQA);
     }
     return;
   }
