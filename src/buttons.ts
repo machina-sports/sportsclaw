@@ -61,8 +61,6 @@ const SPORT_PATTERNS: [DetectedSport, RegExp][] = [
   ["golf", /\b(golf|pga tour|lpga|masters tournament|the masters|the open championship|us open golf|pga championship|ryder cup|tour championship|dp world tour)\b/i],
   // F1
   ["f1", /\b(formula ?1|formula ?one|\bf1\b|grand prix|verstappen|hamilton|leclerc|norris|sainz|perez|red bull racing|ferrari f1|mclaren|mercedes f1)\b/i],
-  // Volleyball (Dutch) — already declared first in SPORT_PATTERNS; this entry is a no-op kept for readability
-  // Pattern is defined above to ensure it takes priority over football's "eredivisie" match
 ];
 
 /**
@@ -304,9 +302,9 @@ const FOLLOW_UP_PROMPTS: Record<string, (prompt: string) => string> = {
 
   // Volleyball actions
   schedule: (p) =>
-    `Show the upcoming volleyball schedule for: ${p}`,
+    `Show the upcoming schedule for: ${p}`,
   results: (p) =>
-    `Show the latest volleyball match results for: ${p}`,
+    `Show the latest match results for: ${p}`,
 
   // Generic fallback actions
   details: (p) =>

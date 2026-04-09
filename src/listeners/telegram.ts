@@ -277,7 +277,7 @@ async function processInlineQuery(
 
 async function sendWelcomeToKnownUsers(apiBase: string): Promise<void> {
   const memoryDir =
-    process.env.sportsclaw_MEMORY_DIR ||
+    process.env.SPORTSCLAW_MEMORY_DIR ||
     join(homedir(), ".sportsclaw", "memory");
 
   if (!existsSync(memoryDir)) return;
