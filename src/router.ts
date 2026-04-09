@@ -212,6 +212,8 @@ function parseRouterJson(text: string): Partial<RouteDecision> | null {
       mode?: unknown;
       confidence?: unknown;
       reason?: unknown;
+      intent?: unknown;
+      needs_clarification?: unknown;
     };
     const selectedSkills = Array.isArray(parsed.selected_skills)
       ? parsed.selected_skills.filter(
@@ -225,11 +227,18 @@ function parseRouterJson(text: string): Partial<RouteDecision> | null {
     const confidence =
       typeof parsed.confidence === "number" ? clamp01(parsed.confidence) : 0;
     const reason = typeof parsed.reason === "string" ? parsed.reason : "";
+    const intent = typeof parsed.intent === "string" ? parsed.intent : undefined;
+    const needsClarification =
+      typeof parsed.needs_clarification === "boolean"
+        ? parsed.needs_clarification
+        : false;
     return {
       selectedSkills,
       ...(mode ? { mode } : {}),
       confidence,
       reason,
+      ...(intent ? { intent } : {}),
+      needsClarification,
     };
   } catch {
     return null;
@@ -259,6 +268,8 @@ async function runLlmRouter(
         "Choose only from allowed skills. Keep selection minimal.",
         "If one sport is explicit, mode must be focused.",
         "If prompt is broad/vague, mode may be ambiguous.",
+        "Also classify the query intent as one of: live_scores, standings, schedule, odds, best_bets, player_stats, team_stats, news, roster, analysis, prediction, ambiguous.",
+        "Set needs_clarification to true ONLY when the user's intent is genuinely unclear even after knowing the sport (e.g. bare sport name with no context). Do NOT set it for any query that is reasonably interpretable.",
       ].join(" "),
       prompt: [
         `Allowed skills: ${allowedSkills}`,
@@ -266,7 +277,7 @@ async function runLlmRouter(
         `Memory preference ranking: ${memoryHint}`,
         ...(input.recentContext ? [`Recent conversation context: ${input.recentContext}`] : []),
         `User prompt: ${input.prompt}`,
-        `Return JSON schema: {"selected_skills":["skill"],"mode":"focused|ambiguous","confidence":0.0,"reason":"short reason"}`,
+        `Return JSON schema: {"selected_skills":["skill"],"mode":"focused|ambiguous","confidence":0.0,"reason":"short reason","intent":"live_scores|standings|schedule|odds|best_bets|player_stats|team_stats|news|roster|analysis|prediction|ambiguous","needs_clarification":false}`,
       ].join("\n"),
       maxOutputTokens: input.config.tokenBudgets?.router ?? DEFAULT_TOKEN_BUDGETS.router,
       ...(() => {

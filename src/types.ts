@@ -373,6 +373,10 @@ export interface RouteDecision {
   mode: "focused" | "ambiguous";
   confidence: number;
   reason: string;
+  /** Query intent classified by the router (e.g. "live_scores", "standings") */
+  intent?: string;
+  /** True when the router determines the query needs a clarifying question */
+  needsClarification?: boolean;
 }
 
 export interface RouteMeta {

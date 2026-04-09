@@ -88,6 +88,9 @@ import {
 } from "./bracket-sim.js";
 import { subagentManager, type SubagentResult } from "./subagent.js";
 import { heartbeatService } from "./heartbeat.js";
+import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
+import { evaluateResponse } from "./evaluator.js";
+import { getSportDisplayName } from "./buttons.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -128,7 +131,7 @@ Your core directives:
 4. CITE THE SOURCE — At the end of your answer, add a small italicized source line naming the actual data providers used. Map skill prefixes to providers:
    football → Transfermarkt & FBref, nfl/nba/nhl/mlb/wnba/cfb/cbb/golf/tennis → ESPN, f1 → FastF1, news → Google News & RSS feeds, kalshi → Kalshi, polymarket → Polymarket, betting → Betting Analysis, markets → ESPN + Kalshi + Polymarket.
    Example: *Source: ESPN, Google News (2025-03-15)*. Only list providers you actually called.
-5. DO NOT ASK CLARIFYING QUESTIONS in one-shot mode. If a prompt is vague (e.g. "how is the premier league"), assume they want current standings and recent news, fetch it, and summarize.
+5. CLARIFICATION: If the user's intent is genuinely unclear and there is no prior conversation history, ask ONE focused question (e.g. "Are you looking for live scores, standings, or today's schedule?"). If the query is reasonably interpretable — or conversation history exists — just answer it directly. Never ask multiple questions. Never ask when you already have enough context to answer.
 6. IDs ARE REQUIRED: If a tool requires a \`season_id\`, \`competition_id\`, etc., DO NOT GUESS. Use lookup tools like \`get_competitions\` or \`get_competition_seasons\` first if you do not know the exact string (e.g. \`premier-league-2025\`). A raw year like \`2025\` will fail.
 7. PARALLEL TOOL CALLS — When a query involves multiple data dimensions (e.g., "tell me about [team]"), call MULTIPLE tools in a SINGLE response step:
    - Recent/upcoming matches
@@ -503,7 +506,7 @@ export class sportsclawEngine {
   }
 
   /** Full system prompt (base + dynamic tool info + strategy + agent directives + user-supplied) */
-  private buildSystemPrompt(hasMemory: boolean, agents?: AgentDef[], strategyContent?: string, callerSystemPrompt?: string): string {
+  private buildSystemPrompt(hasMemory: boolean, agents?: AgentDef[], strategyContent?: string, callerSystemPrompt?: string, queryIntent?: string): string {
     let basePrompt = BASE_SYSTEM_PROMPT;
 
     // Strip fan profile update directive when skipFanProfile is active
@@ -785,6 +788,16 @@ export class sportsclawEngine {
 
     if (this.config.systemPrompt) {
       parts.push("", this.config.systemPrompt);
+    }
+
+    // Inject response shape template for the detected query intent.
+    // Placed last so it's fresh in the model's context window right before
+    // it generates — closer to the end = higher attention weight.
+    if (queryIntent && queryIntent !== "ambiguous") {
+      const templateSection = buildTemplatePrompt(queryIntent as QueryIntent);
+      if (templateSection) {
+        parts.push("", templateSection);
+      }
     }
 
     return parts.join("\n");
@@ -3499,6 +3512,38 @@ export class sportsclawEngine {
       return clarification;
     }
 
+    // --- Intent clarification (sport known, query purpose unclear) ---
+    // Fires when the router explicitly sets needs_clarification=true,
+    // meaning the sport is identified but what the user wants is genuinely
+    // ambiguous (e.g. bare "NBA" with no context). Skip in YOLO and on
+    // follow-up turns where conversation history provides enough context.
+    if (
+      !this.config.yoloMode &&
+      !isFollowUp &&
+      routing.decision?.needsClarification &&
+      routing.decision.mode !== "ambiguous" &&
+      routing.decision.selectedSkills.length > 0 &&
+      !isInternalToolIntent(sanitizedPrompt) &&
+      !isConversationalIntent(sanitizedPrompt)
+    ) {
+      const sport = routing.decision.selectedSkills[0];
+      const sportLabel = getSportDisplayName(sport);
+      const intentQ = `What would you like to know about ${sportLabel}? For example:\n- Live scores or game updates\n- Standings\n- Today's schedule\n- Betting odds or best bets\n- Player or team stats\n- Recent news`;
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: intentQ }] });
+      if (memory) {
+        await memory.appendToThread(sanitizedPrompt, intentQ);
+        await memory.appendExchange(sanitizedPrompt, intentQ);
+      }
+      return intentQ;
+    }
+
+    // Capture detected intent for response template injection and evaluation
+    const queryIntent = (routing.decision?.intent ?? "ambiguous") as QueryIntent;
+
+    if (this.config.verbose && routing.decision?.intent) {
+      console.error(`[sportsclaw] intent=${queryIntent} needs_clarification=${routing.decision.needsClarification ?? false}`);
+    }
+
     // --- Parallel agent execution ---
     // When parallelAgents is enabled and multiple agents were routed,
     // run each agent as an independent lane and synthesize the results.
@@ -3655,7 +3700,7 @@ export class sportsclawEngine {
     const callLLM = (messagesOverride?: Message[]) =>
       generateText({
         model: this.mainModel,
-        system: this.buildSystemPrompt(!!memory, activeAgents.length > 0 ? activeAgents : undefined, strategyContent, options?.systemPrompt),
+        system: this.buildSystemPrompt(!!memory, activeAgents.length > 0 ? activeAgents : undefined, strategyContent, options?.systemPrompt, queryIntent),
         messages: messagesOverride ?? this.messages,
         tools,
         ...(activeTools ? { activeTools } : {}),
@@ -3880,6 +3925,27 @@ export class sportsclawEngine {
         toolOutputs,
         maxOutputTokens: budgets.synthesis,
       });
+    }
+
+    // Evaluator: soft quality gate — logs mismatches in verbose mode.
+    // No user-facing impact; used to detect routing/template gaps over time.
+    if (this.config.verbose) {
+      const evalResult = evaluateResponse(
+        responseText,
+        Array.from(succeededToolNames),
+        queryIntent
+      );
+      if (!evalResult.passed || evalResult.toolsNotCalled.length > 0) {
+        console.error(
+          `[sportsclaw] eval intent=${queryIntent}` +
+            (evalResult.missingKeywords.length > 0
+              ? ` missing_kw=[${evalResult.missingKeywords.join(",")}]`
+              : "") +
+            (evalResult.toolsNotCalled.length > 0
+              ? ` tools_not_called=[${evalResult.toolsNotCalled.join(",")}]`
+              : "")
+        );
+      }
     }
 
     if (netFailures.length > 0) {
