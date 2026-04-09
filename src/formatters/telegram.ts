@@ -97,11 +97,11 @@ function renderTableAsText(block: ParsedBlock & { type: "table" }): string {
   const numCols = Math.max(...rows.map((r) => r.length));
 
   // Compact tables: column-padded in <pre> for proper alignment.
-  // Also check total rendered width — wide tables overflow mobile monospace
-  // (Telegram's <pre> scrolls horizontally but >42 chars reads poorly).
+  // Telegram <pre> blocks scroll horizontally, so an aligned table that
+  // scrolls is far better than an unaligned one that doesn't.
   const widths = columnWidths(rows);
   const totalWidth = widths.reduce((s, w) => s + w, 0) + Math.max(0, numCols - 1) * 3;
-  if (numCols <= 6 && dataRows.length <= 15 && totalWidth <= 42) {
+  if (numCols <= 6 && dataRows.length <= 15 && totalWidth <= 64) {
     return `<pre>${escapeHtml(renderTableAligned(rows, block.headerIndex))}</pre>`;
   }
 
