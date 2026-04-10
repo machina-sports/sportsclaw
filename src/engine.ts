@@ -1076,11 +1076,9 @@ export class sportsclawEngine {
       )
       .join("\n\n");
 
-    // Import inline to avoid circular dependency issues at module load time
-    const { buildTemplatePrompt } = await import("./response-templates.js");
     const intentHint =
       queryIntent && queryIntent !== "ambiguous"
-        ? buildTemplatePrompt(queryIntent as import("./response-templates.js").QueryIntent)
+        ? buildTemplatePrompt(queryIntent as QueryIntent)
         : "";
 
     try {
