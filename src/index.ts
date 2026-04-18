@@ -220,6 +220,20 @@ export { applySimulationToBracket, autoFillBracketFromSim } from "./bracket.js";
 
 // Monte Carlo bracket simulation
 export { simulateBracket, fetchTournamentField } from "./bracket-sim.js";
+
+// Buttons — sport detection, contextual follow-ups, sport picker menus
+export {
+  detectSport,
+  detectLeague,
+  getButtons,
+  getFilteredButtons,
+  getFollowUpPrompt,
+  getQuickActionPrompt,
+  getSportDisplayName,
+  SPORT_MENU_ROWS,
+  SPORT_QUICK_ACTION_ROWS,
+} from "./buttons.js";
+export type { DetectedSport, DetectedLeague, ButtonDef, MenuButtonDef } from "./buttons.js";
 export type { SimTeam, SimConfig, SimulationResult } from "./bracket-sim.js";
 
 // Sprint 3: Subagent spawning
