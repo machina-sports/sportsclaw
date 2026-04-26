@@ -25,7 +25,7 @@ import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
 import {
   detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt,
-  getSportDisplayName, getQuickActionPrompt,
+  getSportDisplayName, getQuickActionPrompt, getSportNavRow,
   SPORT_MENU_ROWS, SPORT_QUICK_ACTION_ROWS,
 } from "../buttons.js";
 import type { DetectedSport, MenuButtonDef } from "../buttons.js";
@@ -117,6 +117,38 @@ function buildInlineKeyboard(
       })),
     ],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Unified response markup builder — action buttons + persistent nav row
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the full inline keyboard for any engine response.
+ * - If the response is game-related, prepends sport-specific action buttons
+ *   (box score, stats, etc.) as the first row.
+ * - Always appends the sport's quick-nav row so users can keep browsing
+ *   without typing.
+ */
+function buildResponseMarkup(
+  response: string,
+  prompt: string,
+  userId: string,
+  sport: DetectedSport
+): object {
+  const rows: InlineKeyboardButton[][] = [];
+
+  if (isGameRelatedResponse(response, prompt)) {
+    const contextKey = storeButtonContext(prompt, userId, sport);
+    const actionKeyboard = buildInlineKeyboard(contextKey, sport, response, prompt);
+    if (actionKeyboard) rows.push(...actionKeyboard.inline_keyboard);
+  }
+
+  rows.push(
+    getSportNavRow(sport).map((btn) => ({ text: btn.label, callback_data: btn.callback }))
+  );
+
+  return { inline_keyboard: rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -625,36 +657,8 @@ async function processMessage(
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;
 
-    // Build inline keyboard for game-related responses with supported data
-    let replyMarkup: object | undefined;
     const sport = detectSport(response, prompt);
-    if (isGameRelatedResponse(response, prompt) && sport) {
-      const contextKey = storeButtonContext(prompt, userId, sport);
-      const keyboard = buildInlineKeyboard(contextKey, sport, response, prompt);
-      // Share button: opens inline query mode pre-filled with the sport name
-      const shareRow: InlineKeyboardButton[] = [
-        {
-          text: "📤 Share",
-          switch_inline_query: getSportDisplayName(sport).toLowerCase(),
-        },
-      ];
-      replyMarkup = {
-        inline_keyboard: [
-          ...(keyboard?.inline_keyboard ?? []),
-          shareRow,
-        ],
-      };
-    } else if (sport) {
-      // Sport detected but not game-related — still show share button alone
-      replyMarkup = {
-        inline_keyboard: [[
-          {
-            text: "📤 Share",
-            switch_inline_query: getSportDisplayName(sport).toLowerCase(),
-          },
-        ]],
-      };
-    }
+    const replyMarkup = sport ? buildResponseMarkup(response, prompt, userId, sport) : undefined;
 
     // Telegram has a 4096 char limit — split if needed
     const chunks = splitMessage(textToSend, 4096);
@@ -790,12 +794,18 @@ async function processCallbackQuery(
 
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;
-
       const chunks = splitMessage(textToSend, 4096);
-      for (const chunk of chunks) {
-        await sendMessage(apiBase, cqMessage.chat.id, chunk, {
+
+      const resumeSport = detectSport(response, suspended.originalPrompt);
+      const resumeReplyMarkup = resumeSport
+        ? buildResponseMarkup(response, suspended.originalPrompt, userId, resumeSport)
+        : undefined;
+
+      for (let idx = 0; idx < chunks.length; idx++) {
+        await sendMessage(apiBase, cqMessage.chat.id, chunks[idx], {
           parseMode: formatted.telegram ? "HTML" : undefined,
           replyToMessageId: cqMessage.message_id,
+          replyMarkup: idx === chunks.length - 1 ? resumeReplyMarkup : undefined,
         });
       }
     } catch (resumeErr: unknown) {
@@ -880,9 +890,16 @@ async function processCallbackQuery(
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;
       const chunks = splitMessage(textToSend, 4096);
-      for (const chunk of chunks) {
-        await sendMessage(apiBase, cqMessage.chat.id, chunk, {
+
+      const qaSport = detectSport(response, followUp);
+      const qaReplyMarkup = qaSport
+        ? buildResponseMarkup(response, followUp, userId, qaSport)
+        : undefined;
+
+      for (let idx = 0; idx < chunks.length; idx++) {
+        await sendMessage(apiBase, cqMessage.chat.id, chunks[idx], {
           parseMode: formatted.telegram ? "HTML" : undefined,
+          replyMarkup: idx === chunks.length - 1 ? qaReplyMarkup : undefined,
         });
       }
     } catch (error: unknown) {
@@ -946,12 +963,18 @@ async function processCallbackQuery(
 
     const formatted = formatResponse(response, "telegram");
     const textToSend = formatted.telegram || formatted.text;
-
     const chunks = splitMessage(textToSend, 4096);
-    for (const chunk of chunks) {
-      await sendMessage(apiBase, cqMessage.chat.id, chunk, {
+
+    // Show nav row so the user can keep browsing after a drill-down
+    const followUpMarkup = ctx.sport
+      ? buildResponseMarkup(response, followUpPrompt, ctx.userId, ctx.sport)
+      : undefined;
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      await sendMessage(apiBase, cqMessage.chat.id, chunks[idx], {
         parseMode: formatted.telegram ? "HTML" : undefined,
         replyToMessageId: cqMessage.message_id,
+        replyMarkup: idx === chunks.length - 1 ? followUpMarkup : undefined,
       });
     }
   } catch (error: unknown) {

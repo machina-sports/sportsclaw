@@ -250,9 +250,9 @@ export function getFilteredButtons(
     return FOOTBALL_STANDINGS_BUTTONS;
   }
 
-  // Unknown league (e.g. Paulista, Carioca, regional cup) → no data buttons
+  // Unknown league (e.g. Paulista, Carioca, regional cup) → standings fallback
   if (league) {
-    return [];
+    return FOOTBALL_STANDINGS_BUTTONS;
   }
 
   // Football detected but no specific league → default full set
@@ -595,3 +595,109 @@ export const SPORT_QUICK_ACTION_ROWS: Record<string, MenuButtonDef[][]> = {
     ],
   ],
 };
+
+// ---------------------------------------------------------------------------
+// Post-response navigation row — shown after every engine response
+// ---------------------------------------------------------------------------
+
+/**
+ * A single row of quick-nav buttons shown at the bottom of every response.
+ * Reuses sc_qa_* callbacks so no new handler code is needed.
+ * Max 5 buttons to stay within Discord's per-row limit.
+ */
+export const SPORT_NAV_ROW: Record<string, MenuButtonDef[]> = {
+  football: [
+    { callback: "sc_qa_football_matches",   label: "📅 Matches" },
+    { callback: "sc_qa_football_standings", label: "🏆 Standings" },
+    { callback: "sc_qa_football_leaders",   label: "⚽ Scorers" },
+    { callback: "sc_qa_football_odds",      label: "💰 Odds" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  nfl: [
+    { callback: "sc_qa_nfl_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_nfl_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_nfl_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_nfl_odds",           label: "💰 Odds" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  nba: [
+    { callback: "sc_qa_nba_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_nba_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_nba_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_nba_odds",           label: "💰 Odds" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  nhl: [
+    { callback: "sc_qa_nhl_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_nhl_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_nhl_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_nhl_odds",           label: "💰 Odds" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  mlb: [
+    { callback: "sc_qa_mlb_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_mlb_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_mlb_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_mlb_odds",           label: "💰 Odds" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  wnba: [
+    { callback: "sc_qa_wnba_scores",        label: "🎯 Scores" },
+    { callback: "sc_qa_wnba_standings",     label: "🏆 Standings" },
+    { callback: "sc_qa_wnba_leaders",       label: "📈 Leaders" },
+    { callback: "sc_qa_wnba_news",          label: "📰 News" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  cfb: [
+    { callback: "sc_qa_cfb_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_cfb_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_cfb_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_cfb_news",           label: "📰 News" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  cbb: [
+    { callback: "sc_qa_cbb_scores",         label: "🎯 Scores" },
+    { callback: "sc_qa_cbb_standings",      label: "🏆 Standings" },
+    { callback: "sc_qa_cbb_leaders",        label: "📈 Leaders" },
+    { callback: "sc_qa_cbb_news",           label: "📰 News" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  tennis: [
+    { callback: "sc_qa_tennis_matches",     label: "🎾 Matches" },
+    { callback: "sc_qa_tennis_rankings",    label: "🏆 Rankings" },
+    { callback: "sc_qa_tennis_news",        label: "📰 News" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  golf: [
+    { callback: "sc_qa_golf_leaderboard",   label: "📊 Leaderboard" },
+    { callback: "sc_qa_golf_schedule",      label: "📅 Schedule" },
+    { callback: "sc_qa_golf_news",          label: "📰 News" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  f1: [
+    { callback: "sc_qa_f1_raceresults",     label: "🏁 Results" },
+    { callback: "sc_qa_f1_driverstnd",      label: "🏆 Standings" },
+    { callback: "sc_qa_f1_laptimes",        label: "⏱️ Lap Times" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+  volleyball: [
+    { callback: "sc_qa_volleyball_standings", label: "🏐 Standings" },
+    { callback: "sc_qa_volleyball_schedule",  label: "📅 Schedule" },
+    { callback: "sc_qa_volleyball_results",   label: "📋 Results" },
+    { callback: "sc_menu",                    label: "⬅️ Menu" },
+  ],
+  markets: [
+    { callback: "sc_qa_markets_markets",    label: "📊 Markets" },
+    { callback: "sc_qa_markets_search",     label: "🔍 Search" },
+    { callback: "sc_menu",                  label: "⬅️ Menu" },
+  ],
+};
+
+/**
+ * Return the nav row for a sport, or a bare Menu button if the sport is
+ * unknown or null.
+ */
+export function getSportNavRow(sport: DetectedSport | string | null): MenuButtonDef[] {
+  if (!sport) return [{ callback: "sc_menu", label: "⬅️ Menu" }];
+  return SPORT_NAV_ROW[sport] ?? [{ callback: "sc_menu", label: "⬅️ Menu" }];
+}

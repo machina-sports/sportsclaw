@@ -26,7 +26,7 @@ import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { isGameRelatedResponse, formatTextForDiscord } from "../formatters/index.js";
 import {
   detectSport, detectLeague, getFilteredButtons, getFollowUpPrompt,
-  getSportDisplayName, getQuickActionPrompt,
+  getSportDisplayName, getQuickActionPrompt, getSportNavRow,
   SPORT_MENU_ROWS, SPORT_QUICK_ACTION_ROWS,
 } from "../buttons.js";
 import type { DetectedSport } from "../buttons.js";
@@ -242,6 +242,46 @@ export async function startDiscordListener(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
+  // Unified response component builder — action row + persistent nav row
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build all Discord ActionRows for an engine response.
+   * - Prepends sport-specific action buttons (box score, stats, etc.) when the
+   *   response is game-related.
+   * - Always appends the sport's nav row so users can keep browsing.
+   */
+  function buildDiscordComponents(
+    response: string,
+    prompt: string,
+    userId: string
+  ): import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder>[] {
+    if (!features.buttons) return [];
+    const sport = detectSport(response, prompt);
+    const components: import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder>[] = [];
+
+    if (isGameRelatedResponse(response, prompt) && sport) {
+      const contextKey = storeButtonContext(prompt, userId, sport);
+      const actionRow = buildActionRow(contextKey, sport, response, prompt);
+      if (actionRow) components.push(actionRow);
+    }
+
+    const navButtons = getSportNavRow(sport);
+    const navRow = new ActionRowBuilder<import("discord.js").ButtonBuilder>();
+    for (const btn of navButtons) {
+      navRow.addComponents(
+        new ButtonBuilder()
+          .setCustomId(btn.callback)
+          .setLabel(btn.label)
+          .setStyle(ButtonStyle.Secondary)
+      );
+    }
+    components.push(navRow);
+
+    return components;
+  }
+
+  // ---------------------------------------------------------------------------
   // Sport picker menu builders
   // ---------------------------------------------------------------------------
 
@@ -376,12 +416,25 @@ export async function startDiscordListener(): Promise<void> {
       await interaction.deferReply();
 
       try {
-        // Resume the engine with the selected value injected as context
         const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
         const engine = new sportsclawEngine(engineConfig);
         const response = await engine.run(resumePrompt, { userId, sessionId: userId });
 
-        await sendGameResponse(response, suspended.originalPrompt, userId, interaction as unknown as import("discord.js").Message);
+        const formatted = formatTextForDiscord(response);
+        const chunks = splitMessage(formatted, 2000);
+        const askComponents = buildDiscordComponents(response, suspended.originalPrompt, userId);
+
+        await interaction.editReply({
+          content: chunks[0] ?? "No data available.",
+          ...(chunks.length === 1 && askComponents.length > 0 ? { components: askComponents } : {}),
+        });
+        for (let i = 1; i < chunks.length; i++) {
+          const isLast = i === chunks.length - 1;
+          await interaction.followUp({
+            content: chunks[i],
+            ...(isLast && askComponents.length > 0 ? { components: askComponents } : {}),
+          });
+        }
       } catch (error: unknown) {
         const errMsg = error instanceof Error ? error.message : String(error);
         console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
@@ -429,9 +482,18 @@ export async function startDiscordListener(): Promise<void> {
         const response = await engine.run(followUp, { userId, sessionId: userId });
         const formatted = formatTextForDiscord(response);
         const chunks = splitMessage(formatted, 2000);
-        await interaction.editReply(chunks[0] ?? "No data available.");
-        for (const chunk of chunks.slice(1)) {
-          await interaction.followUp(chunk);
+        const qaComponents = buildDiscordComponents(response, followUp, userId);
+
+        await interaction.editReply({
+          content: chunks[0] ?? "No data available.",
+          ...(chunks.length === 1 && qaComponents.length > 0 ? { components: qaComponents } : {}),
+        });
+        for (let i = 1; i < chunks.length; i++) {
+          const isLast = i === chunks.length - 1;
+          await interaction.followUp({
+            content: chunks[i],
+            ...(isLast && qaComponents.length > 0 ? { components: qaComponents } : {}),
+          });
         }
       } catch (error: unknown) {
         const errMsg = error instanceof Error ? error.message : String(error);
@@ -467,9 +529,18 @@ export async function startDiscordListener(): Promise<void> {
 
       const formatted = formatTextForDiscord(response);
       const chunks = splitMessage(formatted, 2000);
-      await interaction.editReply(chunks[0] ?? "No data available.");
-      for (const chunk of chunks.slice(1)) {
-        await interaction.followUp(chunk);
+      const followUpComponents = buildDiscordComponents(response, followUpPrompt, ctx.userId);
+
+      await interaction.editReply({
+        content: chunks[0] ?? "No data available.",
+        ...(chunks.length === 1 && followUpComponents.length > 0 ? { components: followUpComponents } : {}),
+      });
+      for (let i = 1; i < chunks.length; i++) {
+        const isLast = i === chunks.length - 1;
+        await interaction.followUp({
+          content: chunks[i],
+          ...(isLast && followUpComponents.length > 0 ? { components: followUpComponents } : {}),
+        });
       }
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -678,23 +749,12 @@ export async function startDiscordListener(): Promise<void> {
     const formatted = formatTextForDiscord(response);
     const chunks = splitMessage(formatted, 2000);
 
-    // Build action buttons for game-related responses
-    let actionRow: import("discord.js").ActionRowBuilder<import("discord.js").ButtonBuilder> | null = null;
-    if (features.buttons && isGameRelatedResponse(response, prompt)) {
-      const sport = detectSport(response, prompt);
-      const contextKey = storeButtonContext(prompt, userId, sport);
-      actionRow = buildActionRow(contextKey, sport, response, prompt);
-    }
+    const components = buildDiscordComponents(response, prompt, userId);
 
-    // Send all chunks; attach buttons to the last one
     for (let i = 0; i < chunks.length; i++) {
       const isLast = i === chunks.length - 1;
-      const options: import("discord.js").MessageCreateOptions = {
-        content: chunks[i],
-      };
-      if (isLast && actionRow) {
-        options.components = [actionRow];
-      }
+      const options: import("discord.js").MessageCreateOptions = { content: chunks[i] };
+      if (isLast && components.length > 0) options.components = components;
       await safeSend(message, options);
     }
   }
