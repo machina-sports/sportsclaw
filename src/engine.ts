@@ -167,6 +167,23 @@ function isMcpIntent(prompt: string): boolean {
   return MCP_INTENT_PATTERNS.some((p) => p.test(prompt));
 }
 
+/** Patterns that indicate visual-generation intents — bypass sport clarification */
+const VISUAL_INTENT_PATTERNS = [
+  // Direct mentions of unambiguous visual-artifact nouns
+  /\b(image|images|poster|posters|infographic|infographics|illustration|illustrations|wallpaper|wallpapers|mockup|mock-?up|mockups)\b/i,
+  // Compound visual artifacts (generic alone, unambiguous when paired)
+  /\b(social\s+tiles?|cover\s+art|concept\s+art|hype\s+(reel|video|poster|tile)|key\s+art)\b/i,
+  // Verb + visual-artifact noun ("generate a banner", "make a graphic", "design a hype tile")
+  /\b(generate|create|make|design|draw|render|produce|mock\s*up)\b\s+(a|an|some|the)?\s*[\w:.-]*\s*(banner|graphic|visual|visuals|picture|photo|teaser|reveal)\b/i,
+  // Explicit tool reference
+  /\bgenerate_image\b/i,
+];
+
+/** Returns true when the prompt is a visual-generation request (poster, image, infographic, etc.) */
+function isVisualIntent(prompt: string): boolean {
+  return VISUAL_INTENT_PATTERNS.some((p) => p.test(prompt));
+}
+
 /** Filter out undefined values so they don't override defaults during merge */
 function filterDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const result: Partial<T> = {};
@@ -3158,7 +3175,8 @@ export class sportsclawEngine {
       routing.decision.mode === "ambiguous" &&
       !isInternalToolIntent(sanitizedPrompt) &&
       !isConversationalIntent(sanitizedPrompt) &&
-      !isMcpIntent(sanitizedPrompt)
+      !isMcpIntent(sanitizedPrompt) &&
+      !isVisualIntent(sanitizedPrompt)
     ) {
       const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
       // Push a matching assistant message so history stays coherent
@@ -3184,7 +3202,8 @@ export class sportsclawEngine {
       routing.decision?.needsClarification &&
       routing.decision.selectedSkills.length > 0 &&
       !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt)
+      !isConversationalIntent(sanitizedPrompt) &&
+      !isVisualIntent(sanitizedPrompt)
     ) {
       const sport = routing.decision.selectedSkills[0];
       const sportLabel = getSportDisplayName(sport);
