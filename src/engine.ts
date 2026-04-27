@@ -3142,7 +3142,12 @@ export class sportsclawEngine {
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
-    const agentRoutes = routeToAgents(this.agents, selectedSkills, sanitizedPrompt);
+    // Detect special intents so the router can prefer purpose-built agents
+    // (e.g. visual-generation prompts → an agent tagged `visual`) over the
+    // skill-overlap fallback which biases toward broad-skill generalists.
+    const intentTags: string[] = [];
+    if (isVisualIntent(sanitizedPrompt)) intentTags.push("visual");
+    const agentRoutes = routeToAgents(this.agents, selectedSkills, sanitizedPrompt, intentTags);
     const activeAgents = agentRoutes.map((r) => r.agent);
 
     if (this.config.verbose && routing.decision) {

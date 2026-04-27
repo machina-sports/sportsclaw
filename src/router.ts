@@ -529,9 +529,16 @@ export interface AgentRouteResult {
  * and return the top matches. Uses a simple overlap-based heuristic:
  *
  *   1. If prompt explicitly mentions an agent name → that agent wins (solo)
- *   2. Otherwise, score = (agent.skills ∩ selectedSkills).size / selectedSkills.size
- *   3. Agents with empty skills[] are generalists (score = 0.3 baseline)
- *   4. Tie-break: agent with broader coverage (more skills) wins
+ *   2. If `intentTags` are provided, prefer agents that claim a matching tag
+ *      in their frontmatter (e.g. visual prompts → an agent tagged `visual`)
+ *   3. Otherwise, score = (agent.skills ∩ selectedSkills).size / selectedSkills.size
+ *   4. Agents with empty skills[] are generalists (score = 0.3 baseline)
+ *   5. Tie-break: agent with broader coverage (more skills) wins
+ *
+ * `intentTags` lets the engine pre-classify a prompt (e.g. "visual" via
+ * `isVisualIntent`) and route it to a purpose-built agent regardless of
+ * whether any sport skills matched. Empty array (default) preserves the
+ * legacy two-phase behavior.
  *
  * Returns up to `maxAgents` agents with score > 0.5 (at least 1 if any exist).
  * Returns empty array if no agents are available.
@@ -540,6 +547,7 @@ export function routeToAgents(
   agents: AgentDef[],
   selectedSkills: string[],
   prompt: string,
+  intentTags: string[] = [],
   maxAgents = 2
 ): AgentRouteResult[] {
   if (agents.length === 0) return [];
@@ -560,6 +568,27 @@ export function routeToAgents(
       promptLower.includes(`@${idLower}`)
     ) {
       return [{ agent, score: 1, reason: `Explicit mention: "${agent.name}"` }];
+    }
+  }
+
+  // Phase 1.5: Intent-tag match — purpose-built agents win on intent hits.
+  // Prefer the most narrowly-scoped agent (fewest skills) to surface
+  // specialists like a creative-only "visual" agent over a multi-skill
+  // generalist that happens to share the tag.
+  if (intentTags.length > 0) {
+    const tagSet = new Set(intentTags);
+    const matched = agents.filter((a) => a.tags.some((t) => tagSet.has(t)));
+    if (matched.length > 0) {
+      matched.sort((a, b) => a.skills.length - b.skills.length);
+      const winner = matched[0];
+      const matchedTags = winner.tags.filter((t) => tagSet.has(t));
+      return [
+        {
+          agent: winner,
+          score: 1,
+          reason: `Intent tag match: ${matchedTags.join(", ")}`,
+        },
+      ];
     }
   }
 
