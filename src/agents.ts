@@ -47,6 +47,12 @@ export interface AgentDef {
   name: string;
   /** Skills this agent can use. Empty = all skills (no filter). */
   skills: string[];
+  /**
+   * Intent tags this agent claims (e.g. "visual", "data", "briefing").
+   * Used by the router to prefer purpose-built agents on intent matches
+   * before falling back to skill-overlap scoring. Empty = no claims.
+   */
+  tags: string[];
   /** The full markdown body (directives + voice), injected into system prompt */
   body: string;
 }
@@ -65,7 +71,7 @@ function parseAgentFile(id: string, raw: string): AgentDef {
   const fmMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
   if (!fmMatch) {
     // No frontmatter — treat entire file as body
-    return { id, name: id, skills: [], body: raw.trim() };
+    return { id, name: id, skills: [], tags: [], body: raw.trim() };
   }
 
   const frontmatter = fmMatch[1];
@@ -75,26 +81,26 @@ function parseAgentFile(id: string, raw: string): AgentDef {
   const nameMatch = frontmatter.match(/^name:\s*(.+)$/m);
   const name = nameMatch ? nameMatch[1].trim() : id;
 
-  // Parse skills array: skills: [a, b, c] or skills:\n  - a\n  - b
-  let skills: string[] = [];
-  const inlineMatch = frontmatter.match(/^skills:\s*\[([^\]]*)\]/m);
-  if (inlineMatch) {
-    skills = inlineMatch[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } else {
-    // Check for YAML list style
-    const listMatch = frontmatter.match(/^skills:\s*\n((?:\s+-\s+.+\n?)+)/m);
-    if (listMatch) {
-      skills = listMatch[1]
+  // Parse a YAML list field (inline `[a, b, c]` or block `\n  - a\n  - b`)
+  const parseList = (key: string): string[] => {
+    const inline = frontmatter.match(new RegExp(`^${key}:\\s*\\[([^\\]]*)\\]`, "m"));
+    if (inline) {
+      return inline[1].split(",").map((s) => s.trim()).filter(Boolean);
+    }
+    const block = frontmatter.match(new RegExp(`^${key}:\\s*\\n((?:\\s+-\\s+.+\\n?)+)`, "m"));
+    if (block) {
+      return block[1]
         .split("\n")
         .map((line) => line.replace(/^\s*-\s*/, "").trim())
         .filter(Boolean);
     }
-  }
+    return [];
+  };
 
-  return { id, name, skills, body };
+  const skills = parseList("skills");
+  const tags = parseList("tags");
+
+  return { id, name, skills, tags, body };
 }
 
 // ---------------------------------------------------------------------------
