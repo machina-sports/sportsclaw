@@ -240,7 +240,10 @@ export class PodMemoryStorage implements MemoryStorage {
       page_size: 1,
     });
 
-    const raw = result?.data?.[0];
+    // Machina Core API returns search results double-nested:
+    // { status, message, data: { data: [...], status, total_documents } }
+    // — so the array lives at result.data.data, not result.data.
+    const raw = result?.data?.data?.[0];
     if (raw) {
       const doc = raw?.value ?? raw?.content ?? {};
       const entry = { doc, docId: raw._id ?? null, dirty: false };
@@ -285,7 +288,7 @@ export class PodMemoryStorage implements MemoryStorage {
           fields: ["_id", "value", "content", "text"],
           page_size: 1,
         });
-        const oldDoc = res?.data?.[0];
+        const oldDoc = res?.data?.data?.[0];
         if (oldDoc) {
           const text = oldDoc?.value?.text ?? oldDoc?.content?.text ?? oldDoc?.text ?? "";
           if (text) {
@@ -306,7 +309,7 @@ export class PodMemoryStorage implements MemoryStorage {
         fields: ["_id", "value", "content", "text"],
         page_size: 1,
       });
-      const dailyDoc = dailyRes?.data?.[0];
+      const dailyDoc = dailyRes?.data?.data?.[0];
       if (dailyDoc) {
         const text = dailyDoc?.value?.text ?? dailyDoc?.content?.text ?? dailyDoc?.text ?? "";
         if (text) {
@@ -325,7 +328,8 @@ export class PodMemoryStorage implements MemoryStorage {
       content: { value: doc },
       metadata: { type: "user-memory", user_id: userId },
     });
-    const docId = createResult?.data?._id ?? null;
+    // create_document also double-nests: { data: { data: { _id, ... } } }
+    const docId = createResult?.data?.data?._id ?? null;
 
     // Fire-and-forget: delete old individual docs
     for (const id of oldDocIds) {
@@ -431,7 +435,7 @@ export class PodMemoryStorage implements MemoryStorage {
           content: { value: entry.doc },
           metadata: { type: "user-memory", user_id: userId },
         });
-        entry.docId = result?.data?._id ?? null;
+        entry.docId = result?.data?.data?._id ?? null;
       }
       entry.dirty = false;
     } catch {
