@@ -217,45 +217,64 @@ function fileToField(file: string): { field: string; date?: string } {
  * Single-document pod storage. All memory fields for a user live in one
  * document named `memory-{userId}` with fields as top-level value keys.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type MemoryEntry = { doc: Record<string, any>; docId: string | null; dirty: boolean };
+
 export class PodMemoryStorage implements MemoryStorage {
-  // Per-turn in-memory cache: avoids repeated pod searches for the same doc.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private cache = new Map<string, { doc: Record<string, any>; docId: string | null; dirty: boolean }>();
+  // Per-turn in-memory cache. Stores PROMISES (not resolved entries) so
+  // concurrent loadCached calls within the same turn share one search/create
+  // round-trip — without this, Promise.all([buildMemoryBlock(), readStrategy()])
+  // races and each branch creates its own duplicate memory doc.
+  private cache = new Map<string, Promise<MemoryEntry>>();
 
   constructor(private mcpManager: McpManager, private serverName: string) {}
 
   /**
    * Load (or create) the single consolidated memory document for a user.
    * Includes auto-migration from old multi-doc layout on first access.
+   * Concurrent calls share one in-flight promise to prevent duplicate-doc creation.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async loadCached(userId: string): Promise<{ doc: Record<string, any>; docId: string | null; dirty: boolean }> {
+  private loadCached(userId: string): Promise<MemoryEntry> {
     const cached = this.cache.get(userId);
     if (cached) return cached;
+    const promise = this.loadFromPod(userId);
+    this.cache.set(userId, promise);
+    return promise;
+  }
 
-    // Try to find existing consolidated doc
+  private async loadFromPod(userId: string): Promise<MemoryEntry> {
+    // Search for the most-recently-updated consolidated doc with a non-empty
+    // value. This handles two failure modes from earlier engine versions:
+    //   (1) zombie empty docs from prior race-condition migrations, and
+    //   (2) accidental dupes from non-deterministic create paths.
+    // We always prefer the freshest doc that actually has content; if every
+    // hit is empty, we fall back to the freshest empty hit (still better than
+    // re-creating).
     const result = await this.callPod("search_documents", {
       filters: { name: `memory-${userId}` },
-      fields: ["_id", "value", "content"],
-      page_size: 1,
+      fields: ["_id", "value", "content", "updated"],
+      sorters: [["updated", -1]],
+      page_size: 10,
     });
 
     // Machina Core API returns search results double-nested:
     // { status, message, data: { data: [...], status, total_documents } }
     // — so the array lives at result.data.data, not result.data.
-    const raw = result?.data?.data?.[0];
-    if (raw) {
-      const doc = raw?.value ?? raw?.content ?? {};
-      const entry = { doc, docId: raw._id ?? null, dirty: false };
-      this.cache.set(userId, entry);
-      return entry;
+    const hits = (result?.data?.data ?? []) as Array<Record<string, unknown>>;
+    if (hits.length > 0) {
+      const pickContent = (h: Record<string, unknown>): boolean => {
+        const v = (h?.value ?? h?.content ?? {}) as Record<string, unknown>;
+        return Object.keys(v).length > 0;
+      };
+      const chosen = hits.find(pickContent) ?? hits[0];
+      const doc = ((chosen?.value ?? chosen?.content ?? {}) as Record<string, unknown>) as Record<string, unknown>;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return { doc: doc as Record<string, any>, docId: (chosen?._id as string) ?? null, dirty: false };
     }
 
-    // No consolidated doc — attempt migration from old multi-doc layout
+    // No consolidated doc anywhere — attempt migration from old multi-doc layout
     const migrated = await this.migrateOldDocs(userId);
-    const entry = { doc: migrated.doc, docId: migrated.docId, dirty: false };
-    this.cache.set(userId, entry);
-    return entry;
+    return { doc: migrated.doc, docId: migrated.docId, dirty: false };
   }
 
   /**
@@ -420,7 +439,9 @@ export class PodMemoryStorage implements MemoryStorage {
 
   /** Write cached doc back to pod if dirty. */
   async flush(userId: string): Promise<void> {
-    const entry = this.cache.get(userId);
+    const cachedPromise = this.cache.get(userId);
+    if (!cachedPromise) return;
+    const entry = await cachedPromise;
     if (!entry?.dirty) return;
 
     try {
