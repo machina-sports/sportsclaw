@@ -265,6 +265,28 @@ export type { DaemonPlatform } from "./daemon.js";
 // AI-native setup wizard
 export { runSetup } from "./setup.js";
 
+// TV Operator Contracts (Machina Sports TV)
+export {
+  FRESHNESS_CLASSES,
+  validatePlaylistBlock,
+  validatePlaylistManifest,
+  validateLiveContentMeta,
+} from "./schema/tv.js";
+export type {
+  FreshnessClass,
+  ReviewState,
+  FallbackPolicy,
+  PlaylistBlock,
+  PlaylistManifest,
+  ChannelState,
+  OnAirBlock,
+  OnAirState,
+  DecisionRecord,
+  AgentRunRecord,
+  HealthSnapshot,
+  ValidationResult,
+} from "./schema/tv.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------
