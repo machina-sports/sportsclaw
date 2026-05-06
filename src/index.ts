@@ -291,6 +291,7 @@ export type {
   AgentRunRecord,
   HealthSnapshot,
   HealthSnapshotInput,
+  IncidentRecord,
   ValidationResult,
   ManifestCoverageOptions,
 } from "./schema/tv.js";
@@ -314,6 +315,16 @@ export {
   readAgentRunLedger,
   readLatestAgentRunRecords,
 } from "./operator-runs.js";
+
+// Incident Log Primitives
+export {
+  validateIncidentRecord,
+  serializeIncidentRecord,
+  parseIncidentRecordLine,
+  appendIncidentRecord,
+  readIncidentLog,
+  readLatestIncidentRecords,
+} from "./incident-log.js";
 
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
