@@ -18,6 +18,7 @@ import {
   appendDecisionRecord,
   readDecisionLedger,
   readLatestDecisionRecords,
+  FileDecisionLedger,
 } from "../dist/decision-ledger.js";
 
 import * as publicEntry from "../dist/index.js";
@@ -300,10 +301,59 @@ describe("public entrypoint exports", () => {
     assert.strictEqual(typeof publicEntry.readLatestDecisionRecords, "function");
   });
 
+  it("re-exports FileDecisionLedger class and storage abstractions", () => {
+    assert.strictEqual(typeof publicEntry.FileDecisionLedger, "function");
+    assert.strictEqual(typeof publicEntry.FileLedgerStorage, "function");
+  });
+
   it("entrypoint utilities behave the same as direct imports", () => {
     const directResult = validateDecisionRecord(validRecord());
     const entryResult = publicEntry.validateDecisionRecord(validRecord());
     assert.deepStrictEqual(directResult, entryResult);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FileDecisionLedger (class-based API)
+// ---------------------------------------------------------------------------
+
+describe("FileDecisionLedger", () => {
+  it("append + readAll round-trips records", async () => {
+    const filePath = path.join(tmpDir, "class-ledger.jsonl");
+    const ledger = new FileDecisionLedger(filePath);
+    await ledger.append(validRecord({ id: "c1" }));
+    await ledger.append(validRecord({ id: "c2" }));
+    const records = await ledger.readAll();
+    assert.strictEqual(records.length, 2);
+    assert.strictEqual(records[0].id, "c1");
+    assert.strictEqual(records[1].id, "c2");
+  });
+
+  it("readAll returns empty array for missing file", async () => {
+    const filePath = path.join(tmpDir, "missing.jsonl");
+    const ledger = new FileDecisionLedger(filePath);
+    const records = await ledger.readAll();
+    assert.deepStrictEqual(records, []);
+  });
+
+  it("readLatest returns last N records", async () => {
+    const filePath = path.join(tmpDir, "class-latest.jsonl");
+    const ledger = new FileDecisionLedger(filePath);
+    for (const id of ["a", "b", "c", "d"]) {
+      await ledger.append(validRecord({ id }));
+    }
+    const latest = await ledger.readLatest(2);
+    assert.strictEqual(latest.length, 2);
+    assert.strictEqual(latest[0].id, "c");
+    assert.strictEqual(latest[1].id, "d");
+  });
+
+  it("append rejects invalid records", async () => {
+    const filePath = path.join(tmpDir, "class-invalid.jsonl");
+    const ledger = new FileDecisionLedger(filePath);
+    await assert.rejects(() => ledger.append({ id: "", timestamp: "t", action: "a", reason: "r" }), {
+      message: /id|invalid|non-empty/i,
+    });
   });
 });
 
