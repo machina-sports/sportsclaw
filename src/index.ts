@@ -305,6 +305,16 @@ export {
   readLatestDecisionRecords,
 } from "./decision-ledger.js";
 
+// Operator Run Record Primitives
+export {
+  validateAgentRunRecord,
+  serializeAgentRunRecord,
+  parseAgentRunRecordLine,
+  appendAgentRunRecord,
+  readAgentRunLedger,
+  readLatestAgentRunRecords,
+} from "./operator-runs.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------
