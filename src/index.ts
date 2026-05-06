@@ -268,9 +268,11 @@ export type { DaemonPlatform } from "./daemon.js";
 // AI-native setup wizard
 export { runSetup } from "./setup.js";
 
-// TV Operator Contracts (Machina Sports TV)
+// TV Operator Contracts
 export {
   FRESHNESS_CLASSES,
+  buildHealthSnapshot,
+  validateHealthSnapshot,
   validatePlaylistBlock,
   validatePlaylistManifest,
   validateLiveContentMeta,
@@ -287,6 +289,7 @@ export type {
   DecisionRecord,
   AgentRunRecord,
   HealthSnapshot,
+  HealthSnapshotInput,
   ValidationResult,
 } from "./schema/tv.js";
 

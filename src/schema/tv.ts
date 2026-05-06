@@ -1,5 +1,5 @@
 /**
- * sportsclaw — TV Operator Contracts (Machina Sports TV)
+ * sportsclaw — TV Operator Contracts
  *
  * Typed contracts and lightweight runtime validators for broadcast operations.
  * These are data-only definitions — no engine wiring or behavior.
@@ -138,6 +138,76 @@ export interface HealthSnapshot {
 export type ValidationResult =
   | { ok: true }
   | { ok: false; error: string };
+
+// ---------------------------------------------------------------------------
+// HealthSnapshot input (omits derived status)
+// ---------------------------------------------------------------------------
+
+export type HealthSnapshotInput = Omit<HealthSnapshot, "status">;
+
+// ---------------------------------------------------------------------------
+// buildHealthSnapshot — derive status from input signals
+// ---------------------------------------------------------------------------
+
+const DOWN_KEYWORDS = /\bcritical\b|\bdown\b/i;
+
+export function buildHealthSnapshot(input: HealthSnapshotInput): HealthSnapshot {
+  const { timestamp, channelId, activeBlocks, staleSources, errors } = input;
+
+  let status: HealthSnapshot["status"];
+
+  const hasCriticalError = errors.some((e) => DOWN_KEYWORDS.test(e));
+
+  if (activeBlocks === 0 || hasCriticalError) {
+    status = "down";
+  } else if (staleSources > 0 || errors.length > 0) {
+    status = "degraded";
+  } else {
+    status = "healthy";
+  }
+
+  return { timestamp, channelId, status, activeBlocks, staleSources, errors };
+}
+
+// ---------------------------------------------------------------------------
+// validateHealthSnapshot — runtime validation
+// ---------------------------------------------------------------------------
+
+const VALID_STATUSES = new Set(["healthy", "degraded", "down"]);
+
+export function validateHealthSnapshot(snapshot: unknown): ValidationResult {
+  if (!snapshot || typeof snapshot !== "object") {
+    return { ok: false, error: "Snapshot must be a non-null object." };
+  }
+
+  const s = snapshot as Record<string, unknown>;
+
+  if (typeof s.timestamp !== "string" || s.timestamp === "") {
+    return { ok: false, error: "Snapshot must have a non-empty timestamp." };
+  }
+
+  if (typeof s.channelId !== "string" || s.channelId === "") {
+    return { ok: false, error: "Snapshot must have a non-empty channelId." };
+  }
+
+  if (!VALID_STATUSES.has(s.status as string)) {
+    return { ok: false, error: "Snapshot status must be healthy, degraded, or down." };
+  }
+
+  if (typeof s.activeBlocks !== "number" || s.activeBlocks < 0) {
+    return { ok: false, error: "Snapshot activeBlocks must be a non-negative number." };
+  }
+
+  if (typeof s.staleSources !== "number" || s.staleSources < 0) {
+    return { ok: false, error: "Snapshot staleSources must be a non-negative number." };
+  }
+
+  if (!Array.isArray(s.errors)) {
+    return { ok: false, error: "Snapshot errors must be an array." };
+  }
+
+  return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // Validators — lightweight runtime safety checks
