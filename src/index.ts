@@ -293,6 +293,16 @@ export type {
   ValidationResult,
 } from "./schema/tv.js";
 
+// Decision Ledger Primitives
+export {
+  validateDecisionRecord,
+  serializeDecisionRecord,
+  parseDecisionRecordLine,
+  appendDecisionRecord,
+  readDecisionLedger,
+  readLatestDecisionRecords,
+} from "./decision-ledger.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------

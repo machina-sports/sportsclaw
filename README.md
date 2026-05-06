@@ -100,7 +100,7 @@ sportsclaw ships with **14 sports data skills** out of the box, powered by [`spo
 
 ### Inspiration & Acknowledgements
 
-sportsclaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), and [OpenClaw](https://github.com/anthropics/openclaw). Built on the [Vercel AI SDK](https://sdk.vercel.ai) for multi-provider LLM support. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
+sportsclaw's execution engine draws direct inspiration from [NanoClaw](https://github.com/qwibitai/nanoclaw/), [pi.dev](https://pi.dev), [OpenClaw](https://github.com/anthropics/openclaw), and [NemoClaw](https://github.com/NVIDIA/NemoClaw). Built on the [Vercel AI SDK](https://sdk.vercel.ai) for multi-provider LLM support. The interactive CLI setup and reasoning spinner are powered by [@clack/prompts](https://github.com/natemoo-re/clack).
 
 ### Questions?
 

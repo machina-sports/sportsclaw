@@ -23,7 +23,8 @@
     "docker:run": "docker run --rm --env-file .env sportsclaw",
     "test:version": "npm run build && node --test test/version-help.test.mjs",
     "test:tv-contracts": "npm run build && node --test test/tv-contracts.test.mjs",
-    "test:operator-health": "npm run build && node --test test/operator-health.test.mjs"
+    "test:operator-health": "npm run build && node --test test/operator-health.test.mjs",
+    "test:decision-ledger": "npm run build && node --test test/decision-ledger.test.mjs"
   },
   "keywords": [
     "sports",
