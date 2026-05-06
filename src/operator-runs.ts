@@ -147,3 +147,12 @@ export async function readLatestAgentRunRecords(
 ): Promise<AgentRunRecord[]> {
   return new FileAgentRunLedger(filePath).readLatest(limit);
 }
+
+import { PodLedgerStorage } from "./ledger.js";
+import type { McpManager } from "./mcp.js";
+
+export class PodOperatorRunsLedger extends PodLedgerStorage<AgentRunRecord> {
+  constructor(mcpManager: McpManager, serverName: string, ledgerName: string = "operator-runs-ledger") {
+    super(mcpManager, serverName, ledgerName, parseAgentRunRecordLine, serializeAgentRunRecord);
+  }
+}
