@@ -5,10 +5,8 @@
  * Data-only utilities — no engine wiring or behavior.
  */
 
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import type { DecisionRecord, ValidationResult } from "./schema/tv.js";
+import { FileLedgerStorage } from "./ledger.js";
 
 // ---------------------------------------------------------------------------
 // validateDecisionRecord
@@ -37,6 +35,10 @@ export function validateDecisionRecord(record: unknown): ValidationResult {
 // ---------------------------------------------------------------------------
 
 export function serializeDecisionRecord(record: DecisionRecord): string {
+  const result = validateDecisionRecord(record);
+  if (!result.ok) {
+    throw new Error(`Invalid decision record: ${result.error}`);
+  }
   return JSON.stringify(record) + "\n";
 }
 
@@ -63,54 +65,35 @@ export function parseDecisionRecordLine(line: string): DecisionRecord {
 }
 
 // ---------------------------------------------------------------------------
-// appendDecisionRecord
+// FileDecisionLedger
+// ---------------------------------------------------------------------------
+
+export class FileDecisionLedger extends FileLedgerStorage<DecisionRecord> {
+  constructor(filePath: string) {
+    super(filePath, parseDecisionRecordLine, serializeDecisionRecord);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone helpers (delegate to a temporary instance)
 // ---------------------------------------------------------------------------
 
 export async function appendDecisionRecord(
   filePath: string,
   record: DecisionRecord,
 ): Promise<void> {
-  const result = validateDecisionRecord(record);
-  if (!result.ok) {
-    throw new Error(`Invalid decision record: ${result.error}`);
-  }
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, serializeDecisionRecord(record), "utf-8");
+  return new FileDecisionLedger(filePath).append(record);
 }
-
-// ---------------------------------------------------------------------------
-// readDecisionLedger
-// ---------------------------------------------------------------------------
 
 export async function readDecisionLedger(
   filePath: string,
 ): Promise<DecisionRecord[]> {
-  let content: string;
-  try {
-    content = await fs.readFile(filePath, "utf-8");
-  } catch (err: any) {
-    if (err.code === "ENOENT") return [];
-    throw err;
-  }
-
-  return content
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map(parseDecisionRecordLine);
+  return new FileDecisionLedger(filePath).readAll();
 }
-
-// ---------------------------------------------------------------------------
-// readLatestDecisionRecords
-// ---------------------------------------------------------------------------
 
 export async function readLatestDecisionRecords(
   filePath: string,
   limit: number,
 ): Promise<DecisionRecord[]> {
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error("Limit must be a positive integer.");
-  }
-
-  const all = await readDecisionLedger(filePath);
-  return all.slice(-limit);
+  return new FileDecisionLedger(filePath).readLatest(limit);
 }

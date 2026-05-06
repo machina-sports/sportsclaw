@@ -296,6 +296,10 @@ export type {
   ManifestCoverageOptions,
 } from "./schema/tv.js";
 
+// Ledger Storage Abstraction
+export { FileLedgerStorage } from "./ledger.js";
+export type { LedgerStorage } from "./ledger.js";
+
 // Decision Ledger Primitives
 export {
   validateDecisionRecord,
@@ -304,6 +308,7 @@ export {
   appendDecisionRecord,
   readDecisionLedger,
   readLatestDecisionRecords,
+  FileDecisionLedger,
 } from "./decision-ledger.js";
 
 // Operator Run Record Primitives
@@ -314,6 +319,7 @@ export {
   appendAgentRunRecord,
   readAgentRunLedger,
   readLatestAgentRunRecords,
+  FileAgentRunLedger,
 } from "./operator-runs.js";
 
 // Incident Log Primitives
@@ -324,6 +330,7 @@ export {
   appendIncidentRecord,
   readIncidentLog,
   readLatestIncidentRecords,
+  FileIncidentLedger,
 } from "./incident-log.js";
 
 // ---------------------------------------------------------------------------

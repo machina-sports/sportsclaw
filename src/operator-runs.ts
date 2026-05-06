@@ -5,11 +5,9 @@
  * Data-only utilities — no engine wiring or behavior.
  */
 
-import fs from "node:fs/promises";
-import path from "node:path";
-
 import type { AgentRunRecord, ValidationResult } from "./schema/tv.js";
 import { validateDecisionRecord } from "./decision-ledger.js";
+import { FileLedgerStorage } from "./ledger.js";
 
 // ---------------------------------------------------------------------------
 // validateAgentRunRecord
@@ -86,6 +84,10 @@ export function validateAgentRunRecord(record: unknown): ValidationResult {
 // ---------------------------------------------------------------------------
 
 export function serializeAgentRunRecord(record: AgentRunRecord): string {
+  const result = validateAgentRunRecord(record);
+  if (!result.ok) {
+    throw new Error(`Invalid agent run record: ${result.error}`);
+  }
   return JSON.stringify(record) + "\n";
 }
 
@@ -115,53 +117,33 @@ export function parseAgentRunRecordLine(line: string): AgentRunRecord {
 }
 
 // ---------------------------------------------------------------------------
-// appendAgentRunRecord
+// FileAgentRunLedger
+// ---------------------------------------------------------------------------
+
+export class FileAgentRunLedger extends FileLedgerStorage<AgentRunRecord> {
+  constructor(filePath: string) {
+    super(filePath, parseAgentRunRecordLine, serializeAgentRunRecord);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone helpers (delegate to a temporary instance)
 // ---------------------------------------------------------------------------
 
 export async function appendAgentRunRecord(
   filePath: string,
   record: AgentRunRecord,
 ): Promise<void> {
-  const result = validateAgentRunRecord(record);
-  if (!result.ok) {
-    throw new Error(`Invalid agent run record: ${result.error}`);
-  }
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, serializeAgentRunRecord(record), "utf-8");
+  return new FileAgentRunLedger(filePath).append(record);
 }
-
-// ---------------------------------------------------------------------------
-// readAgentRunLedger
-// ---------------------------------------------------------------------------
 
 export async function readAgentRunLedger(filePath: string): Promise<AgentRunRecord[]> {
-  let content: string;
-  try {
-    content = await fs.readFile(filePath, "utf-8");
-  } catch (err: any) {
-    if (err.code === "ENOENT") return [];
-    throw err;
-  }
-
-  return content
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map(parseAgentRunRecordLine);
+  return new FileAgentRunLedger(filePath).readAll();
 }
-
-// ---------------------------------------------------------------------------
-// readLatestAgentRunRecords
-// ---------------------------------------------------------------------------
 
 export async function readLatestAgentRunRecords(
   filePath: string,
   limit: number,
 ): Promise<AgentRunRecord[]> {
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error("Limit must be a positive integer.");
-  }
-
-  const all = await readAgentRunLedger(filePath);
-  return all.slice(-limit);
+  return new FileAgentRunLedger(filePath).readLatest(limit);
 }
