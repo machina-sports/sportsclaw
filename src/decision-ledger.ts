@@ -97,3 +97,12 @@ export async function readLatestDecisionRecords(
 ): Promise<DecisionRecord[]> {
   return new FileDecisionLedger(filePath).readLatest(limit);
 }
+
+import { PodLedgerStorage } from "./ledger.js";
+import type { McpManager } from "./mcp.js";
+
+export class PodDecisionLedger extends PodLedgerStorage<DecisionRecord> {
+  constructor(mcpManager: McpManager, serverName: string, ledgerName: string = "decision-ledger") {
+    super(mcpManager, serverName, ledgerName, parseDecisionRecordLine, serializeDecisionRecord);
+  }
+}

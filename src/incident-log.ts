@@ -128,3 +128,12 @@ export async function readLatestIncidentRecords(
 ): Promise<IncidentRecord[]> {
   return new FileIncidentLedger(filePath).readLatest(limit);
 }
+
+import { PodLedgerStorage } from "./ledger.js";
+import type { McpManager } from "./mcp.js";
+
+export class PodIncidentLedger extends PodLedgerStorage<IncidentRecord> {
+  constructor(mcpManager: McpManager, serverName: string, ledgerName: string = "incident-ledger") {
+    super(mcpManager, serverName, ledgerName, parseIncidentRecordLine, serializeIncidentRecord);
+  }
+}
