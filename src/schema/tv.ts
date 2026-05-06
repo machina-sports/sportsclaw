@@ -119,6 +119,21 @@ export interface AgentRunRecord {
 }
 
 // ---------------------------------------------------------------------------
+// IncidentRecord — record of an operational incident or pipeline issue
+// ---------------------------------------------------------------------------
+
+export interface IncidentRecord {
+  id: string;
+  timestamp: string;
+  level: "warning" | "error" | "critical";
+  message: string;
+  component: string;
+  resolvedAt?: string;
+  resolution?: string;
+  meta?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // HealthSnapshot — point-in-time health of the broadcast pipeline
 // ---------------------------------------------------------------------------
 
