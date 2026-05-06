@@ -276,6 +276,7 @@ export {
   validatePlaylistBlock,
   validatePlaylistManifest,
   validateLiveContentMeta,
+  validateManifestCoverage,
 } from "./schema/tv.js";
 export type {
   FreshnessClass,
@@ -291,6 +292,7 @@ export type {
   HealthSnapshot,
   HealthSnapshotInput,
   ValidationResult,
+  ManifestCoverageOptions,
 } from "./schema/tv.js";
 
 // Decision Ledger Primitives

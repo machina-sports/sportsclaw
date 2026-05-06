@@ -271,3 +271,124 @@ export function validateLiveContentMeta(block: unknown): ValidationResult {
 
   return { ok: true };
 }
+
+// ---------------------------------------------------------------------------
+// validateManifestCoverage — higher-level coverage policy checks
+// ---------------------------------------------------------------------------
+
+export interface ManifestCoverageOptions {
+  minimumTotalDurationSec?: number;
+  maximumTotalDurationSec?: number;
+  requireFallbackForEveryBlock?: boolean;
+  requireFreshnessForLiveBlocks?: boolean;
+  maxLiveAgeMs?: number;
+  nowMs?: number;
+  expectedBlockCountMin?: number;
+}
+
+function isLiveFreshness(value: unknown): boolean {
+  return value === "LIVE" || value === "HOT_SYNC";
+}
+
+export function validateManifestCoverage(
+  manifest: unknown,
+  options: ManifestCoverageOptions = {},
+): ValidationResult {
+  const baseResult = validatePlaylistManifest(manifest);
+  if (!baseResult.ok) return baseResult;
+
+  const blocks = (manifest as { blocks: Record<string, unknown>[] }).blocks;
+
+  if (
+    typeof options.expectedBlockCountMin === "number" &&
+    blocks.length < options.expectedBlockCountMin
+  ) {
+    return {
+      ok: false,
+      error: `Manifest must contain at least ${options.expectedBlockCountMin} blocks (found ${blocks.length}).`,
+    };
+  }
+
+  const totalDuration = blocks.reduce(
+    (sum, b) => sum + (Number(b.durationSec) || 0),
+    0,
+  );
+
+  if (
+    typeof options.minimumTotalDurationSec === "number" &&
+    totalDuration < options.minimumTotalDurationSec
+  ) {
+    return {
+      ok: false,
+      error: `Manifest total duration ${totalDuration}s is below minimum ${options.minimumTotalDurationSec}s.`,
+    };
+  }
+
+  if (
+    typeof options.maximumTotalDurationSec === "number" &&
+    totalDuration > options.maximumTotalDurationSec
+  ) {
+    return {
+      ok: false,
+      error: `Manifest total duration ${totalDuration}s exceeds maximum ${options.maximumTotalDurationSec}s.`,
+    };
+  }
+
+  if (options.requireFallbackForEveryBlock) {
+    for (const block of blocks) {
+      const fallback = block.fallback as Record<string, unknown> | undefined;
+      if (
+        !fallback ||
+        typeof fallback.blockId !== "string" ||
+        fallback.blockId === "" ||
+        typeof fallback.reason !== "string" ||
+        fallback.reason === ""
+      ) {
+        return {
+          ok: false,
+          error: `Block ${String(block.id ?? "?")} must have a complete fallback policy (blockId and reason).`,
+        };
+      }
+    }
+  }
+
+  if (options.requireFreshnessForLiveBlocks) {
+    for (const block of blocks) {
+      if (!isLiveFreshness(block.freshness)) continue;
+      if (typeof block.sourceRef !== "string" || block.sourceRef === "") {
+        return {
+          ok: false,
+          error: `Block ${String(block.id ?? "?")} (${String(block.freshness)}) must have a sourceRef.`,
+        };
+      }
+      if (
+        typeof block.freshnessTimestamp !== "string" ||
+        block.freshnessTimestamp === ""
+      ) {
+        return {
+          ok: false,
+          error: `Block ${String(block.id ?? "?")} (${String(block.freshness)}) must have a freshnessTimestamp.`,
+        };
+      }
+    }
+  }
+
+  if (typeof options.maxLiveAgeMs === "number") {
+    const nowMs = typeof options.nowMs === "number" ? options.nowMs : Date.now();
+    for (const block of blocks) {
+      if (!isLiveFreshness(block.freshness)) continue;
+      const ts = block.freshnessTimestamp;
+      if (typeof ts !== "string" || ts === "") continue;
+      const ageMs = nowMs - Date.parse(ts);
+      if (Number.isNaN(ageMs)) continue;
+      if (ageMs > options.maxLiveAgeMs) {
+        return {
+          ok: false,
+          error: `Block ${String(block.id ?? "?")} (${String(block.freshness)}) freshness is stale: age ${ageMs}ms exceeds maxLiveAgeMs ${options.maxLiveAgeMs}ms.`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
