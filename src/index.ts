@@ -31,6 +31,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
@@ -107,6 +108,8 @@ import {
 import { WatchManager } from "./watch.js";
 import type { WatchOutputMode, WatcherConfig } from "./types.js";
 
+const require = createRequire(import.meta.url);
+const PKG_VERSION: string = require("../package.json").version;
 
 // ---------------------------------------------------------------------------
 // Re-exports for library usage
@@ -2127,7 +2130,7 @@ async function cmdMcp(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function printHelp(): void {
-  console.log("sportsclaw Engine v0.4.1");
+  console.log(`sportsclaw Engine v${PKG_VERSION}`);
   console.log("");
   console.log("Usage:");
   console.log('  sportsclaw "<prompt>"              Run a one-shot sports query');
