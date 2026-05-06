@@ -25,7 +25,8 @@
     "test:tv-contracts": "npm run build && node --test test/tv-contracts.test.mjs",
     "test:operator-health": "npm run build && node --test test/operator-health.test.mjs",
     "test:decision-ledger": "npm run build && node --test test/decision-ledger.test.mjs",
-    "test:manifest-coverage": "npm run build && node --test test/manifest-coverage.test.mjs"
+    "test:manifest-coverage": "npm run build && node --test test/manifest-coverage.test.mjs",
+    "test:operator-runs": "npm run build && node --test test/operator-runs.test.mjs"
   },
   "keywords": [
     "sports",
