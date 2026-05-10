@@ -34,7 +34,8 @@
     "test:guardrails": "npm run build && node --test test/guardrails.test.mjs",
     "test:heartbeat-state": "npm run build && node --test test/heartbeat-state.test.mjs",
     "test:heartbeat": "npm run build && node --test test/heartbeat.test.mjs",
-    "test:heartbeat-wake-gate": "npm run build && node --test test/heartbeat-wake-gate.test.mjs"
+    "test:heartbeat-wake-gate": "npm run build && node --test test/heartbeat-wake-gate.test.mjs",
+    "test:operator-daemon": "npm run build && node --test test/operator-daemon.test.mjs"
   },
   "keywords": [
     "sports",
