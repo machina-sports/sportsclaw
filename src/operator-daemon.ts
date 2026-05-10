@@ -368,6 +368,11 @@ export function createOperatorDaemon(
     },
     start(): void {
       if (started) return;
+      // Order matters: heartbeat.start() must run BEFORE scheduleCron,
+      // because scheduleCron only starts the per-cron timer when the
+      // heartbeat is already running. Reversing the order leaves the cron
+      // job registered but never firing.
+      heartbeat.start();
       // Pin the cron id to the operator-supplied jobId so the brief
       // directory, persisted record, and per-job lockfile all use the same
       // key — and so two daemon replicas can coordinate via the per-job
@@ -381,7 +386,6 @@ export function createOperatorDaemon(
         recurring: true,
         wakeGate: cfg.wakeGate,
       });
-      heartbeat.start();
       started = true;
     },
     stop(): void {
@@ -447,14 +451,25 @@ function wrapOneTool(
     }
     if (decision.action === "warn") counts.warnings++;
     counts.calls++;
+    let result: unknown;
     try {
-      const result = await original(args, ctx);
-      guard.afterCall(name, args, true, digestResult(result));
-      return result;
+      result = await original(args, ctx);
     } catch (err) {
       guard.afterCall(name, args, false);
       throw err;
     }
+    // Compute the digest defensively: a successful tool returning a
+    // non-serialisable result (circular ref, BigInt, etc.) would otherwise
+    // throw inside digestResult, get caught by the outer try, and be
+    // miscounted as a failure. Pass undefined to skip same-result tracking.
+    let digest: string | undefined;
+    try {
+      digest = digestResult(result);
+    } catch {
+      digest = undefined;
+    }
+    guard.afterCall(name, args, true, digest);
+    return result;
   };
 
   return { ...def, execute: wrappedExecute } as Tool;

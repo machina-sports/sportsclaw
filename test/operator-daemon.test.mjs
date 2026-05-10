@@ -37,6 +37,8 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /** Build a generateText stub that returns a fixed text and records inputs. */
 function makeGen(text) {
   const calls = [];
@@ -244,6 +246,42 @@ describe("tool guardrail wrapping", () => {
     assert.strictEqual(event.guardrailBlocks, 0);
   });
 
+  it("does not miscount a non-serialisable success as a failure", async () => {
+    // A tool returning a circular-ref result would crash JSON.stringify
+    // inside digestResult; without the try/catch around digestResult the
+    // outer catch would mark this as a failure. With the fix the success
+    // is recorded and no digest is tracked.
+    const tools = {
+      search_documents: makeTool(async () => {
+        const a = { hello: "world" };
+        // create a circular reference (un-stringifiable)
+        a.self = a;
+        return a;
+      }),
+    };
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      // Invoke the wrapped tool 4 times. Each succeeds. Without the fix,
+      // each would be (mis)counted as a failure and the 4th would trip
+      // the warn threshold via per-tool failure tracking.
+      for (let i = 0; i < 4; i++) {
+        await passedTools.search_documents.execute(
+          { i },
+          { toolCallId: String(i), messages: [] },
+        );
+      }
+      return { text: "ok" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({ tools, generateTextImpl }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    assert.strictEqual(event.toolCalls, 4);
+    // No warnings, no blocks — these are successful calls.
+    assert.strictEqual(event.guardrailWarnings, 0);
+    assert.strictEqual(event.guardrailBlocks, 0);
+  });
+
   it("blocks repeated identical failures and reports it on the event", async () => {
     const tools = {
       execute_workflow: makeTool(async () => {
@@ -347,6 +385,78 @@ describe("heartbeat persistence integration", () => {
       `${event.tickId}.md`,
     );
     assert.ok(fs.existsSync(briefPath), `expected brief at ${briefPath}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timer-driven path — drives runTick via the heartbeat scheduler instead of
+// tickOnce(), so the cron timer's wake-gate + markRunStart + cron_fired
+// emission are all exercised end-to-end.
+// ---------------------------------------------------------------------------
+
+describe("timer-driven tick path", () => {
+  it("start() → cron timer fires → runTick writes brief under operator-supplied jobId", async () => {
+    const tickEvents = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        jobId: "stable-operator-id",
+        intervalMs: 60_000, // long; rely on the immediate first-fire
+        onTickEvent: (e) => tickEvents.push(e),
+        generateTextImpl: makeGen("first tick body"),
+      }),
+    );
+    daemon.start();
+    // Wait for the heartbeat's immediate first-fire to flow through
+    // cron_fired → onEvent → runTick → brief write.
+    await wait(150);
+    daemon.stop();
+
+    // tick_started + tick_published landed via the event handler
+    const types = tickEvents.map((e) => e.type);
+    assert.ok(types.includes("tick_started"), `missing tick_started, got ${types.join(",")}`);
+    assert.ok(types.includes("tick_published"), `missing tick_published, got ${types.join(",")}`);
+
+    // Brief is on disk under the operator-supplied jobId
+    const briefRoot = path.join(tmpDir, "briefs", "stable-operator-id");
+    assert.ok(fs.existsSync(briefRoot), `expected brief dir at ${briefRoot}`);
+    const briefs = fs.readdirSync(briefRoot).filter((f) => f.endsWith(".md"));
+    assert.strictEqual(briefs.length, 1);
+    const text = fs.readFileSync(path.join(briefRoot, briefs[0]), "utf8");
+    assert.match(text, /first tick body/);
+
+    // Heartbeat persistence reflects the timer-driven fire (markRunStart
+    // ran inside execute(), then markJobSucceeded ran from runTick).
+    const persisted = await daemon.heartbeat.getPersistedJob("stable-operator-id");
+    assert.ok(persisted, "timer-driven tick must persist heartbeat state");
+    assert.strictEqual(persisted.runCount, 1);
+    assert.strictEqual(persisted.lastStatus, "succeeded");
+  });
+
+  it("wake-gate denial → cron_skipped → tick_skipped, no brief written", async () => {
+    const tickEvents = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        jobId: "gated-job",
+        intervalMs: 60_000,
+        onTickEvent: (e) => tickEvents.push(e.type),
+        wakeGate: () => ({ wake: false, reason: "fixtures fresh" }),
+      }),
+    );
+    daemon.start();
+    await wait(150);
+    daemon.stop();
+
+    assert.ok(
+      tickEvents.includes("tick_skipped"),
+      `expected tick_skipped, got ${tickEvents.join(",")}`,
+    );
+    assert.ok(
+      !tickEvents.includes("tick_started"),
+      "tick_started should not fire when the wake gate denies",
+    );
+    // No brief should have been written
+    const briefRoot = path.join(tmpDir, "briefs", "gated-job");
+    assert.ok(!fs.existsSync(briefRoot), "no brief should be written on a skipped tick");
   });
 });
 
