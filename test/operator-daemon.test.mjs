@@ -296,6 +296,58 @@ describe("heartbeat persistence integration", () => {
     const event = await daemon.tickOnce();
     assert.strictEqual(event.type, "tick_published");
   });
+
+  it("tickOnce primes markRunStart so markJobSucceeded actually persists", async () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    // Before this fix, the persisted record was a silent no-op because no
+    // markRunStart had run first. Now tickOnce primes markJobStart and
+    // markJobSucceeded lands on the same record.
+    const persisted = await daemon.heartbeat.getPersistedJob("tv-operator-test");
+    assert.ok(persisted, "tickOnce must create a persisted record");
+    assert.strictEqual(persisted.runCount, 1);
+    assert.strictEqual(persisted.lastStatus, "succeeded");
+  });
+
+  it("tickOnce on a failing tick persists lastStatus=failed with the error", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: async () => {
+          throw new Error("upstream gone");
+        },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_failed");
+    const persisted = await daemon.heartbeat.getPersistedJob("tv-operator-test");
+    assert.ok(persisted);
+    assert.strictEqual(persisted.lastStatus, "failed");
+    assert.match(persisted.lastError, /upstream gone/);
+  });
+
+  it("does not mutate cfg.jobId after start() — briefs stay under the operator-supplied id", async () => {
+    // Use a fresh heartbeat that we DON'T pre-start, then drive a tick via
+    // tickOnce — and verify the brief landed at the operator-supplied jobId
+    // (not under an auto-generated cron_xxx_yyy id, which was the bug).
+    const cfgIn = baseConfig({ jobId: "stable-operator-id" });
+    const daemon = createOperatorDaemon(cfgIn);
+    daemon.start();
+    // start() previously did `cfg.jobId = cronJob.id` — assert it didn't:
+    assert.strictEqual(cfgIn.jobId, "stable-operator-id");
+    // cronJob exposed via the daemon must use the same id
+    assert.strictEqual(daemon.cronJob.id, "stable-operator-id");
+    daemon.stop();
+    // Drive a tick after start() to confirm brief routing is stable
+    const event = await daemon.tickOnce();
+    const briefPath = path.join(
+      tmpDir,
+      "briefs",
+      "stable-operator-id",
+      `${event.tickId}.md`,
+    );
+    assert.ok(fs.existsSync(briefPath), `expected brief at ${briefPath}`);
+  });
 });
 
 // ---------------------------------------------------------------------------

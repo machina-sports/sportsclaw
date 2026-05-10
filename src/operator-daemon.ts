@@ -187,13 +187,19 @@ export function createOperatorDaemon(
   }
   if (!cfg.rootDir) throw new Error("OperatorDaemon: rootDir is required.");
 
+  // Capture the operator-supplied jobId as a stable local. Used as the cron
+  // id (via scheduleCron({id})), the brief jobId, and the persistence key —
+  // all three must agree across the daemon's lifetime, so we never read
+  // `cfg.jobId` after this point.
+  const jobId = cfg.jobId;
+  const intervalMs = cfg.intervalMs;
   const userId = cfg.userId ?? "operator";
   const memoryFilePath =
     cfg.memoryFilePath ?? path.join(cfg.rootDir, "editorial-memory.md");
   const briefDir = cfg.briefDir ?? path.join(cfg.rootDir, "briefs");
   const stateDir = cfg.stateDir ?? cfg.rootDir;
   const recentBriefLimit = cfg.recentBriefLimit ?? DEFAULT_RECENT_BRIEF_LIMIT;
-  const recentBriefJobIds = cfg.recentBriefJobIds ?? [cfg.jobId];
+  const recentBriefJobIds = cfg.recentBriefJobIds ?? [jobId];
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
   const generateImpl = cfg.generateTextImpl ?? generateText;
 
@@ -214,7 +220,7 @@ export function createOperatorDaemon(
     const timestamp = new Date().toISOString();
     cfg.onTickEvent?.({
       type: "tick_started",
-      jobId: cfg.jobId,
+      jobId,
       tickId,
       timestamp,
     });
@@ -271,7 +277,7 @@ export function createOperatorDaemon(
     try {
       await briefStore.write({
         tickId,
-        jobId: cfg.jobId,
+        jobId,
         body: briefBody,
       });
     } catch (err) {
@@ -286,12 +292,10 @@ export function createOperatorDaemon(
 
     // 7. Heartbeat status + telemetry.
     if (failureReason) {
-      await heartbeat
-        .markJobFailed(cfg.jobId, failureReason)
-        .catch(() => {});
+      await heartbeat.markJobFailed(jobId, failureReason).catch(() => {});
       const event: TickEvent = {
         type: "tick_failed",
-        jobId: cfg.jobId,
+        jobId,
         tickId,
         reason: failureReason,
         timestamp,
@@ -303,12 +307,12 @@ export function createOperatorDaemon(
       return event;
     }
 
-    await heartbeat.markJobSucceeded(cfg.jobId).catch(() => {});
+    await heartbeat.markJobSucceeded(jobId).catch(() => {});
 
     const silent = LastTickBrief.isSilent(text);
     const event: TickEvent = {
       type: silent ? "tick_silent" : "tick_published",
-      jobId: cfg.jobId,
+      jobId,
       tickId,
       text: silent ? undefined : text,
       timestamp,
@@ -324,13 +328,13 @@ export function createOperatorDaemon(
 
   const onEvent = (event: HeartbeatEvent): void => {
     cfg.onHeartbeatEvent?.(event);
-    if (event.cronJobId !== cronJob?.id) return;
+    if (event.cronJobId !== jobId) return;
 
     if (event.type === "cron_skipped") {
       const tickId = newTickId();
       const skip: TickEvent = {
         type: "tick_skipped",
-        jobId: cfg.jobId,
+        jobId,
         tickId,
         reason: event.result ?? "wake gate denied",
         timestamp: event.timestamp,
@@ -343,7 +347,7 @@ export function createOperatorDaemon(
       const tickId = newTickId();
       runTick(tickId).catch((err) => {
         console.error(
-          `[operator-daemon] tick crashed for ${cfg.jobId}: ${
+          `[operator-daemon] tick crashed for ${jobId}: ${
             err instanceof Error ? err.message : err
           }`,
         );
@@ -364,18 +368,19 @@ export function createOperatorDaemon(
     },
     start(): void {
       if (started) return;
+      // Pin the cron id to the operator-supplied jobId so the brief
+      // directory, persisted record, and per-job lockfile all use the same
+      // key — and so two daemon replicas can coordinate via the per-job
+      // lock added in #37.
       cronJob = heartbeat.scheduleCron({
-        label: cfg.jobLabel ?? cfg.jobId,
+        id: jobId,
+        label: cfg.jobLabel ?? jobId,
         prompt: cfg.role, // not used by the cron timer; kept for traceability
         userId,
-        intervalMs: cfg.intervalMs,
+        intervalMs,
         recurring: true,
         wakeGate: cfg.wakeGate,
       });
-      // Re-key the persisted job under the configured jobId so subsequent
-      // markJobSucceeded / Failed calls land on the same record. The heartbeat
-      // generates its own id; we accept that and use it for routing.
-      cfg.jobId = cronJob.id; // bind config jobId to the actual cron id
       heartbeat.start();
       started = true;
     },
@@ -384,6 +389,14 @@ export function createOperatorDaemon(
       started = false;
     },
     async tickOnce(): Promise<TickEvent> {
+      // Manual / test seam: the cron timer normally calls markRunStart
+      // inside execute(); when we bypass the timer we must prime the
+      // persisted record ourselves, otherwise markJobSucceeded / Failed
+      // would silently no-op (markRunSuccess only updates an existing
+      // record). No-op when persistence is off.
+      if (heartbeat.hasPersistence) {
+        await heartbeat.markJobStart(jobId, { intervalMs }).catch(() => {});
+      }
       return runTick(newTickId());
     },
   };
