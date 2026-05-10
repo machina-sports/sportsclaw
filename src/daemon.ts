@@ -16,7 +16,17 @@
  */
 
 import { execSync, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+} from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,11 +35,51 @@ import { fileURLToPath } from "node:url";
 // Public types and validation
 // ---------------------------------------------------------------------------
 
-export type DaemonPlatform = "discord" | "telegram" | "watch";
-const VALID_PLATFORMS: DaemonPlatform[] = ["discord", "telegram", "watch"];
+export type DaemonPlatform = "discord" | "telegram" | "watch" | "operator";
+/** Platforms that take no second positional argument. */
+const SIMPLE_PLATFORMS: DaemonPlatform[] = ["discord", "telegram", "watch"];
+const VALID_PLATFORMS: DaemonPlatform[] = ["discord", "telegram", "watch", "operator"];
 
 export function isValidPlatform(value: string): value is DaemonPlatform {
   return VALID_PLATFORMS.includes(value as DaemonPlatform);
+}
+
+/**
+ * Platforms whose service / log / pid identity is keyed by a jobId in
+ * addition to the platform itself. Operator daemons are the only such
+ * platform in v1.
+ */
+export function platformRequiresJobId(platform: DaemonPlatform): boolean {
+  return platform === "operator";
+}
+
+const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function assertJobId(platform: DaemonPlatform, jobId: string | undefined): string {
+  if (!platformRequiresJobId(platform)) {
+    throw new Error(
+      `[daemon] platform "${platform}" does not take a jobId argument`,
+    );
+  }
+  if (!jobId || !JOB_ID_PATTERN.test(jobId)) {
+    throw new Error(
+      `[daemon] platform "${platform}" requires a jobId matching ${JOB_ID_PATTERN.source}`,
+    );
+  }
+  return jobId;
+}
+
+function assertNoJobId(platform: DaemonPlatform, jobId: string | undefined): void {
+  if (jobId !== undefined && !platformRequiresJobId(platform)) {
+    throw new Error(
+      `[daemon] platform "${platform}" does not accept a jobId (got "${jobId}")`,
+    );
+  }
+}
+
+/** Cross-driver service-key composition. Used in error messages + status output. */
+function serviceKey(platform: DaemonPlatform, jobId?: string): string {
+  return jobId ? `${platform}/${jobId}` : platform;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,16 +100,26 @@ function logsDir(): string {
   return dir;
 }
 
-function logPaths(platform: DaemonPlatform): { out: string; err: string } {
+export function logPaths(
+  platform: DaemonPlatform,
+  jobId?: string,
+): { out: string; err: string } {
+  const suffix = jobId ? `${platform}-${jobId}` : platform;
   return {
-    out: join(logsDir(), `${platform}-out.log`),
-    err: join(logsDir(), `${platform}-err.log`),
+    out: join(logsDir(), `${suffix}-out.log`),
+    err: join(logsDir(), `${suffix}-err.log`),
   };
 }
 
-function scriptArgsFor(platform: DaemonPlatform): string[] {
+export function scriptArgsFor(
+  platform: DaemonPlatform,
+  jobId?: string,
+): string[] {
   if (platform === "watch") {
     return ["watch", `--config=${join(homedir(), ".sportsclaw", "watchers.json")}`];
+  }
+  if (platform === "operator") {
+    return ["operate", "--job", assertJobId(platform, jobId)];
   }
   return ["listen", platform];
 }
@@ -90,11 +150,11 @@ function tailFile(path: string, lines: number): string {
 
 interface Driver {
   name: string;
-  start(platform: DaemonPlatform): void;
-  stop(platform: DaemonPlatform): void;
+  start(platform: DaemonPlatform, jobId?: string): void;
+  stop(platform: DaemonPlatform, jobId?: string): void;
   status(): void;
-  logs(platform: DaemonPlatform, lines: number): void;
-  restart(platform: DaemonPlatform): void;
+  logs(platform: DaemonPlatform, lines: number, jobId?: string): void;
+  restart(platform: DaemonPlatform, jobId?: string): void;
 }
 
 function driver(): Driver {
@@ -129,6 +189,8 @@ interface Pm2Process {
 
 function migratePm2IfPresent(platform: DaemonPlatform): void {
   if (process.env.SPORTSCLAW_KEEP_PM2 === "1") return;
+  // operator daemons never had pm2 supervision (this PR introduces the platform).
+  if (platform === "operator") return;
 
   // Only proceed if pm2 is actually on PATH.
   const which = spawnSync(osPlatform() === "win32" ? "where.exe" : "which", ["pm2"], {
@@ -171,29 +233,41 @@ function migratePm2IfPresent(platform: DaemonPlatform): void {
 // Public API — same surface as before, dispatched per-OS
 // ---------------------------------------------------------------------------
 
-export function daemonStart(platform: DaemonPlatform): void {
+export function daemonStart(platform: DaemonPlatform, jobId?: string): void {
+  if (platformRequiresJobId(platform)) assertJobId(platform, jobId);
+  else assertNoJobId(platform, jobId);
   migratePm2IfPresent(platform);
-  driver().start(platform);
+  driver().start(platform, jobId);
 }
 
-export function daemonStop(platform: DaemonPlatform): void {
+export function daemonStop(platform: DaemonPlatform, jobId?: string): void {
+  if (platformRequiresJobId(platform)) assertJobId(platform, jobId);
+  else assertNoJobId(platform, jobId);
   // Migration is silent when no pm2 entry exists, so this only fires when
   // the user has a leftover pm2 daemon — exactly when stopping it is helpful.
   migratePm2IfPresent(platform);
-  driver().stop(platform);
+  driver().stop(platform, jobId);
 }
 
 export function daemonStatus(): void {
   driver().status();
 }
 
-export function daemonLogs(platform: DaemonPlatform, lines = 50): void {
-  driver().logs(platform, lines);
+export function daemonLogs(
+  platform: DaemonPlatform,
+  lines = 50,
+  jobId?: string,
+): void {
+  if (platformRequiresJobId(platform)) assertJobId(platform, jobId);
+  else assertNoJobId(platform, jobId);
+  driver().logs(platform, lines, jobId);
 }
 
-export function daemonRestart(platform: DaemonPlatform): void {
+export function daemonRestart(platform: DaemonPlatform, jobId?: string): void {
+  if (platformRequiresJobId(platform)) assertJobId(platform, jobId);
+  else assertNoJobId(platform, jobId);
   migratePm2IfPresent(platform);
-  driver().restart(platform);
+  driver().restart(platform, jobId);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,17 +276,48 @@ export function daemonRestart(platform: DaemonPlatform): void {
 
 const LAUNCHD_LABEL_PREFIX = "gg.sportsclaw.";
 
-function launchdLabel(p: DaemonPlatform): string {
+function launchdLabel(p: DaemonPlatform, jobId?: string): string {
+  if (p === "operator") {
+    return `${LAUNCHD_LABEL_PREFIX}operator.${assertJobId(p, jobId)}`;
+  }
   return `${LAUNCHD_LABEL_PREFIX}${p}`;
 }
 
-function launchdPlistPath(p: DaemonPlatform): string {
-  return join(homedir(), "Library", "LaunchAgents", `${launchdLabel(p)}.plist`);
+function launchdPlistPath(p: DaemonPlatform, jobId?: string): string {
+  return join(
+    homedir(),
+    "Library",
+    "LaunchAgents",
+    `${launchdLabel(p, jobId)}.plist`,
+  );
 }
 
-function launchdRenderPlist(p: DaemonPlatform): string {
-  const { out, err } = logPaths(p);
-  const args = [nodeBin(), entryPoint(), ...scriptArgsFor(p)];
+/**
+ * Enumerate every installed sportsclaw plist, returning the parsed
+ * (platform, jobId?) tuple. Used by `status` to surface every operator
+ * job alongside the simple platforms.
+ */
+function launchdInstalledServices(): Array<{ platform: DaemonPlatform; jobId?: string }> {
+  const dir = join(homedir(), "Library", "LaunchAgents");
+  if (!existsSync(dir)) return [];
+  const out: Array<{ platform: DaemonPlatform; jobId?: string }> = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.startsWith(LAUNCHD_LABEL_PREFIX) || !file.endsWith(".plist")) continue;
+    const label = file.slice(0, -".plist".length);
+    const rest = label.slice(LAUNCHD_LABEL_PREFIX.length);
+    if (rest.startsWith("operator.")) {
+      const jobId = rest.slice("operator.".length);
+      if (JOB_ID_PATTERN.test(jobId)) out.push({ platform: "operator", jobId });
+    } else if (SIMPLE_PLATFORMS.includes(rest as DaemonPlatform)) {
+      out.push({ platform: rest as DaemonPlatform });
+    }
+  }
+  return out;
+}
+
+function launchdRenderPlist(p: DaemonPlatform, jobId?: string): string {
+  const { out, err } = logPaths(p, jobId);
+  const args = [nodeBin(), entryPoint(), ...scriptArgsFor(p, jobId)];
   const xmlArgs = args
     .map((a) => `        <string>${escapeXml(a)}</string>`)
     .join("\n");
@@ -221,7 +326,7 @@ function launchdRenderPlist(p: DaemonPlatform): string {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${launchdLabel(p)}</string>
+    <string>${launchdLabel(p, jobId)}</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -284,66 +389,75 @@ function launchctlList(label: string): { running: boolean; pid?: number } {
   return { running: true };
 }
 
+/** Compose the supervisor display tag for "<platform>[ <jobId>]". */
+function tag(p: DaemonPlatform, jobId?: string): string {
+  return jobId ? `${p} ${jobId}` : p;
+}
+
+/** Compose the `stop`-style CLI suffix: `<platform> [<jobId>]`. */
+function cliSuffix(p: DaemonPlatform, jobId?: string): string {
+  return jobId ? `${p} ${jobId}` : p;
+}
+
 const launchdDriver: Driver = {
   name: "launchd",
-  start(p) {
-    const plistPath = launchdPlistPath(p);
+  start(p, jobId) {
+    const plistPath = launchdPlistPath(p, jobId);
     const dir = join(homedir(), "Library", "LaunchAgents");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    const existing = launchctlList(launchdLabel(p));
+    const existing = launchctlList(launchdLabel(p, jobId));
     if (existing.running && existing.pid) {
-      console.error(`${p} daemon is already running (PID ${existing.pid}).`);
-      console.error(`Stop it first with: sportsclaw stop ${p}`);
+      console.error(`${tag(p, jobId)} daemon is already running (PID ${existing.pid}).`);
+      console.error(`Stop it first with: sportsclaw stop ${cliSuffix(p, jobId)}`);
       process.exit(1);
     }
 
-    writeFileSync(plistPath, launchdRenderPlist(p), "utf-8");
+    writeFileSync(plistPath, launchdRenderPlist(p, jobId), "utf-8");
     // load is the legacy command but works across all macOS versions we target.
     spawnSync("launchctl", ["load", plistPath], { stdio: "inherit" });
 
-    console.log(`${p} daemon started via launchd.`);
+    console.log(`${tag(p, jobId)} daemon started via launchd.`);
     console.log(`  Status: sportsclaw status`);
-    console.log(`  Logs:   sportsclaw logs ${p}`);
-    console.log(`  Stop:   sportsclaw stop ${p}`);
+    console.log(`  Logs:   sportsclaw logs ${cliSuffix(p, jobId)}`);
+    console.log(`  Stop:   sportsclaw stop ${cliSuffix(p, jobId)}`);
   },
-  stop(p) {
-    const plistPath = launchdPlistPath(p);
+  stop(p, jobId) {
+    const plistPath = launchdPlistPath(p, jobId);
     if (!existsSync(plistPath)) {
-      console.error(`${p} daemon is not installed.`);
+      console.error(`${tag(p, jobId)} daemon is not installed.`);
       process.exit(1);
     }
     spawnSync("launchctl", ["unload", plistPath], { stdio: "inherit" });
-    console.log(`${p} daemon stopped.`);
+    console.log(`${tag(p, jobId)} daemon stopped.`);
   },
   status() {
-    let any = false;
+    const services = launchdInstalledServices();
     console.log("Daemon Status:");
     console.log("");
-    for (const p of VALID_PLATFORMS) {
-      const plistPath = launchdPlistPath(p);
-      if (!existsSync(plistPath)) continue;
-      any = true;
-      const info = launchctlList(launchdLabel(p));
-      const online = info.running && info.pid;
-      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
-      const label = online ? `online (PID ${info.pid})` : "stopped";
-      console.log(`  ${icon} ${p.padEnd(12)} ${label}`);
-    }
-    if (!any) {
+    if (services.length === 0) {
       console.log("No daemons installed.");
       console.log("");
       console.log("Start one with: sportsclaw start <discord|telegram|watch>");
+      console.log("            or: sportsclaw start operator <jobId>");
       return;
+    }
+    for (const { platform, jobId } of services) {
+      const info = launchctlList(launchdLabel(platform, jobId));
+      const online = info.running && info.pid;
+      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
+      const status = online ? `online (PID ${info.pid})` : "stopped";
+      const left = jobId ? `${platform} [${jobId}]` : platform;
+      console.log(`  ${icon} ${left.padEnd(36)} ${status}`);
     }
     console.log("");
     console.log(`Logs: ${logsDir()}`);
   },
-  logs(p, lines) {
-    const { out, err } = logPaths(p);
+  logs(p, lines, jobId) {
+    const { out, err } = logPaths(p, jobId);
     if (!existsSync(out) && !existsSync(err)) {
-      console.error(`No logs found for ${p}. Is the daemon running?`);
-      console.error(`Start it with: sportsclaw start ${p}`);
+      console.error(`No logs found for ${tag(p, jobId)}. Is the daemon running?`);
+      console.error(`Start it with: sportsclaw start ${cliSuffix(p, jobId)}`);
       process.exit(1);
     }
     if (existsSync(out)) {
@@ -355,22 +469,20 @@ const launchdDriver: Driver = {
       console.log(tailFile(err, lines));
     }
   },
-  restart(p) {
-    const plistPath = launchdPlistPath(p);
+  restart(p, jobId) {
+    const plistPath = launchdPlistPath(p, jobId);
     if (!existsSync(plistPath)) {
-      console.log(`${p} daemon is not currently installed. Starting fresh...`);
-      this.start(p);
+      console.log(`${tag(p, jobId)} daemon is not currently installed. Starting fresh...`);
+      this.start(p, jobId);
       return;
     }
     // kickstart -k restarts cleanly, surviving even a hung process.
-    // process.getuid() is always defined on macOS (POSIX); the optional-call
-    // syntax exists only because Node types it as conditional for Windows.
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
     const r =
       uid !== null
         ? spawnSync(
             "launchctl",
-            ["kickstart", "-k", `gui/${uid}/${launchdLabel(p)}`],
+            ["kickstart", "-k", `gui/${uid}/${launchdLabel(p, jobId)}`],
             { stdio: "inherit" }
           )
         : { status: 1 };
@@ -379,7 +491,7 @@ const launchdDriver: Driver = {
       spawnSync("launchctl", ["unload", plistPath], { stdio: "inherit" });
       spawnSync("launchctl", ["load", plistPath], { stdio: "inherit" });
     }
-    console.log(`Restarted ${p} daemon.`);
+    console.log(`Restarted ${tag(p, jobId)} daemon.`);
   },
 };
 
@@ -387,20 +499,42 @@ const launchdDriver: Driver = {
 // Linux — systemd user units
 // ---------------------------------------------------------------------------
 
-function systemdUnitName(p: DaemonPlatform): string {
+function systemdUnitName(p: DaemonPlatform, jobId?: string): string {
+  if (p === "operator") {
+    return `sportsclaw-operator-${assertJobId(p, jobId)}.service`;
+  }
   return `sportsclaw-${p}.service`;
 }
 
-function systemdUnitPath(p: DaemonPlatform): string {
-  return join(homedir(), ".config", "systemd", "user", systemdUnitName(p));
+function systemdUnitPath(p: DaemonPlatform, jobId?: string): string {
+  return join(homedir(), ".config", "systemd", "user", systemdUnitName(p, jobId));
 }
 
-function systemdRenderUnit(p: DaemonPlatform): string {
-  const { out, err } = logPaths(p);
-  const args = [nodeBin(), entryPoint(), ...scriptArgsFor(p)];
+/** Enumerate installed systemd user units belonging to sportsclaw. */
+function systemdInstalledServices(): Array<{ platform: DaemonPlatform; jobId?: string }> {
+  const dir = join(homedir(), ".config", "systemd", "user");
+  if (!existsSync(dir)) return [];
+  const out: Array<{ platform: DaemonPlatform; jobId?: string }> = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.startsWith("sportsclaw-") || !file.endsWith(".service")) continue;
+    const rest = file.slice("sportsclaw-".length, -".service".length);
+    if (rest.startsWith("operator-")) {
+      const jobId = rest.slice("operator-".length);
+      if (JOB_ID_PATTERN.test(jobId)) out.push({ platform: "operator", jobId });
+    } else if (SIMPLE_PLATFORMS.includes(rest as DaemonPlatform)) {
+      out.push({ platform: rest as DaemonPlatform });
+    }
+  }
+  return out;
+}
+
+function systemdRenderUnit(p: DaemonPlatform, jobId?: string): string {
+  const { out, err } = logPaths(p, jobId);
+  const args = [nodeBin(), entryPoint(), ...scriptArgsFor(p, jobId)];
   const execStart = args.map(quoteIfNeeded).join(" ");
+  const description = jobId ? `sportsclaw ${p} ${jobId}` : `sportsclaw ${p} listener`;
   return `[Unit]
-Description=sportsclaw ${p} listener
+Description=${description}
 After=network-online.target
 Wants=network-online.target
 
@@ -435,73 +569,72 @@ function systemctlUser(args: string[]): { ok: boolean; stdout: string; stderr: s
 
 const systemdDriver: Driver = {
   name: "systemd",
-  start(p) {
-    const unitPath = systemdUnitPath(p);
+  start(p, jobId) {
+    const unitName = systemdUnitName(p, jobId);
+    const unitPath = systemdUnitPath(p, jobId);
     const dir = join(homedir(), ".config", "systemd", "user");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    // Already running?
-    const active = systemctlUser(["is-active", systemdUnitName(p)]);
+    const active = systemctlUser(["is-active", unitName]);
     if (active.stdout === "active") {
-      console.error(`${p} daemon is already running.`);
-      console.error(`Stop it first with: sportsclaw stop ${p}`);
+      console.error(`${tag(p, jobId)} daemon is already running.`);
+      console.error(`Stop it first with: sportsclaw stop ${cliSuffix(p, jobId)}`);
       process.exit(1);
     }
 
-    writeFileSync(unitPath, systemdRenderUnit(p), "utf-8");
+    writeFileSync(unitPath, systemdRenderUnit(p, jobId), "utf-8");
     const reload = systemctlUser(["daemon-reload"]);
     if (!reload.ok) {
       console.error(`systemctl --user daemon-reload failed: ${reload.stderr}`);
       process.exit(1);
     }
-    const enable = systemctlUser(["enable", "--now", systemdUnitName(p)]);
+    const enable = systemctlUser(["enable", "--now", unitName]);
     if (!enable.ok) {
-      console.error(`systemctl --user enable --now ${systemdUnitName(p)} failed:`);
+      console.error(`systemctl --user enable --now ${unitName} failed:`);
       console.error(enable.stderr);
       process.exit(1);
     }
 
-    console.log(`${p} daemon started via systemd (--user).`);
+    console.log(`${tag(p, jobId)} daemon started via systemd (--user).`);
     console.log(`  Status: sportsclaw status`);
-    console.log(`  Logs:   sportsclaw logs ${p}`);
-    console.log(`  Stop:   sportsclaw stop ${p}`);
+    console.log(`  Logs:   sportsclaw logs ${cliSuffix(p, jobId)}`);
+    console.log(`  Stop:   sportsclaw stop ${cliSuffix(p, jobId)}`);
     console.log(`  Note: enable lingering with \`loginctl enable-linger\` if you want this to`);
     console.log(`        survive logout. Otherwise it stops when you log out.`);
   },
-  stop(p) {
-    const unitPath = systemdUnitPath(p);
+  stop(p, jobId) {
+    const unitPath = systemdUnitPath(p, jobId);
     if (!existsSync(unitPath)) {
-      console.error(`${p} daemon is not installed.`);
+      console.error(`${tag(p, jobId)} daemon is not installed.`);
       process.exit(1);
     }
-    systemctlUser(["disable", "--now", systemdUnitName(p)]);
-    console.log(`${p} daemon stopped.`);
+    systemctlUser(["disable", "--now", systemdUnitName(p, jobId)]);
+    console.log(`${tag(p, jobId)} daemon stopped.`);
   },
   status() {
-    let any = false;
+    const services = systemdInstalledServices();
     console.log("Daemon Status:");
     console.log("");
-    for (const p of VALID_PLATFORMS) {
-      const unitPath = systemdUnitPath(p);
-      if (!existsSync(unitPath)) continue;
-      any = true;
-      const active = systemctlUser(["is-active", systemdUnitName(p)]);
-      const online = active.stdout === "active";
-      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
-      const label = online ? "online" : active.stdout || "inactive";
-      console.log(`  ${icon} ${p.padEnd(12)} ${label}`);
-    }
-    if (!any) {
+    if (services.length === 0) {
       console.log("No daemons installed.");
       console.log("");
       console.log("Start one with: sportsclaw start <discord|telegram|watch>");
+      console.log("            or: sportsclaw start operator <jobId>");
       return;
+    }
+    for (const { platform, jobId } of services) {
+      const active = systemctlUser(["is-active", systemdUnitName(platform, jobId)]);
+      const online = active.stdout === "active";
+      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
+      const status = online ? "online" : active.stdout || "inactive";
+      const left = jobId ? `${platform} [${jobId}]` : platform;
+      console.log(`  ${icon} ${left.padEnd(36)} ${status}`);
     }
     console.log("");
     console.log(`Logs: ${logsDir()}`);
   },
-  logs(p, lines) {
-    const { out, err } = logPaths(p);
+  logs(p, lines, jobId) {
+    const { out, err } = logPaths(p, jobId);
     if (existsSync(out) || existsSync(err)) {
       if (existsSync(out)) {
         console.log(`=== ${out} ===`);
@@ -519,23 +652,23 @@ const systemdDriver: Driver = {
       "--no-pager",
       "-n",
       String(lines),
-      systemdUnitName(p),
+      systemdUnitName(p, jobId),
     ]);
     console.log(r.stdout || r.stderr);
   },
-  restart(p) {
-    const unitPath = systemdUnitPath(p);
+  restart(p, jobId) {
+    const unitPath = systemdUnitPath(p, jobId);
     if (!existsSync(unitPath)) {
-      console.log(`${p} daemon is not currently installed. Starting fresh...`);
-      this.start(p);
+      console.log(`${tag(p, jobId)} daemon is not currently installed. Starting fresh...`);
+      this.start(p, jobId);
       return;
     }
-    const r = systemctlUser(["restart", systemdUnitName(p)]);
+    const r = systemctlUser(["restart", systemdUnitName(p, jobId)]);
     if (!r.ok) {
       console.error(`systemctl --user restart failed: ${r.stderr}`);
       process.exit(1);
     }
-    console.log(`Restarted ${p} daemon.`);
+    console.log(`Restarted ${tag(p, jobId)} daemon.`);
   },
 };
 
@@ -543,23 +676,48 @@ const systemdDriver: Driver = {
 // Windows — Task Scheduler + .cmd respawn wrapper
 // ---------------------------------------------------------------------------
 
-function windowsTaskName(p: DaemonPlatform): string {
+function windowsTaskName(p: DaemonPlatform, jobId?: string): string {
+  if (p === "operator") return `sportsclaw-operator-${assertJobId(p, jobId)}`;
   return `sportsclaw-${p}`;
 }
 
-function windowsWrapperPath(p: DaemonPlatform): string {
-  return join(homedir(), ".sportsclaw", "scripts", `sportsclaw-${p}.cmd`);
+function windowsWrapperPath(p: DaemonPlatform, jobId?: string): string {
+  return join(
+    homedir(),
+    ".sportsclaw",
+    "scripts",
+    `${windowsTaskName(p, jobId)}.cmd`,
+  );
+}
+
+/** Enumerate installed sportsclaw task names. */
+function windowsInstalledServices(): Array<{ platform: DaemonPlatform; jobId?: string }> {
+  const dir = join(homedir(), ".sportsclaw", "scripts");
+  if (!existsSync(dir)) return [];
+  const out: Array<{ platform: DaemonPlatform; jobId?: string }> = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.startsWith("sportsclaw-") || !file.endsWith(".cmd")) continue;
+    const rest = file.slice("sportsclaw-".length, -".cmd".length);
+    if (rest.startsWith("operator-")) {
+      const jobId = rest.slice("operator-".length);
+      if (JOB_ID_PATTERN.test(jobId)) out.push({ platform: "operator", jobId });
+    } else if (SIMPLE_PLATFORMS.includes(rest as DaemonPlatform)) {
+      out.push({ platform: rest as DaemonPlatform });
+    }
+  }
+  return out;
 }
 
 /**
  * Render a Windows .cmd that respawns the listener forever with a 10s back-off.
  * Logs append to the same files used on macOS/Linux.
  */
-function windowsRenderWrapper(p: DaemonPlatform): string {
-  const { out, err } = logPaths(p);
-  const args = [`"${nodeBin()}"`, `"${entryPoint()}"`, ...scriptArgsFor(p)].join(" ");
+function windowsRenderWrapper(p: DaemonPlatform, jobId?: string): string {
+  const { out, err } = logPaths(p, jobId);
+  const args = [`"${nodeBin()}"`, `"${entryPoint()}"`, ...scriptArgsFor(p, jobId)].join(" ");
+  const label = jobId ? `${p} ${jobId}` : p;
   return `@echo off
-REM sportsclaw ${p} listener — respawn loop
+REM sportsclaw ${label} — respawn loop
 :loop
 ${args} 1>>"${out}" 2>>"${err}"
 timeout /t 10 /nobreak >nul
@@ -589,21 +747,19 @@ function windowsTaskRunning(name: string): boolean {
 
 const windowsDriver: Driver = {
   name: "schtasks",
-  start(p) {
-    const taskName = windowsTaskName(p);
+  start(p, jobId) {
+    const taskName = windowsTaskName(p, jobId);
     if (windowsTaskRunning(taskName)) {
-      console.error(`${p} daemon is already running.`);
-      console.error(`Stop it first with: sportsclaw stop ${p}`);
+      console.error(`${tag(p, jobId)} daemon is already running.`);
+      console.error(`Stop it first with: sportsclaw stop ${cliSuffix(p, jobId)}`);
       process.exit(1);
     }
 
-    // Write/refresh the wrapper script
-    const wrapperPath = windowsWrapperPath(p);
+    const wrapperPath = windowsWrapperPath(p, jobId);
     const wrapperDir = join(homedir(), ".sportsclaw", "scripts");
     if (!existsSync(wrapperDir)) mkdirSync(wrapperDir, { recursive: true });
-    writeFileSync(wrapperPath, windowsRenderWrapper(p), "utf-8");
+    writeFileSync(wrapperPath, windowsRenderWrapper(p, jobId), "utf-8");
 
-    // Create-or-replace the scheduled task — runs at logon, kills on logoff.
     const create = schtasks([
       "/Create",
       "/F",
@@ -620,50 +776,50 @@ const windowsDriver: Driver = {
       console.error(`schtasks /Create failed: ${create.stderr || create.stdout}`);
       process.exit(1);
     }
-    // Run it now (without waiting for next logon).
     schtasks(["/Run", "/TN", taskName]);
 
-    console.log(`${p} daemon started via Task Scheduler.`);
+    console.log(`${tag(p, jobId)} daemon started via Task Scheduler.`);
     console.log(`  Status: sportsclaw status`);
-    console.log(`  Logs:   sportsclaw logs ${p}`);
-    console.log(`  Stop:   sportsclaw stop ${p}`);
+    console.log(`  Logs:   sportsclaw logs ${cliSuffix(p, jobId)}`);
+    console.log(`  Stop:   sportsclaw stop ${cliSuffix(p, jobId)}`);
   },
-  stop(p) {
-    const taskName = windowsTaskName(p);
+  stop(p, jobId) {
+    const taskName = windowsTaskName(p, jobId);
     if (!windowsTaskExists(taskName)) {
-      console.error(`${p} daemon is not installed.`);
+      console.error(`${tag(p, jobId)} daemon is not installed.`);
       process.exit(1);
     }
     schtasks(["/End", "/TN", taskName]);
     schtasks(["/Delete", "/TN", taskName, "/F"]);
-    console.log(`${p} daemon stopped.`);
+    console.log(`${tag(p, jobId)} daemon stopped.`);
   },
   status() {
-    let any = false;
+    const services = windowsInstalledServices();
     console.log("Daemon Status:");
     console.log("");
-    for (const p of VALID_PLATFORMS) {
-      const taskName = windowsTaskName(p);
-      if (!windowsTaskExists(taskName)) continue;
-      any = true;
-      const online = windowsTaskRunning(taskName);
-      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
-      console.log(`  ${icon} ${p.padEnd(12)} ${online ? "online" : "stopped"}`);
-    }
-    if (!any) {
+    if (services.length === 0) {
       console.log("No daemons installed.");
       console.log("");
       console.log("Start one with: sportsclaw start <discord|telegram|watch>");
+      console.log("            or: sportsclaw start operator <jobId>");
       return;
+    }
+    for (const { platform, jobId } of services) {
+      const taskName = windowsTaskName(platform, jobId);
+      if (!windowsTaskExists(taskName)) continue;
+      const online = windowsTaskRunning(taskName);
+      const icon = online ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
+      const left = jobId ? `${platform} [${jobId}]` : platform;
+      console.log(`  ${icon} ${left.padEnd(36)} ${online ? "online" : "stopped"}`);
     }
     console.log("");
     console.log(`Logs: ${logsDir()}`);
   },
-  logs(p, lines) {
-    const { out, err } = logPaths(p);
+  logs(p, lines, jobId) {
+    const { out, err } = logPaths(p, jobId);
     if (!existsSync(out) && !existsSync(err)) {
-      console.error(`No logs found for ${p}. Is the daemon running?`);
-      console.error(`Start it with: sportsclaw start ${p}`);
+      console.error(`No logs found for ${tag(p, jobId)}. Is the daemon running?`);
+      console.error(`Start it with: sportsclaw start ${cliSuffix(p, jobId)}`);
       process.exit(1);
     }
     if (existsSync(out)) {
@@ -675,16 +831,16 @@ const windowsDriver: Driver = {
       console.log(tailFile(err, lines));
     }
   },
-  restart(p) {
-    const taskName = windowsTaskName(p);
+  restart(p, jobId) {
+    const taskName = windowsTaskName(p, jobId);
     if (!windowsTaskExists(taskName)) {
-      console.log(`${p} daemon is not currently installed. Starting fresh...`);
-      this.start(p);
+      console.log(`${tag(p, jobId)} daemon is not currently installed. Starting fresh...`);
+      this.start(p, jobId);
       return;
     }
     schtasks(["/End", "/TN", taskName]);
     schtasks(["/Run", "/TN", taskName]);
-    console.log(`Restarted ${p} daemon.`);
+    console.log(`Restarted ${tag(p, jobId)} daemon.`);
   },
 };
 
@@ -695,3 +851,4 @@ const windowsDriver: Driver = {
 void execSync;
 void execFileSync;
 void readFileSync;
+void serviceKey;

@@ -1,0 +1,297 @@
+/**
+ * Operator Job Config — schema + loader for `~/.sportsclaw/operator/<jobId>.json`.
+ *
+ * One file per autonomous job. Read by `sportsclaw operate --job <jobId>`
+ * and by the supervised form (`sportsclaw start operator <jobId>`).
+ *
+ * Required: jobId, intervalMs.
+ * Persona: exactly one of `persona` (MCP-resolved by name) or `personaText`.
+ *
+ * No I/O outside `loadOperatorJobConfig` / `listOperatorJobs`. All other
+ * helpers are pure validators so they're easy to test.
+ */
+
+import fs from "node:fs";
+import path from "node:path";
+import { homedir } from "node:os";
+
+import type { LLMProvider } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface OperatorJobConfig {
+  /** Unique job id. Must match the filename basename. */
+  jobId: string;
+  /** Human-readable label, shown in logs + supervisor. Defaults to jobId. */
+  label?: string;
+  /** Tick interval in ms. Must be > 0. */
+  intervalMs: number;
+  /** EITHER an MCP-resolvable prompt name (resolved at runtime via get_prompt_by_name)... */
+  persona?: string;
+  /** ...OR inline persona text. One of these two is required. */
+  personaText?: string;
+  /** AI SDK model id. Defaults to sportsclaw config. */
+  model?: string;
+  /** Provider override. Defaults to sportsclaw config. */
+  provider?: LLMProvider;
+  /** Persistence + brief root. Defaults to ~/.sportsclaw/operator/<jobId>/. */
+  rootDir?: string;
+  /** If set, POST every TickEvent to <tailServer>/ingest. Failures are non-fatal. */
+  tailServer?: string;
+  /**
+   * Extra system-prompt fragments. Each string is resolved against
+   * prompts.ts exports first (e.g. "broadcast-directive" →
+   * BROADCAST_DIRECTIVE_FRAGMENT) and used as inline text otherwise.
+   */
+  extraFragments?: string[];
+  /** Tool guardrail overrides — passed through to ToolGuardController. */
+  guardOptions?: Record<string, unknown>;
+}
+
+export interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  issues: ValidationIssue[];
+  /** Populated only when valid. */
+  config?: OperatorJobConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/** Directory holding all operator job configs. */
+export function operatorConfigDir(): string {
+  return path.join(homedir(), ".sportsclaw", "operator");
+}
+
+/** Path to the JSON file for a given jobId. */
+export function operatorConfigPath(jobId: string): string {
+  return path.join(operatorConfigDir(), `${jobId}.json`);
+}
+
+/** Default rootDir for a job — used by HeartbeatService persistence + briefs. */
+export function defaultRootDir(jobId: string): string {
+  return path.join(operatorConfigDir(), jobId);
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+const VALID_PROVIDERS: ReadonlySet<LLMProvider> = new Set<LLMProvider>([
+  "anthropic",
+  "openai",
+  "google",
+]);
+
+const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * Validate a parsed JSON object against the OperatorJobConfig schema.
+ * Returns line-precise field errors via `issues`. `valid: true` guarantees
+ * `config` is populated and safe to cast.
+ */
+export function validateOperatorJobConfig(
+  input: unknown,
+  opts: { sourcePath?: string } = {},
+): ValidationResult {
+  const issues: ValidationIssue[] = [];
+  const push = (field: string, message: string) => issues.push({ field, message });
+
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    push("", "expected a JSON object at the top level");
+    return { valid: false, issues };
+  }
+  const raw = input as Record<string, unknown>;
+
+  // jobId
+  if (typeof raw.jobId !== "string" || !raw.jobId) {
+    push("jobId", "missing required string");
+  } else if (!JOB_ID_PATTERN.test(raw.jobId)) {
+    push(
+      "jobId",
+      `must match ${JOB_ID_PATTERN.source} (got ${JSON.stringify(raw.jobId)})`,
+    );
+  } else if (opts.sourcePath) {
+    const expected = path.basename(opts.sourcePath, ".json");
+    if (raw.jobId !== expected) {
+      push(
+        "jobId",
+        `jobId "${raw.jobId}" must match filename basename "${expected}"`,
+      );
+    }
+  }
+
+  // intervalMs
+  if (typeof raw.intervalMs !== "number" || !Number.isFinite(raw.intervalMs)) {
+    push("intervalMs", "missing required number");
+  } else if (raw.intervalMs <= 0) {
+    push("intervalMs", `must be > 0 (got ${raw.intervalMs})`);
+  }
+
+  // persona / personaText — exactly one required
+  const hasPersona = typeof raw.persona === "string" && raw.persona.length > 0;
+  const hasPersonaText =
+    typeof raw.personaText === "string" && raw.personaText.length > 0;
+  if (!hasPersona && !hasPersonaText) {
+    push("persona|personaText", "exactly one of 'persona' or 'personaText' is required");
+  } else if (hasPersona && hasPersonaText) {
+    push(
+      "persona|personaText",
+      "exactly one of 'persona' or 'personaText' may be set, not both",
+    );
+  }
+  if (raw.persona !== undefined && typeof raw.persona !== "string") {
+    push("persona", "must be a string (MCP prompt name)");
+  }
+  if (raw.personaText !== undefined && typeof raw.personaText !== "string") {
+    push("personaText", "must be a string");
+  }
+
+  // label
+  if (raw.label !== undefined && typeof raw.label !== "string") {
+    push("label", "must be a string");
+  }
+
+  // model
+  if (raw.model !== undefined && typeof raw.model !== "string") {
+    push("model", "must be a string");
+  }
+
+  // provider
+  if (raw.provider !== undefined) {
+    if (typeof raw.provider !== "string" || !VALID_PROVIDERS.has(raw.provider as LLMProvider)) {
+      push(
+        "provider",
+        `must be one of ${[...VALID_PROVIDERS].join(", ")} (got ${JSON.stringify(raw.provider)})`,
+      );
+    }
+  }
+
+  // rootDir
+  if (raw.rootDir !== undefined && typeof raw.rootDir !== "string") {
+    push("rootDir", "must be a string");
+  }
+
+  // tailServer
+  if (raw.tailServer !== undefined) {
+    if (typeof raw.tailServer !== "string") {
+      push("tailServer", "must be a string URL");
+    } else {
+      try {
+        const url = new URL(raw.tailServer);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          push("tailServer", "must be http(s)");
+        }
+      } catch {
+        push("tailServer", `not a valid URL: ${JSON.stringify(raw.tailServer)}`);
+      }
+    }
+  }
+
+  // extraFragments
+  if (raw.extraFragments !== undefined) {
+    if (!Array.isArray(raw.extraFragments)) {
+      push("extraFragments", "must be an array of strings");
+    } else {
+      for (let i = 0; i < raw.extraFragments.length; i++) {
+        if (typeof raw.extraFragments[i] !== "string") {
+          push(`extraFragments[${i}]`, "must be a string");
+        }
+      }
+    }
+  }
+
+  // guardOptions
+  if (
+    raw.guardOptions !== undefined &&
+    (typeof raw.guardOptions !== "object" || raw.guardOptions === null || Array.isArray(raw.guardOptions))
+  ) {
+    push("guardOptions", "must be an object");
+  }
+
+  if (issues.length > 0) {
+    return { valid: false, issues };
+  }
+
+  return {
+    valid: true,
+    issues: [],
+    config: {
+      jobId: raw.jobId as string,
+      label: raw.label as string | undefined,
+      intervalMs: raw.intervalMs as number,
+      persona: raw.persona as string | undefined,
+      personaText: raw.personaText as string | undefined,
+      model: raw.model as string | undefined,
+      provider: raw.provider as LLMProvider | undefined,
+      rootDir: raw.rootDir as string | undefined,
+      tailServer: raw.tailServer as string | undefined,
+      extraFragments: raw.extraFragments as string[] | undefined,
+      guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// I/O
+// ---------------------------------------------------------------------------
+
+/** Load + validate a job config by id. Throws with line-precise errors on failure. */
+export function loadOperatorJobConfig(jobId: string): { config: OperatorJobConfig; path: string } {
+  if (!jobId || !JOB_ID_PATTERN.test(jobId)) {
+    throw new Error(
+      `Invalid jobId ${JSON.stringify(jobId)} — must match ${JOB_ID_PATTERN.source}`,
+    );
+  }
+  const filePath = operatorConfigPath(jobId);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Operator job config not found: ${filePath}`);
+  }
+  let parsed: unknown;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Failed to read ${filePath}: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+  const result = validateOperatorJobConfig(parsed, { sourcePath: filePath });
+  if (!result.valid || !result.config) {
+    const lines = result.issues.map((i) => `  - ${i.field || "<root>"}: ${i.message}`);
+    throw new Error(
+      `Operator job config invalid: ${filePath}\n${lines.join("\n")}`,
+    );
+  }
+  return { config: result.config, path: filePath };
+}
+
+/** List all job config files in `~/.sportsclaw/operator/`. */
+export function listOperatorJobs(): Array<{ jobId: string; path: string }> {
+  const dir = operatorConfigDir();
+  if (!fs.existsSync(dir)) return [];
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => {
+      const jobId = f.slice(0, -".json".length);
+      return { jobId, path: path.join(dir, f) };
+    })
+    // Operator-controlled filenames may not match JOB_ID_PATTERN — quietly hide
+    // those rather than fail listing.
+    .filter(({ jobId }) => JOB_ID_PATTERN.test(jobId))
+    .sort((a, b) => (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
+}

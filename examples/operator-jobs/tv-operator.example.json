@@ -1,0 +1,10 @@
+{
+  "jobId": "tv-operator",
+  "label": "Machina Sports TV — operator",
+  "intervalMs": 300000,
+  "personaText": "You are the editorial operator for Machina Sports TV — a 24/7 World Cup companion channel on YouTube Live. Every tick, you decide whether to publish a broadcast block or stay silent. Hard rules: no dead air, no invented live facts, fallback before hallucination.",
+  "extraFragments": ["broadcast-directive"],
+  "model": "gemini-2.5-flash",
+  "provider": "google",
+  "tailServer": "http://localhost:8090"
+}
