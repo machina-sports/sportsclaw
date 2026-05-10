@@ -3014,9 +3014,9 @@ export class sportsclawEngine {
         memory.readStrategy(),
       ]);
 
-      if (this.config.verbose && memoryBlock) {
+      if (memoryBlock) {
         console.error(
-          `[sportsclaw] memory loaded for user ${options.userId} (${memoryBlock.length} chars)`
+          `[sportsclaw] memory_loaded user=${options.userId} chars=${memoryBlock.length}`
         );
       }
     }
@@ -3073,11 +3073,9 @@ export class sportsclawEngine {
       const recentTail = this.messages.slice(-keepCount);
       const dropped = this.messages.length - (pinnedHead.length + recentTail.length);
       this.messages = [...pinnedHead, ...recentTail];
-      if (this.config.verbose) {
-        console.error(
-          `[sportsclaw] context pruned: dropped ${dropped} old messages, keeping ${this.messages.length} (1 pinned + ${recentTail.length} recent)`
-        );
-      }
+      console.error(
+        `[sportsclaw] context_pruned dropped=${dropped} kept=${this.messages.length} pinned=1 recent=${recentTail.length}`
+      );
     }
 
     let stepCount = 0;
