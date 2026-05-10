@@ -241,14 +241,6 @@ export function writeEnvVar(filePath: string, key: string, value: string): void 
 }
 
 /**
- * Read a token value from a dotenv-style file (KEY=VALUE format).
- * Returns the value for the given key, or undefined if not found.
- */
-function readEnvFile(filePath: string, key: string): string | undefined {
-  return parseEnvFile(filePath)[key];
-}
-
-/**
  * Sync a token saved by a wizard back into `~/.sportsclaw/.env` when that file
  * already contains the same key with a stale value. Without this, a stale `.env`
  * silently shadows the wizard's update because `firstEnv()` wins over config.json.
@@ -663,6 +655,7 @@ export async function runChannelsFlow(): Promise<void> {
       message: "Paste your Discord bot token:",
       validate: (val) => {
         if (!val || val.trim().length === 0) return "Bot token is required.";
+        return undefined;
       },
     });
     if (p.isCancel(tokenInput)) {
@@ -740,6 +733,7 @@ export async function runChannelsFlow(): Promise<void> {
       message: "Paste your Telegram bot token:",
       validate: (val) => {
         if (!val || val.trim().length === 0) return "Bot token is required.";
+        return undefined;
       },
     });
     if (p.isCancel(tokenInput)) {
@@ -866,7 +860,7 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
     } else {
       const newKey = await p.password({
         message: `Paste your ${envName}:`,
-        validate: (val) => { if (!val || !val.trim()) return "API key is required."; },
+        validate: (val) => (!val || !val.trim() ? "API key is required." : undefined),
       });
       if (p.isCancel(newKey)) { p.cancel("Cancelled."); process.exit(0); }
       apiKey = (newKey as string).trim();
@@ -874,7 +868,7 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
   } else {
     const newKey = await p.password({
       message: `Paste your ${envName}:`,
-      validate: (val) => { if (!val || !val.trim()) return "API key is required."; },
+      validate: (val) => (!val || !val.trim() ? "API key is required." : undefined),
     });
     if (p.isCancel(newKey)) { p.cancel("Cancelled."); process.exit(0); }
     apiKey = (newKey as string).trim();
@@ -964,7 +958,7 @@ async function configureDiscordIntegration(savedConfig: CLIConfig): Promise<Disc
     } else {
       const input = await p.password({
         message: "Paste your Discord bot token:",
-        validate: (val) => { if (!val?.trim()) return "Bot token is required."; },
+        validate: (val) => (!val?.trim() ? "Bot token is required." : undefined),
       });
       if (p.isCancel(input)) return null;
       token = (input as string).trim();
@@ -972,7 +966,7 @@ async function configureDiscordIntegration(savedConfig: CLIConfig): Promise<Disc
   } else {
     const input = await p.password({
       message: "Paste your Discord bot token:",
-      validate: (val) => { if (!val?.trim()) return "Bot token is required."; },
+      validate: (val) => (!val?.trim() ? "Bot token is required." : undefined),
     });
     if (p.isCancel(input)) return null;
     token = (input as string).trim();
@@ -1025,7 +1019,7 @@ async function configureTelegramIntegration(savedConfig: CLIConfig): Promise<Tel
     } else {
       const input = await p.password({
         message: "Paste your Telegram bot token:",
-        validate: (val) => { if (!val?.trim()) return "Bot token is required."; },
+        validate: (val) => (!val?.trim() ? "Bot token is required." : undefined),
       });
       if (p.isCancel(input)) return null;
       token = (input as string).trim();
@@ -1033,7 +1027,7 @@ async function configureTelegramIntegration(savedConfig: CLIConfig): Promise<Tel
   } else {
     const input = await p.password({
       message: "Paste your Telegram bot token:",
-      validate: (val) => { if (!val?.trim()) return "Bot token is required."; },
+      validate: (val) => (!val?.trim() ? "Bot token is required." : undefined),
     });
     if (p.isCancel(input)) return null;
     token = (input as string).trim();
@@ -1095,7 +1089,7 @@ async function configureMcpInteractive(): Promise<void> {
     const url = await p.text({
       message: "MCP server URL:",
       placeholder: "https://your-pod.machina.gg/mcp/sse",
-      validate: (val) => { if (!val?.trim()) return "URL is required."; },
+      validate: (val) => (!val?.trim() ? "URL is required." : undefined),
     });
     if (p.isCancel(url)) return;
 
@@ -1105,6 +1099,7 @@ async function configureMcpInteractive(): Promise<void> {
       validate: (val) => {
         if (!val?.trim()) return "Name is required.";
         if (!/^[a-zA-Z0-9_-]+$/.test(val.trim())) return "Only alphanumeric, hyphens, underscores.";
+        return undefined;
       },
     });
     if (p.isCancel(name)) return;
