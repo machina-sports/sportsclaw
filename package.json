@@ -33,7 +33,8 @@
     "test:prompts": "npm run build && node --test test/prompts.test.mjs",
     "test:guardrails": "npm run build && node --test test/guardrails.test.mjs",
     "test:heartbeat-state": "npm run build && node --test test/heartbeat-state.test.mjs",
-    "test:heartbeat": "npm run build && node --test test/heartbeat.test.mjs"
+    "test:heartbeat": "npm run build && node --test test/heartbeat.test.mjs",
+    "test:heartbeat-wake-gate": "npm run build && node --test test/heartbeat-wake-gate.test.mjs"
   },
   "keywords": [
     "sports",

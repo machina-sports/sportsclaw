@@ -33,6 +33,36 @@ import type { CronJobState } from "./heartbeat-state.js";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional cheap pre-check that runs before any LLM machinery for a tick.
+ * If `wake: false`, the tick exits without firing the engine — saves money
+ * on quiet ticks. If `wake: true`, the optional `context` string is attached
+ * to the cron_fired event for downstream handlers to inject into the prompt.
+ *
+ * Adapted from Hermes' wakeAgent gate (see external review notes).
+ *
+ * NOT persisted: this is a runtime-only callback; it lives in the closure
+ * of the daemon process. Skip metadata is recorded via
+ * HeartbeatStateStore.markRunSkipped.
+ */
+export interface WakeGateContext {
+  /** Job id being evaluated. */
+  jobId: string;
+  /** Read-only snapshot of the cron job for the gate to inspect. */
+  job: Readonly<Omit<CronJob, "wakeGate">>;
+}
+
+export interface WakeGateResult {
+  /** True to allow the tick to fire the engine; false to skip this tick. */
+  wake: boolean;
+  /** Free-form context attached to cron_fired (only when wake=true). */
+  context?: string;
+  /** Human-readable reason; recorded on the persisted state when wake=false. */
+  reason?: string;
+}
+
+export type WakeGateFn = (ctx: WakeGateContext) => Promise<WakeGateResult> | WakeGateResult;
+
 export interface CronJob {
   /** Unique identifier */
   id: string;
@@ -54,15 +84,28 @@ export interface CronJob {
   runCount: number;
   /** When this job was created */
   createdAt: string;
+  /**
+   * Optional wake gate — cheap pre-check that decides whether this tick
+   * should fire the engine. NOT persisted (functions are not serialisable);
+   * the daemon re-attaches gates at startup.
+   */
+  wakeGate?: WakeGateFn;
 }
 
 export interface HeartbeatEvent {
-  type: "task_matched" | "task_expired" | "cron_fired" | "evaluation_error";
+  type:
+    | "task_matched"
+    | "task_expired"
+    | "cron_fired"
+    | "cron_skipped"
+    | "evaluation_error";
   taskId?: string;
   cronJobId?: string;
   userId?: string;
   result?: string;
   error?: string;
+  /** Optional context emitted alongside cron_fired when the wake gate produced a context string. */
+  wakeContext?: string;
   timestamp: string;
 }
 
@@ -228,6 +271,20 @@ export class HeartbeatService {
     await this.stateStore.markRunFailed(jobId, error);
   }
 
+  /**
+   * Mark the most recent attempt of `jobId` as skipped by the wake gate.
+   * Bumps skipCount, records the reason and timestamp, leaves runCount
+   * unchanged. Usually called internally by the cron timer when the wake
+   * gate denies — exposed publicly so external orchestrators can also
+   * register a skip.
+   */
+  async markJobSkipped(jobId: string, reason: string): Promise<void> {
+    if (!this.stateStore) return;
+    const job = this.cronJobs.get(jobId);
+    const intervalMs = job?.intervalMs ?? this.intervalMs;
+    await this.stateStore.markRunSkipped(jobId, { intervalMs, reason });
+  }
+
   /** Move a persisted job to a different lifecycle (active / paused / completed / error). */
   async setJobLifecycle(
     jobId: string,
@@ -321,6 +378,12 @@ export class HeartbeatService {
      * fresh `cron_<ts>_<rand>` id (single-replica use).
      */
     id?: string;
+    /**
+     * Optional cheap pre-check. Runs before each fire; if it returns
+     * `{wake: false}` the tick is skipped without invoking the engine.
+     * See WakeGateFn.
+     */
+    wakeGate?: WakeGateFn;
   }): CronJob {
     const id = params.id ?? `cron_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const job: CronJob = {
@@ -333,6 +396,7 @@ export class HeartbeatService {
       status: "active",
       runCount: 0,
       createdAt: new Date().toISOString(),
+      wakeGate: params.wakeGate,
     };
 
     this.cronJobs.set(id, job);
@@ -455,6 +519,26 @@ export class HeartbeatService {
       }
     } finally {
       this.inFlight = false;
+    }
+  }
+
+  /**
+   * Persist a wake-gate skip. Logged but never throws — gate denial is the
+   * happy path, we shouldn't crash the daemon when persistence is flaky.
+   */
+  private async recordSkip(job: CronJob, reason: string): Promise<void> {
+    if (!this.stateStore) return;
+    try {
+      await this.stateStore.markRunSkipped(job.id, {
+        intervalMs: job.intervalMs,
+        reason,
+        lifecycle: "active",
+      });
+    } catch (err) {
+      console.error(
+        `[heartbeat] markRunSkipped failed for "${job.label}": ` +
+          (err instanceof Error ? err.message : err),
+      );
     }
   }
 
@@ -586,9 +670,9 @@ export class HeartbeatService {
       // Cross-process double-fire protection (when persistence is configured):
       // acquire a per-job lockfile, reload state from disk, and skip if
       // another replica already advanced nextRunAt past now — meaning that
-      // replica won the race for this interval. The lock window covers only
-      // the markRunStart + emit critical section; consumer work runs after
-      // the event fires and outside the lock.
+      // replica won the race for this interval. The lock window covers the
+      // wake-gate evaluation + markRunStart + emit critical section;
+      // consumer work runs after the event fires and outside the lock.
       let releaseLock: (() => Promise<void>) | null = null;
       if (this.stateStore && this.lockPath) {
         const jobLockPath = this.perJobLockPath(job.id);
@@ -639,6 +723,54 @@ export class HeartbeatService {
       }
 
       try {
+        // Wake gate (optional): cheap pre-check that runs BEFORE markRunStart
+        // but INSIDE the per-job lock so two replicas don't both evaluate.
+        //   wake: true  → capture context, proceed to markRunStart + cron_fired
+        //   wake: false → emit cron_skipped, persist skip metadata, return
+        //   throws      → fail-closed (treated as denied) and recorded
+        // (See Hermes wakeAgent gate for the original pattern.)
+        let wakeContext: string | undefined;
+        if (job.wakeGate) {
+          const { wakeGate: _ignored, ...jobView } = job;
+          let result: WakeGateResult;
+          try {
+            result = await Promise.resolve(
+              job.wakeGate({ jobId: job.id, job: jobView }),
+            );
+          } catch (err) {
+            const reason = `wake gate threw: ${err instanceof Error ? err.message : err}`;
+            await this.recordSkip(job, reason);
+            this.emitEvent({
+              type: "cron_skipped",
+              cronJobId: job.id,
+              userId: job.userId,
+              result: reason,
+              error: err instanceof Error ? err.message : String(err),
+              timestamp: new Date().toISOString(),
+            });
+            if (this.verbose) {
+              console.error(`[heartbeat] Cron skipped (gate threw): "${job.label}" — ${reason}`);
+            }
+            return;
+          }
+          if (!result.wake) {
+            const reason = result.reason ?? "wake gate denied";
+            await this.recordSkip(job, reason);
+            this.emitEvent({
+              type: "cron_skipped",
+              cronJobId: job.id,
+              userId: job.userId,
+              result: reason,
+              timestamp: new Date().toISOString(),
+            });
+            if (this.verbose) {
+              console.error(`[heartbeat] Cron skipped: "${job.label}" — ${reason}`);
+            }
+            return;
+          }
+          wakeContext = result.context;
+        }
+
         // Advance-before-execute: write nextRunAt to the persisted state BEFORE
         // emitting the cron_fired event. If the daemon crashes mid-tick, we
         // lose this fire instead of replaying it on restart. At-most-once
@@ -668,6 +800,7 @@ export class HeartbeatService {
           cronJobId: job.id,
           userId: job.userId,
           result: `Cron "${job.label}" fired (run #${job.runCount})`,
+          wakeContext,
           timestamp: new Date().toISOString(),
         });
 
