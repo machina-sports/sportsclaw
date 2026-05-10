@@ -6,19 +6,26 @@
  * Hermes' `PLATFORM_HINTS` + tool-use discipline pattern (see external
  * review notes).
  *
- * The cron-mode autonomy fragment and tool-discipline fragment together
- * stop a Gemini-class model from rambling instead of dispatching tools —
- * this is the small-LOC fix with the largest behavioural win for the
- * autonomous operator daemon.
+ * The cron-autonomy fragment and tool-discipline fragment together stop a
+ * Gemini-class model from rambling instead of dispatching tools — this is
+ * the small-LOC fix with the largest behavioural win for any autonomous
+ * worker, not just the broadcast operator.
  *
  * The `[SILENT]` sentinel fragment teaches the model to vote "no useful
- * broadcast this tick" instead of forcing us to ship empty narration.
+ * action this tick" instead of forcing us to ship empty work.
+ *
+ * Domain coupling: CRON_AUTONOMY, TOOL_DISCIPLINE, and SILENT_SENTINEL are
+ * deliberately written in domain-neutral language so betting / scouting /
+ * fan-engagement / other autonomous workers can reuse them unchanged.
+ * Broadcast-specific framing lives in BROADCAST_DIRECTIVE_FRAGMENT — pass
+ * it via `extras` (or via the daemon's `extraFragments`) when the worker
+ * IS a broadcast operator.
  *
  * No I/O. Pure string composition.
  */
 
 // ---------------------------------------------------------------------------
-// Fragments
+// Fragments — domain-neutral
 // ---------------------------------------------------------------------------
 
 export const CRON_AUTONOMY_FRAGMENT = `
@@ -29,10 +36,10 @@ You are running on a scheduler, not in a chat. There is no human present.
 - Do not ask clarifying questions. There is no one to answer.
 - Do not request approvals. The cron contract is your approval to act.
 - Execute the task fully and autonomously. If the task is ambiguous,
-  pick the safer path — lean on fallback content, return [SILENT], or
-  reduce the scope rather than escalate.
-- Your final response is broadcast/telemetry, not a chat reply. Treat
-  every word as on-air content.
+  pick the safer path — lean on a fallback, return [SILENT], or reduce
+  the scope rather than escalate.
+- Your final response is the work product, not a chat reply. Treat
+  every word as the final output for this tick.
 `.trim();
 
 export const TOOL_DISCIPLINE_FRAGMENT = `
@@ -43,26 +50,49 @@ export const TOOL_DISCIPLINE_FRAGMENT = `
 - Do not ask permission to call a tool. The user is not here to grant it.
 - If a tool fails: classify the error. Retry only when the error is
   transient. Otherwise fall through to a safer path or return [SILENT].
-- The final assistant text must be ONLY the broadcast/telemetry summary
-  suitable for the on-air reasoning trail. No prefatory "Here is what I
-  did", no trailing "Let me know if you want changes". Just the summary.
+- The final assistant text must be ONLY the output summary for this
+  tick. No prefatory "Here is what I did", no trailing "Let me know if
+  you want changes". Just the summary.
 `.trim();
 
 export const SILENT_SENTINEL_FRAGMENT = `
 # The [SILENT] sentinel
 
-If a tick has nothing meaningful to broadcast — no new data, no editorial
-change, no fan signal worth surfacing — return EXACTLY \`[SILENT]\` as
-your final response. The runtime suppresses delivery; nothing pollutes
-the trail; no tokens are wasted on empty narration.
+If a tick has nothing worth surfacing — no new data, no state change, no
+signal worth acting on — return EXACTLY \`[SILENT]\` as your final
+response. The runtime suppresses delivery; nothing pollutes the trail;
+no tokens are wasted on empty output.
 
 Use [SILENT] when:
 - Nothing has changed since the previous brief on this job.
 - An upstream dependency is unavailable and you have no useful fallback.
-- The wake-gate fired but inspection shows no editorial action is due.
+- The wake-gate fired but inspection shows no action is due.
 
-Do not use [SILENT] to avoid hard work. If the cron contract says "plan
-the next 60 minutes," plan it.
+Do not use [SILENT] to avoid hard work. If the cron contract specifies a
+task, complete it.
+`.trim();
+
+// ---------------------------------------------------------------------------
+// Fragments — domain-specific (opt-in via extras)
+// ---------------------------------------------------------------------------
+
+/**
+ * Broadcast-specific framing for the SportsClaw TV operator. Pass via
+ * `extras` (or `OperatorDaemonConfig.extraFragments`) when the daemon's
+ * role IS a broadcast editor. Non-broadcast domains (betting / scouting /
+ * fan-engagement) supply their own directive fragments instead.
+ */
+export const BROADCAST_DIRECTIVE_FRAGMENT = `
+# Broadcast directive
+
+Your output for this tick is on-air content for a 24/7 sports channel.
+
+- Treat every word as broadcast/telemetry — viewers will read or hear it.
+- [SILENT] here maps to "no editorial action is due this tick" — use it
+  when there is no new data, no editorial change, and no fan signal
+  worth surfacing.
+- Hard rules: no dead air, no invented live facts, fallback before
+  hallucination.
 `.trim();
 
 export const EDITORIAL_MEMORY_FRAGMENT_HEADER = `
