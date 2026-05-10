@@ -10,6 +10,7 @@ import {
   CRON_AUTONOMY_FRAGMENT,
   TOOL_DISCIPLINE_FRAGMENT,
   SILENT_SENTINEL_FRAGMENT,
+  BROADCAST_DIRECTIVE_FRAGMENT,
   EDITORIAL_MEMORY_FRAGMENT_HEADER,
   TICK_BRIEF_FRAGMENT_HEADER,
   SILENT_SENTINEL_TOKEN,
@@ -36,6 +37,44 @@ describe("fragments", () => {
 
   it("SILENT_SENTINEL_TOKEN matches the canonical sentinel from last-tick-brief", () => {
     assert.strictEqual(SILENT_SENTINEL_TOKEN, SILENT_SENTINEL);
+  });
+
+  it("BROADCAST_DIRECTIVE_FRAGMENT is exported and mentions on-air", () => {
+    assert.match(BROADCAST_DIRECTIVE_FRAGMENT, /on-air/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Domain neutrality — the autonomy / discipline / sentinel fragments must
+// NOT carry broadcast-specific wording so non-broadcast workers (betting,
+// scouting, fan-engagement) can reuse them unchanged.
+// ---------------------------------------------------------------------------
+
+describe("domain neutrality", () => {
+  const broadcastTerms = [
+    /broadcast/i,
+    /\bon-air\b/i,
+    /telemetry/i,
+    /editorial/i,
+    /\bfan signal\b/i,
+  ];
+
+  for (const term of broadcastTerms) {
+    it(`CRON_AUTONOMY_FRAGMENT does not contain ${term}`, () => {
+      assert.doesNotMatch(CRON_AUTONOMY_FRAGMENT, term);
+    });
+    it(`TOOL_DISCIPLINE_FRAGMENT does not contain ${term}`, () => {
+      assert.doesNotMatch(TOOL_DISCIPLINE_FRAGMENT, term);
+    });
+    it(`SILENT_SENTINEL_FRAGMENT does not contain ${term}`, () => {
+      assert.doesNotMatch(SILENT_SENTINEL_FRAGMENT, term);
+    });
+  }
+
+  it("BROADCAST_DIRECTIVE_FRAGMENT IS allowed to mention broadcast/on-air", () => {
+    // Sanity check: the directive fragment is where broadcast wording lives.
+    assert.match(BROADCAST_DIRECTIVE_FRAGMENT, /broadcast/i);
+    assert.match(BROADCAST_DIRECTIVE_FRAGMENT, /on-air/i);
   });
 });
 
@@ -110,5 +149,21 @@ describe("buildSystemPrompt", () => {
   it("trims the role to avoid stray leading/trailing whitespace", () => {
     const out = buildSystemPrompt({ role: "   ROLE   ", isCron: true });
     assert.ok(out.startsWith("ROLE"));
+  });
+
+  it("broadcast workers opt in by passing BROADCAST_DIRECTIVE_FRAGMENT via extras", () => {
+    const out = buildSystemPrompt({
+      role: "ROLE",
+      isCron: true,
+      toolDiscipline: true,
+      silentSentinel: true,
+      extras: [BROADCAST_DIRECTIVE_FRAGMENT],
+    });
+    // Domain-neutral fragments are present
+    assert.ok(out.includes("Autonomous mode"));
+    assert.ok(out.includes("Tool use discipline"));
+    // Domain-specific framing is present too — opted in via extras
+    assert.ok(out.includes("Broadcast directive"));
+    assert.match(out, /on-air/i);
   });
 });
