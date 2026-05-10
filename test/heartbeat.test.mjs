@@ -179,41 +179,128 @@ describe("HeartbeatService cron advance-before-execute", () => {
 // ---------------------------------------------------------------------------
 
 describe("HeartbeatService tick lock", () => {
-  it("skips the tick when the cross-process lockfile is held", async () => {
-    // create a lockfile and hold it
+  it("skips the global watcher-task tick when the cross-process lockfile is held", async () => {
+    // create a lockfile and hold it — this is the GLOBAL lock that protects
+    // tickGuarded()'s watcher-task path.
     const lockPath = path.join(tmpDir, "heartbeat.lock");
     fs.writeFileSync(lockPath, "");
     const release = await lockfile.lock(lockPath, { stale: 30_000, retries: 0 });
 
-    let cronFires = 0;
     const hb = new HeartbeatService({ intervalMs: 60_000, verbose: false });
     hb.configurePersistence({ stateDir: tmpDir });
-    hb.setEventHandler((evt) => {
-      if (evt.type === "cron_fired") cronFires++;
-    });
     hb.start();
-    hb.scheduleCron({
-      label: "blocked",
+    await wait(50);
+    hb.stop();
+    await release();
+
+    // No crash, persisted state file is parseable.
+    const list = await hb.listPersistedJobs();
+    assert.ok(Array.isArray(list));
+  });
+
+  it("two replicas with the same shared jobId do NOT double-fire a cron", async () => {
+    // Both services point at the same stateDir AND share the same cron
+    // jobId. With the per-job lock + state-reload skip check, only one
+    // replica wins each interval.
+    const sharedId = "shared-cron-job";
+
+    const hbA = new HeartbeatService({ intervalMs: 60_000, verbose: false });
+    hbA.configurePersistence({ stateDir: tmpDir });
+    const hbB = new HeartbeatService({ intervalMs: 60_000, verbose: false });
+    hbB.configurePersistence({ stateDir: tmpDir });
+
+    let firesA = 0;
+    let firesB = 0;
+    hbA.setEventHandler((evt) => {
+      if (evt.type === "cron_fired" && evt.cronJobId === sharedId) firesA++;
+    });
+    hbB.setEventHandler((evt) => {
+      if (evt.type === "cron_fired" && evt.cronJobId === sharedId) firesB++;
+    });
+
+    hbA.start();
+    hbB.start();
+    hbA.scheduleCron({
+      id: sharedId,
+      label: "shared",
       prompt: "x",
       userId: "tester",
       intervalMs: 1_000_000,
       recurring: true,
     });
-    // give the tick a chance to attempt — it should be blocked by the held lock
-    // (note: the cron timer fires through scheduleCron's own setInterval, so
-    // it bypasses the global tickGuarded — the LOCK protects the
-    // GLOBAL tickGuarded path. cron jobs have their own per-job timers.
-    // Verify the global lock by calling tickGuarded indirectly via the
-    // immediate first-tick on start().)
+    hbB.scheduleCron({
+      id: sharedId,
+      label: "shared",
+      prompt: "x",
+      userId: "tester",
+      intervalMs: 1_000_000,
+      recurring: true,
+    });
+    // Both first-fire immediately on schedule. The per-job lock + reload
+    // must let only one through.
+    await wait(150);
+    hbA.stop();
+    hbB.stop();
+
+    const total = firesA + firesB;
+    assert.strictEqual(
+      total,
+      1,
+      `expected exactly one replica to fire, got A=${firesA} B=${firesB}`,
+    );
+    // And the persisted record reflects exactly one fire across both processes.
+    const persisted = await hbA.getPersistedJob(sharedId);
+    assert.ok(persisted);
+    assert.strictEqual(persisted.runCount, 1);
+  });
+
+  it("a replica whose state shows nextRunAt in the future skips its tick", async () => {
+    // Pre-populate state with a nextRunAt far in the future, then fire the
+    // cron — the per-job-lock branch reloads from disk and skips.
+    const sharedId = "advanced-job";
+    const farFuture = new Date(Date.now() + 60 * 60_000).toISOString();
+    const stateFile = path.join(tmpDir, "heartbeat-state.json");
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        version: 1,
+        jobs: {
+          [sharedId]: {
+            jobId: sharedId,
+            state: "active",
+            nextRunAt: farFuture,
+            lastRunAt: new Date().toISOString(),
+            runCount: 7,
+            lastStatus: "succeeded",
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      }),
+    );
+
+    const hb = new HeartbeatService({ intervalMs: 60_000, verbose: false });
+    hb.configurePersistence({ stateDir: tmpDir });
+
+    let fires = 0;
+    hb.setEventHandler((evt) => {
+      if (evt.type === "cron_fired" && evt.cronJobId === sharedId) fires++;
+    });
+    hb.start();
+    hb.scheduleCron({
+      id: sharedId,
+      label: "advanced",
+      prompt: "x",
+      userId: "tester",
+      intervalMs: 1_000_000,
+      recurring: true,
+    });
     await wait(80);
     hb.stop();
-    await release();
 
-    // cronFires may be > 0 because per-cron timers don't share the global
-    // lock — we ASSERT that the lock at least did NOT crash the daemon and
-    // that persisted state is well-formed.
-    const list = await hb.listPersistedJobs();
-    assert.ok(list.length >= 0); // smoke: no crash, file is parseable
+    assert.strictEqual(fires, 0, "replica should have skipped — state shows another beat us");
+    const persisted = await hb.getPersistedJob(sharedId);
+    // runCount must not have been bumped past the seeded value
+    assert.strictEqual(persisted.runCount, 7);
   });
 });
 
