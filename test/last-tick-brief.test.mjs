@@ -84,6 +84,31 @@ describe("LastTickBrief.write", () => {
     const escaped = path.resolve(tmpDir, "..", "escape.md");
     assert.ok(!fs.existsSync(escaped));
   });
+
+  it("rejects bare '..' as a jobId — file lands inside rootDir", async () => {
+    const ltb = new LastTickBrief(tmpDir);
+    await ltb.write({ tickId: "t1", jobId: "..", body: "x" });
+    // Without the fix, this would land at <tmpDir>/../t1.md
+    const escaped = path.resolve(tmpDir, "..", "t1.md");
+    assert.ok(!fs.existsSync(escaped), "brief escaped rootDir via jobId='..'");
+    // And nothing should be written into rootDir's parent under any name
+    const parent = path.dirname(tmpDir);
+    const siblings = fs.readdirSync(parent);
+    for (const name of siblings) {
+      assert.ok(
+        !name.endsWith("t1.md"),
+        `unexpected sibling file ${name} in ${parent}`,
+      );
+    }
+  });
+
+  it("rejects bare '.' as a jobId — file does not collide with rootDir contents", async () => {
+    const ltb = new LastTickBrief(tmpDir);
+    await ltb.write({ tickId: "t2", jobId: ".", body: "x" });
+    // Without the fix, this would resolve to <tmpDir>/t2.md (in rootDir itself)
+    const collision = path.join(tmpDir, "t2.md");
+    assert.ok(!fs.existsSync(collision), "brief should not write directly into rootDir");
+  });
 });
 
 describe("LastTickBrief.loadOne", () => {

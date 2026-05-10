@@ -228,7 +228,10 @@ export function parseBrief(text: string): TickBrief {
 
 function sanitizeId(id: string): string {
   // permit only safe filename chars; replace others with `_` to avoid path-traversal
-  return id.replace(/[^A-Za-z0-9._-]/g, "_");
+  const cleaned = id.replace(/[^A-Za-z0-9._-]/g, "_");
+  // `.` and `..` survive the regex but would let the path escape rootDir.
+  if (cleaned === "." || cleaned === "..") return "_";
+  return cleaned;
 }
 
 function renderJobSection(jobId: string, briefs: TickBrief[]): string {
