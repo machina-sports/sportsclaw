@@ -27,7 +27,10 @@
     "test:decision-ledger": "npm run build && node --test test/decision-ledger.test.mjs",
     "test:manifest-coverage": "npm run build && node --test test/manifest-coverage.test.mjs",
     "test:operator-runs": "npm run build && node --test test/operator-runs.test.mjs",
-    "test:incident-log": "npm run build && node --test test/incident-log.test.mjs"
+    "test:incident-log": "npm run build && node --test test/incident-log.test.mjs",
+    "test:editorial-memory": "npm run build && node --test test/editorial-memory.test.mjs",
+    "test:last-tick-brief": "npm run build && node --test test/last-tick-brief.test.mjs",
+    "test:prompts": "npm run build && node --test test/prompts.test.mjs"
   },
   "keywords": [
     "sports",
