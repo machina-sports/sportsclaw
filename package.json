@@ -35,7 +35,10 @@
     "test:heartbeat-state": "npm run build && node --test test/heartbeat-state.test.mjs",
     "test:heartbeat": "npm run build && node --test test/heartbeat.test.mjs",
     "test:heartbeat-wake-gate": "npm run build && node --test test/heartbeat-wake-gate.test.mjs",
-    "test:operator-daemon": "npm run build && node --test test/operator-daemon.test.mjs"
+    "test:operator-daemon": "npm run build && node --test test/operator-daemon.test.mjs",
+    "test:operator-config": "npm run build && node --test test/operator-config.test.mjs",
+    "test:operate": "npm run build && node --test test/operate.test.mjs",
+    "test:daemon-operator": "npm run build && node --test test/daemon-operator.test.mjs"
   },
   "keywords": [
     "sports",

@@ -1,0 +1,8 @@
+{
+  "jobId": "markets-monitor",
+  "label": "Markets monitor — Kalshi / Polymarket edge watcher",
+  "intervalMs": 600000,
+  "personaText": "You are an autonomous markets analyst. Every tick, inspect the major event contracts on Kalshi and Polymarket for sports we cover. Surface a short structured report ONLY when you detect a meaningful edge or a notable line move; otherwise return [SILENT].",
+  "model": "claude-sonnet-4-6",
+  "provider": "anthropic"
+}

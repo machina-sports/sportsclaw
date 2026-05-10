@@ -97,7 +97,10 @@ import {
   daemonRestart,
   daemonLogs,
   isValidPlatform,
+  platformRequiresJobId,
+  type DaemonPlatform,
 } from "./daemon.js";
+import { cmdOperate } from "./operate.js";
 import { runSetup } from "./setup.js";
 import {
   loadMcpConfigs,
@@ -1915,13 +1918,54 @@ async function cmdQuery(args: string[]): Promise<void> {
 // CLI: `sportsclaw start <platform>` — start a daemon
 // ---------------------------------------------------------------------------
 
-function cmdStart(args: string[]): void {
+/**
+ * Parse the first two positionals as (platform, jobId?) for the
+ * supervisor subcommands. Returns null + prints a usage hint on bad input.
+ *
+ * Shape:
+ *   <platform>                — simple platforms (discord/telegram/watch)
+ *   operator <jobId>          — operator daemons require a jobId
+ *
+ * Returns: { platform, jobId? } on success; null on failure (caller exits).
+ */
+function parseDaemonTarget(
+  verb: string,
+  args: string[],
+): { platform: DaemonPlatform; jobId?: string } | null {
   const platform = args[0]?.toLowerCase();
   if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw start <discord|telegram|watch>");
-    process.exit(1);
+    console.error(
+      `Usage: sportsclaw ${verb} <discord|telegram|watch|operator <jobId>>`,
+    );
+    return null;
   }
-  daemonStart(platform);
+  if (platformRequiresJobId(platform)) {
+    const jobId = args[1];
+    if (!jobId) {
+      console.error(`Usage: sportsclaw ${verb} operator <jobId>`);
+      return null;
+    }
+    if (args.length > 2 && verb !== "logs") {
+      console.error(
+        `Usage: sportsclaw ${verb} operator <jobId> — unexpected arg "${args[2]}"`,
+      );
+      return null;
+    }
+    return { platform, jobId };
+  }
+  if (args.length > 1 && verb !== "logs") {
+    console.error(
+      `Usage: sportsclaw ${verb} ${platform} — does not take additional args (got "${args[1]}")`,
+    );
+    return null;
+  }
+  return { platform };
+}
+
+function cmdStart(args: string[]): void {
+  const target = parseDaemonTarget("start", args);
+  if (!target) process.exit(1);
+  daemonStart(target.platform, target.jobId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1929,16 +1973,13 @@ function cmdStart(args: string[]): void {
 // ---------------------------------------------------------------------------
 
 function cmdStop(args: string[]): void {
-  const platform = args[0]?.toLowerCase();
-  if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw stop <discord|telegram|watch>");
-    process.exit(1);
-  }
-  daemonStop(platform);
+  const target = parseDaemonTarget("stop", args);
+  if (!target) process.exit(1);
+  daemonStop(target.platform, target.jobId);
 }
 
 // ---------------------------------------------------------------------------
-// CLI: `sportsclaw status` — show daemon status
+// CLI: `sportsclaw status` — show daemon status (all platforms)
 // ---------------------------------------------------------------------------
 
 function cmdStatus(): void {
@@ -1950,26 +1991,44 @@ function cmdStatus(): void {
 // ---------------------------------------------------------------------------
 
 function cmdRestart(args: string[]): void {
-  const platform = args[0]?.toLowerCase();
-  if (!platform || !["discord", "telegram", "watch"].includes(platform)) {
-    console.error("Usage: sportsclaw restart <discord|telegram|watch>");
-    process.exit(1);
-  }
-  daemonRestart(platform as any);
+  const target = parseDaemonTarget("restart", args);
+  if (!target) process.exit(1);
+  daemonRestart(target.platform, target.jobId);
 }
 
 // ---------------------------------------------------------------------------
-// CLI: `sportsclaw logs <platform>` — tail daemon logs
+// CLI: `sportsclaw logs <platform> [--lines N]` — tail daemon logs
 // ---------------------------------------------------------------------------
 
 function cmdLogs(args: string[]): void {
-  const platform = args[0]?.toLowerCase();
-  if (!platform || !isValidPlatform(platform)) {
-    console.error("Usage: sportsclaw logs <discord|telegram|watch>");
-    process.exit(1);
+  // Pull --lines out of args before positional parsing so the count works
+  // for both `logs discord 100` and `logs operator <jobId> 100`.
+  let lines = 50;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--lines") {
+      const n = Number.parseInt(args[++i], 10);
+      if (Number.isFinite(n) && n > 0) lines = n;
+    } else if (a.startsWith("--lines=")) {
+      const n = Number.parseInt(a.slice("--lines=".length), 10);
+      if (Number.isFinite(n) && n > 0) lines = n;
+    } else {
+      positional.push(a);
+    }
   }
-  const lines = args[1] ? Number.parseInt(args[1], 10) : 50;
-  daemonLogs(platform, Number.isFinite(lines) && lines > 0 ? lines : 50);
+  // Backwards compat: if a final positional is purely numeric, treat it as N.
+  if (positional.length >= 2) {
+    const tail = positional[positional.length - 1];
+    if (/^\d+$/.test(tail)) {
+      const n = Number.parseInt(tail, 10);
+      if (n > 0) lines = n;
+      positional.pop();
+    }
+  }
+  const target = parseDaemonTarget("logs", positional);
+  if (!target) process.exit(1);
+  daemonLogs(target.platform, lines, target.jobId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2234,9 +2293,12 @@ function printHelp(): void {
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
+  console.log("  sportsclaw operate --job <jobId>   Run an autonomous operator daemon (foreground)");
+  console.log("  sportsclaw operate --list          List configured operator jobs");
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
+  console.log("  sportsclaw start operator <jobId>  Start a supervised operator daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");
-  console.log("  sportsclaw status                  Show daemon status");
+  console.log("  sportsclaw status                  Show daemon status (all platforms + operator jobs)");
   console.log("  sportsclaw restart <platform>      Restart a running daemon");
   console.log("  sportsclaw logs <platform>         Tail daemon log output");
   console.log("  sportsclaw agents                  List installed agents");
@@ -2448,6 +2510,8 @@ async function main(): Promise<void> {
       return cmdRestart(subArgs);
     case "logs":
       return cmdLogs(subArgs);
+    case "operate":
+      return cmdOperate(subArgs);
     case "agents":
       return cmdAgents();
     case "analytics":
