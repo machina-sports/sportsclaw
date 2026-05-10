@@ -808,7 +808,6 @@ function renderBracket(bracketData: BracketMatch[]): string {
       const team1Line = `${t1Mark}${m.team1.padEnd(maxTeamLen)} ${score1}`;
 
       // Connector line (shows winner advancing)
-      const winnerName = m.winner === 1 ? m.team1 : m.winner === 2 ? m.team2 : "???";
       const connector = ri < roundNums.length - 1 ? ` ─── ` : "";
       const connLine = `${"".padEnd(cellWidth + 1)}${connector}`;
 

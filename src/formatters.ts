@@ -29,15 +29,6 @@ const EMBED_COLORS = {
 };
 
 /**
- * Detect if response contains table-like data.
- */
-function hasTableData(text: string): boolean {
-  const lines = text.split("\n");
-  const pipeCount = lines.filter((line) => line.includes("|")).length;
-  return pipeCount >= 2;
-}
-
-/**
  * Detect if response has markdown headers (### format).
  */
 function hasHeaders(text: string): boolean {
