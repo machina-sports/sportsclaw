@@ -331,6 +331,32 @@ export function isHalt(e: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-provider message-part shape guards
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape of a tool-call message part as emitted by the Vercel AI SDK across
+ * providers. We only depend on `type` and `toolName`; other fields (id, args)
+ * vary by provider and are not consulted here.
+ */
+export type ToolCallPart = {
+  type: "tool-call";
+  toolName: string;
+};
+
+/**
+ * Runtime guard for tool-call parts. The previous version cast `msg.content`
+ * to a structural array shape and accessed fields without validation, which
+ * silently produced no matches if a provider returned an unexpected envelope.
+ * This guard narrows safely and skips unrecognized shapes.
+ */
+export function isToolCallPart(part: unknown): part is ToolCallPart {
+  if (!part || typeof part !== "object") return false;
+  const p = part as Record<string, unknown>;
+  return p.type === "tool-call" && typeof p.toolName === "string";
+}
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -3143,8 +3169,8 @@ export class sportsclawEngine {
       const historyToolNames = new Set<string>();
       for (const msg of this.messages) {
         if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          for (const part of msg.content as Array<{ type?: string; toolName?: string }>) {
-            if (part.type === "tool-call" && part.toolName && part.toolName in tools) {
+          for (const part of msg.content) {
+            if (isToolCallPart(part) && part.toolName in tools) {
               historyToolNames.add(part.toolName);
             }
           }

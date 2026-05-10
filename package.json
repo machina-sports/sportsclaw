@@ -42,7 +42,8 @@
     "test:ci-smoke": "npm run build && node test/ci-smoke.mjs",
     "test:ci-integration": "npm run build && node test/ci-integration.mjs",
     "test:pod-memory-append-race": "npm run build && node --test test/pod-memory-append-race.test.mjs",
-    "test:halt-guard": "npm run build && node --test test/halt-guard.test.mjs"
+    "test:halt-guard": "npm run build && node --test test/halt-guard.test.mjs",
+    "test:tool-call-part-guard": "npm run build && node --test test/tool-call-part-guard.test.mjs"
   },
   "keywords": [
     "sports",
