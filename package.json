@@ -27,7 +27,9 @@
     "test:decision-ledger": "npm run build && node --test test/decision-ledger.test.mjs",
     "test:manifest-coverage": "npm run build && node --test test/manifest-coverage.test.mjs",
     "test:operator-runs": "npm run build && node --test test/operator-runs.test.mjs",
-    "test:incident-log": "npm run build && node --test test/incident-log.test.mjs"
+    "test:incident-log": "npm run build && node --test test/incident-log.test.mjs",
+    "test:ci-smoke": "npm run build && node test/ci-smoke.mjs",
+    "test:ci-integration": "npm run build && node test/ci-integration.mjs"
   },
   "keywords": [
     "sports",

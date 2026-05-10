@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR/branch when new commits land,
+# so a rapid push sequence doesn't queue up many duplicate runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-typecheck:
+    name: Build (tsc strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  test:
+    name: Tests + smoke (no API key)
+    runs-on: ubuntu-latest
+    needs: build-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Run all node:test files
+        run: node --test test/*.test.mjs
+      - name: CI smoke (engine boot + memory_loaded log)
+        run: node test/ci-smoke.mjs
+
+  integration:
+    name: Integration (Gemini end-to-end)
+    runs-on: ubuntu-latest
+    needs: build-and-typecheck
+    # Skip on PRs from forks — GitHub doesn't pass repo secrets to fork-triggered
+    # workflows, so the integration step would always fail on those. Build + test
+    # still run on fork PRs via the other two jobs.
+    if: |
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: CI integration (Gemini end-to-end)
+        env:
+          # The repo secret is named GEMINI_API_KEY (user-friendly), but the
+          # engine internally reads GOOGLE_GENERATIVE_AI_API_KEY (src/engine.ts).
+          # Set both from the same secret so either code path resolves.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: node test/ci-integration.mjs
