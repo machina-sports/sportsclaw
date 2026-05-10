@@ -19,10 +19,15 @@
  * This service is the missing execution layer that checks those tasks.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { generateText } from "ai";
+import lockfile from "proper-lockfile";
 import { listTasks, completeTask, expireOldTasks } from "./taskbus.js";
 import type { WatcherTask, LLMProvider } from "./types.js";
 import { buildProviderOptions } from "./types.js";
+import { HeartbeatStateStore } from "./heartbeat-state.js";
+import type { CronJobState } from "./heartbeat-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,6 +85,27 @@ export interface HeartbeatServiceOptions {
   verbose?: boolean;
 }
 
+export interface HeartbeatPersistenceOptions {
+  /**
+   * Directory for the state file + lock file. Both are created lazily.
+   * Pass an absolute path (e.g. `~/.sportsclaw` resolved at the call site).
+   */
+  stateDir: string;
+  /**
+   * How long a held lock is considered stale (ms). After this, another
+   * process can break the lock. Default 30000.
+   */
+  lockStaleMs?: number;
+  /**
+   * Custom name for the state file. Default `heartbeat-state.json`.
+   */
+  stateFilename?: string;
+  /**
+   * Custom name for the lock file. Default `heartbeat.lock`.
+   */
+  lockFilename?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -106,6 +132,14 @@ export class HeartbeatService {
   private cronTimers = new Map<string, NodeJS.Timeout>();
   private isRunning = false;
 
+  // Optional persistence + cross-process locking. None of the existing public
+  // API requires persistence; opt in via configurePersistence().
+  private stateStore: HeartbeatStateStore | null = null;
+  private stateDir: string | null = null;
+  private lockPath: string | null = null;
+  private lockStaleMs: number = 30_000;
+  private inFlight = false;
+
   constructor(options?: HeartbeatServiceOptions) {
     this.intervalMs = options?.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.model = options?.model;
@@ -120,6 +154,87 @@ export class HeartbeatService {
   setModel(model: unknown, provider: LLMProvider): void {
     this.model = model;
     this.provider = provider;
+  }
+
+  /**
+   * Opt in to persistent state + cross-process tick locking. Must be called
+   * before `start()`. Without this, HeartbeatService runs entirely in-memory
+   * and overlapping ticks are guarded only by an in-process flag.
+   */
+  configurePersistence(options: HeartbeatPersistenceOptions): void {
+    if (this.timer) {
+      throw new Error(
+        "[heartbeat] configurePersistence() must be called before start()",
+      );
+    }
+    const stateFilename = options.stateFilename ?? "heartbeat-state.json";
+    const lockFilename = options.lockFilename ?? "heartbeat.lock";
+    this.stateDir = options.stateDir;
+    this.stateStore = new HeartbeatStateStore(
+      path.join(options.stateDir, stateFilename),
+    );
+    this.lockPath = path.join(options.stateDir, lockFilename);
+    // 5 min default. Autonomous LLM ticks can routinely run 30+ s; the
+    // previous 30 s default would let a sibling replica break a healthy
+    // daemon's lock mid-tick.
+    this.lockStaleMs = options.lockStaleMs ?? 5 * 60_000;
+  }
+
+  /** Per-job lockfile path (under stateDir, suffixed by sanitized jobId). */
+  private perJobLockPath(jobId: string): string {
+    if (!this.lockPath) throw new Error("[heartbeat] lockPath not configured");
+    const dir = path.dirname(this.lockPath);
+    const base = path.basename(this.lockPath);
+    const safe = jobId.replace(/[^A-Za-z0-9._-]/g, "_") || "_";
+    return path.join(dir, `${base}.${safe === "." || safe === ".." ? "_" : safe}`);
+  }
+
+  /** Whether persistent state is configured. */
+  get hasPersistence(): boolean {
+    return this.stateStore !== null;
+  }
+
+  /** Snapshot of persisted job state. Returns [] when persistence is off. */
+  async listPersistedJobs(): Promise<CronJobState[]> {
+    if (!this.stateStore) return [];
+    await this.stateStore.load();
+    return this.stateStore.list();
+  }
+
+  /** Persisted record for a single job, or null. */
+  async getPersistedJob(jobId: string): Promise<CronJobState | null> {
+    if (!this.stateStore) return null;
+    await this.stateStore.load();
+    return this.stateStore.get(jobId);
+  }
+
+  /**
+   * Mark the most recent run of `jobId` as succeeded. Downstream cron handlers
+   * call this after the work finishes. No-op when persistence is off.
+   */
+  async markJobSucceeded(jobId: string): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.markRunSuccess(jobId);
+  }
+
+  /**
+   * Mark the most recent run of `jobId` as failed. Records the error message
+   * but does NOT silently disable the job — the next interval will still
+   * fire. Move the job to lifecycle="error" via `setJobLifecycle()` if you
+   * need it to stop trying.
+   */
+  async markJobFailed(jobId: string, error: unknown): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.markRunFailed(jobId, error);
+  }
+
+  /** Move a persisted job to a different lifecycle (active / paused / completed / error). */
+  async setJobLifecycle(
+    jobId: string,
+    lifecycle: CronJobState["state"],
+  ): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.setLifecycle(jobId, lifecycle);
   }
 
   /** Register or replace the event handler */
@@ -144,14 +259,14 @@ export class HeartbeatService {
     this.isRunning = true;
 
     // Run first heartbeat immediately
-    this.tick().catch((err) => {
+    this.tickGuarded().catch((err) => {
       console.error(
         `[heartbeat] Tick error: ${err instanceof Error ? err.message : err}`
       );
     });
 
     this.timer = setInterval(() => {
-      this.tick().catch((err) => {
+      this.tickGuarded().catch((err) => {
         console.error(
           `[heartbeat] Tick error: ${err instanceof Error ? err.message : err}`
         );
@@ -199,8 +314,15 @@ export class HeartbeatService {
     userId: string;
     intervalMs: number;
     recurring?: boolean;
+    /**
+     * Stable job id. Required when two replicas need to coordinate via the
+     * per-job lockfile + persisted state — both must pass the same id so
+     * they target the same lock and the same persisted record. Default: a
+     * fresh `cron_<ts>_<rand>` id (single-replica use).
+     */
+    id?: string;
   }): CronJob {
-    const id = `cron_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = params.id ?? `cron_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const job: CronJob = {
       id,
       label: params.label,
@@ -286,6 +408,66 @@ export class HeartbeatService {
   // -------------------------------------------------------------------------
   // Core heartbeat tick
   // -------------------------------------------------------------------------
+
+  /**
+   * Guard the tick body with (1) an in-process flag — prevents overlapping
+   * ticks within a single daemon if a tick takes longer than the interval —
+   * and (2) when persistence is configured, a cross-process lockfile —
+   * prevents two daemons from double-firing if the deployment accidentally
+   * runs more than one operator replica. Both guards SKIP the tick when
+   * contention is detected; we never queue.
+   */
+  private async tickGuarded(): Promise<void> {
+    if (this.inFlight) {
+      if (this.verbose) {
+        console.error("[heartbeat] tick skipped — in-process tick already running");
+      }
+      return;
+    }
+    this.inFlight = true;
+    try {
+      if (this.lockPath) {
+        await this.ensureLockFile();
+        let release: (() => Promise<void>) | null = null;
+        try {
+          release = await lockfile.lock(this.lockPath, {
+            stale: this.lockStaleMs,
+            retries: 0,
+          });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ELOCKED") {
+            if (this.verbose) {
+              console.error(
+                "[heartbeat] tick skipped — cross-process lock held by another daemon",
+              );
+            }
+            return;
+          }
+          throw err;
+        }
+        try {
+          await this.tick();
+        } finally {
+          if (release) await release();
+        }
+      } else {
+        await this.tick();
+      }
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async ensureLockFile(): Promise<void> {
+    if (!this.lockPath) return;
+    try {
+      await fs.mkdir(path.dirname(this.lockPath), { recursive: true });
+      // proper-lockfile needs the file to exist
+      await fs.writeFile(this.lockPath, "", { flag: "a" });
+    } catch {
+      // best-effort; lock acquisition will surface any real fs failure
+    }
+  }
 
   private async tick(): Promise<void> {
     if (this.verbose) {
@@ -401,30 +583,118 @@ export class HeartbeatService {
     const execute = async () => {
       if (job.status !== "active") return;
 
-      job.lastRunAt = new Date().toISOString();
-      job.runCount++;
+      // Cross-process double-fire protection (when persistence is configured):
+      // acquire a per-job lockfile, reload state from disk, and skip if
+      // another replica already advanced nextRunAt past now — meaning that
+      // replica won the race for this interval. The lock window covers only
+      // the markRunStart + emit critical section; consumer work runs after
+      // the event fires and outside the lock.
+      let releaseLock: (() => Promise<void>) | null = null;
+      if (this.stateStore && this.lockPath) {
+        const jobLockPath = this.perJobLockPath(job.id);
+        try {
+          await fs.mkdir(path.dirname(jobLockPath), { recursive: true });
+          await fs.writeFile(jobLockPath, "", { flag: "a" });
+          releaseLock = await lockfile.lock(jobLockPath, {
+            stale: this.lockStaleMs,
+            retries: 0,
+          });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ELOCKED") {
+            if (this.verbose) {
+              console.error(
+                `[heartbeat] Cron "${job.label}" skipped — per-job lock held by another daemon`,
+              );
+            }
+            return;
+          }
+          throw err;
+        }
 
-      this.emitEvent({
-        type: "cron_fired",
-        cronJobId: job.id,
-        userId: job.userId,
-        result: `Cron "${job.label}" fired (run #${job.runCount})`,
-        timestamp: new Date().toISOString(),
-      });
-
-      if (this.verbose) {
-        console.error(
-          `[heartbeat] Cron fired: "${job.label}" (run #${job.runCount})`
-        );
+        // Reload state from disk so cross-process advances are visible.
+        try {
+          await this.stateStore.load();
+          const persisted = this.stateStore.get(job.id);
+          if (persisted) {
+            const nextRunMs = new Date(persisted.nextRunAt).getTime();
+            // 100ms tolerance for clock-skew at the interval boundary.
+            if (Number.isFinite(nextRunMs) && nextRunMs > Date.now() + 100) {
+              if (this.verbose) {
+                console.error(
+                  `[heartbeat] Cron "${job.label}" skipped — another daemon advanced nextRunAt to ${persisted.nextRunAt}`,
+                );
+              }
+              await releaseLock();
+              return;
+            }
+          }
+        } catch (err) {
+          // Reload failure: fall through and execute. Better to risk one
+          // extra fire than to disable the daemon on disk hiccups.
+          console.error(
+            `[heartbeat] state reload failed for "${job.label}": ` +
+              (err instanceof Error ? err.message : err),
+          );
+        }
       }
 
-      // One-shot jobs auto-complete
-      if (!job.recurring) {
-        job.status = "completed";
-        const timer = this.cronTimers.get(job.id);
-        if (timer) {
-          clearInterval(timer);
-          this.cronTimers.delete(job.id);
+      try {
+        // Advance-before-execute: write nextRunAt to the persisted state BEFORE
+        // emitting the cron_fired event. If the daemon crashes mid-tick, we
+        // lose this fire instead of replaying it on restart. At-most-once
+        // semantics. (See Hermes scheduler for the original pattern.)
+        if (this.stateStore) {
+          try {
+            await this.stateStore.markRunStart(job.id, {
+              intervalMs: job.intervalMs,
+              lifecycle: "active",
+            });
+          } catch (err) {
+            // persistence failure must not silently disable the tick — log and
+            // continue. the daemon owner can rely on `getPersistedJob()` to
+            // detect drift between memory and disk.
+            console.error(
+              `[heartbeat] markRunStart failed for "${job.label}": ` +
+                (err instanceof Error ? err.message : err),
+            );
+          }
+        }
+
+        job.lastRunAt = new Date().toISOString();
+        job.runCount++;
+
+        this.emitEvent({
+          type: "cron_fired",
+          cronJobId: job.id,
+          userId: job.userId,
+          result: `Cron "${job.label}" fired (run #${job.runCount})`,
+          timestamp: new Date().toISOString(),
+        });
+
+        if (this.verbose) {
+          console.error(
+            `[heartbeat] Cron fired: "${job.label}" (run #${job.runCount})`
+          );
+        }
+
+        // One-shot jobs auto-complete
+        if (!job.recurring) {
+          job.status = "completed";
+          const timer = this.cronTimers.get(job.id);
+          if (timer) {
+            clearInterval(timer);
+            this.cronTimers.delete(job.id);
+          }
+          if (this.stateStore) {
+            await this.stateStore.setLifecycle(job.id, "completed").catch(() => {});
+          }
+        }
+      } finally {
+        if (releaseLock) {
+          await releaseLock().catch(() => {
+            // lock release failures are logged elsewhere by proper-lockfile;
+            // do not let them mask the cron outcome.
+          });
         }
       }
     };
