@@ -40,7 +40,8 @@
     "test:operate": "npm run build && node --test test/operate.test.mjs",
     "test:daemon-operator": "npm run build && node --test test/daemon-operator.test.mjs",
     "test:ci-smoke": "npm run build && node test/ci-smoke.mjs",
-    "test:ci-integration": "npm run build && node test/ci-integration.mjs"
+    "test:ci-integration": "npm run build && node test/ci-integration.mjs",
+    "test:pod-memory-append-race": "npm run build && node --test test/pod-memory-append-race.test.mjs"
   },
   "keywords": [
     "sports",

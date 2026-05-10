@@ -227,6 +227,12 @@ export class PodMemoryStorage implements MemoryStorage {
   // races and each branch creates its own duplicate memory doc.
   private cache = new Map<string, Promise<MemoryEntry>>();
 
+  // Per-userId serialization chain for read-modify-write operations (append).
+  // Without this, two concurrent append() calls on the same userId both read
+  // the pre-mutation doc and the second flush overwrites the first — losing
+  // an entry. Chaining serializes the RMW segment so both writes land.
+  private appendChain = new Map<string, Promise<void>>();
+
   constructor(private mcpManager: McpManager, private serverName: string) {}
 
   /**
@@ -402,8 +408,26 @@ export class PodMemoryStorage implements MemoryStorage {
   }
 
   async append(userId: string, file: string, content: string): Promise<void> {
-    const existing = await this.read(userId, file);
-    await this.write(userId, file, existing ? `${existing}\n${content}` : content);
+    // Serialize concurrent appends per userId. read+write share a cached doc
+    // that mutates synchronously, but the read→mutate→flush sequence isn't
+    // atomic, so two concurrent appends would both read pre-mutation state
+    // and the second write would overwrite the first. Queue them instead.
+    const previous = this.appendChain.get(userId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {}) // existing append swallowed errors; preserve that
+      .then(async () => {
+        const existing = await this.read(userId, file);
+        await this.write(userId, file, existing ? `${existing}\n${content}` : content);
+      });
+    this.appendChain.set(userId, next);
+    try {
+      await next;
+    } finally {
+      // Drop the entry once we're the tail of the chain so the map doesn't grow.
+      if (this.appendChain.get(userId) === next) {
+        this.appendChain.delete(userId);
+      }
+    }
   }
 
   async list(userId: string, _pattern: string): Promise<string[]> {
