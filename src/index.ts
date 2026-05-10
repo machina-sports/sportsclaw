@@ -54,10 +54,9 @@ import {
   getCachedSchemaVersion,
   DEFAULT_SKILLS,
 } from "./schema.js";
-import type { LLMProvider, ToolProgressEvent, McpServerConfig } from "./types.js";
+import type { ToolProgressEvent, McpServerConfig } from "./types.js";
 import {
   loadConfig,
-  saveConfig,
   resolveConfig,
   applyConfigToEnv,
   runConfigFlow,
@@ -79,8 +78,6 @@ import {
   bootstrapDefaultAgents,
   needsAgentBootstrap,
   loadAgents,
-  loadAgent,
-  listAgentIds,
   getAgentsDir,
 } from "./agents.js";
 import {
@@ -804,7 +801,7 @@ function createToolTracker(
 // CLI: `sportsclaw add <sport>`
 // ---------------------------------------------------------------------------
 
-async function cmdAdd(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdAdd(args: string[], _opts?: { fromChat?: boolean }): Promise<void> {
   const sport = args[0];
   if (!sport) {
     console.error("Usage: sportsclaw add <sport>");
@@ -838,7 +835,7 @@ async function cmdAdd(args: string[], opts?: { fromChat?: boolean }): Promise<vo
 // CLI: `sportsclaw remove <sport>`
 // ---------------------------------------------------------------------------
 
-function cmdRemove(args: string[], opts?: { fromChat?: boolean }): void {
+function cmdRemove(args: string[], _opts?: { fromChat?: boolean }): void {
   const sport = args[0];
   if (!sport) {
     console.error("Usage: sportsclaw remove <sport>");
@@ -857,7 +854,7 @@ function cmdRemove(args: string[], opts?: { fromChat?: boolean }): void {
 // CLI: `sportsclaw list`
 // ---------------------------------------------------------------------------
 
-function cmdList(opts?: { fromChat?: boolean }): void {
+function cmdList(_opts?: { fromChat?: boolean }): void {
   const schemas = listSchemas();
   if (schemas.length === 0) {
     console.log("No sport schemas installed.");
@@ -875,7 +872,7 @@ function cmdList(opts?: { fromChat?: boolean }): void {
 // CLI: `sportsclaw doctor` — diagnose and fix common issues
 // ---------------------------------------------------------------------------
 
-async function cmdDoctor(opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
   const { pythonPath, provider, model, apiKey } = resolveConfig();
   let allGood = true;
 
@@ -1087,7 +1084,7 @@ function detectConfigDrift(): string[] {
 // CLI: `sportsclaw init`
 // ---------------------------------------------------------------------------
 
-async function cmdInit(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdInit(args: string[], _opts?: { fromChat?: boolean }): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const all = args.includes("--all") || args.includes("-a");
   const { pythonPath } = resolveConfig();
@@ -2261,7 +2258,7 @@ function printHelp(): void {
 // CLI: `sportsclaw config` — interactive configuration wizard
 // ---------------------------------------------------------------------------
 
-async function cmdConfig(opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdConfig(_opts?: { fromChat?: boolean }): Promise<void> {
   await runConfigFlow();
 }
 
@@ -2269,7 +2266,7 @@ async function cmdConfig(opts?: { fromChat?: boolean }): Promise<void> {
 // CLI: `sportsclaw channels` — channel token wizard
 // ---------------------------------------------------------------------------
 
-async function cmdChannels(opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdChannels(_opts?: { fromChat?: boolean }): Promise<void> {
   await runChannelsFlow();
 }
 
@@ -2277,7 +2274,7 @@ async function cmdChannels(opts?: { fromChat?: boolean }): Promise<void> {
 // CLI: `sportsclaw agents` — list installed agents
 // ---------------------------------------------------------------------------
 
-function cmdAgents(opts?: { fromChat?: boolean }): void {
+function cmdAgents(_opts?: { fromChat?: boolean }): void {
   if (needsAgentBootstrap()) {
     bootstrapDefaultAgents();
   }
@@ -2304,7 +2301,7 @@ function cmdAgents(opts?: { fromChat?: boolean }): void {
 // CLI: `sportsclaw setup [prompt]` — AI-native setup wizard
 // ---------------------------------------------------------------------------
 
-async function cmdSetup(args: string[], opts?: { fromChat?: boolean }): Promise<void> {
+async function cmdSetup(args: string[], _opts?: { fromChat?: boolean }): Promise<void> {
   const prompt = args.filter((a) => !a.startsWith("-")).join(" ").trim() || undefined;
   await runSetup(prompt);
 }
@@ -2313,7 +2310,7 @@ async function cmdSetup(args: string[], opts?: { fromChat?: boolean }): Promise<
 // Analytics Command
 // ---------------------------------------------------------------------------
 
-function cmdAnalytics(args: string[], opts?: { fromChat?: boolean }): void {
+function cmdAnalytics(args: string[], _opts?: { fromChat?: boolean }): void {
   const subCmd = args[0];
 
   if (subCmd === "report" || !subCmd) {

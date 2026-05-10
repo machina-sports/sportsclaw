@@ -142,7 +142,7 @@ function makeMatchId(
  */
 export function generateBracketStructure(
   teams: BracketTeam[],
-  year: number,
+  _year: number,
 ): BracketMatchup[] {
   if (teams.length !== 64) {
     throw new Error(`Expected 64 teams, got ${teams.length}`);

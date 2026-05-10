@@ -32,7 +32,6 @@ import {
   type sportsclawConfig,
   type RunOptions,
   type Message,
-  type ImageAttachment,
   type GeneratedImage,
   type GeneratedVideo,
   type TokenBudgets,
@@ -46,10 +45,8 @@ import {
   removeSchema,
   getInstalledVsAvailable,
   DEFAULT_SKILLS,
-  SKILL_DESCRIPTIONS,
 } from "./schema.js";
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
-import type { CLIConfig } from "./config.js";
 import { MemoryManager, PodMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
 import { loadAgents, type AgentDef } from "./agents.js";
@@ -63,15 +60,11 @@ import {
   logQuery,
   buildQueryEvent,
   recordToolCall,
-  logSession,
   generateSessionId,
 } from "./analytics.js";
 import { AskUserQuestionHalt } from "./ask.js";
 import {
-  ApprovalPendingHalt,
-  generateApprovalId,
   isActionPreApproved,
-  type AgenticAction,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
@@ -80,13 +73,13 @@ import {
   createBracket, loadBracket, saveBracket, listBrackets, deleteBracket,
   makePick, getBracketProgress, getNextMatchups, toBracketChartData,
   applySimulationToBracket, autoFillBracketFromSim,
-  type BracketTeam, type BracketSession, type BracketRegionName, REGIONS,
+  type BracketTeam, type BracketRegionName, REGIONS,
 } from "./bracket.js";
 import {
   fetchTournamentField, simulateBracket,
   type SimConfig, type SimBracketStrategy,
 } from "./bracket-sim.js";
-import { subagentManager, type SubagentResult } from "./subagent.js";
+import { subagentManager } from "./subagent.js";
 import { heartbeatService } from "./heartbeat.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";

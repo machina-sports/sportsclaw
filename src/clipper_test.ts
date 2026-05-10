@@ -29,7 +29,7 @@ import {
 } from "@google/generative-ai/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { FfprobeData } from "fluent-ffmpeg";
-import { ensureCredential, resolveCredential, printCredentialStatus } from "./credentials.js";
+import { ensureCredential, resolveCredential } from "./credentials.js";
 import { executePythonBridge } from "./tools.js";
 import { resolveConfig } from "./config.js";
 

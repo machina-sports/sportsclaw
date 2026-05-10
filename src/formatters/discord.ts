@@ -9,7 +9,6 @@
 
 import {
   parseBlocks,
-  stripBold,
   isComparisonTable,
   renderComparisonText,
   renderTableAligned,

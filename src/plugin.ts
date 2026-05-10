@@ -18,7 +18,7 @@ import {
   writeFileSync,
   readFileSync,
 } from "node:fs";
-import { homedir, platform } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { get as httpsGet } from "node:https";
 import pc from "picocolors";

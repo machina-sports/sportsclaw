@@ -25,7 +25,6 @@ import {
 } from "./relay.js";
 import type {
   LiveGameEnvelope,
-  LiveGameEvent,
   LegacyGameStatus,
 } from "./relay.js";
 

@@ -17,7 +17,6 @@
 
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import type { ISwarmStorage } from "./interfaces.js";
 import {
   NS_TASKS,
