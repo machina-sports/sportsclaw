@@ -39,6 +39,7 @@ import {
   getAllowedUsers,
   ButtonContextStore,
   buildListenerEngineConfig,
+  formatListenerError,
 } from "./shared.js";
 
 const COMMAND_PREFIX = "/claw";
@@ -479,7 +480,7 @@ export async function startTelegramListener(): Promise<void> {
       lastSuccessfulPoll = Date.now();
     } catch (error: unknown) {
       // Network errors during polling — retry after a short delay
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = formatListenerError(error);
       console.error(`[sportsclaw] Polling error: ${errMsg}`);
       await new Promise((r) => setTimeout(r, 5000));
     }
@@ -572,7 +573,7 @@ async function sendGeneratedImages(
       method: "POST",
       body: formData,
     }).catch((err) => {
-      console.error(`[sportsclaw] Failed to send generated image: ${err instanceof Error ? err.message : err}`);
+      console.error(`[sportsclaw] Failed to send generated image: ${formatListenerError(err)}`);
     });
     // Persist locally
     saveImageToDisk(img.data, img.mimeType).catch(() => {});
@@ -765,7 +766,7 @@ async function processMessage(
       return;
     }
 
-    const errMsg = error instanceof Error ? error.message : String(error);
+    const errMsg = formatListenerError(error);
     console.error(`[sportsclaw] Telegram error: ${errMsg}`);
     await sendMessage(apiBase, msg.chat.id, "Sorry, I encountered an error processing your request.", {
       replyToMessageId: msg.message_id,
@@ -869,7 +870,7 @@ async function processCallbackQuery(
         });
       }
     } catch (resumeErr: unknown) {
-      const errMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+      const errMsg = formatListenerError(resumeErr);
       console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
       await sendMessage(apiBase, cqMessage.chat.id, "Sorry, I encountered an error processing your selection.", {
         replyToMessageId: cqMessage.message_id,
@@ -963,7 +964,7 @@ async function processCallbackQuery(
         });
       }
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = formatListenerError(error);
       console.error(`[sportsclaw] Quick action error: ${errMsg}`);
       await sendMessage(apiBase, cqMessage.chat.id, "Sorry, I encountered an error processing that request.");
     } finally {
@@ -1038,7 +1039,7 @@ async function processCallbackQuery(
       });
     }
   } catch (error: unknown) {
-    const errMsg = error instanceof Error ? error.message : String(error);
+    const errMsg = formatListenerError(error);
     console.error(`[sportsclaw] Callback query error: ${errMsg}`);
     await sendMessage(
       apiBase,

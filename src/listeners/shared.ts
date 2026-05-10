@@ -38,6 +38,28 @@ export function parsePositiveInt(value: string | undefined, fallback: number): n
 }
 
 // ---------------------------------------------------------------------------
+// Error formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical "anything → string" coercion for listener catch blocks.
+ *
+ * Both listeners caught errors with subtly different inline patterns —
+ *   • `e instanceof Error ? e.message : String(e)`  (canonical, most sites)
+ *   • `e instanceof Error ? e.message : e`           (drops the String wrap)
+ *   • `e.message` / `e.stack ?? e.message`           (assumes typed Error)
+ *
+ * The middle form returns the original (possibly non-string) value when
+ * `e` isn't an Error, which then gets template-literal-stringified
+ * unpredictably depending on the provider.
+ *
+ * Use this helper instead. Always returns a string.
+ */
+export function formatListenerError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// ---------------------------------------------------------------------------
 // Button context store — bounded LRU keyed by random short ID.
 // ---------------------------------------------------------------------------
 

@@ -42,6 +42,7 @@ import {
   getAllowedUsers,
   ButtonContextStore,
   buildListenerEngineConfig,
+  formatListenerError,
 } from "./shared.js";
 
 const PREFIX = process.env.DISCORD_PREFIX || "!sportsclaw";
@@ -189,7 +190,7 @@ export async function startDiscordListener(): Promise<void> {
         }
       } catch (sendErr) {
         console.error(
-          `[sportsclaw] Failed to send to channel: ${sendErr instanceof Error ? sendErr.message : sendErr}`
+          `[sportsclaw] Failed to send to channel: ${formatListenerError(sendErr)}`
         );
       }
     }
@@ -371,7 +372,7 @@ export async function startDiscordListener(): Promise<void> {
     } catch (err) {
       // Polls require the SEND_POLLS permission — degrade silently
       if (process.env.SPORTSCLAW_VERBOSE) {
-        console.error(`[sportsclaw] Poll creation failed: ${err instanceof Error ? err.message : err}`);
+        console.error(`[sportsclaw] Poll creation failed: ${formatListenerError(err)}`);
       }
     }
   }
@@ -448,7 +449,7 @@ export async function startDiscordListener(): Promise<void> {
           });
         }
       } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : String(error);
+        const errMsg = formatListenerError(error);
         console.error(`[sportsclaw] AskUserQuestion resume error: ${errMsg}`);
         await interaction.editReply(
           "Sorry, I encountered an error processing your selection."
@@ -508,7 +509,7 @@ export async function startDiscordListener(): Promise<void> {
           });
         }
       } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : String(error);
+        const errMsg = formatListenerError(error);
         console.error(`[sportsclaw] Quick action error: ${errMsg}`);
         await interaction.editReply("Sorry, I encountered an error processing that request.");
       }
@@ -555,7 +556,7 @@ export async function startDiscordListener(): Promise<void> {
         });
       }
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = formatListenerError(error);
       console.error(`[sportsclaw] Button handler error: ${errMsg}`);
       await interaction.editReply(
         "Sorry, I encountered an error processing that request."
@@ -592,7 +593,7 @@ export async function startDiscordListener(): Promise<void> {
       } catch (err) {
         // Non-fatal — prefix commands still work
         console.error(
-          `[sportsclaw] Slash command registration failed: ${err instanceof Error ? err.message : err}`
+          `[sportsclaw] Slash command registration failed: ${formatListenerError(err)}`
         );
       }
     }
@@ -678,7 +679,7 @@ export async function startDiscordListener(): Promise<void> {
           await sendGeneratedImages(pollEngine, message);
           await sendGeneratedVideos(pollEngine, message);
         } catch (error: unknown) {
-          const errMsg = error instanceof Error ? error.message : String(error);
+          const errMsg = formatListenerError(error);
           console.error(`[sportsclaw] Discord error: ${errMsg}`);
           await safeSend(message, "Sorry, I encountered an error processing your request.");
         } finally {
@@ -737,7 +738,7 @@ export async function startDiscordListener(): Promise<void> {
         return;
       }
 
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = formatListenerError(error);
       console.error(`[sportsclaw] Discord error: ${errMsg}`);
       await safeSend(
         message,
@@ -778,7 +779,7 @@ export async function startDiscordListener(): Promise<void> {
   try {
     await client.login(process.env.DISCORD_BOT_TOKEN);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatListenerError(err);
     if (msg.includes("disallowed intents")) {
       console.error("[sportsclaw] Error: Discord rejected the connection due to disallowed intents.");
       console.error("");
