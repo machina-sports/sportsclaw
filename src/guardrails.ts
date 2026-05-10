@@ -52,12 +52,6 @@ export interface ToolGuardOptions {
    * repeat detection only runs on tools in this set.
    */
   idempotentTools?: ReadonlySet<string>;
-  /**
-   * Tool names that mutate state. Currently informational — guardrail logic
-   * uses `idempotentTools` for affirmative categorisation. Reserved for
-   * future "no two mutating calls in a row with same args" rules.
-   */
-  mutatingTools?: ReadonlySet<string>;
 }
 
 /** Decision returned by `beforeCall`. */
@@ -169,7 +163,6 @@ const DEFAULTS: Required<ToolGuardOptions> = {
   idempotentRepeatWarn: 3,
   idempotentRepeatBlock: 5,
   idempotentTools: DEFAULT_IDEMPOTENT_TOOLS,
-  mutatingTools: DEFAULT_MUTATING_TOOLS,
 };
 
 // ---------------------------------------------------------------------------
@@ -190,7 +183,6 @@ export class ToolGuardController {
       ...DEFAULTS,
       ...options,
       idempotentTools: options.idempotentTools ?? DEFAULTS.idempotentTools,
-      mutatingTools: options.mutatingTools ?? DEFAULTS.mutatingTools,
     };
   }
 
@@ -334,11 +326,6 @@ export class ToolGuardController {
     return this.opts.idempotentTools.has(toolName);
   }
 
-  /** Whether a tool is categorised as state-mutating under the current options. */
-  isMutating(toolName: string): boolean {
-    return this.opts.mutatingTools.has(toolName);
-  }
-
   // -------------------------------------------------------------------------
   // internals
   // -------------------------------------------------------------------------
@@ -358,10 +345,14 @@ export class ToolGuardController {
 
 /**
  * Stable hex digest of arbitrary JSON-serialisable input. Object keys are
- * sorted recursively so {a:1,b:2} and {b:2,a:1} hash identically.
+ * sorted recursively so {a:1,b:2} and {b:2,a:1} hash identically. `undefined`
+ * inputs (e.g. a no-arg tool call) hash as if `null` was passed — without
+ * this, createHash().update() would throw on the undefined return from
+ * JSON.stringify(undefined).
  */
 export function hashCanonical(value: unknown): string {
-  return createHash("sha256").update(canonicalize(value)).digest("hex");
+  const canonical = canonicalize(value);
+  return createHash("sha256").update(canonical ?? "null").digest("hex");
 }
 
 /** Convenience wrapper for the result-digest pattern. */
@@ -369,7 +360,7 @@ export function digestResult(result: unknown): string {
   return hashCanonical(result);
 }
 
-function canonicalize(value: unknown): string {
+function canonicalize(value: unknown): string | undefined {
   return JSON.stringify(value, function (_key, v) {
     if (v && typeof v === "object" && !Array.isArray(v)) {
       const sorted: Record<string, unknown> = {};

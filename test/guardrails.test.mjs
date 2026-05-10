@@ -43,6 +43,16 @@ describe("hashCanonical", () => {
   it("differs for different values", () => {
     assert.notStrictEqual(hashCanonical({ a: 1 }), hashCanonical({ a: 2 }));
   });
+
+  it("does not throw on undefined input (no-arg tool calls)", () => {
+    // Without the fix, JSON.stringify(undefined) returns undefined and
+    // createHash().update() throws. Guard hashes undefined as null.
+    const h = hashCanonical(undefined);
+    assert.match(h, /^[0-9a-f]{64}$/);
+    // Sanity: undefined and null hash to the same value (we treat them
+    // as equivalent for digest purposes)
+    assert.strictEqual(hashCanonical(undefined), hashCanonical(null));
+  });
 });
 
 describe("ToolGuardController.signature", () => {
