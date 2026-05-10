@@ -1,0 +1,527 @@
+/**
+ * Operator Daemon — test suite
+ *
+ * Tests the integration adapter that wires HeartbeatService + EditorialMemory
+ * + LastTickBrief + ToolGuardController + an AI-SDK generateText pass.
+ *
+ * Strategy: inject a mock generateText impl + a fresh HeartbeatService per
+ * test, so no network and no real model. Use tickOnce() to drive the body
+ * directly — start()/stop() with timers is exercised separately.
+ */
+
+import assert from "node:assert/strict";
+import { describe, it, beforeEach, afterEach } from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+import {
+  createOperatorDaemon,
+} from "../dist/operator-daemon.js";
+import { HeartbeatService } from "../dist/heartbeat.js";
+import { LastTickBrief } from "../dist/last-tick-brief.js";
+
+import * as publicEntry from "../dist/index.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+let tmpDir;
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "operator-daemon-test-"));
+});
+
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Build a generateText stub that returns a fixed text and records inputs. */
+function makeGen(text) {
+  const calls = [];
+  const impl = async (args) => {
+    calls.push(args);
+    return { text };
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+/** Build a fake AI-SDK Tool with a controllable execute. */
+function makeTool(execute) {
+  return {
+    description: "test tool",
+    inputSchema: { jsonSchema: { type: "object" } },
+    execute,
+  };
+}
+
+function freshHeartbeat() {
+  return new HeartbeatService();
+}
+
+function baseConfig(overrides = {}) {
+  return {
+    jobId: "tv-operator-test",
+    intervalMs: 60_000,
+    rootDir: tmpDir,
+    role: "You are SportsClaw, a 24/7 broadcast editor.",
+    model: { name: "mock-model" }, // never actually used by the stub
+    heartbeat: freshHeartbeat(),
+    generateTextImpl: makeGen("Tonight: Argentina vs Brazil opens."),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// tickOnce — published path
+// ---------------------------------------------------------------------------
+
+describe("tickOnce — published path", () => {
+  it("returns a tick_published event with the model text", async () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    const event = await daemon.tickOnce();
+
+    assert.strictEqual(event.type, "tick_published");
+    assert.strictEqual(event.text, "Tonight: Argentina vs Brazil opens.");
+    assert.strictEqual(event.jobId, "tv-operator-test");
+    assert.match(event.tickId, /^tick_/);
+  });
+
+  it("writes the brief to disk under <briefDir>/<jobId>/<tickId>.md", async () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    const event = await daemon.tickOnce();
+
+    const briefPath = path.join(
+      tmpDir,
+      "briefs",
+      "tv-operator-test",
+      `${event.tickId}.md`,
+    );
+    assert.ok(fs.existsSync(briefPath), `expected brief at ${briefPath}`);
+    const text = fs.readFileSync(briefPath, "utf8");
+    assert.match(text, /Tonight: Argentina vs Brazil opens\./);
+  });
+
+  it("composes the system prompt with cron + tool-discipline + sentinel + memory", async () => {
+    const gen = makeGen("hello world");
+    fs.writeFileSync(
+      path.join(tmpDir, "editorial-memory.md"),
+      "lesson: prefer fallback over hallucination",
+      "utf8",
+    );
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen }),
+    );
+    await daemon.tickOnce();
+
+    assert.strictEqual(gen.calls.length, 1);
+    const sys = gen.calls[0].system;
+    assert.match(sys, /Autonomous mode/);
+    assert.match(sys, /Tool use discipline/);
+    assert.match(sys, /\[SILENT\] sentinel/);
+    assert.match(sys, /prefer fallback over hallucination/);
+  });
+
+  it("substitutes {tickId} and {timestamp} in the tick prompt", async () => {
+    const gen = makeGen("ok");
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        tickPrompt: "Run {tickId} at {timestamp}.",
+      }),
+    );
+    const event = await daemon.tickOnce();
+    const userPrompt = gen.calls[0].prompt;
+    assert.match(userPrompt, new RegExp(`Run ${event.tickId} at `));
+    assert.match(userPrompt, /at \d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tickOnce — silent path
+// ---------------------------------------------------------------------------
+
+describe("tickOnce — silent path", () => {
+  it("recognises [SILENT] as a tick_silent event with no text", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: makeGen("[SILENT]") }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_silent");
+    assert.strictEqual(event.text, undefined);
+  });
+
+  it("writes a silent brief that downstream loadRecent reports as silent", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: makeGen("[SILENT]") }),
+    );
+    await daemon.tickOnce();
+    const briefs = await new LastTickBrief(
+      path.join(tmpDir, "briefs"),
+    ).loadRecent("tv-operator-test", 1);
+    assert.strictEqual(briefs.length, 1);
+    assert.strictEqual(briefs[0].silent, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tickOnce — failed path
+// ---------------------------------------------------------------------------
+
+describe("tickOnce — failed path", () => {
+  it("returns tick_failed when generateText throws", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: async () => {
+          throw new Error("upstream timeout");
+        },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_failed");
+    assert.match(event.reason, /upstream timeout/);
+  });
+
+  it("still writes a brief that records the failure", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: async () => {
+          throw new Error("upstream timeout");
+        },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    const briefPath = path.join(
+      tmpDir,
+      "briefs",
+      "tv-operator-test",
+      `${event.tickId}.md`,
+    );
+    const text = fs.readFileSync(briefPath, "utf8");
+    assert.match(text, /tick failed/);
+    assert.match(text, /upstream timeout/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool guardrail wrapping
+// ---------------------------------------------------------------------------
+
+describe("tool guardrail wrapping", () => {
+  it("wraps each tool's execute and counts tool calls", async () => {
+    const calls = [];
+    const tools = {
+      search_documents: makeTool(async (args) => {
+        calls.push(args);
+        return { documents: [] };
+      }),
+    };
+
+    const events = [];
+    // The mock generateText now invokes the tool from inside the stub.
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      // Drive the wrapped execute directly to mimic an AI-SDK pass.
+      await passedTools.search_documents.execute(
+        { name: "tv-news" },
+        { toolCallId: "1", messages: [] },
+      );
+      await passedTools.search_documents.execute(
+        { name: "tv-news" },
+        { toolCallId: "2", messages: [] },
+      );
+      return { text: "two reads done" };
+    };
+
+    const daemon = createOperatorDaemon(
+      baseConfig({ tools, generateTextImpl }),
+    );
+    const event = await daemon.tickOnce();
+
+    assert.strictEqual(calls.length, 2, "underlying tool invoked twice");
+    assert.strictEqual(event.toolCalls, 2);
+    assert.strictEqual(event.guardrailBlocks, 0);
+  });
+
+  it("does not miscount a non-serialisable success as a failure", async () => {
+    // A tool returning a circular-ref result would crash JSON.stringify
+    // inside digestResult; without the try/catch around digestResult the
+    // outer catch would mark this as a failure. With the fix the success
+    // is recorded and no digest is tracked.
+    const tools = {
+      search_documents: makeTool(async () => {
+        const a = { hello: "world" };
+        // create a circular reference (un-stringifiable)
+        a.self = a;
+        return a;
+      }),
+    };
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      // Invoke the wrapped tool 4 times. Each succeeds. Without the fix,
+      // each would be (mis)counted as a failure and the 4th would trip
+      // the warn threshold via per-tool failure tracking.
+      for (let i = 0; i < 4; i++) {
+        await passedTools.search_documents.execute(
+          { i },
+          { toolCallId: String(i), messages: [] },
+        );
+      }
+      return { text: "ok" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({ tools, generateTextImpl }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    assert.strictEqual(event.toolCalls, 4);
+    // No warnings, no blocks — these are successful calls.
+    assert.strictEqual(event.guardrailWarnings, 0);
+    assert.strictEqual(event.guardrailBlocks, 0);
+  });
+
+  it("blocks repeated identical failures and reports it on the event", async () => {
+    const tools = {
+      execute_workflow: makeTool(async () => {
+        throw new Error("workflow not found");
+      }),
+    };
+
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      // Drive the same failing call 6 times — guardrail blocks 5+.
+      for (let i = 0; i < 6; i++) {
+        try {
+          await passedTools.execute_workflow.execute(
+            { workflow: "ingest" },
+            { toolCallId: String(i), messages: [] },
+          );
+        } catch {
+          // expected — first 5 throw, 6th returns synthetic block result
+        }
+      }
+      return { text: "tried ingest" };
+    };
+
+    const daemon = createOperatorDaemon(
+      baseConfig({ tools, generateTextImpl }),
+    );
+    const event = await daemon.tickOnce();
+    assert.ok(
+      event.guardrailBlocks >= 1,
+      `expected at least one block, got ${event.guardrailBlocks}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Heartbeat persistence integration
+// ---------------------------------------------------------------------------
+
+describe("heartbeat persistence integration", () => {
+  it("configurePersistence is auto-applied with rootDir as stateDir", async () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    assert.strictEqual(daemon.heartbeat.hasPersistence, true);
+  });
+
+  it("does not double-configure persistence if heartbeat already has it", async () => {
+    const hb = freshHeartbeat();
+    hb.configurePersistence({ stateDir: tmpDir });
+    const daemon = createOperatorDaemon(baseConfig({ heartbeat: hb }));
+    assert.strictEqual(daemon.heartbeat.hasPersistence, true);
+    // tickOnce runs without throwing about double-config.
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+  });
+
+  it("tickOnce primes markRunStart so markJobSucceeded actually persists", async () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    // Before this fix, the persisted record was a silent no-op because no
+    // markRunStart had run first. Now tickOnce primes markJobStart and
+    // markJobSucceeded lands on the same record.
+    const persisted = await daemon.heartbeat.getPersistedJob("tv-operator-test");
+    assert.ok(persisted, "tickOnce must create a persisted record");
+    assert.strictEqual(persisted.runCount, 1);
+    assert.strictEqual(persisted.lastStatus, "succeeded");
+  });
+
+  it("tickOnce on a failing tick persists lastStatus=failed with the error", async () => {
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: async () => {
+          throw new Error("upstream gone");
+        },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_failed");
+    const persisted = await daemon.heartbeat.getPersistedJob("tv-operator-test");
+    assert.ok(persisted);
+    assert.strictEqual(persisted.lastStatus, "failed");
+    assert.match(persisted.lastError, /upstream gone/);
+  });
+
+  it("does not mutate cfg.jobId after start() — briefs stay under the operator-supplied id", async () => {
+    // Use a fresh heartbeat that we DON'T pre-start, then drive a tick via
+    // tickOnce — and verify the brief landed at the operator-supplied jobId
+    // (not under an auto-generated cron_xxx_yyy id, which was the bug).
+    const cfgIn = baseConfig({ jobId: "stable-operator-id" });
+    const daemon = createOperatorDaemon(cfgIn);
+    daemon.start();
+    // start() previously did `cfg.jobId = cronJob.id` — assert it didn't:
+    assert.strictEqual(cfgIn.jobId, "stable-operator-id");
+    // cronJob exposed via the daemon must use the same id
+    assert.strictEqual(daemon.cronJob.id, "stable-operator-id");
+    daemon.stop();
+    // Drive a tick after start() to confirm brief routing is stable
+    const event = await daemon.tickOnce();
+    const briefPath = path.join(
+      tmpDir,
+      "briefs",
+      "stable-operator-id",
+      `${event.tickId}.md`,
+    );
+    assert.ok(fs.existsSync(briefPath), `expected brief at ${briefPath}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timer-driven path — drives runTick via the heartbeat scheduler instead of
+// tickOnce(), so the cron timer's wake-gate + markRunStart + cron_fired
+// emission are all exercised end-to-end.
+// ---------------------------------------------------------------------------
+
+describe("timer-driven tick path", () => {
+  it("start() → cron timer fires → runTick writes brief under operator-supplied jobId", async () => {
+    const tickEvents = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        jobId: "stable-operator-id",
+        intervalMs: 60_000, // long; rely on the immediate first-fire
+        onTickEvent: (e) => tickEvents.push(e),
+        generateTextImpl: makeGen("first tick body"),
+      }),
+    );
+    daemon.start();
+    // Wait for the heartbeat's immediate first-fire to flow through
+    // cron_fired → onEvent → runTick → brief write.
+    await wait(150);
+    daemon.stop();
+
+    // tick_started + tick_published landed via the event handler
+    const types = tickEvents.map((e) => e.type);
+    assert.ok(types.includes("tick_started"), `missing tick_started, got ${types.join(",")}`);
+    assert.ok(types.includes("tick_published"), `missing tick_published, got ${types.join(",")}`);
+
+    // Brief is on disk under the operator-supplied jobId
+    const briefRoot = path.join(tmpDir, "briefs", "stable-operator-id");
+    assert.ok(fs.existsSync(briefRoot), `expected brief dir at ${briefRoot}`);
+    const briefs = fs.readdirSync(briefRoot).filter((f) => f.endsWith(".md"));
+    assert.strictEqual(briefs.length, 1);
+    const text = fs.readFileSync(path.join(briefRoot, briefs[0]), "utf8");
+    assert.match(text, /first tick body/);
+
+    // Heartbeat persistence reflects the timer-driven fire (markRunStart
+    // ran inside execute(), then markJobSucceeded ran from runTick).
+    const persisted = await daemon.heartbeat.getPersistedJob("stable-operator-id");
+    assert.ok(persisted, "timer-driven tick must persist heartbeat state");
+    assert.strictEqual(persisted.runCount, 1);
+    assert.strictEqual(persisted.lastStatus, "succeeded");
+  });
+
+  it("wake-gate denial → cron_skipped → tick_skipped, no brief written", async () => {
+    const tickEvents = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        jobId: "gated-job",
+        intervalMs: 60_000,
+        onTickEvent: (e) => tickEvents.push(e.type),
+        wakeGate: () => ({ wake: false, reason: "fixtures fresh" }),
+      }),
+    );
+    daemon.start();
+    await wait(150);
+    daemon.stop();
+
+    assert.ok(
+      tickEvents.includes("tick_skipped"),
+      `expected tick_skipped, got ${tickEvents.join(",")}`,
+    );
+    assert.ok(
+      !tickEvents.includes("tick_started"),
+      "tick_started should not fire when the wake gate denies",
+    );
+    // No brief should have been written
+    const briefRoot = path.join(tmpDir, "briefs", "gated-job");
+    assert.ok(!fs.existsSync(briefRoot), "no brief should be written on a skipped tick");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Telemetry hook
+// ---------------------------------------------------------------------------
+
+describe("onTickEvent telemetry hook", () => {
+  it("fires tick_started followed by tick_published", async () => {
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({ onTickEvent: (e) => events.push(e.type) }),
+    );
+    await daemon.tickOnce();
+    assert.deepStrictEqual(events, ["tick_started", "tick_published"]);
+  });
+
+  it("fires tick_started followed by tick_failed on error", async () => {
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        onTickEvent: (e) => events.push(e.type),
+        generateTextImpl: async () => {
+          throw new Error("nope");
+        },
+      }),
+    );
+    await daemon.tickOnce();
+    assert.deepStrictEqual(events, ["tick_started", "tick_failed"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+describe("config validation", () => {
+  it("throws when jobId is missing", () => {
+    assert.throws(
+      () => createOperatorDaemon({ ...baseConfig(), jobId: "" }),
+      /jobId is required/,
+    );
+  });
+
+  it("throws when intervalMs is non-positive", () => {
+    assert.throws(
+      () => createOperatorDaemon({ ...baseConfig(), intervalMs: 0 }),
+      /intervalMs must be > 0/,
+    );
+  });
+
+  it("throws when rootDir is missing", () => {
+    assert.throws(
+      () => createOperatorDaemon({ ...baseConfig(), rootDir: "" }),
+      /rootDir is required/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Public entry re-exports
+// ---------------------------------------------------------------------------
+
+describe("public entry re-exports", () => {
+  it("re-exports createOperatorDaemon from index.js", () => {
+    assert.strictEqual(typeof publicEntry.createOperatorDaemon, "function");
+  });
+});

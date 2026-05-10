@@ -252,6 +252,22 @@ export class HeartbeatService {
   }
 
   /**
+   * Mark a job as starting a run. Bumps runCount, advances nextRunAt, sets
+   * lastStatus="running". The cron timer calls this implicitly via the
+   * advance-before-execute path; manual / `tickOnce` callers should invoke
+   * it before `markJobSucceeded` so the success record actually lands
+   * (markRunSuccess updates an existing record only).
+   * No-op when persistence is off.
+   */
+  async markJobStart(jobId: string, opts: { intervalMs: number }): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.markRunStart(jobId, {
+      intervalMs: opts.intervalMs,
+      lifecycle: "active",
+    });
+  }
+
+  /**
    * Mark the most recent run of `jobId` as succeeded. Downstream cron handlers
    * call this after the work finishes. No-op when persistence is off.
    */

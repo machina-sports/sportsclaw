@@ -348,6 +348,15 @@ export type {
   GuardrailDetail,
 } from "./guardrails.js";
 
+// Operator Daemon (autonomous tick loop)
+export { createOperatorDaemon } from "./operator-daemon.js";
+export type {
+  OperatorDaemon,
+  OperatorDaemonConfig,
+  TickEvent,
+  TickStatus,
+} from "./operator-daemon.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------
