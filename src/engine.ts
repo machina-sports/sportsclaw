@@ -317,6 +317,20 @@ export class SessionStore {
 export const sessionStore = new SessionStore();
 
 // ---------------------------------------------------------------------------
+// Halt sentinel guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if `e` is a sentinel that halts the engine loop and must
+ * propagate to the listener (which has dedicated handling for it). Catch
+ * blocks inside engine.run() and its helpers should re-throw on these so
+ * they don't get converted into a normal error response.
+ */
+export function isHalt(e: unknown): boolean {
+  return e instanceof AskUserQuestionHalt || e instanceof ApprovalPendingHalt;
+}
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -1496,6 +1510,7 @@ export class sportsclawEngine {
             created_at: task.createdAt,
           });
         } catch (err) {
+          if (isHalt(err)) throw err;
           return `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -1612,6 +1627,7 @@ export class sportsclawEngine {
               "when ready. Tell the user you're working on it.",
           });
         } catch (err) {
+          if (isHalt(err)) throw err;
           return `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -1824,6 +1840,7 @@ export class sportsclawEngine {
             return `Consolidated ${count} daily log file(s) into CONSOLIDATED.md. ` +
               "Old logs have been deleted. Memory is now leaner.";
           } catch (err) {
+            if (isHalt(err)) throw err;
             return `Consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
           }
         },
@@ -1869,6 +1886,7 @@ export class sportsclawEngine {
           this._generatedImages.push(image);
           return `Image generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Failed to generate image: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -1934,6 +1952,7 @@ export class sportsclawEngine {
           this._generatedVideos.push(video);
           return `Video generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Failed to generate video: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2062,6 +2081,7 @@ export class sportsclawEngine {
           });
           return "```\n" + result + "\n```";
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Chart rendering failed: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2146,6 +2166,7 @@ export class sportsclawEngine {
             message: `Bracket "${session.name}" created with ${session.totalMatchups} matchups. Start picking!`,
           });
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error creating bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2215,6 +2236,7 @@ export class sportsclawEngine {
           }
           return JSON.stringify(result);
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error making pick: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2302,6 +2324,7 @@ export class sportsclawEngine {
 
           return parts.join("\n\n");
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error viewing bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2371,6 +2394,7 @@ export class sportsclawEngine {
             }),
           );
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error checking bracket status: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2436,6 +2460,7 @@ export class sportsclawEngine {
 
           return `Error: unknown mode "${args.mode}". Use "reset_picks" or "delete".`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error resetting bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2617,6 +2642,7 @@ export class sportsclawEngine {
 
           return JSON.stringify(response);
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error running simulation: ${error instanceof Error ? error.message : String(error)}`;
         }
       },

@@ -115,7 +115,7 @@ const PKG_VERSION: string = require("../package.json").version;
 // Re-exports for library usage
 // ---------------------------------------------------------------------------
 
-export { sportsclawEngine } from "./engine.js";
+export { sportsclawEngine, isHalt } from "./engine.js";
 export {
   TOOL_SPECS,
   ToolRegistry,
