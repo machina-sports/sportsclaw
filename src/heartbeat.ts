@@ -19,10 +19,15 @@
  * This service is the missing execution layer that checks those tasks.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { generateText } from "ai";
+import lockfile from "proper-lockfile";
 import { listTasks, completeTask, expireOldTasks } from "./taskbus.js";
 import type { WatcherTask, LLMProvider } from "./types.js";
 import { buildProviderOptions } from "./types.js";
+import { HeartbeatStateStore } from "./heartbeat-state.js";
+import type { CronJobState } from "./heartbeat-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,6 +85,27 @@ export interface HeartbeatServiceOptions {
   verbose?: boolean;
 }
 
+export interface HeartbeatPersistenceOptions {
+  /**
+   * Directory for the state file + lock file. Both are created lazily.
+   * Pass an absolute path (e.g. `~/.sportsclaw` resolved at the call site).
+   */
+  stateDir: string;
+  /**
+   * How long a held lock is considered stale (ms). After this, another
+   * process can break the lock. Default 30000.
+   */
+  lockStaleMs?: number;
+  /**
+   * Custom name for the state file. Default `heartbeat-state.json`.
+   */
+  stateFilename?: string;
+  /**
+   * Custom name for the lock file. Default `heartbeat.lock`.
+   */
+  lockFilename?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -106,6 +132,14 @@ export class HeartbeatService {
   private cronTimers = new Map<string, NodeJS.Timeout>();
   private isRunning = false;
 
+  // Optional persistence + cross-process locking. None of the existing public
+  // API requires persistence; opt in via configurePersistence().
+  private stateStore: HeartbeatStateStore | null = null;
+  private stateDir: string | null = null;
+  private lockPath: string | null = null;
+  private lockStaleMs: number = 30_000;
+  private inFlight = false;
+
   constructor(options?: HeartbeatServiceOptions) {
     this.intervalMs = options?.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.model = options?.model;
@@ -120,6 +154,75 @@ export class HeartbeatService {
   setModel(model: unknown, provider: LLMProvider): void {
     this.model = model;
     this.provider = provider;
+  }
+
+  /**
+   * Opt in to persistent state + cross-process tick locking. Must be called
+   * before `start()`. Without this, HeartbeatService runs entirely in-memory
+   * and overlapping ticks are guarded only by an in-process flag.
+   */
+  configurePersistence(options: HeartbeatPersistenceOptions): void {
+    if (this.timer) {
+      throw new Error(
+        "[heartbeat] configurePersistence() must be called before start()",
+      );
+    }
+    const stateFilename = options.stateFilename ?? "heartbeat-state.json";
+    const lockFilename = options.lockFilename ?? "heartbeat.lock";
+    this.stateDir = options.stateDir;
+    this.stateStore = new HeartbeatStateStore(
+      path.join(options.stateDir, stateFilename),
+    );
+    this.lockPath = path.join(options.stateDir, lockFilename);
+    this.lockStaleMs = options.lockStaleMs ?? 30_000;
+  }
+
+  /** Whether persistent state is configured. */
+  get hasPersistence(): boolean {
+    return this.stateStore !== null;
+  }
+
+  /** Snapshot of persisted job state. Returns [] when persistence is off. */
+  async listPersistedJobs(): Promise<CronJobState[]> {
+    if (!this.stateStore) return [];
+    await this.stateStore.load();
+    return this.stateStore.list();
+  }
+
+  /** Persisted record for a single job, or null. */
+  async getPersistedJob(jobId: string): Promise<CronJobState | null> {
+    if (!this.stateStore) return null;
+    await this.stateStore.load();
+    return this.stateStore.get(jobId);
+  }
+
+  /**
+   * Mark the most recent run of `jobId` as succeeded. Downstream cron handlers
+   * call this after the work finishes. No-op when persistence is off.
+   */
+  async markJobSucceeded(jobId: string): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.markRunSuccess(jobId);
+  }
+
+  /**
+   * Mark the most recent run of `jobId` as failed. Records the error message
+   * but does NOT silently disable the job — the next interval will still
+   * fire. Move the job to lifecycle="error" via `setJobLifecycle()` if you
+   * need it to stop trying.
+   */
+  async markJobFailed(jobId: string, error: unknown): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.markRunFailed(jobId, error);
+  }
+
+  /** Move a persisted job to a different lifecycle (active / paused / completed / error). */
+  async setJobLifecycle(
+    jobId: string,
+    lifecycle: CronJobState["state"],
+  ): Promise<void> {
+    if (!this.stateStore) return;
+    await this.stateStore.setLifecycle(jobId, lifecycle);
   }
 
   /** Register or replace the event handler */
@@ -144,14 +247,14 @@ export class HeartbeatService {
     this.isRunning = true;
 
     // Run first heartbeat immediately
-    this.tick().catch((err) => {
+    this.tickGuarded().catch((err) => {
       console.error(
         `[heartbeat] Tick error: ${err instanceof Error ? err.message : err}`
       );
     });
 
     this.timer = setInterval(() => {
-      this.tick().catch((err) => {
+      this.tickGuarded().catch((err) => {
         console.error(
           `[heartbeat] Tick error: ${err instanceof Error ? err.message : err}`
         );
@@ -287,6 +390,66 @@ export class HeartbeatService {
   // Core heartbeat tick
   // -------------------------------------------------------------------------
 
+  /**
+   * Guard the tick body with (1) an in-process flag — prevents overlapping
+   * ticks within a single daemon if a tick takes longer than the interval —
+   * and (2) when persistence is configured, a cross-process lockfile —
+   * prevents two daemons from double-firing if the deployment accidentally
+   * runs more than one operator replica. Both guards SKIP the tick when
+   * contention is detected; we never queue.
+   */
+  private async tickGuarded(): Promise<void> {
+    if (this.inFlight) {
+      if (this.verbose) {
+        console.error("[heartbeat] tick skipped — in-process tick already running");
+      }
+      return;
+    }
+    this.inFlight = true;
+    try {
+      if (this.lockPath) {
+        await this.ensureLockFile();
+        let release: (() => Promise<void>) | null = null;
+        try {
+          release = await lockfile.lock(this.lockPath, {
+            stale: this.lockStaleMs,
+            retries: 0,
+          });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ELOCKED") {
+            if (this.verbose) {
+              console.error(
+                "[heartbeat] tick skipped — cross-process lock held by another daemon",
+              );
+            }
+            return;
+          }
+          throw err;
+        }
+        try {
+          await this.tick();
+        } finally {
+          if (release) await release();
+        }
+      } else {
+        await this.tick();
+      }
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async ensureLockFile(): Promise<void> {
+    if (!this.lockPath) return;
+    try {
+      await fs.mkdir(path.dirname(this.lockPath), { recursive: true });
+      // proper-lockfile needs the file to exist
+      await fs.writeFile(this.lockPath, "", { flag: "a" });
+    } catch {
+      // best-effort; lock acquisition will surface any real fs failure
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.verbose) {
       console.error(`[heartbeat] Tick at ${new Date().toISOString()}`);
@@ -401,6 +564,27 @@ export class HeartbeatService {
     const execute = async () => {
       if (job.status !== "active") return;
 
+      // Advance-before-execute: write nextRunAt to the persisted state BEFORE
+      // emitting the cron_fired event. If the daemon crashes mid-tick, we
+      // lose this fire instead of replaying it on restart. At-most-once
+      // semantics. (See Hermes scheduler for the original pattern.)
+      if (this.stateStore) {
+        try {
+          await this.stateStore.markRunStart(job.id, {
+            intervalMs: job.intervalMs,
+            lifecycle: "active",
+          });
+        } catch (err) {
+          // persistence failure must not silently disable the tick — log and
+          // continue. the daemon owner can rely on `getPersistedJob()` to
+          // detect drift between memory and disk.
+          console.error(
+            `[heartbeat] markRunStart failed for "${job.label}": ` +
+              (err instanceof Error ? err.message : err),
+          );
+        }
+      }
+
       job.lastRunAt = new Date().toISOString();
       job.runCount++;
 
@@ -425,6 +609,9 @@ export class HeartbeatService {
         if (timer) {
           clearInterval(timer);
           this.cronTimers.delete(job.id);
+        }
+        if (this.stateStore) {
+          await this.stateStore.setLifecycle(job.id, "completed").catch(() => {});
         }
       }
     };
