@@ -26,7 +26,7 @@ import path from "node:path";
 export type CronJobLifecycle = "active" | "paused" | "completed" | "error";
 
 /** Outcome of the most recent tick of a cron job. */
-export type CronJobLastStatus = "succeeded" | "failed" | "running";
+export type CronJobLastStatus = "succeeded" | "failed" | "running" | "skipped";
 
 /** Persisted per-job runtime state. */
 export interface CronJobState {
@@ -38,12 +38,18 @@ export interface CronJobState {
   nextRunAt: string;
   /** ISO timestamp of the most recent fire start. */
   lastRunAt?: string;
-  /** Number of times this job has fired (best effort across restarts). */
+  /** Number of times this job has actually fired (work began). Skips are NOT counted here. */
   runCount: number;
+  /** Number of times this job's wake gate denied the tick. */
+  skipCount: number;
   /** Status of the most recent run. */
   lastStatus?: CronJobLastStatus;
   /** Stringified error from the most recent failed run, if any. */
   lastError?: string;
+  /** ISO timestamp of the most recent wake-gate skip. */
+  lastSkipAt?: string;
+  /** Reason given by the wake gate on the most recent skip. */
+  lastSkipReason?: string;
   /** ISO timestamp when this state record was last written. */
   updatedAt: string;
 }
@@ -97,6 +103,7 @@ export class HeartbeatStateStore {
    * Record that a job's next fire is scheduled — call this BEFORE doing the
    * work. This is the at-most-once guarantee on crash. Increments runCount,
    * sets lastRunAt to now, lastStatus to "running", and writes nextRunAt.
+   * Preserves skipCount and the prior skip-tracking fields.
    */
   async markRunStart(
     jobId: string,
@@ -111,8 +118,43 @@ export class HeartbeatStateStore {
         nextRunAt: new Date(now.getTime() + opts.intervalMs).toISOString(),
         lastRunAt: nowIso,
         runCount: (existing?.runCount ?? 0) + 1,
+        skipCount: existing?.skipCount ?? 0,
         lastStatus: "running",
         lastError: undefined,
+        lastSkipAt: existing?.lastSkipAt,
+        lastSkipReason: existing?.lastSkipReason,
+        updatedAt: nowIso,
+      };
+    });
+  }
+
+  /**
+   * Record that a job's wake gate denied the tick. Increments skipCount,
+   * sets lastStatus to "skipped", records the reason and timestamp.
+   * Does NOT bump runCount, does NOT advance nextRunAt — the next interval
+   * fires the next attempt. Creates a fresh record if the job has none yet
+   * (rare: a brand-new job whose first tick is gated off).
+   */
+  async markRunSkipped(
+    jobId: string,
+    opts: { intervalMs: number; reason: string; lifecycle?: CronJobLifecycle },
+  ): Promise<CronJobState> {
+    return this.mutate(jobId, (existing) => {
+      const now = new Date();
+      const nowIso = now.toISOString();
+      return {
+        jobId,
+        state: opts.lifecycle ?? existing?.state ?? "active",
+        nextRunAt:
+          existing?.nextRunAt ??
+          new Date(now.getTime() + opts.intervalMs).toISOString(),
+        lastRunAt: existing?.lastRunAt,
+        runCount: existing?.runCount ?? 0,
+        skipCount: (existing?.skipCount ?? 0) + 1,
+        lastStatus: "skipped",
+        lastError: existing?.lastError,
+        lastSkipAt: nowIso,
+        lastSkipReason: opts.reason,
         updatedAt: nowIso,
       };
     });
@@ -244,8 +286,11 @@ function normalize(parsed: unknown): StateFile {
       nextRunAt: j.nextRunAt,
       lastRunAt: typeof j.lastRunAt === "string" ? j.lastRunAt : undefined,
       runCount: typeof j.runCount === "number" ? j.runCount : 0,
+      skipCount: typeof j.skipCount === "number" ? j.skipCount : 0,
       lastStatus: (j.lastStatus as CronJobLastStatus | undefined) ?? undefined,
       lastError: typeof j.lastError === "string" ? j.lastError : undefined,
+      lastSkipAt: typeof j.lastSkipAt === "string" ? j.lastSkipAt : undefined,
+      lastSkipReason: typeof j.lastSkipReason === "string" ? j.lastSkipReason : undefined,
       updatedAt: typeof j.updatedAt === "string" ? j.updatedAt : new Date(0).toISOString(),
     };
   }
