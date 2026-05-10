@@ -333,6 +333,21 @@ export {
   FileIncidentLedger,
 } from "./incident-log.js";
 
+// Tool-call Guardrails
+export {
+  ToolGuardController,
+  DEFAULT_IDEMPOTENT_TOOLS,
+  DEFAULT_MUTATING_TOOLS,
+  hashCanonical,
+  digestResult,
+} from "./guardrails.js";
+export type {
+  ToolCallSignature,
+  ToolGuardOptions,
+  BeforeCallDecision,
+  GuardrailDetail,
+} from "./guardrails.js";
+
 // ---------------------------------------------------------------------------
 // Markdown terminal renderer
 // ---------------------------------------------------------------------------

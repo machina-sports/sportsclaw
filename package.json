@@ -30,7 +30,8 @@
     "test:incident-log": "npm run build && node --test test/incident-log.test.mjs",
     "test:editorial-memory": "npm run build && node --test test/editorial-memory.test.mjs",
     "test:last-tick-brief": "npm run build && node --test test/last-tick-brief.test.mjs",
-    "test:prompts": "npm run build && node --test test/prompts.test.mjs"
+    "test:prompts": "npm run build && node --test test/prompts.test.mjs",
+    "test:guardrails": "npm run build && node --test test/guardrails.test.mjs"
   },
   "keywords": [
     "sports",
