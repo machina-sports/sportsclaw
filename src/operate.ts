@@ -332,9 +332,92 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
           });
         } catch { /* non-fatal */ }
       }
+      // Archive the image to the pod (best-effort).
+      const imageUrl = cfg.tailServer
+        ? `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`
+        : `file://${filePath}`;
+      await archiveToPod(mcpManager, {
+        ts: new Date().toISOString(),
+        category: "image",
+        workflow_name: `sportsclaw-operate:${cfg.jobId}`,
+        prompt: image.prompt,
+        image_url: imageUrl,
+        image_provider: image.provider,
+      });
     },
   });
   toolNames.push("generate_image");
+
+  // recall_recent_content — pull earlier content from the pod's tv-content-archive
+  // so the daemon can resurface a relevant past beat when fresh data is thin
+  // instead of recycling the same headline. The persona invites this tool.
+  toolSet["recall_recent_content"] = defineTool({
+    description:
+      "Recall earlier broadcasts, prediction markets, fixtures, news headlines, " +
+      "or generated images from today's content archive. Call this when current " +
+      "data is thin or the same story has repeated across recent ticks and you " +
+      "want to resurface an earlier moment instead of recycling. Returns a JSON " +
+      "object {count, results: [...]} with past archive entries — each has ts, " +
+      "category, and narrative/items/prompt/image_url depending on category.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          enum: ["broadcast", "image", "prediction_markets", "fixtures", "news"],
+          description: "Type of past content to recall.",
+        },
+        since_minutes: {
+          type: "number",
+          description: "Look back this many minutes. Defaults to 240 (4 hours).",
+        },
+        limit: {
+          type: "number",
+          description: "Max entries to return. Defaults to 5.",
+        },
+      },
+      required: ["category"],
+    }),
+    execute: async (args: Record<string, unknown>) => {
+      const category = typeof args.category === "string" ? args.category : "";
+      const sinceMin = typeof args.since_minutes === "number" ? args.since_minutes : 240;
+      const limit = typeof args.limit === "number" ? args.limit : 5;
+      if (!category) return JSON.stringify({ error: "category required" });
+      const server = mcpManager.getMachinaServerName();
+      if (!server) return JSON.stringify({ error: "no pod available", count: 0, results: [] });
+      const sinceIso = new Date(Date.now() - sinceMin * 60_000).toISOString();
+      const result = await mcpManager.callToolDirect(server, "search_documents", {
+        filters: {
+          name: "tv-content-archive",
+          "metadata.category": category,
+          created: { $gte: sinceIso },
+        },
+        sorters: [["created", -1]],
+        page_size: limit,
+      });
+      if (result.isError) return JSON.stringify({ error: result.content, count: 0, results: [] });
+      try {
+        const parsed = JSON.parse(result.content);
+        const docs = (parsed as Record<string, unknown>)?.data ?? [];
+        const innerDocs = (docs as Record<string, unknown>)?.data ?? docs;
+        const items = (Array.isArray(innerDocs) ? innerDocs : []).map((d: Record<string, unknown>) => {
+          const value = (d.value ?? {}) as Record<string, unknown>;
+          return {
+            ts: value.ts,
+            category: value.category,
+            narrative: value.narrative,
+            items: value.items,
+            prompt: value.prompt,
+            image_url: value.image_url,
+          };
+        });
+        return JSON.stringify({ count: items.length, results: items });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : String(e), count: 0, results: [] });
+      }
+    },
+  });
+  toolNames.push("recall_recent_content");
 
   return { registry, mcpManager, toolSet, toolNames };
 }
@@ -612,9 +695,67 @@ async function postTelemetry(url: string, body: Record<string, unknown>): Promis
   }
 }
 
+/**
+ * Persist a content event into the pod's tv-content-archive so the daemon
+ * (or any other consumer) can recall it later. Best-effort, non-fatal.
+ *
+ * One doc per archivable event (broadcast / prediction_markets / fixtures /
+ * news / image). Indexable by date + category for fast MCP search later
+ * via the recall_recent_content tool.
+ */
+async function archiveToPod(
+  mcpManager: McpManager,
+  data: {
+    ts: string;
+    tickId?: string;
+    category: "broadcast" | "prediction_markets" | "fixtures" | "news" | "image";
+    workflow_name: string;
+    narrative?: string;
+    items?: unknown[];
+    prompt?: string;
+    image_url?: string;
+    image_provider?: string;
+  },
+): Promise<void> {
+  const server = mcpManager.getMachinaServerName();
+  if (!server) return;
+  const date = data.ts.slice(0, 10); // "2026-05-11"
+  const content = {
+    ts: data.ts,
+    tickId: data.tickId ?? "",
+    date,
+    category: data.category,
+    workflow_name: data.workflow_name,
+    narrative: data.narrative ?? "",
+    items: data.items ?? [],
+    prompt: data.prompt ?? "",
+    image_url: data.image_url ?? "",
+    image_provider: data.image_provider ?? "",
+    replayed_count: 0,
+  };
+  try {
+    await mcpManager.callToolDirect(server, "create_document", {
+      name: "tv-content-archive",
+      content,
+      metadata: {
+        document_type: "tv-content-archive",
+        date,
+        category: data.category,
+        workflow_name: data.workflow_name,
+        tickId: data.tickId ?? "",
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[operate] archive failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
 function makeTailServerPoster(
   tailServer: string,
   jobId: string,
+  mcpManager: McpManager,
   modelId?: string,
   intervalMs?: number,
 ): (evt: TickEvent) => Promise<void> {
@@ -661,9 +802,22 @@ function makeTailServerPoster(
       );
     }
 
-    // Fan out the structured packet — each array becomes a widget event.
+    // Archive the broadcast narrative to the pod (best-effort).
+    if (evt.type === "tick_published" && textOverride !== undefined) {
+      await archiveToPod(mcpManager, {
+        ts: evt.timestamp,
+        tickId: "tickId" in evt && typeof evt.tickId === "string" ? evt.tickId : undefined,
+        category: "broadcast",
+        workflow_name: wfName,
+        narrative: textOverride,
+      });
+    }
+
+    // Fan out the structured packet — each array becomes a widget event
+    // AND an archive doc on the pod.
     if (packet) {
       const ts = evt.timestamp;
+      const tickId = "tickId" in evt && typeof evt.tickId === "string" ? evt.tickId : undefined;
       if (Array.isArray(packet.prediction_markets) && packet.prediction_markets.length > 0) {
         await postTelemetry(url, {
           ts,
@@ -672,6 +826,10 @@ function makeTailServerPoster(
           level: "info",
           workflow_name: wfName,
           items: packet.prediction_markets,
+        });
+        await archiveToPod(mcpManager, {
+          ts, tickId, category: "prediction_markets",
+          workflow_name: wfName, items: packet.prediction_markets,
         });
       }
       if (Array.isArray(packet.fixtures) && packet.fixtures.length > 0) {
@@ -683,6 +841,10 @@ function makeTailServerPoster(
           workflow_name: wfName,
           items: packet.fixtures,
         });
+        await archiveToPod(mcpManager, {
+          ts, tickId, category: "fixtures",
+          workflow_name: wfName, items: packet.fixtures,
+        });
       }
       if (Array.isArray(packet.news) && packet.news.length > 0) {
         await postTelemetry(url, {
@@ -692,6 +854,10 @@ function makeTailServerPoster(
           level: "info",
           workflow_name: wfName,
           items: packet.news,
+        });
+        await archiveToPod(mcpManager, {
+          ts, tickId, category: "news",
+          workflow_name: wfName, items: packet.news,
         });
       }
     }
@@ -778,7 +944,7 @@ async function runOnce(jobId: string): Promise<void> {
       extraFragments: inputs.extraFragments,
       guardOptions: cfg.guardOptions,
       onTickEvent: cfg.tailServer
-        ? makeTailServerPoster(cfg.tailServer, cfg.jobId, inputs.modelId, cfg.intervalMs)
+        ? makeTailServerPoster(cfg.tailServer, cfg.jobId, tools.mcpManager, inputs.modelId, cfg.intervalMs)
         : undefined,
       onToolCall: cfg.tailServer
         ? makeToolCallPoster(cfg.tailServer, cfg.jobId)
@@ -831,7 +997,7 @@ async function runForeground(jobId: string): Promise<void> {
     extraFragments: inputs.extraFragments,
     guardOptions: cfg.guardOptions,
     onTickEvent: cfg.tailServer
-      ? makeTailServerPoster(cfg.tailServer, cfg.jobId, inputs.modelId, cfg.intervalMs)
+      ? makeTailServerPoster(cfg.tailServer, cfg.jobId, tools.mcpManager, inputs.modelId, cfg.intervalMs)
       : (evt) => console.log(JSON.stringify(evt)),
     onToolCall: cfg.tailServer
       ? makeToolCallPoster(cfg.tailServer, cfg.jobId)
