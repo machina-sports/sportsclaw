@@ -310,6 +310,38 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
       const id = randomUUID();
       const filePath = path.join(imagesDir, `${id}.${ext}`);
       fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+
+      // Try to upload to GCS via the pod's tv-upload-image-to-gcs workflow.
+      // Returns a public https://storage.googleapis.com/... URL the overlay
+      // can load directly. Falls back to the local tail-server URL if the
+      // pod isn't reachable or the upload fails.
+      const localUrl = cfg.tailServer
+        ? `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`
+        : `file://${filePath}`;
+      let publicUrl = localUrl;
+      const machinaServer = mcpManager.getMachinaServerName();
+      if (machinaServer) {
+        try {
+          const dataUri = `data:image/${ext === "png" ? "png" : "jpeg"};base64,${image.data}`;
+          const res = await mcpManager.callToolDirect(machinaServer, "execute_workflow", {
+            name: "machina-sports-tv-upload-image-to-gcs",
+            context: {
+              image_data: dataUri,
+              filename: `${id}.${ext}`,
+              content_type: `image/${ext === "png" ? "png" : "jpeg"}`,
+            },
+          });
+          if (!res.isError) {
+            const parsed = JSON.parse(res.content) as Record<string, unknown>;
+            const outputs = ((parsed?.data as Record<string, unknown>)?.data as Record<string, unknown>)?.outputs as Record<string, unknown> | undefined;
+            const gcsUrl = typeof outputs?.url === "string" ? outputs.url : "";
+            if (gcsUrl) publicUrl = gcsUrl;
+          }
+        } catch (err) {
+          console.error(`[operate] GCS upload failed (falling back to local): ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
       if (cfg.tailServer) {
         const url = cfg.tailServer.replace(/\/+$/, "") + "/ingest";
         try {
@@ -324,24 +356,18 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
               model: image.provider === "google" ? "gemini-3.1-flash-image-preview" : "dall-e-3",
               prompt_excerpt: image.prompt,
               workflow_name: `sportsclaw-operate:${cfg.jobId}`,
-              // The tail-server's /images/<filename> route serves files from
-              // IMAGES_DIR (defaults to this same dir for the tv-operator job).
-              // Use the relative path the browser can load via the tail-server.
-              src: `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`,
+              src: publicUrl,
             }),
           });
         } catch { /* non-fatal */ }
       }
       // Archive the image to the pod (best-effort).
-      const imageUrl = cfg.tailServer
-        ? `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`
-        : `file://${filePath}`;
       await archiveToPod(mcpManager, {
         ts: new Date().toISOString(),
         category: "image",
         workflow_name: `sportsclaw-operate:${cfg.jobId}`,
         prompt: image.prompt,
-        image_url: imageUrl,
+        image_url: publicUrl,
         image_provider: image.provider,
       });
     },
@@ -704,7 +730,7 @@ async function postTelemetry(url: string, body: Record<string, unknown>): Promis
  * via the recall_recent_content tool.
  */
 async function archiveToPod(
-  mcpManager: McpManager,
+  mcpManager: McpManager | undefined,
   data: {
     ts: string;
     tickId?: string;
@@ -717,6 +743,10 @@ async function archiveToPod(
     image_provider?: string;
   },
 ): Promise<void> {
+  // Best-effort, non-fatal: a missing mcpManager (test callers, deployments
+  // without an MCP server) or a manager with no Machina pod is treated the
+  // same as "no archive backend available" — silently skip.
+  if (!mcpManager) return;
   const server = mcpManager.getMachinaServerName();
   if (!server) return;
   const date = data.ts.slice(0, 10); // "2026-05-11"
@@ -755,7 +785,7 @@ async function archiveToPod(
 function makeTailServerPoster(
   tailServer: string,
   jobId: string,
-  mcpManager: McpManager,
+  mcpManager?: McpManager,
   modelId?: string,
   intervalMs?: number,
 ): (evt: TickEvent) => Promise<void> {
