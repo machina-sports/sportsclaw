@@ -503,4 +503,25 @@ describe("buildOperatorTools generate_image", () => {
       await t.mcpManager.disconnectAll().catch(() => {});
     }
   });
+
+  it("registers a broadcaster-oriented description on the daemon tool (not the chat-mode default)", async () => {
+    // The chat-mode default description says "sent to the user in their
+    // channel," which empirically caused Gemini to skip the tool in
+    // operator ticks. The daemon must override with broadcaster wording.
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      const tool = t.toolSet["generate_image"];
+      assert.ok(tool);
+      const desc = String(tool.description ?? "");
+      assert.match(desc, /broadcast/i, "daemon description must invoke broadcast wording");
+      assert.match(desc, /on-air overlay/i, "daemon description must reference the on-air overlay");
+      assert.doesNotMatch(
+        desc,
+        /sent to the user in their channel/i,
+        "daemon must NOT use the chat-mode default description",
+      );
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
 });
