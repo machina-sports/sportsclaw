@@ -103,18 +103,22 @@ export interface CreateGenerateImageToolOpts {
   onImage: (image: GeneratedImage) => void | Promise<void>;
   /** Optional: engine-internal halt-signal detector. Operator daemon doesn't need it. */
   isHalt?: (err: unknown) => boolean;
+  /** Optional: override the default tool description. The default is chat-oriented ("sent to the user in their channel"); the operator daemon should pass a broadcaster-oriented description so the LLM knows when to call it. */
+  description?: string;
 }
+
+const DEFAULT_DESCRIPTION =
+  "Generate an image from a text prompt. Routes to the appropriate image " +
+  "generation API based on the configured provider:\n" +
+  "- Google → Gemini image generation\n" +
+  "- OpenAI → DALL-E 3\n" +
+  "- Anthropic → Not supported (will return an error)\n" +
+  "The generated image is automatically sent to the user in their channel.";
 
 export function createGenerateImageTool(opts: CreateGenerateImageToolOpts) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (defineTool as any)({
-    description:
-      "Generate an image from a text prompt. Routes to the appropriate image " +
-      "generation API based on the configured provider:\n" +
-      "- Google → Gemini image generation\n" +
-      "- OpenAI → DALL-E 3\n" +
-      "- Anthropic → Not supported (will return an error)\n" +
-      "The generated image is automatically sent to the user in their channel.",
+    description: opts.description ?? DEFAULT_DESCRIPTION,
     inputSchema: jsonSchema({
       type: "object",
       properties: {

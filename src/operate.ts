@@ -297,6 +297,13 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
   const imagesDir = path.join(rootDir, "images");
   toolSet["generate_image"] = createGenerateImageTool({
     provider,
+    description:
+      "Generate a broadcast-overlay image (poster card, hero graphic, fan-cam still) from a text prompt. " +
+      "Routes to Google Gemini image generation. The image is delivered to the on-air overlay as a kind:\"image\" " +
+      "telemetry event. Use this when the lead story has strong visual potential (a stadium, an iconic player, " +
+      "a final-whistle moment, a tournament-hype beat). Prompts should describe a poster-style composition " +
+      "explicitly — e.g. \"broadcast graphic: France national team huddle, World Cup 2026, dramatic stadium " +
+      "lighting, hero composition, 16:9 poster.\" Returns a short confirmation string after the image lands.",
     onImage: async (image) => {
       try { fs.mkdirSync(imagesDir, { recursive: true }); } catch {}
       const ext = (image.mimeType || "").includes("png") ? "png" : "jpg";
@@ -317,7 +324,10 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
               model: image.provider === "google" ? "gemini-3.1-flash-image-preview" : "dall-e-3",
               prompt_excerpt: image.prompt,
               workflow_name: `sportsclaw-operate:${cfg.jobId}`,
-              src: `file://${filePath}`,
+              // The tail-server's /images/<filename> route serves files from
+              // IMAGES_DIR (defaults to this same dir for the tv-operator job).
+              // Use the relative path the browser can load via the tail-server.
+              src: `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`,
             }),
           });
         } catch { /* non-fatal */ }
