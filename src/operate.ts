@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
-import { generateText, tool as defineTool, jsonSchema, type ToolSet } from "ai";
+import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { openai } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";

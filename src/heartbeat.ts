@@ -178,7 +178,6 @@ export class HeartbeatService {
   // Optional persistence + cross-process locking. None of the existing public
   // API requires persistence; opt in via configurePersistence().
   private stateStore: HeartbeatStateStore | null = null;
-  private stateDir: string | null = null;
   private lockPath: string | null = null;
   private lockStaleMs: number = 30_000;
   private inFlight = false;
@@ -212,7 +211,6 @@ export class HeartbeatService {
     }
     const stateFilename = options.stateFilename ?? "heartbeat-state.json";
     const lockFilename = options.lockFilename ?? "heartbeat.lock";
-    this.stateDir = options.stateDir;
     this.stateStore = new HeartbeatStateStore(
       path.join(options.stateDir, stateFilename),
     );
