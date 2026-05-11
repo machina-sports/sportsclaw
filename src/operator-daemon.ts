@@ -36,6 +36,7 @@
 import path from "node:path";
 import {
   generateText,
+  stepCountIs,
   type LanguageModel,
   type ToolSet,
   type Tool,
@@ -61,6 +62,19 @@ import {
 // ---------------------------------------------------------------------------
 
 export type TickStatus = "silent" | "published" | "failed" | "skipped";
+
+export interface ToolCallEvent {
+  jobId: string;
+  tickId: string;
+  toolName: string;
+  /** ms from beforeCall to execute resolution */
+  durationMs: number;
+  /** "ok" — tool ran successfully, "error" — tool threw, "blocked" — guardrail blocked it */
+  outcome: "ok" | "error" | "blocked";
+  /** Reason string when outcome is "blocked" or "error". */
+  reason?: string;
+  timestamp: string;
+}
 
 export interface TickEvent {
   type:
@@ -103,6 +117,9 @@ export interface OperatorDaemonConfig {
   tools?: ToolSet;
   /** Max output tokens for the tick. Default 2048. */
   maxOutputTokens?: number;
+  /** Maximum LLM steps per tick. Default 8. Allows the model to call tools
+   *  and then produce a final synthesis text within one tick. */
+  maxSteps?: number;
   /** Append additional fragments to the system prompt (project-specific guides, etc.). */
   extraFragments?: string[];
 
@@ -133,6 +150,8 @@ export interface OperatorDaemonConfig {
   onTickEvent?: (event: TickEvent) => void;
   /** Heartbeat event hook — surfaces cron_fired / cron_skipped / etc. */
   onHeartbeatEvent?: (event: HeartbeatEvent) => void;
+  /** Per-tool-call hook — fires once per tool execution with timing + result. */
+  onToolCall?: (event: ToolCallEvent) => void;
 
   /** Inject a HeartbeatService (tests). Default: a fresh instance. */
   heartbeat?: HeartbeatService;
@@ -172,6 +191,7 @@ const DEFAULT_TICK_PROMPT = [
 ].join("\n");
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
+const DEFAULT_MAX_STEPS = 16;
 const DEFAULT_RECENT_BRIEF_LIMIT = 1;
 
 // ---------------------------------------------------------------------------
@@ -248,7 +268,13 @@ export function createOperatorDaemon(
     // 4. Wrap tools with the guardrail.
     const guard = new ToolGuardController(cfg.guardOptions);
     const counts = { calls: 0, warnings: 0, blocks: 0 };
-    const wrappedTools = wrapTools(cfg.tools, guard, counts);
+    const toolCallSink = (event: ToolCallEvent): void => {
+      try { cfg.onToolCall?.(event); } catch { /* swallow */ }
+    };
+    const wrappedTools = wrapTools(
+      cfg.tools, guard, counts,
+      { jobId: cfg.jobId, tickId, onToolCall: toolCallSink },
+    );
 
     const tickPrompt = tickPromptTemplate
       .replace("{tickId}", tickId)
@@ -264,6 +290,11 @@ export function createOperatorDaemon(
         prompt: tickPrompt,
         ...(wrappedTools ? { tools: wrappedTools } : {}),
         maxOutputTokens: cfg.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+        // Allow the model multiple steps so it can call tools and THEN
+        // produce a final synthesis text. Without stopWhen, generateText
+        // takes a single step and ends with empty text whenever the
+        // model chose to call tools first.
+        stopWhen: stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
       });
       text = (result.text ?? "").trim();
     } catch (err) {
@@ -421,15 +452,22 @@ interface TickCounts {
  * warn, or block. Returns undefined (so generateText omits the tools field)
  * when no tools were provided.
  */
+interface ToolCallCtx {
+  jobId: string;
+  tickId: string;
+  onToolCall: (event: ToolCallEvent) => void;
+}
+
 function wrapTools(
   tools: ToolSet | undefined,
   guard: ToolGuardController,
   counts: TickCounts,
+  toolCallCtx: ToolCallCtx,
 ): ToolSet | undefined {
   if (!tools) return undefined;
   const wrapped: ToolSet = {};
   for (const [name, def] of Object.entries(tools)) {
-    wrapped[name] = wrapOneTool(name, def, guard, counts);
+    wrapped[name] = wrapOneTool(name, def, guard, counts, toolCallCtx);
   }
   return wrapped;
 }
@@ -439,14 +477,29 @@ function wrapOneTool(
   def: Tool,
   guard: ToolGuardController,
   counts: TickCounts,
+  toolCallCtx: ToolCallCtx,
 ): Tool {
   const original = (def as { execute?: Tool["execute"] }).execute;
   if (!original) return def; // declarative-only tools (no runtime execute) — pass through
 
+  const emit = (outcome: "ok" | "error" | "blocked", startedAt: number, reason?: string): void => {
+    toolCallCtx.onToolCall({
+      jobId: toolCallCtx.jobId,
+      tickId: toolCallCtx.tickId,
+      toolName: name,
+      durationMs: Date.now() - startedAt,
+      outcome,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+  };
+
   const wrappedExecute: NonNullable<Tool["execute"]> = async (args, ctx) => {
+    const startedAt = Date.now();
     const decision = guard.beforeCall(name, args);
     if (decision.action === "block") {
       counts.blocks++;
+      emit("blocked", startedAt, decision.message);
       return decision.syntheticResult as unknown;
     }
     if (decision.action === "warn") counts.warnings++;
@@ -456,6 +509,7 @@ function wrapOneTool(
       result = await original(args, ctx);
     } catch (err) {
       guard.afterCall(name, args, false);
+      emit("error", startedAt, err instanceof Error ? err.message : String(err));
       throw err;
     }
     // Compute the digest defensively: a successful tool returning a
@@ -469,6 +523,7 @@ function wrapOneTool(
       digest = undefined;
     }
     guard.afterCall(name, args, true, digest);
+    emit("ok", startedAt);
     return result;
   };
 

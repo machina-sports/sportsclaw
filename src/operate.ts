@@ -30,6 +30,7 @@ import { google } from "@ai-sdk/google";
 import {
   createOperatorDaemon,
   type TickEvent,
+  type ToolCallEvent,
 } from "./operator-daemon.js";
 import {
   listOperatorJobs,
@@ -42,7 +43,7 @@ import {
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { McpManager } from "./mcp.js";
 import { loadAllSchemas } from "./schema.js";
-import { resolveConfig } from "./config.js";
+import { resolveConfig, applyConfigToEnv } from "./config.js";
 import {
   BROADCAST_DIRECTIVE_FRAGMENT,
   buildSystemPrompt,
@@ -377,16 +378,24 @@ async function resolveJobInputs(
   opts: { ensureRootDir?: boolean } = {},
 ): Promise<ResolvedDaemonInputs> {
   const sportsclawCfg = resolveConfig();
+  applyConfigToEnv();
   const provider = cfg.provider ?? sportsclawCfg.provider ?? "google";
   const modelId =
     cfg.model ?? sportsclawCfg.model ?? defaultModelFor(provider);
-  const rootDir = cfg.rootDir ?? defaultRootDir(cfg.jobId);
+  const rawRootDir = cfg.rootDir ?? defaultRootDir(cfg.jobId);
+  const rootDir = expandTilde(rawRootDir);
   if (opts.ensureRootDir) {
     fs.mkdirSync(rootDir, { recursive: true });
   }
   const personaText = await resolvePersona(cfg, mcpManager);
   const extraFragments = resolveExtraFragments(cfg.extraFragments);
   return { provider, modelId, rootDir, personaText, extraFragments };
+}
+
+function expandTilde(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return path.join(homedir(), p.slice(2));
+  return p;
 }
 
 function defaultModelFor(provider: LLMProvider): string {
@@ -401,30 +410,255 @@ function defaultModelFor(provider: LLMProvider): string {
 }
 
 // ---------------------------------------------------------------------------
+// Structured packet — the persona may end its narrative with a JSON packet
+// delimited by <<<DATA>>>...<<<END>>>. The packet carries arrays the overlay
+// renders as widgets (prediction_markets, fixtures, news). We strip the
+// packet from the broadcast text, parse the JSON, and post each array as
+// its own telemetry event.
+// ---------------------------------------------------------------------------
+
+interface MarketItem {
+  question?: string;
+  prob?: number | string;
+  trend?: string;
+  source?: string;
+}
+interface FixtureItem {
+  home?: string;
+  away?: string;
+  odds?: string;
+  kickoff?: string;
+  source?: string;
+}
+interface NewsItem {
+  headline?: string;
+  source?: string;
+  ts?: string;
+}
+interface StructuredPacket {
+  prediction_markets?: MarketItem[];
+  fixtures?: FixtureItem[];
+  news?: NewsItem[];
+}
+interface ParsedBroadcast {
+  narrative: string;
+  data: StructuredPacket | null;
+  parseError?: string;
+}
+
+const PACKET_RE = /<<<DATA>>>\s*([\s\S]*?)\s*<<<END>>>/;
+
+export function parseStructuredBroadcast(text: string): ParsedBroadcast {
+  const match = text.match(PACKET_RE);
+  if (!match) return { narrative: text.trim(), data: null };
+  const raw = match[1].trim();
+  let data: StructuredPacket | null = null;
+  let parseError: string | undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      data = parsed as StructuredPacket;
+    }
+  } catch (err) {
+    parseError = err instanceof Error ? err.message : String(err);
+  }
+  const narrative = text.replace(PACKET_RE, "").trim();
+  return { narrative, data, parseError };
+}
+
+// ---------------------------------------------------------------------------
 // Tail-server poster — non-fatal HTTP POST per TickEvent
 // ---------------------------------------------------------------------------
+
+/**
+ * Map a TickEvent type to the overlay's kind vocabulary (see
+ * machina-sports-tv/agent-templates/.../docs/telemetry-event-shape.md).
+ * Returns kind + a human-readable message + an optional model name.
+ */
+function mapTickEventToTelemetry(
+  evt: TickEvent,
+  jobId: string,
+  modelId: string | undefined,
+  intervalMs: number | undefined,
+): {
+  kind: string;
+  message: string;
+  level: "info" | "warn" | "error";
+  model?: string;
+  prompt_excerpt?: string;
+  phase?: string;
+  intervalMs?: number;
+} {
+  switch (evt.type) {
+    case "tick_started":
+      // "tick" kind drives the overlay's countdown / upcoming strip — it
+      // carries the schedule interval so the overlay can sync its timer.
+      return {
+        kind: "tick",
+        message: `tick ${evt.tickId.slice(0, 12)}… started · job ${jobId}`,
+        level: "info",
+        phase: "started",
+        intervalMs: intervalMs,
+      };
+    case "tick_published":
+      // "broadcast" kind tells the overlay to take over the main renderer
+      // slot AND populate the spotlight + "last covered" tease.
+      return {
+        kind: "broadcast",
+        message: `${evt.toolCalls ?? 0} tool calls · ${(evt.text ?? "").length} chars`,
+        level: "info",
+        model: modelId,
+        prompt_excerpt: evt.text,
+      };
+    case "tick_silent":
+      return {
+        kind: "reasoning",
+        message: `tick ${evt.tickId.slice(0, 12)}… silent · no broadcast`,
+        level: "info",
+      };
+    case "tick_failed":
+      return {
+        kind: "error",
+        message: `tick failed: ${evt.reason ?? "unknown"}`,
+        level: "error",
+      };
+    case "tick_skipped":
+      return {
+        kind: "gate",
+        message: `tick skipped · ${evt.reason ?? "wake gate denied"}`,
+        level: "warn",
+      };
+    default:
+      return { kind: "reasoning", message: String(evt.type), level: "info" };
+  }
+}
+
+async function postTelemetry(url: string, body: Record<string, unknown>): Promise<void> {
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error(
+      `[operate] tail-server POST failed (${url}): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
 
 function makeTailServerPoster(
   tailServer: string,
   jobId: string,
-): (evt: TickEvent) => void {
+  modelId?: string,
+  intervalMs?: number,
+): (evt: TickEvent) => Promise<void> {
   const url = tailServer.replace(/\/+$/, "") + "/ingest";
-  return (evt: TickEvent) => {
+  const wfName = `sportsclaw-operate:${jobId}`;
+  return async (evt: TickEvent) => {
+    // For tick_published events, strip the structured packet from the
+    // narrative before posting, then fan out the packet's arrays as their
+    // own kind-specific events (prediction_markets / fixtures / news).
+    let textOverride: string | undefined;
+    let packet: StructuredPacket | null = null;
+    if (evt.type === "tick_published" && evt.text) {
+      const parsed = parseStructuredBroadcast(evt.text);
+      textOverride = parsed.narrative;
+      packet = parsed.data;
+      if (parsed.parseError) {
+        console.error(`[operate] structured packet parse error: ${parsed.parseError}`);
+      }
+    }
+
+    const eventForMap: TickEvent = textOverride !== undefined
+      ? { ...evt, text: textOverride }
+      : evt;
+    const mapped = mapTickEventToTelemetry(eventForMap, jobId, modelId, intervalMs);
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ts: evt.timestamp,
+          kind: mapped.kind,
+          message: mapped.message,
+          level: mapped.level,
+          model: mapped.model ?? "",
+          prompt_excerpt: mapped.prompt_excerpt ?? "",
+          phase: mapped.phase ?? "",
+          intervalMs: mapped.intervalMs ?? 0,
+          workflow_name: wfName,
+        }),
+      });
+    } catch (err) {
+      console.error(
+        `[operate] tail-server POST failed (${url}): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    // Fan out the structured packet — each array becomes a widget event.
+    if (packet) {
+      const ts = evt.timestamp;
+      if (Array.isArray(packet.prediction_markets) && packet.prediction_markets.length > 0) {
+        await postTelemetry(url, {
+          ts,
+          kind: "prediction_markets",
+          message: `${packet.prediction_markets.length} markets live`,
+          level: "info",
+          workflow_name: wfName,
+          items: packet.prediction_markets,
+        });
+      }
+      if (Array.isArray(packet.fixtures) && packet.fixtures.length > 0) {
+        await postTelemetry(url, {
+          ts,
+          kind: "fixtures",
+          message: `${packet.fixtures.length} fixtures`,
+          level: "info",
+          workflow_name: wfName,
+          items: packet.fixtures,
+        });
+      }
+      if (Array.isArray(packet.news) && packet.news.length > 0) {
+        await postTelemetry(url, {
+          ts,
+          kind: "news",
+          message: `${packet.news.length} headlines`,
+          level: "info",
+          workflow_name: wfName,
+          items: packet.news,
+        });
+      }
+    }
+  };
+}
+
+/**
+ * Map ToolCallEvent → tv-telemetry-event. Each tool call shows up in the
+ * reasoning trail as an "ingest" line with the tool name + duration so the
+ * overlay surfaces which tools the LLM actually picked.
+ */
+function makeToolCallPoster(
+  tailServer: string,
+  jobId: string,
+): (evt: ToolCallEvent) => void {
+  const url = tailServer.replace(/\/+$/, "") + "/ingest";
+  return (evt: ToolCallEvent) => {
+    const level: "info" | "warn" | "error" =
+      evt.outcome === "ok" ? "info" : evt.outcome === "blocked" ? "warn" : "error";
+    const msg = `${evt.toolName} · ${evt.outcome} · ${evt.durationMs}ms` +
+      (evt.reason ? ` · ${evt.reason}` : "");
     fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        kind: "tv-telemetry-event",
-        source: "sportsclaw-operate",
-        jobId,
-        event: evt,
-        timestamp: new Date().toISOString(),
+        ts: evt.timestamp,
+        kind: "ingest",
+        message: msg,
+        level,
+        workflow_name: `sportsclaw-operate:${jobId}`,
       }),
-    }).catch((err) => {
-      console.error(
-        `[operate] tail-server POST failed (${url}): ${err instanceof Error ? err.message : err}`,
-      );
-    });
+    }).catch(() => { /* non-fatal */ });
   };
 }
 
@@ -478,10 +712,20 @@ async function runOnce(jobId: string): Promise<void> {
       rootDir: inputs.rootDir,
       extraFragments: inputs.extraFragments,
       guardOptions: cfg.guardOptions,
-      onTickEvent: cfg.tailServer ? makeTailServerPoster(cfg.tailServer, cfg.jobId) : undefined,
+      onTickEvent: cfg.tailServer
+        ? makeTailServerPoster(cfg.tailServer, cfg.jobId, inputs.modelId, cfg.intervalMs)
+        : undefined,
+      onToolCall: cfg.tailServer
+        ? makeToolCallPoster(cfg.tailServer, cfg.jobId)
+        : undefined,
     });
     const event = await daemon.tickOnce();
     console.log(JSON.stringify(event, null, 2));
+    // Bug #12 drain: onTickEvent posters are fire-and-forget — give them a
+    // short window to flush before process.exit kills any pending fetches.
+    if (cfg.tailServer) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+    }
     process.exit(exitCodeFor(event));
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
@@ -522,8 +766,11 @@ async function runForeground(jobId: string): Promise<void> {
     extraFragments: inputs.extraFragments,
     guardOptions: cfg.guardOptions,
     onTickEvent: cfg.tailServer
-      ? makeTailServerPoster(cfg.tailServer, cfg.jobId)
+      ? makeTailServerPoster(cfg.tailServer, cfg.jobId, inputs.modelId, cfg.intervalMs)
       : (evt) => console.log(JSON.stringify(evt)),
+    onToolCall: cfg.tailServer
+      ? makeToolCallPoster(cfg.tailServer, cfg.jobId)
+      : undefined,
   });
 
   let shuttingDown = false;
