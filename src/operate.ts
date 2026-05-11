@@ -447,23 +447,38 @@ interface ParsedBroadcast {
 }
 
 const PACKET_RE = /<<<DATA>>>\s*([\s\S]*?)\s*<<<END>>>/;
+const PACKET_OPEN_RE = /<<<DATA>>>/;
 
 export function parseStructuredBroadcast(text: string): ParsedBroadcast {
   const match = text.match(PACKET_RE);
-  if (!match) return { narrative: text.trim(), data: null };
-  const raw = match[1].trim();
-  let data: StructuredPacket | null = null;
-  let parseError: string | undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      data = parsed as StructuredPacket;
+  if (match) {
+    const raw = match[1].trim();
+    let data: StructuredPacket | null = null;
+    let parseError: string | undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        data = parsed as StructuredPacket;
+      }
+    } catch (err) {
+      parseError = err instanceof Error ? err.message : String(err);
     }
-  } catch (err) {
-    parseError = err instanceof Error ? err.message : String(err);
+    const narrative = text.replace(PACKET_RE, "").trim();
+    return { narrative, data, parseError };
   }
-  const narrative = text.replace(PACKET_RE, "").trim();
-  return { narrative, data, parseError };
+  // Defensive: LLM started a packet but never closed it (token-limit truncation,
+  // malformed output). Strip from <<<DATA>>> onward so raw JSON doesn't bleed
+  // into the renderer card. Data is lost for this tick, but the narrative stays
+  // clean and the parse error is surfaced via telemetry.
+  const openMatch = text.match(PACKET_OPEN_RE);
+  if (openMatch && openMatch.index !== undefined) {
+    return {
+      narrative: text.slice(0, openMatch.index).trim(),
+      data: null,
+      parseError: "packet opened but never closed (truncated)",
+    };
+  }
+  return { narrative: text.trim(), data: null };
 }
 
 // ---------------------------------------------------------------------------
