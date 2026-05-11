@@ -12,6 +12,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import http from "node:http";
 
 import {
+  buildOperatorTools,
   exitCodeFor,
   FRAGMENT_ALIASES,
   makeTailServerPoster,
@@ -421,10 +422,85 @@ describe("parseStructuredBroadcast", () => {
     assert.strictEqual(r.narrative, "Para 1.\n\nPara 2.");
   });
 
-  it("ignores stray <<<DATA>>> with no matching <<<END>>>", () => {
+  it("defensively strips an open <<<DATA>>> with no matching <<<END>>>", () => {
+    // When the LLM truncates mid-packet (token limit, malformed output),
+    // strip everything from <<<DATA>>> onward so raw JSON doesn't bleed
+    // into the broadcast card. Data is lost for this tick (would have been
+    // malformed JSON anyway); narrative stays clean.
     const r = parseStructuredBroadcast("Text. <<<DATA>>> not closed");
-    // No match — returns the full text as narrative, data null.
     assert.strictEqual(r.data, null);
-    assert.match(r.narrative, /Text\./);
+    assert.ok(
+      !r.narrative.includes("<<<DATA>>>"),
+      "narrative must not contain the open marker",
+    );
+    assert.ok(
+      !r.narrative.includes("not closed"),
+      "narrative must not contain anything after the open marker",
+    );
+    assert.match(r.narrative, /^Text\.\s*$/);
+    assert.match(r.parseError ?? "", /truncated|never closed/i);
+  });
+
+  it("strips an open packet that contains a half-written JSON object", () => {
+    const r = parseStructuredBroadcast(
+      'World Cup recap.\n\n<<<DATA>>>{"prediction_markets":[{"question":"Will',
+    );
+    assert.strictEqual(r.data, null);
+    assert.ok(!r.narrative.includes("<<<DATA>>>"));
+    assert.ok(!r.narrative.includes("prediction_markets"));
+    assert.strictEqual(r.narrative, "World Cup recap.");
+    assert.ok(r.parseError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildOperatorTools — generate_image registration
+// ---------------------------------------------------------------------------
+
+describe("buildOperatorTools generate_image", () => {
+  // These tests instantiate a fresh ToolRegistry + McpManager, which may
+  // attempt MCP connection if SPORTSCLAW_MCP_SERVERS / ~/.sportsclaw/mcp.json
+  // is configured. Connect is non-fatal; we just need the toolset to come
+  // back with generate_image in it.
+
+  const baseCfg = {
+    jobId: "test-image-job",
+    intervalMs: 60_000,
+    personaText: "test persona",
+    provider: "google",
+  };
+
+  it("registers generate_image in the toolset (named in toolNames + present in toolSet)", async () => {
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      assert.ok(
+        t.toolNames.includes("generate_image"),
+        `toolNames did not include generate_image: ${t.toolNames.slice(0, 8).join(", ")}…`,
+      );
+      assert.ok(
+        t.toolSet["generate_image"],
+        "toolSet has no generate_image entry",
+      );
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
+
+  it("generate_image execute returns an Anthropic-unsupported message when provider=anthropic", async () => {
+    const t = await buildOperatorTools(
+      { ...baseCfg, provider: "anthropic" },
+      false,
+    );
+    try {
+      const tool = t.toolSet["generate_image"];
+      assert.ok(tool);
+      const result = await tool.execute({ prompt: "irrelevant" }, {
+        toolCallId: "t1",
+        messages: [],
+      });
+      assert.match(String(result), /Anthropic does not support image generation/i);
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
   });
 });
