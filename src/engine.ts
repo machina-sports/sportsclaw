@@ -65,6 +65,7 @@ import {
 import { AskUserQuestionHalt } from "./ask.js";
 import {
   isActionPreApproved,
+  ApprovalPendingHalt,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
