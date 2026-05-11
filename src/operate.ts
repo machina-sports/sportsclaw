@@ -311,36 +311,13 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
       const filePath = path.join(imagesDir, `${id}.${ext}`);
       fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
 
-      // Try to upload to GCS via the pod's tv-upload-image-to-gcs workflow.
-      // Returns a public https://storage.googleapis.com/... URL the overlay
-      // can load directly. Falls back to the local tail-server URL if the
-      // pod isn't reachable or the upload fails.
-      const localUrl = cfg.tailServer
+      // Daemon-generated images stay local. The tail-server's /images route
+      // serves them. GCS is pod-side only — for content the pod itself
+      // produces (videos via Seedance/Veo3, audio, etc.), which can be larger
+      // than the daemon→pod MCP request-body limit.
+      const publicUrl = cfg.tailServer
         ? `${cfg.tailServer.replace(/\/+$/, "")}/images/${id}.${ext}`
         : `file://${filePath}`;
-      let publicUrl = localUrl;
-      const machinaServer = mcpManager.getMachinaServerName();
-      if (machinaServer) {
-        try {
-          const dataUri = `data:image/${ext === "png" ? "png" : "jpeg"};base64,${image.data}`;
-          const res = await mcpManager.callToolDirect(machinaServer, "execute_workflow", {
-            name: "machina-sports-tv-upload-image-to-gcs",
-            context: {
-              image_data: dataUri,
-              filename: `${id}.${ext}`,
-              content_type: `image/${ext === "png" ? "png" : "jpeg"}`,
-            },
-          });
-          if (!res.isError) {
-            const parsed = JSON.parse(res.content) as Record<string, unknown>;
-            const outputs = ((parsed?.data as Record<string, unknown>)?.data as Record<string, unknown>)?.outputs as Record<string, unknown> | undefined;
-            const gcsUrl = typeof outputs?.url === "string" ? outputs.url : "";
-            if (gcsUrl) publicUrl = gcsUrl;
-          }
-        } catch (err) {
-          console.error(`[operate] GCS upload failed (falling back to local): ${err instanceof Error ? err.message : err}`);
-        }
-      }
 
       if (cfg.tailServer) {
         const url = cfg.tailServer.replace(/\/+$/, "") + "/ingest";
@@ -361,7 +338,8 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
           });
         } catch { /* non-fatal */ }
       }
-      // Archive the image to the pod (best-effort).
+      // Archive the image metadata to the pod (best-effort). Only the URL +
+      // prompt — the bytes stay on the local tail-server filesystem.
       await archiveToPod(mcpManager, {
         ts: new Date().toISOString(),
         category: "image",
@@ -764,7 +742,7 @@ async function archiveToPod(
     replayed_count: 0,
   };
   try {
-    await mcpManager.callToolDirect(server, "create_document", {
+    const res = await mcpManager.callToolDirect(server, "create_document", {
       name: "tv-content-archive",
       content,
       metadata: {
@@ -775,6 +753,9 @@ async function archiveToPod(
         tickId: data.tickId ?? "",
       },
     });
+    if (res.isError) {
+      console.error(`[operate] archive returned error · category=${data.category} · ${res.content.slice(0, 200)}`);
+    }
   } catch (err) {
     console.error(
       `[operate] archive failed: ${err instanceof Error ? err.message : err}`,
