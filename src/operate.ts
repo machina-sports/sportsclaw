@@ -547,14 +547,31 @@ async function resolvePersona(
       `Job "${cfg.jobId}": failed to resolve persona "${cfg.persona}" via MCP: ${result.content}`,
     );
   }
-  // The MCP tool returns either { content: "..." } or a structured prompt;
-  // accept both shapes pragmatically.
+  // The MCP tool returns one of:
+  //   - a bare string (some servers)
+  //   - {content|text|prompt: "..."}  (legacy/simple servers)
+  //   - {data: {data: {template|content|text|prompt: "..."}, status}, status}
+  //     (Machina pod's get_prompt_by_name — the prompt record nests inside
+  //     data.data, and the persona text lives in the `template` field that
+  //     mirrors the YAML's template:.)
+  // Accept all shapes pragmatically.
   try {
-    const parsed = JSON.parse(result.content) as
-      | { content?: string; text?: string; prompt?: string }
-      | string;
+    const parsed = JSON.parse(result.content);
     if (typeof parsed === "string") return parsed;
-    return parsed.content ?? parsed.text ?? parsed.prompt ?? result.content;
+    if (parsed && typeof parsed === "object") {
+      const p = parsed as Record<string, unknown>;
+      // Direct fields.
+      const direct = (p.content ?? p.text ?? p.prompt ?? p.template) as string | undefined;
+      if (typeof direct === "string" && direct.length > 0) return direct;
+      // Machina pod nested shape: { data: { data: { template|content|text|prompt } } }
+      const outer = p.data as Record<string, unknown> | undefined;
+      const inner = (outer?.data ?? outer) as Record<string, unknown> | undefined;
+      if (inner) {
+        const nested = (inner.template ?? inner.content ?? inner.text ?? inner.prompt) as string | undefined;
+        if (typeof nested === "string" && nested.length > 0) return nested;
+      }
+    }
+    return result.content;
   } catch {
     return result.content;
   }
