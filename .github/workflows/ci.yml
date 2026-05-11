@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Run on every PR regardless of base branch — supports stacked PRs where
+  # the immediate base is another feature branch rather than main.
   pull_request:
-    branches: [main]
+  # Push trigger stays narrow — only sanity-check after a merge to main.
   push:
     branches: [main]
 

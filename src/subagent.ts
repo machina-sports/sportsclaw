@@ -22,7 +22,7 @@
 
 import { generateText, tool as defineTool, jsonSchema, stepCountIs, type ToolSet } from "ai";
 import type { sportsclawConfig, LLMProvider } from "./types.js";
-import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
+import { buildProviderOptions } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ function generateId(): string {
   return `sub_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function buildSubagentSystemPrompt(taskPrompt: string): string {
+function buildSubagentSystemPrompt(_taskPrompt: string): string {
   return [
     "You are a sportsclaw background research subagent.",
     "",

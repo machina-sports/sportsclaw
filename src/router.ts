@@ -2,7 +2,6 @@ import { generateText } from "ai";
 import type {
   LLMProvider,
   RouteDecision,
-  RouteMeta,
   RouteOutcome,
   ToolSpec,
   sportsclawConfig,

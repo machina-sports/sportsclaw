@@ -63,15 +63,6 @@ export interface SimulationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Default config
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SIM_CONFIG: SimConfig = {
-  iterations: 10_000,
-  weights: { bpi: 0.6, espnAdv: 0.25, futures: 0.15 },
-};
-
-// ---------------------------------------------------------------------------
 // Core math
 // ---------------------------------------------------------------------------
 
@@ -101,14 +92,6 @@ function createRng(seed?: number): () => number {
 // ---------------------------------------------------------------------------
 // Seed-based BPI fallback
 // ---------------------------------------------------------------------------
-
-/**
- * When real BPI data is unavailable, estimate BPI from tournament seed.
- * Seed 1 ≈ 95, seed 16 ≈ 65, linearly interpolated.
- */
-function seedToBpi(seed: number): number {
-  return 95 - ((seed - 1) / 15) * 30;
-}
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -308,64 +291,6 @@ const ROUND_DISPLAY_NAMES = [
 ];
 
 /**
- * Match SimTeam data to bracket teams by name (fuzzy) and populate BPI/projections.
- */
-function enrichBracketTeams(
-  session: BracketSession,
-  fieldData: SimTeam[],
-): Map<string, SimTeam> {
-  const teamMap = new Map<string, SimTeam>();
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-
-  // Build lookup from fetched data
-  const dataByName = new Map<string, SimTeam>();
-  for (const t of fieldData) {
-    dataByName.set(normalize(t.name), t);
-  }
-
-  // Extract unique teams from round 1 matchups
-  const bracketTeams = new Set<string>();
-  for (const m of session.matchups) {
-    if (m.round === 1) {
-      if (m.topSeed) bracketTeams.add(m.topSeed.name);
-      if (m.bottomSeed) bracketTeams.add(m.bottomSeed.name);
-    }
-  }
-
-  for (const m of session.matchups) {
-    if (m.round !== 1) continue;
-
-    for (const team of [m.topSeed, m.bottomSeed]) {
-      if (!team || teamMap.has(team.name)) continue;
-
-      const key = normalize(team.name);
-      const match = dataByName.get(key);
-
-      if (match) {
-        teamMap.set(team.name, {
-          ...match,
-          seed: team.seed,
-          region: team.region,
-          name: team.name,
-          teamId: team.teamId ?? match.teamId,
-        });
-      } else {
-        // Seed-based fallback
-        teamMap.set(team.name, {
-          seed: team.seed,
-          name: team.name,
-          teamId: team.teamId ?? "",
-          region: team.region,
-          bpi: seedToBpi(team.seed),
-        });
-      }
-    }
-  }
-
-  return teamMap;
-}
-
-/**
  * Run Monte Carlo bracket simulation.
  *
  * For each iteration, simulate all 63 games using weighted coin flips
@@ -541,7 +466,7 @@ export function simulateBracket(
  */
 function getFeederMatchIds(
   matchup: BracketMatchup,
-  allMatchups: BracketMatchup[],
+  _allMatchups: BracketMatchup[],
 ): { topFeederId: string; bottomFeederId: string } | null {
   const { round, matchIndex, region } = matchup;
 
@@ -607,14 +532,6 @@ function findTeamFromSim(
 const KALSHI_SCORING: Record<number, number> = {
   1: 10, 2: 20, 3: 40, 4: 80, 5: 160, 6: 320,
 };
-
-/**
- * Map a round number (1-6) from a matchId like "east-r1-m0".
- */
-function roundFromMatchId(matchId: string): number {
-  const m = matchId.match(/-r(\d+)-/);
-  return m ? parseInt(m[1], 10) : 1;
-}
 
 // ---------------------------------------------------------------------------
 // Strategy generation

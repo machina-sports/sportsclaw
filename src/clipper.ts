@@ -331,7 +331,7 @@ function validateVideoPath(filePath: string): string | undefined {
 // Main CLI flow
 // ---------------------------------------------------------------------------
 
-export async function cmdClip(args: string[] = [], opts?: { fromChat?: boolean }): Promise<void> {
+export async function cmdClip(args: string[] = [], _opts?: { fromChat?: boolean }): Promise<void> {
   const flags = parseClipArgs(args);
 
   p.intro(pc.bold("SportsClaw Auto-Clipper") + pc.dim(" (Vision + PBP Engine)"));

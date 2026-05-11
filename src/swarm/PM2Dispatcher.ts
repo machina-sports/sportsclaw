@@ -176,11 +176,8 @@ export class PM2Dispatcher implements IWorkerDispatcher {
 
     // Forward env vars
     if (spec.env && Object.keys(spec.env).length > 0) {
-      const envPairs = Object.entries(spec.env)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(" ");
-      // PM2 env injection via --env doesn't exist; use node_args workaround
-      // Set env via the -- separator and let the child read process.env
+      // TODO: PM2 doesn't have a direct --env flag; child reads process.env via
+      // the -- separator. Implement env-pair forwarding here when needed.
       parts.push(`--node-args=""`); // placeholder for future node flags
     }
 

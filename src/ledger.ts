@@ -69,8 +69,6 @@ export class FileLedgerStorage<T> implements LedgerStorage<T> {
 import type { McpManager } from "./mcp.js";
 
 export class PodLedgerStorage<T> implements LedgerStorage<T> {
-  // A cache for the document ID so we don't have to search every time we append.
-  private docId: string | null = null;
   private inFlightSync: Promise<void> | null = null;
 
   constructor(
@@ -126,14 +124,12 @@ export class PodLedgerStorage<T> implements LedgerStorage<T> {
           item_id: id,
           content: { value: { records: rawRecords } },
         });
-        this.docId = id;
       } else {
-        const createRes = await this.callPod("create_document", {
+        await this.callPod("create_document", {
           name: this.ledgerName,
           content: { value: { records: rawRecords } },
           metadata: { type: "ledger", ledger_name: this.ledgerName },
         });
-        this.docId = createRes?.data?.data?._id || null;
       }
     })();
     
