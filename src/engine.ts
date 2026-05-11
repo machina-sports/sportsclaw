@@ -65,6 +65,7 @@ import {
 import { AskUserQuestionHalt } from "./ask.js";
 import {
   isActionPreApproved,
+  ApprovalPendingHalt,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
@@ -315,6 +316,46 @@ export class SessionStore {
 
 /** Global session store — shared across all engine instances. */
 export const sessionStore = new SessionStore();
+
+// ---------------------------------------------------------------------------
+// Halt sentinel guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if `e` is a sentinel that halts the engine loop and must
+ * propagate to the listener (which has dedicated handling for it). Catch
+ * blocks inside engine.run() and its helpers should re-throw on these so
+ * they don't get converted into a normal error response.
+ */
+export function isHalt(e: unknown): boolean {
+  return e instanceof AskUserQuestionHalt || e instanceof ApprovalPendingHalt;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-provider message-part shape guards
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape of a tool-call message part as emitted by the Vercel AI SDK across
+ * providers. We only depend on `type` and `toolName`; other fields (id, args)
+ * vary by provider and are not consulted here.
+ */
+export type ToolCallPart = {
+  type: "tool-call";
+  toolName: string;
+};
+
+/**
+ * Runtime guard for tool-call parts. The previous version cast `msg.content`
+ * to a structural array shape and accessed fields without validation, which
+ * silently produced no matches if a provider returned an unexpected envelope.
+ * This guard narrows safely and skips unrecognized shapes.
+ */
+export function isToolCallPart(part: unknown): part is ToolCallPart {
+  if (!part || typeof part !== "object") return false;
+  const p = part as Record<string, unknown>;
+  return p.type === "tool-call" && typeof p.toolName === "string";
+}
 
 // ---------------------------------------------------------------------------
 // Engine class
@@ -1496,6 +1537,7 @@ export class sportsclawEngine {
             created_at: task.createdAt,
           });
         } catch (err) {
+          if (isHalt(err)) throw err;
           return `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -1612,6 +1654,7 @@ export class sportsclawEngine {
               "when ready. Tell the user you're working on it.",
           });
         } catch (err) {
+          if (isHalt(err)) throw err;
           return `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
@@ -1824,6 +1867,7 @@ export class sportsclawEngine {
             return `Consolidated ${count} daily log file(s) into CONSOLIDATED.md. ` +
               "Old logs have been deleted. Memory is now leaner.";
           } catch (err) {
+            if (isHalt(err)) throw err;
             return `Consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
           }
         },
@@ -1869,6 +1913,7 @@ export class sportsclawEngine {
           this._generatedImages.push(image);
           return `Image generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Failed to generate image: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -1934,6 +1979,7 @@ export class sportsclawEngine {
           this._generatedVideos.push(video);
           return `Video generated successfully with prompt: "${args.prompt}"`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Failed to generate video: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2062,6 +2108,7 @@ export class sportsclawEngine {
           });
           return "```\n" + result + "\n```";
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Chart rendering failed: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2146,6 +2193,7 @@ export class sportsclawEngine {
             message: `Bracket "${session.name}" created with ${session.totalMatchups} matchups. Start picking!`,
           });
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error creating bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2215,6 +2263,7 @@ export class sportsclawEngine {
           }
           return JSON.stringify(result);
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error making pick: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2302,6 +2351,7 @@ export class sportsclawEngine {
 
           return parts.join("\n\n");
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error viewing bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2371,6 +2421,7 @@ export class sportsclawEngine {
             }),
           );
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error checking bracket status: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2436,6 +2487,7 @@ export class sportsclawEngine {
 
           return `Error: unknown mode "${args.mode}". Use "reset_picks" or "delete".`;
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error resetting bracket: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -2617,6 +2669,7 @@ export class sportsclawEngine {
 
           return JSON.stringify(response);
         } catch (error) {
+          if (isHalt(error)) throw error;
           return `Error running simulation: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -3014,9 +3067,9 @@ export class sportsclawEngine {
         memory.readStrategy(),
       ]);
 
-      if (this.config.verbose && memoryBlock) {
+      if (memoryBlock) {
         console.error(
-          `[sportsclaw] memory loaded for user ${options.userId} (${memoryBlock.length} chars)`
+          `[sportsclaw] memory_loaded user=${options.userId} chars=${memoryBlock.length}`
         );
       }
     }
@@ -3073,11 +3126,9 @@ export class sportsclawEngine {
       const recentTail = this.messages.slice(-keepCount);
       const dropped = this.messages.length - (pinnedHead.length + recentTail.length);
       this.messages = [...pinnedHead, ...recentTail];
-      if (this.config.verbose) {
-        console.error(
-          `[sportsclaw] context pruned: dropped ${dropped} old messages, keeping ${this.messages.length} (1 pinned + ${recentTail.length} recent)`
-        );
-      }
+      console.error(
+        `[sportsclaw] context_pruned dropped=${dropped} kept=${this.messages.length} pinned=1 recent=${recentTail.length}`
+      );
     }
 
     let stepCount = 0;
@@ -3119,8 +3170,8 @@ export class sportsclawEngine {
       const historyToolNames = new Set<string>();
       for (const msg of this.messages) {
         if (msg.role === "assistant" && Array.isArray(msg.content)) {
-          for (const part of msg.content as Array<{ type?: string; toolName?: string }>) {
-            if (part.type === "tool-call" && part.toolName && part.toolName in tools) {
+          for (const part of msg.content) {
+            if (isToolCallPart(part) && part.toolName in tools) {
               historyToolNames.add(part.toolName);
             }
           }
