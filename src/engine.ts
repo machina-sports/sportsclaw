@@ -82,6 +82,7 @@ import {
 } from "./bracket-sim.js";
 import { subagentManager } from "./subagent.js";
 import { heartbeatService } from "./heartbeat.js";
+import { createGenerateImageTool } from "./image-gen.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";
 import { getSportDisplayName } from "./buttons.js";
@@ -1878,45 +1879,10 @@ export class sportsclawEngine {
     // Image + Video generation tools
     // -----------------------------------------------------------------
 
-    toolMap["generate_image"] = defineTool({
-      description:
-        "Generate an image from a text prompt. Routes to the appropriate image " +
-        "generation API based on the configured provider:\n" +
-        "- Google → Gemini image generation\n" +
-        "- OpenAI → DALL-E 3\n" +
-        "- Anthropic → Not supported (will return an error)\n" +
-        "The generated image is automatically sent to the user in their channel.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          prompt: {
-            type: "string",
-            description:
-              "Detailed text description of the image to generate. Be specific " +
-              "about style, composition, colors, and subject matter.",
-          },
-          size: {
-            type: "string",
-            enum: ["1024x1024", "1024x1792", "1792x1024"],
-            description: "Image dimensions. Default: 1024x1024.",
-          },
-        },
-        required: ["prompt"],
-      }),
-      execute: async (args: { prompt?: string; size?: string }) => {
-        if (!args.prompt) return "Error: prompt is required.";
-        if (config.provider === "anthropic") {
-          return "Anthropic does not support image generation. Please switch to Google or OpenAI.";
-        }
-        try {
-          const image = await generateImageForProvider(config.provider, args.prompt, args.size);
-          this._generatedImages.push(image);
-          return `Image generated successfully with prompt: "${args.prompt}"`;
-        } catch (error) {
-          if (isHalt(error)) throw error;
-          return `Failed to generate image: ${error instanceof Error ? error.message : String(error)}`;
-        }
-      },
+    toolMap["generate_image"] = createGenerateImageTool({
+      provider: config.provider,
+      onImage: (image) => { this._generatedImages.push(image); },
+      isHalt,
     });
 
     toolMap["generate_video"] = defineTool({
@@ -3791,78 +3757,6 @@ export class sportsclawEngine {
     const result = await this.run(userPrompt, options);
     console.log(result);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Image generation helpers (standalone, outside the class)
-// ---------------------------------------------------------------------------
-
-async function generateImageForProvider(
-  provider: LLMProvider,
-  prompt: string,
-  size?: string
-): Promise<GeneratedImage> {
-  if (provider === "google") return generateImageGoogle(prompt);
-  if (provider === "openai") return generateImageOpenAI(prompt, size);
-  throw new Error("Provider does not support image generation.");
-}
-
-async function generateImageGoogle(prompt: string): Promise<GeneratedImage> {
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
-
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-      }),
-    }
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Google image generation failed (${res.status}): ${errBody}`);
-  }
-
-  const data = (await res.json()) as any;
-  const parts = data.candidates?.[0]?.content?.parts;
-  if (!parts) throw new Error("Google image generation returned no content.");
-
-  const imagePart = parts.find((p: any) => p.inlineData);
-  if (!imagePart?.inlineData?.data) throw new Error("No image data in response.");
-
-  return {
-    data: imagePart.inlineData.data,
-    mimeType: imagePart.inlineData.mimeType || "image/jpeg",
-    prompt,
-    provider: "google",
-  };
-}
-
-async function generateImageOpenAI(prompt: string, size?: string): Promise<GeneratedImage> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not set.");
-
-  const res = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: "dall-e-3", prompt, n: 1, size: size || "1024x1024", response_format: "b64_json" }),
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`OpenAI image generation failed (${res.status}): ${errBody}`);
-  }
-
-  const data = (await res.json()) as any;
-  const imageData = data.data?.[0]?.b64_json;
-  if (!imageData) throw new Error("OpenAI image generation returned no image data.");
-
-  return { data: imageData, mimeType: "image/png", prompt, provider: "openai" };
 }
 
 // ---------------------------------------------------------------------------

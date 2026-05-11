@@ -21,6 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
@@ -44,6 +45,7 @@ import { ToolRegistry, type ToolCallInput } from "./tools.js";
 import { McpManager } from "./mcp.js";
 import { loadAllSchemas } from "./schema.js";
 import { resolveConfig, applyConfigToEnv } from "./config.js";
+import { createGenerateImageTool } from "./image-gen.js";
 import {
   BROADCAST_DIRECTIVE_FRAGMENT,
   buildSystemPrompt,
@@ -252,7 +254,7 @@ interface OperatorTools {
  * filtering. The registry + mcpManager are returned so callers can use them
  * for persona resolution and clean shutdown.
  */
-async function buildOperatorTools(verbose: boolean): Promise<OperatorTools> {
+async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Promise<OperatorTools> {
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);
@@ -285,6 +287,44 @@ async function buildOperatorTools(verbose: boolean): Promise<OperatorTools> {
       },
     });
   }
+
+  // generate_image — extracted from engine.ts so the operator daemon can call
+  // it alongside sport skills + MCP tools. Sink writes bytes to <rootDir>/images
+  // and POSTs a kind:"image" telemetry event to the tail-server (best-effort).
+  const sportsclawCfg = resolveConfig();
+  const provider = cfg.provider ?? sportsclawCfg.provider ?? "google";
+  const rootDir = expandTilde(cfg.rootDir ?? defaultRootDir(cfg.jobId));
+  const imagesDir = path.join(rootDir, "images");
+  toolSet["generate_image"] = createGenerateImageTool({
+    provider,
+    onImage: async (image) => {
+      try { fs.mkdirSync(imagesDir, { recursive: true }); } catch {}
+      const ext = (image.mimeType || "").includes("png") ? "png" : "jpg";
+      const id = randomUUID();
+      const filePath = path.join(imagesDir, `${id}.${ext}`);
+      fs.writeFileSync(filePath, Buffer.from(image.data, "base64"));
+      if (cfg.tailServer) {
+        const url = cfg.tailServer.replace(/\/+$/, "") + "/ingest";
+        try {
+          await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ts: new Date().toISOString(),
+              kind: "image",
+              message: `image generated · ${image.prompt.slice(0, 80)}`,
+              level: "info",
+              model: image.provider === "google" ? "gemini-3.1-flash-image-preview" : "dall-e-3",
+              prompt_excerpt: image.prompt,
+              workflow_name: `sportsclaw-operate:${cfg.jobId}`,
+              src: `file://${filePath}`,
+            }),
+          });
+        } catch { /* non-fatal */ }
+      }
+    },
+  });
+  toolNames.push("generate_image");
 
   return { registry, mcpManager, toolSet, toolNames };
 }
@@ -683,7 +723,7 @@ function makeToolCallPoster(
 
 async function runDryRun(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
-  const tools = await buildOperatorTools(false);
+  const tools = await buildOperatorTools(cfg, false);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager);
     const system = buildSystemPrompt({
@@ -714,7 +754,7 @@ async function runDryRun(jobId: string): Promise<void> {
 
 async function runOnce(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
-  const tools = await buildOperatorTools(false);
+  const tools = await buildOperatorTools(cfg, false);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
     const daemon = createOperatorDaemon({
@@ -767,7 +807,7 @@ function exitCodeFor(event: TickEvent): number {
 
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
-  const tools = await buildOperatorTools(false);
+  const tools = await buildOperatorTools(cfg, false);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
 
   const daemon = createOperatorDaemon({
