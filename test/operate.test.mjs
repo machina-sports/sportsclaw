@@ -16,6 +16,7 @@ import {
   FRAGMENT_ALIASES,
   makeTailServerPoster,
   parseFlags,
+  parseStructuredBroadcast,
   resolveExtraFragments,
   resolvePersona,
 } from "../dist/operate.js";
@@ -244,7 +245,7 @@ describe("makeTailServerPoster", () => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  const event = {
+  const baseEvent = {
     type: "tick_published",
     jobId: "tv-operator",
     tickId: "tick_001",
@@ -252,39 +253,113 @@ describe("makeTailServerPoster", () => {
     timestamp: "2026-01-01T00:00:00.000Z",
   };
 
-  it("POSTs to <tailServer>/ingest with structured envelope", async () => {
-    const post = makeTailServerPoster(baseUrl, "tv-operator");
-    post(event);
-    await new Promise((r) => setTimeout(r, 50));
+  it("POSTs to <tailServer>/ingest with a flat tv-telemetry-event shape", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator", "gemini-3.1-pro-preview", 60000);
+    await post(baseEvent);
     assert.strictEqual(received.length, 1);
     assert.strictEqual(received[0].url, "/ingest");
-    assert.strictEqual(received[0].body.kind, "tv-telemetry-event");
-    assert.strictEqual(received[0].body.source, "sportsclaw-operate");
-    assert.strictEqual(received[0].body.jobId, "tv-operator");
-    assert.deepStrictEqual(received[0].body.event, event);
+    const body = received[0].body;
+    assert.strictEqual(body.kind, "broadcast");
+    assert.strictEqual(body.workflow_name, "sportsclaw-operate:tv-operator");
+    assert.strictEqual(body.model, "gemini-3.1-pro-preview");
+    assert.strictEqual(body.prompt_excerpt, "Argentina vs Brazil opens.");
+    assert.strictEqual(body.ts, baseEvent.timestamp);
+  });
+
+  it("maps tick_started → kind=tick with phase+intervalMs", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator", undefined, 90000);
+    await post({ ...baseEvent, type: "tick_started" });
+    assert.strictEqual(received.length, 1);
+    assert.strictEqual(received[0].body.kind, "tick");
+    assert.strictEqual(received[0].body.phase, "started");
+    assert.strictEqual(received[0].body.intervalMs, 90000);
+  });
+
+  it("maps tick_failed → kind=error", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator");
+    await post({ ...baseEvent, type: "tick_failed", reason: "upstream timeout" });
+    assert.strictEqual(received[0].body.kind, "error");
+    assert.match(received[0].body.message, /upstream timeout/);
+    assert.strictEqual(received[0].body.level, "error");
+  });
+
+  it("strips <<<DATA>>>...<<<END>>> from broadcast text before POSTing", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator");
+    await post({
+      ...baseEvent,
+      text: 'Big news today.\n\n<<<DATA>>>{"prediction_markets":[{"question":"Q","prob":0.5,"source":"Kalshi"}]}<<<END>>>',
+    });
+    // First post is the broadcast — narrative ONLY, packet stripped.
+    assert.strictEqual(received[0].body.kind, "broadcast");
+    assert.strictEqual(received[0].body.prompt_excerpt, "Big news today.");
+    assert.doesNotMatch(received[0].body.prompt_excerpt, /<<<DATA>>>/);
+  });
+
+  it("fans out the structured packet as kind-specific events", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator");
+    const packet = JSON.stringify({
+      prediction_markets: [{ question: "Will X win?", prob: 0.3, source: "Polymarket" }],
+      news: [{ headline: "Breaking", source: "NYT", ts: "2026-05-11" }],
+    });
+    await post({
+      ...baseEvent,
+      text: `Narrative.\n\n<<<DATA>>>${packet}<<<END>>>`,
+    });
+    // Should produce 3 POSTs: broadcast, prediction_markets, news
+    assert.strictEqual(received.length, 3);
+    const kinds = received.map((r) => r.body.kind);
+    assert.deepStrictEqual(kinds, ["broadcast", "prediction_markets", "news"]);
+    const marketsBody = received.find((r) => r.body.kind === "prediction_markets").body;
+    assert.strictEqual(marketsBody.items.length, 1);
+    assert.strictEqual(marketsBody.items[0].question, "Will X win?");
+    const newsBody = received.find((r) => r.body.kind === "news").body;
+    assert.strictEqual(newsBody.items[0].headline, "Breaking");
+  });
+
+  it("omits empty arrays from the packet fan-out", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator");
+    const packet = JSON.stringify({
+      prediction_markets: [{ question: "Q", prob: 0.5, source: "Kalshi" }],
+      news: [], // empty — should NOT fan out
+      fixtures: [], // empty — should NOT fan out
+    });
+    await post({
+      ...baseEvent,
+      text: `Hello.\n\n<<<DATA>>>${packet}<<<END>>>`,
+    });
+    assert.strictEqual(received.length, 2);
+    const kinds = received.map((r) => r.body.kind);
+    assert.deepStrictEqual(kinds, ["broadcast", "prediction_markets"]);
+  });
+
+  it("tolerates malformed JSON in the packet (does not crash)", async () => {
+    const post = makeTailServerPoster(baseUrl, "tv-operator");
+    await post({
+      ...baseEvent,
+      text: "Body.\n\n<<<DATA>>>{ not valid json <<<END>>>",
+    });
+    // Broadcast still posts even when packet parse fails.
+    assert.ok(received.length >= 1);
+    assert.strictEqual(received[0].body.kind, "broadcast");
+    // The packet should still be stripped from the narrative.
+    assert.doesNotMatch(received[0].body.prompt_excerpt, /<<<DATA>>>/);
   });
 
   it("normalises trailing slash on the server URL", async () => {
     const post = makeTailServerPoster(`${baseUrl}///`, "tv-operator");
-    post(event);
-    await new Promise((r) => setTimeout(r, 50));
+    await post(baseEvent);
     assert.strictEqual(received.length, 1);
     assert.strictEqual(received[0].url, "/ingest");
   });
 
   it("does NOT throw when the server is unreachable (network error)", async () => {
     const post = makeTailServerPoster("http://127.0.0.1:1", "tv-operator");
-    // Should not throw synchronously...
-    post(event);
-    // ...nor should it surface as an unhandled rejection (the poster
-    // catches and logs to stderr). Give it a tick for the fetch to fail.
-    await new Promise((r) => setTimeout(r, 50));
+    await post(baseEvent);
     // If we got here without a crash, the contract holds.
     assert.ok(true);
   });
 
   it("does NOT throw when the server returns 5xx", async () => {
-    // Replace the handler to return 503
     await new Promise((resolve) => server.close(resolve));
     server = http.createServer((_req, res) => {
       res.writeHead(503);
@@ -293,8 +368,63 @@ describe("makeTailServerPoster", () => {
     await new Promise((resolve) => server.listen(0, resolve));
     const port = server.address().port;
     const post = makeTailServerPoster(`http://127.0.0.1:${port}`, "tv-operator");
-    post(event);
-    await new Promise((r) => setTimeout(r, 50));
+    await post(baseEvent);
     assert.ok(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseStructuredBroadcast — packet extraction
+// ---------------------------------------------------------------------------
+
+describe("parseStructuredBroadcast", () => {
+  it("returns the full text and null data when no packet present", () => {
+    const r = parseStructuredBroadcast("Just a broadcast paragraph.");
+    assert.strictEqual(r.narrative, "Just a broadcast paragraph.");
+    assert.strictEqual(r.data, null);
+  });
+
+  it("extracts a well-formed packet and strips it from the narrative", () => {
+    const r = parseStructuredBroadcast(
+      'Hello world.\n\n<<<DATA>>>{"prediction_markets":[{"question":"Q","prob":0.5}]}<<<END>>>',
+    );
+    assert.strictEqual(r.narrative, "Hello world.");
+    assert.ok(r.data);
+    assert.strictEqual(r.data.prediction_markets.length, 1);
+    assert.strictEqual(r.data.prediction_markets[0].question, "Q");
+  });
+
+  it("trims surrounding whitespace inside the delimiters", () => {
+    const r = parseStructuredBroadcast(
+      'Text.\n\n<<<DATA>>>\n  {"news":[{"headline":"H"}]}  \n<<<END>>>',
+    );
+    assert.ok(r.data);
+    assert.strictEqual(r.data.news[0].headline, "H");
+  });
+
+  it("reports a parseError when the JSON is malformed", () => {
+    const r = parseStructuredBroadcast(
+      "Text.\n\n<<<DATA>>>{ not valid json <<<END>>>",
+    );
+    assert.strictEqual(r.data, null);
+    assert.ok(r.parseError);
+    // The narrative is still recovered without the packet.
+    assert.strictEqual(r.narrative, "Text.");
+  });
+
+  it("handles multiple newlines + multi-line JSON inside the packet", () => {
+    const r = parseStructuredBroadcast(
+      "Para 1.\n\nPara 2.\n\n<<<DATA>>>\n{\n  \"news\": [\n    {\"headline\":\"H1\"},\n    {\"headline\":\"H2\"}\n  ]\n}\n<<<END>>>",
+    );
+    assert.ok(r.data);
+    assert.strictEqual(r.data.news.length, 2);
+    assert.strictEqual(r.narrative, "Para 1.\n\nPara 2.");
+  });
+
+  it("ignores stray <<<DATA>>> with no matching <<<END>>>", () => {
+    const r = parseStructuredBroadcast("Text. <<<DATA>>> not closed");
+    // No match — returns the full text as narrative, data null.
+    assert.strictEqual(r.data, null);
+    assert.match(r.narrative, /Text\./);
   });
 });

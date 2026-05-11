@@ -490,6 +490,108 @@ describe("onTickEvent telemetry hook", () => {
 });
 
 // ---------------------------------------------------------------------------
+// onToolCall telemetry hook — per-tool execution observability
+// ---------------------------------------------------------------------------
+
+describe("onToolCall telemetry hook", () => {
+  it("fires once per tool execution with timing + outcome", async () => {
+    const calls = [];
+    const tools = {
+      search_documents: makeTool(async () => ({ documents: [] })),
+    };
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      await passedTools.search_documents.execute(
+        { name: "tv-news" },
+        { toolCallId: "1", messages: [] },
+      );
+      return { text: "done" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        tools,
+        generateTextImpl,
+        onToolCall: (e) => calls.push(e),
+      }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].toolName, "search_documents");
+    assert.strictEqual(calls[0].outcome, "ok");
+    assert.strictEqual(typeof calls[0].durationMs, "number");
+    assert.ok(calls[0].tickId.startsWith("tick_"));
+    assert.strictEqual(calls[0].jobId, "tv-operator-test");
+  });
+
+  it("records outcome=error when the underlying tool throws", async () => {
+    const calls = [];
+    const tools = {
+      execute_workflow: makeTool(async () => {
+        throw new Error("workflow not found");
+      }),
+    };
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      try {
+        await passedTools.execute_workflow.execute(
+          { workflow: "ingest" },
+          { toolCallId: "1", messages: [] },
+        );
+      } catch {
+        // expected
+      }
+      return { text: "tried" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        tools,
+        generateTextImpl,
+        onToolCall: (e) => calls.push(e),
+      }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].outcome, "error");
+    assert.match(calls[0].reason, /workflow not found/);
+  });
+
+  it("records outcome=blocked when the guardrail blocks a tool", async () => {
+    const calls = [];
+    const tools = {
+      execute_workflow: makeTool(async () => {
+        throw new Error("workflow not found");
+      }),
+    };
+    const generateTextImpl = async ({ tools: passedTools }) => {
+      // Drive the same failing call 6 times — guardrail blocks at 5+.
+      for (let i = 0; i < 6; i++) {
+        try {
+          await passedTools.execute_workflow.execute(
+            { workflow: "ingest" },
+            { toolCallId: String(i), messages: [] },
+          );
+        } catch {
+          // expected
+        }
+      }
+      return { text: "tried" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        tools,
+        generateTextImpl,
+        onToolCall: (e) => calls.push(e),
+      }),
+    );
+    await daemon.tickOnce();
+    const outcomes = calls.map((c) => c.outcome);
+    // 5 error outcomes + at least one block.
+    assert.ok(
+      outcomes.includes("blocked"),
+      "expected at least one outcome=blocked, got " + JSON.stringify(outcomes),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
