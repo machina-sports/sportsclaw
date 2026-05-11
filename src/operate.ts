@@ -423,6 +423,83 @@ async function buildOperatorTools(cfg: OperatorJobConfig, verbose: boolean): Pro
   });
   toolNames.push("recall_recent_content");
 
+  // recall_library — pull evergreen pieces from the pod's tv-content-library
+  // (hand-curated team / group / venue / player / historical / tactical pieces).
+  // Distinct from recall_recent_content (which queries the per-tick archive):
+  // library pieces are persistent, scope-tagged, and recalled when a tick's
+  // lead matches a scope we have canonical framing for.
+  toolSet["recall_library"] = defineTool({
+    description:
+      "Recall evergreen library pieces about a specific scope (team, group, venue, " +
+      "player, historical moment, tactical concept). Call this when the broadcast " +
+      "lead names a scope you have a canonical library piece on — e.g. lead mentions " +
+      "Brazil → recall_library({scope_type:'team', scope_ref:'BRA'}) → get the canonical " +
+      "Hexa-hunt framing to weave into the live narrative. Returns " +
+      "{count, results: [{title, body, scope_type, scope_ref, tags}]} from the pod's " +
+      "tv-content-library document store. Library pieces are persistent (not the " +
+      "per-tick archive — for that use recall_recent_content).",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        scope_type: {
+          type: "string",
+          enum: ["team", "group", "venue", "player", "historical", "tactical"],
+          description: "Filter by scope type. Omit for any scope.",
+        },
+        scope_ref: {
+          type: "string",
+          description: "Exact scope reference (e.g. 'BRA' for Brazil, 'group-A', 'metlife', 'messi'). Use with scope_type for canonical lookup.",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Filter to pieces tagged with ANY of these tags (e.g. ['favorites'], ['host'], ['europe']).",
+        },
+        limit: {
+          type: "number",
+          description: "Max pieces to return. Default 3.",
+        },
+      },
+    }),
+    execute: async (args: Record<string, unknown>) => {
+      const scope_type = typeof args.scope_type === "string" ? args.scope_type : undefined;
+      const scope_ref = typeof args.scope_ref === "string" ? args.scope_ref : undefined;
+      const tags = Array.isArray(args.tags) ? args.tags.filter((t): t is string => typeof t === "string") : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : 3;
+      const server = mcpManager.getMachinaServerName();
+      if (!server) return JSON.stringify({ error: "no pod available", count: 0, results: [] });
+      const filters: Record<string, unknown> = { name: "tv-content-library" };
+      if (scope_type) filters["metadata.scope_type"] = scope_type;
+      if (scope_ref) filters["metadata.scope_ref"] = scope_ref;
+      if (tags && tags.length > 0) filters["value.tags"] = { $in: tags };
+      const result = await mcpManager.callToolDirect(server, "search_documents", {
+        filters,
+        sorters: [["created", -1]],
+        page_size: limit,
+      });
+      if (result.isError) return JSON.stringify({ error: result.content, count: 0, results: [] });
+      try {
+        const parsed = JSON.parse(result.content);
+        const docs = (parsed as Record<string, unknown>)?.data ?? [];
+        const innerDocs = (docs as Record<string, unknown>)?.data ?? docs;
+        const items = (Array.isArray(innerDocs) ? innerDocs : []).map((d: Record<string, unknown>) => {
+          const value = (d.value ?? {}) as Record<string, unknown>;
+          return {
+            title: value.title,
+            body: value.body,
+            scope_type: value.scope_type,
+            scope_ref: value.scope_ref,
+            tags: value.tags,
+          };
+        });
+        return JSON.stringify({ count: items.length, results: items });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : String(e), count: 0, results: [] });
+      }
+    },
+  });
+  toolNames.push("recall_library");
+
   return { registry, mcpManager, toolSet, toolNames };
 }
 

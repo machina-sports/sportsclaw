@@ -572,3 +572,46 @@ describe("buildOperatorTools recall_recent_content", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// buildOperatorTools — recall_library tool (tv-content-library)
+// ---------------------------------------------------------------------------
+
+describe("buildOperatorTools recall_library", () => {
+  const baseCfg = {
+    jobId: "test-recall-library-job",
+    intervalMs: 60_000,
+    personaText: "x",
+    provider: "google",
+  };
+
+  it("registers recall_library in the toolset", async () => {
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      assert.ok(
+        t.toolNames.includes("recall_library"),
+        `toolNames did not include recall_library: ${t.toolNames.slice(0, 8).join(", ")}…`,
+      );
+      assert.ok(t.toolSet["recall_library"]);
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
+
+  it("recall_library description mentions tv-content-library + canonical/library framing", async () => {
+    // The description must distinguish this tool from recall_recent_content
+    // so the LLM picks the right tool. Pin the key wording.
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      const tool = t.toolSet["recall_library"];
+      assert.ok(tool);
+      const desc = String(tool.description ?? "");
+      assert.match(desc, /tv-content-library/i);
+      assert.match(desc, /persistent|evergreen|canonical/i);
+      // Ensures the LLM knows when NOT to pick this tool
+      assert.match(desc, /recall_recent_content/i);
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
+});
