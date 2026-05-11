@@ -255,7 +255,15 @@ describe("makeTailServerPoster", () => {
   };
 
   it("POSTs to <tailServer>/ingest with a flat tv-telemetry-event shape", async () => {
-    const post = makeTailServerPoster(baseUrl, "tv-operator", "gemini-3.1-pro-preview", 60000);
+    // makeTailServerPoster signature: (tailServer, jobId, mcpManager?, modelId?, intervalMs?)
+    // Pass undefined for mcpManager — archive is best-effort and skipped without one.
+    const post = makeTailServerPoster(
+      baseUrl,
+      "tv-operator",
+      undefined,
+      "gemini-3.1-pro-preview",
+      60000,
+    );
     await post(baseEvent);
     assert.strictEqual(received.length, 1);
     assert.strictEqual(received[0].url, "/ingest");
@@ -268,7 +276,7 @@ describe("makeTailServerPoster", () => {
   });
 
   it("maps tick_started → kind=tick with phase+intervalMs", async () => {
-    const post = makeTailServerPoster(baseUrl, "tv-operator", undefined, 90000);
+    const post = makeTailServerPoster(baseUrl, "tv-operator", undefined, undefined, 90000);
     await post({ ...baseEvent, type: "tick_started" });
     assert.strictEqual(received.length, 1);
     assert.strictEqual(received[0].body.kind, "tick");
@@ -520,6 +528,45 @@ describe("buildOperatorTools generate_image", () => {
         /sent to the user in their channel/i,
         "daemon must NOT use the chat-mode default description",
       );
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildOperatorTools — recall_recent_content tool (tv-content-archive)
+// ---------------------------------------------------------------------------
+
+describe("buildOperatorTools recall_recent_content", () => {
+  const baseCfg = {
+    jobId: "test-recall-job",
+    intervalMs: 60_000,
+    personaText: "x",
+    provider: "google",
+  };
+
+  it("registers recall_recent_content in the toolset", async () => {
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      assert.ok(
+        t.toolNames.includes("recall_recent_content"),
+        `toolNames did not include recall_recent_content: ${t.toolNames.slice(0, 8).join(", ")}…`,
+      );
+      assert.ok(t.toolSet["recall_recent_content"]);
+    } finally {
+      await t.mcpManager.disconnectAll().catch(() => {});
+    }
+  });
+
+  it("recall_recent_content returns {error:'category required'} when category is missing", async () => {
+    const t = await buildOperatorTools(baseCfg, false);
+    try {
+      const tool = t.toolSet["recall_recent_content"];
+      assert.ok(tool);
+      const result = await tool.execute({}, { toolCallId: "t1", messages: [] });
+      const parsed = JSON.parse(String(result));
+      assert.match(String(parsed.error), /category required/i);
     } finally {
       await t.mcpManager.disconnectAll().catch(() => {});
     }
