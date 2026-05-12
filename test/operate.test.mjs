@@ -197,6 +197,71 @@ describe("resolvePersona", () => {
     assert.strictEqual(text, "wrapped persona");
   });
 
+  it("unwraps the Machina pod's nested {data:{data:{template}}} response shape", async () => {
+    // get_prompt_by_name on the pod returns the prompt record nested two
+    // levels deep, with the persona body in `template` (matching the YAML).
+    // The previous parser missed this and returned the raw JSON envelope
+    // as the persona — silently shipping garbage as the system prompt.
+    const mcp = makeMockMcp({
+      serverName: "machina",
+      callToolDirect: async () => ({
+        isError: false,
+        content: JSON.stringify({
+          status: "ok",
+          message: "ok",
+          data: {
+            data: {
+              name: "tv-host-persona",
+              template: "You are SportsClaw, the on-air operator.",
+            },
+            status: "ok",
+          },
+        }),
+      }),
+    });
+    const text = await resolvePersona(
+      { jobId: "j", intervalMs: 60_000, persona: "tv-host-persona" },
+      mcp,
+    );
+    assert.strictEqual(text, "You are SportsClaw, the on-air operator.");
+  });
+
+  it("prefers `template` over `content/text/prompt` when multiple are present at the nested level", async () => {
+    const mcp = makeMockMcp({
+      serverName: "machina",
+      callToolDirect: async () => ({
+        isError: false,
+        content: JSON.stringify({
+          data: {
+            data: {
+              template: "FROM template",
+              content: "from content",
+              text: "from text",
+            },
+          },
+        }),
+      }),
+    });
+    const text = await resolvePersona(
+      { jobId: "j", intervalMs: 60_000, persona: "p" },
+      mcp,
+    );
+    assert.strictEqual(text, "FROM template");
+  });
+
+  it("falls back to the raw response when the shape doesn't match anything", async () => {
+    const weirdShape = JSON.stringify({ unrelated: { key: "values" } });
+    const mcp = makeMockMcp({
+      serverName: "machina",
+      callToolDirect: async () => ({ isError: false, content: weirdShape }),
+    });
+    const text = await resolvePersona(
+      { jobId: "j", intervalMs: 60_000, persona: "p" },
+      mcp,
+    );
+    assert.strictEqual(text, weirdShape);
+  });
+
   it("surfaces MCP errors as resolver errors", async () => {
     const mcp = makeMockMcp({
       serverName: "machina",
