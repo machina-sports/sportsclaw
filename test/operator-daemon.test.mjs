@@ -619,6 +619,85 @@ describe("config validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Editorial-memory writeback tools — daemon-level wiring
+// ---------------------------------------------------------------------------
+
+describe("editorial-memory tools (daemon wiring)", () => {
+  // The daemon adds add_lesson / replace_lesson / remove_lesson into the
+  // tick's toolset by default. Disable via enableMemoryTools: false.
+  // The model stub here captures the tools it receives so we can pin
+  // their presence/absence without driving a real LLM.
+
+  function makeGenCapturingTools() {
+    let captured = null;
+    const impl = async ({ tools }) => {
+      captured = tools ?? {};
+      return { text: "ok" };
+    };
+    impl.captured = () => captured;
+    return impl;
+  }
+
+  it("registers add/replace/remove_lesson by default", async () => {
+    const gen = makeGenCapturingTools();
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen }),
+    );
+    await daemon.tickOnce();
+    const tools = gen.captured() ?? {};
+    assert.ok(tools["add_lesson"], "add_lesson must be registered by default");
+    assert.ok(tools["replace_lesson"], "replace_lesson must be registered by default");
+    assert.ok(tools["remove_lesson"], "remove_lesson must be registered by default");
+  });
+
+  it("does NOT register memory tools when enableMemoryTools is false", async () => {
+    const gen = makeGenCapturingTools();
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen, enableMemoryTools: false }),
+    );
+    await daemon.tickOnce();
+    const tools = gen.captured() ?? {};
+    assert.strictEqual(tools["add_lesson"], undefined);
+    assert.strictEqual(tools["replace_lesson"], undefined);
+    assert.strictEqual(tools["remove_lesson"], undefined);
+  });
+
+  it("preserves caller-supplied tools alongside memory tools", async () => {
+    const callerTool = makeTool(async () => "from caller");
+    const gen = makeGenCapturingTools();
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        tools: { caller_thing: callerTool },
+      }),
+    );
+    await daemon.tickOnce();
+    const tools = gen.captured() ?? {};
+    assert.ok(tools["caller_thing"]);
+    assert.ok(tools["add_lesson"]);
+  });
+
+  it("memory writes from a tick land on disk (visible to a fresh load)", async () => {
+    // Drive the model stub to invoke add_lesson against the daemon's
+    // memory, then verify the file picks it up after the tick.
+    const memoryFilePath = path.join(tmpDir, "editorial-memory.md");
+    const generateTextImpl = async ({ tools: passed }) => {
+      await passed.add_lesson.execute(
+        { body: "Test lesson from a mocked tick." },
+        { toolCallId: "t1", messages: [] },
+      );
+      return { text: "ok" };
+    };
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl }),
+    );
+    await daemon.tickOnce();
+    const text = fs.readFileSync(memoryFilePath, "utf8");
+    assert.match(text, /Test lesson from a mocked tick/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Public entry re-exports
 // ---------------------------------------------------------------------------
 

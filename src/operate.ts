@@ -470,13 +470,22 @@ async function runDryRun(jobId: string): Promise<void> {
     console.log("");
     console.log(system);
     console.log("");
-    console.log(`=== Tools (${tools.toolNames.length}) ===`);
+    const memoryToolsOn = cfg.enableMemoryTools !== false;
+    const memoryToolCount = memoryToolsOn ? 3 : 0;
+    const totalToolCount = tools.toolNames.length + memoryToolCount;
+    console.log(`=== Tools (${totalToolCount}) ===`);
     for (const name of tools.toolNames) console.log(`  - ${name}`);
+    if (memoryToolsOn) {
+      console.log(`  - add_lesson         (daemon-owned memory writeback)`);
+      console.log(`  - replace_lesson     (daemon-owned memory writeback)`);
+      console.log(`  - remove_lesson      (daemon-owned memory writeback)`);
+    }
     console.log("");
-    console.log(`provider: ${inputs.provider}`);
-    console.log(`model:    ${inputs.modelId}`);
-    console.log(`rootDir:  ${inputs.rootDir}`);
-    console.log(`sink:     ${sink.name}`);
+    console.log(`provider:          ${inputs.provider}`);
+    console.log(`model:             ${inputs.modelId}`);
+    console.log(`rootDir:           ${inputs.rootDir}`);
+    console.log(`sink:              ${sink.name}`);
+    console.log(`memory writeback:  ${memoryToolsOn ? "enabled" : "disabled"}`);
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
   }
@@ -509,6 +518,7 @@ async function runOnce(jobId: string): Promise<void> {
       rootDir: inputs.rootDir,
       extraFragments: inputs.extraFragments,
       guardOptions: cfg.guardOptions,
+      enableMemoryTools: cfg.enableMemoryTools,
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -571,6 +581,7 @@ async function runForeground(jobId: string): Promise<void> {
     rootDir: inputs.rootDir,
     extraFragments: inputs.extraFragments,
     guardOptions: cfg.guardOptions,
+    enableMemoryTools: cfg.enableMemoryTools,
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
