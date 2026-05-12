@@ -146,8 +146,10 @@ export const noopSink: OperatorSinkPlugin = {
  * Resolve which sink to use for a given job config. Resolution order:
  *
  *   1. cfg.sink === "noop"      → noopSink (built-in)
- *   2. cfg.sink === "broadcast" → bundled broadcast sink (deprecated path,
- *                                 to be removed when TV ships its own pkg)
+ *   2. cfg.sink === "broadcast" → bundled broadcast sink — DEPRECATED. Emits
+ *                                 a stderr warning. Install the
+ *                                 @machina-sports/tv-operator-sink package
+ *                                 and set cfg.sink to it instead.
  *   3. cfg.sink begins with "./", "../" or "/", or ends in ".js" / ".mjs"
  *                               → filesystem path. Dynamic-import relative to
  *                                 process.cwd() (or use as-is when absolute).
@@ -155,7 +157,9 @@ export const noopSink: OperatorSinkPlugin = {
  *                                 import — the package must be installed
  *                                 alongside sportsclaw (workspace dep, npm
  *                                 link, or published).
- *   5. cfg.tailServer is set    → backward-compat: use bundled broadcast sink
+ *   5. cfg.tailServer is set    → DEPRECATED implicit fallback to the
+ *                                 bundled broadcast sink. Same warning as
+ *                                 case 2.
  *   6. otherwise                → noopSink
  *
  * External modules (cases 3 and 4) must expose the sink as one of:
@@ -171,6 +175,7 @@ export async function resolveSink(
 ): Promise<OperatorSinkPlugin> {
   if (cfg.sink === "noop") return noopSink;
   if (cfg.sink === "broadcast") {
+    emitBroadcastDeprecationWarning("explicit");
     const { broadcastSink } = await import("./sinks/broadcast.js");
     return broadcastSink;
   }
@@ -180,10 +185,43 @@ export async function resolveSink(
   // Backward-compat: legacy configs without `sink` but with a `tailServer`
   // got the broadcast sink implicitly. Preserve that.
   if (cfg.tailServer) {
+    emitBroadcastDeprecationWarning("implicit");
     const { broadcastSink } = await import("./sinks/broadcast.js");
     return broadcastSink;
   }
   return noopSink;
+}
+
+// ---------------------------------------------------------------------------
+// Deprecation warning
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit a one-line stderr warning when the bundled broadcast sink resolves.
+ * Fires for both code paths:
+ *   - "explicit": `cfg.sink === "broadcast"` — caller asked for it by name
+ *   - "implicit": `cfg.tailServer` set without `cfg.sink` — legacy fallback
+ *
+ * Both will be removed in a follow-up PR after a soak window. The migration
+ * target is the @machina-sports/tv-operator-sink package, which exposes the
+ * same plugin at its public name.
+ *
+ * Suppress via env: SPORTSCLAW_SUPPRESS_DEPRECATION=1 (for deployments still
+ * in transition that don't want warning lines polluting their logs).
+ */
+function emitBroadcastDeprecationWarning(mode: "explicit" | "implicit"): void {
+  if (process.env.SPORTSCLAW_SUPPRESS_DEPRECATION === "1") return;
+  const reason =
+    mode === "explicit"
+      ? `cfg.sink="broadcast" resolves to the BUNDLED broadcast sink.`
+      : `cfg.tailServer is set but cfg.sink is not — falling back to the BUNDLED broadcast sink.`;
+  console.error(
+    `[sportsclaw] DEPRECATED: ${reason} ` +
+      `The bundled broadcast sink is scheduled for removal. ` +
+      `Install @machina-sports/tv-operator-sink and set ` +
+      `\`"sink": "@machina-sports/tv-operator-sink"\` in your operator job config. ` +
+      `Suppress this warning with SPORTSCLAW_SUPPRESS_DEPRECATION=1.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
