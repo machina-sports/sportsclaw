@@ -41,6 +41,19 @@ export interface OperatorJobConfig {
   /** If set, POST every TickEvent to <tailServer>/ingest. Failures are non-fatal. */
   tailServer?: string;
   /**
+   * Domain plugin that hooks into the daemon's events. Built-ins:
+   *   - "noop"      → no-op sink (tick events stream to stdout as NDJSON)
+   *   - "broadcast" → SportsClaw TV's bundled sink (deprecated path; the
+   *                   actual implementation is scheduled to move to the
+   *                   machina-sports-tv repo)
+   * External sink packages (npm name or filesystem path) will land in a
+   * follow-up PR once TV ships its own package.
+   *
+   * If omitted: defaults to "broadcast" when `tailServer` is set (legacy
+   * shape), otherwise "noop".
+   */
+  sink?: string;
+  /**
    * Extra system-prompt fragments. Each string is resolved against
    * prompts.ts exports first (e.g. "broadcast-directive" →
    * BROADCAST_DIRECTIVE_FRAGMENT) and used as inline text otherwise.
@@ -196,6 +209,11 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // sink
+  if (raw.sink !== undefined && (typeof raw.sink !== "string" || !raw.sink.trim())) {
+    push("sink", "must be a non-empty string (e.g. \"noop\", \"broadcast\", or a package/path)");
+  }
+
   // extraFragments
   if (raw.extraFragments !== undefined) {
     if (!Array.isArray(raw.extraFragments)) {
@@ -234,6 +252,7 @@ export function validateOperatorJobConfig(
       provider: raw.provider as LLMProvider | undefined,
       rootDir: raw.rootDir as string | undefined,
       tailServer: raw.tailServer as string | undefined,
+      sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
     },

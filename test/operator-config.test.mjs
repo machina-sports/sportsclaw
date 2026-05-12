@@ -194,6 +194,37 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.strictEqual(r.valid, true);
   });
 
+  it("accepts known sink values (noop, broadcast)", () => {
+    for (const s of ["noop", "broadcast"]) {
+      const r = validateOperatorJobConfig({ ...base, sink: s });
+      assert.strictEqual(r.valid, true, `sink=${s}`);
+      assert.strictEqual(r.config.sink, s);
+    }
+  });
+
+  it("accepts an external sink name (e.g. package or path) — resolver will load it at runtime", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      sink: "@machina-sports/tv-operator-sink",
+    });
+    assert.strictEqual(r.valid, true);
+  });
+
+  it("rejects an empty sink string", () => {
+    for (const bad of ["", "   "]) {
+      const r = validateOperatorJobConfig({ ...base, sink: bad });
+      assert.strictEqual(r.valid, false, `sink=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "sink"));
+    }
+  });
+
+  it("rejects a non-string sink value", () => {
+    for (const bad of [42, true, ["broadcast"], { name: "x" }]) {
+      const r = validateOperatorJobConfig({ ...base, sink: bad });
+      assert.strictEqual(r.valid, false, `sink=${JSON.stringify(bad)}`);
+    }
+  });
+
   it("collects multiple errors at once (line-precise)", () => {
     const r = validateOperatorJobConfig({
       intervalMs: -1,
