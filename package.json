@@ -45,6 +45,7 @@
     "test:halt-guard": "npm run build && node --test test/halt-guard.test.mjs",
     "test:tool-call-part-guard": "npm run build && node --test test/tool-call-part-guard.test.mjs",
     "test:operator-sink": "npm run build && node --test test/operator-sink.test.mjs",
+    "test:operator-sink-external": "npm run build && node --test test/operator-sink-external.test.mjs",
     "test:sinks-broadcast": "npm run build && node --test test/sinks-broadcast.test.mjs"
   },
   "keywords": [

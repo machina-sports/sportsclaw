@@ -60,13 +60,6 @@ describe("resolveSink", () => {
     assert.strictEqual(s.name, "noop");
   });
 
-  it("throws a clear error for unknown sink names (until external resolver lands)", async () => {
-    await assert.rejects(
-      resolveSink({ ...baseCfg, sink: "@example/some-other-sink" }),
-      /not a built-in/i,
-    );
-  });
-
   it("prefers cfg.sink over cfg.tailServer when both are set", async () => {
     const s = await resolveSink({
       ...baseCfg,
@@ -75,4 +68,8 @@ describe("resolveSink", () => {
     });
     assert.strictEqual(s.name, "noop");
   });
+
+  // External sink resolution (filesystem path + npm package name) is
+  // covered by test/operator-sink-external.test.mjs alongside its
+  // fixture modules — see that file for path / package / shape cases.
 });
