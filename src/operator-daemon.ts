@@ -51,6 +51,7 @@ import {
 import { EditorialMemory } from "./editorial-memory.js";
 import { LastTickBrief, newTickId } from "./last-tick-brief.js";
 import { buildSystemPrompt } from "./prompts.js";
+import { buildMemoryTools } from "./operator-memory-tools.js";
 import {
   ToolGuardController,
   digestResult,
@@ -120,6 +121,13 @@ export interface OperatorDaemonConfig {
   /** Maximum LLM steps per tick. Default 8. Allows the model to call tools
    *  and then produce a final synthesis text within one tick. */
   maxSteps?: number;
+  /**
+   * Register the daemon-owned memory writeback tools (add_lesson,
+   * replace_lesson, remove_lesson) bound to this job's EditorialMemory.
+   * Writes hit disk immediately but the in-prompt memory snapshot for the
+   * current tick is frozen — new lessons appear next tick. Default: true.
+   */
+  enableMemoryTools?: boolean;
   /** Append additional fragments to the system prompt (project-specific guides, etc.). */
   extraFragments?: string[];
 
@@ -271,8 +279,15 @@ export function createOperatorDaemon(
     const toolCallSink = (event: ToolCallEvent): void => {
       try { cfg.onToolCall?.(event); } catch { /* swallow */ }
     };
+    // Daemon-owned tools: memory writeback (add/replace/remove_lesson)
+    // tied to THIS tick's live EditorialMemory instance. Writes hit disk
+    // immediately but the in-prompt snapshot above is frozen — new lessons
+    // appear in the next tick's prompt. Opt out via cfg.enableMemoryTools=false.
+    const daemonOwnedTools: ToolSet =
+      cfg.enableMemoryTools === false ? {} : buildMemoryTools(memory);
+    const mergedTools: ToolSet = { ...(cfg.tools ?? {}), ...daemonOwnedTools };
     const wrappedTools = wrapTools(
-      cfg.tools, guard, counts,
+      mergedTools, guard, counts,
       { jobId: cfg.jobId, tickId, onToolCall: toolCallSink },
     );
 

@@ -194,6 +194,22 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.strictEqual(r.valid, true);
   });
 
+  it("accepts enableMemoryTools as boolean (true and false)", () => {
+    for (const v of [true, false]) {
+      const r = validateOperatorJobConfig({ ...base, enableMemoryTools: v });
+      assert.strictEqual(r.valid, true, `enableMemoryTools=${v}`);
+      assert.strictEqual(r.config.enableMemoryTools, v);
+    }
+  });
+
+  it("rejects a non-boolean enableMemoryTools", () => {
+    for (const bad of ["true", 1, 0, null, [], {}]) {
+      const r = validateOperatorJobConfig({ ...base, enableMemoryTools: bad });
+      assert.strictEqual(r.valid, false, `enableMemoryTools=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "enableMemoryTools"));
+    }
+  });
+
   it("accepts known sink values (noop, broadcast)", () => {
     for (const s of ["noop", "broadcast"]) {
       const r = validateOperatorJobConfig({ ...base, sink: s });

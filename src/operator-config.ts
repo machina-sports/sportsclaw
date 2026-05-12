@@ -61,6 +61,13 @@ export interface OperatorJobConfig {
   extraFragments?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
   guardOptions?: Record<string, unknown>;
+  /**
+   * Register the daemon-owned memory writeback tools (add_lesson,
+   * replace_lesson, remove_lesson). The LLM can call these to evolve its
+   * own cross-tick memory. Writes appear in the NEXT tick's system prompt
+   * — the current tick sees a frozen snapshot. Default: true.
+   */
+  enableMemoryTools?: boolean;
 }
 
 export interface ValidationIssue {
@@ -235,6 +242,11 @@ export function validateOperatorJobConfig(
     push("guardOptions", "must be an object");
   }
 
+  // enableMemoryTools
+  if (raw.enableMemoryTools !== undefined && typeof raw.enableMemoryTools !== "boolean") {
+    push("enableMemoryTools", "must be a boolean");
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -255,6 +267,7 @@ export function validateOperatorJobConfig(
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
+      enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
     },
   };
 }
