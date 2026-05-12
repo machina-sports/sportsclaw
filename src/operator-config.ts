@@ -38,19 +38,19 @@ export interface OperatorJobConfig {
   provider?: LLMProvider;
   /** Persistence + brief root. Defaults to ~/.sportsclaw/operator/<jobId>/. */
   rootDir?: string;
-  /** If set, POST every TickEvent to <tailServer>/ingest. Failures are non-fatal. */
+  /**
+   * Domain-specific endpoint URL — sinks read this from `ctx.cfg.tailServer`
+   * to know where to POST telemetry events. The bundled sportsclaw daemon
+   * doesn't interpret this field directly; the resolved sink does.
+   */
   tailServer?: string;
   /**
-   * Domain plugin that hooks into the daemon's events. Built-ins:
-   *   - "noop"      → no-op sink (tick events stream to stdout as NDJSON)
-   *   - "broadcast" → SportsClaw TV's bundled sink (deprecated path; the
-   *                   actual implementation is scheduled to move to the
-   *                   machina-sports-tv repo)
-   * External sink packages (npm name or filesystem path) will land in a
-   * follow-up PR once TV ships its own package.
-   *
-   * If omitted: defaults to "broadcast" when `tailServer` is set (legacy
-   * shape), otherwise "noop".
+   * Domain plugin that hooks into the daemon's events. One of:
+   *   - "noop"             → no-op sink (TickEvents stream to stdout)
+   *   - "./path/to/sink"   → filesystem path (resolved against cwd)
+   *   - "/abs/path/sink"   → absolute filesystem path
+   *   - "@scope/package"   → npm package name (dynamic import)
+   * Omit for the noop sink default.
    */
   sink?: string;
   /**

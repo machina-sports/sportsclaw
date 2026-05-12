@@ -618,10 +618,6 @@ export {
   resolveExtraFragments,
   resolvePersona,
 };
-// Re-export the broadcast sink's pure helper for tests that pin the
-// packet-strip contract. The sink itself moves to the TV repo in the
-// follow-up PR; this re-export will go away with it.
-export { parseStructuredBroadcast } from "./sinks/broadcast.js";
 
 // Suppress unused warnings for fragment-header re-exports that may be
 // consumed by callers in the future.
