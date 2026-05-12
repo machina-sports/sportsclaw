@@ -33,6 +33,9 @@
  * once the TV sink moves to machina-sports-tv. The interface is stable.
  */
 
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import type { ToolSet } from "ai";
 
 import type { TickEvent, ToolCallEvent } from "./operator-daemon.js";
@@ -142,17 +145,26 @@ export const noopSink: OperatorSinkPlugin = {
 /**
  * Resolve which sink to use for a given job config. Resolution order:
  *
- *   1. cfg.sink === "noop"      → noopSink
- *   2. cfg.sink === "broadcast" → builtin broadcast sink (deprecated path,
+ *   1. cfg.sink === "noop"      → noopSink (built-in)
+ *   2. cfg.sink === "broadcast" → bundled broadcast sink (deprecated path,
  *                                 to be removed when TV ships its own pkg)
- *   3. cfg.sink === <other>     → reserved for future dynamic import (npm
- *                                 package name or filesystem path); throws
- *                                 in this PR until the resolver lands.
- *   4. cfg.tailServer is set    → backward-compat: use broadcast sink
- *   5. otherwise                → noopSink
+ *   3. cfg.sink begins with "./", "../" or "/", or ends in ".js" / ".mjs"
+ *                               → filesystem path. Dynamic-import relative to
+ *                                 process.cwd() (or use as-is when absolute).
+ *   4. cfg.sink === <other>     → npm package name. Resolves via dynamic
+ *                                 import — the package must be installed
+ *                                 alongside sportsclaw (workspace dep, npm
+ *                                 link, or published).
+ *   5. cfg.tailServer is set    → backward-compat: use bundled broadcast sink
+ *   6. otherwise                → noopSink
  *
- * The async signature is forward-looking — dynamic-import support will use
- * it. Callers should `await` the resolver.
+ * External modules (cases 3 and 4) must expose the sink as one of:
+ *   - `export default <plugin>`
+ *   - `export const sink = <plugin>` (named export)
+ *
+ * The resolver picks `default` first, then `sink`. The chosen value must be
+ * an object with a string `name` field — minimal contract check; runtime
+ * validation of the hooks themselves happens lazily when they're called.
  */
 export async function resolveSink(
   cfg: OperatorJobConfig,
@@ -163,11 +175,7 @@ export async function resolveSink(
     return broadcastSink;
   }
   if (cfg.sink) {
-    throw new Error(
-      `OperatorJobConfig.sink="${cfg.sink}" is not a built-in. ` +
-        `External sinks (npm package / filesystem path) will be supported in a ` +
-        `follow-up PR. Use "noop" or "broadcast" for now.`,
-    );
+    return loadExternalSink(cfg.sink);
   }
   // Backward-compat: legacy configs without `sink` but with a `tailServer`
   // got the broadcast sink implicitly. Preserve that.
@@ -176,4 +184,75 @@ export async function resolveSink(
     return broadcastSink;
   }
   return noopSink;
+}
+
+// ---------------------------------------------------------------------------
+// External sink loader
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a sink plugin from an external module — either a filesystem path or
+ * an npm package name. ESM dynamic-import in both cases.
+ *
+ * Filesystem detection: a spec is treated as a path if it starts with `./`,
+ * `../`, `/`, or ends in `.js`/`.mjs`/`.cjs`. Everything else is treated as
+ * an npm package name and passed through to `import()` directly — Node's
+ * resolver handles workspace deps, `npm link`'d packages, and installed
+ * packages identically. The caller's CWD is used to resolve relative paths.
+ *
+ * Module shape: the loader accepts `default` export OR `sink` named export.
+ * `default` wins. The chosen value must be an object with a string `name`
+ * field. Tools / hook methods are validated lazily — a sink that ships
+ * neither registerTools nor any event hook is technically legal (and
+ * equivalent to noopSink).
+ */
+async function loadExternalSink(spec: string): Promise<OperatorSinkPlugin> {
+  let mod: unknown;
+  try {
+    const specifier = isFilesystemSpec(spec)
+      ? toFileUrl(spec)
+      : spec;
+    mod = await import(specifier);
+  } catch (err) {
+    throw new Error(
+      `Failed to load operator sink "${spec}": ` +
+        (err instanceof Error ? err.message : String(err)) +
+        ". Check the path/package is reachable from the daemon's working " +
+        "directory and exports a default or named `sink` plugin.",
+    );
+  }
+  if (!mod || typeof mod !== "object") {
+    throw new Error(`Operator sink module "${spec}" did not produce a module object.`);
+  }
+  const m = mod as Record<string, unknown>;
+  const candidate = (m.default ?? m.sink) as unknown;
+  if (!candidate || typeof candidate !== "object") {
+    throw new Error(
+      `Operator sink "${spec}" exports neither a default nor a named "sink" — ` +
+        "module must export one or the other as an OperatorSinkPlugin object.",
+    );
+  }
+  const plugin = candidate as Record<string, unknown>;
+  if (typeof plugin.name !== "string" || !plugin.name) {
+    throw new Error(
+      `Operator sink "${spec}" is missing the required \`name\` field on its plugin export.`,
+    );
+  }
+  return plugin as unknown as OperatorSinkPlugin;
+}
+
+function isFilesystemSpec(spec: string): boolean {
+  if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/")) return true;
+  if (/\.(?:js|mjs|cjs)$/.test(spec)) return true;
+  return false;
+}
+
+/**
+ * ESM dynamic import needs an absolute path as a file:// URL (or a bare
+ * specifier). Relative paths get resolved against process.cwd() so daemons
+ * launched from arbitrary working directories behave predictably.
+ */
+function toFileUrl(spec: string): string {
+  const absolute = path.isAbsolute(spec) ? spec : path.resolve(process.cwd(), spec);
+  return pathToFileURL(absolute).href;
 }
