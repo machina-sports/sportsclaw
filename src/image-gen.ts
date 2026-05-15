@@ -39,7 +39,10 @@ export async function generateImageGoogle(prompt: string): Promise<GeneratedImag
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+        generationConfig: {
+          responseModalities: ["IMAGE", "TEXT"],
+          imageConfig: { aspectRatio: "16:9" },
+        },
       }),
     },
   );
