@@ -161,6 +161,19 @@ export interface OperatorDaemonConfig {
   /** Per-tool-call hook — fires once per tool execution with timing + result. */
   onToolCall?: (event: ToolCallEvent) => void;
 
+  /**
+   * Pre-tick context composer. Called once per tick BEFORE generateText.
+   * Returned string is prepended to the tick prompt — the place to inject
+   * deterministic, daemon-side directives the LLM cannot ignore (e.g. a
+   * scored rotation pool computed from external data). Errors are caught
+   * and logged; the tick proceeds without the directive.
+   */
+  onComposeTickContext?: (args: {
+    jobId: string;
+    tickId: string;
+    timestamp: string;
+  }) => Promise<string | null | undefined> | string | null | undefined;
+
   /** Inject a HeartbeatService (tests). Default: a fresh instance. */
   heartbeat?: HeartbeatService;
   /** Inject a generateText impl (tests). Default: ai SDK's. */
@@ -291,7 +304,26 @@ export function createOperatorDaemon(
       { jobId: cfg.jobId, tickId, onToolCall: toolCallSink },
     );
 
-    const tickPrompt = tickPromptTemplate
+    // 4b. Optional pre-tick context — sink-supplied deterministic directive
+    // injected ahead of the tick prompt. Used to feed the LLM constraints
+    // computed from external data (rotation pool, live-match cue, etc.) that
+    // we don't want depending on the LLM's discretion to call a tool for.
+    let preTickDirective = "";
+    if (cfg.onComposeTickContext) {
+      try {
+        const directive = await cfg.onComposeTickContext({ jobId, tickId, timestamp });
+        if (typeof directive === "string" && directive.trim().length > 0) {
+          preTickDirective = directive.trim() + "\n\n";
+        }
+      } catch (err) {
+        console.error(
+          `[operator-daemon] onComposeTickContext threw (tick ${tickId}): ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    const tickPrompt = preTickDirective + tickPromptTemplate
       .replace("{tickId}", tickId)
       .replace("{timestamp}", timestamp);
 

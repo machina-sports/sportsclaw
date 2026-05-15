@@ -110,6 +110,27 @@ export interface OperatorSinkPlugin {
   }): CreateGenerateImageToolOpts;
 
   /**
+   * Pre-tick context composer. Called once per tick BEFORE the LLM call so
+   * the sink can inject deterministic, daemon-side directives into the tick
+   * input (e.g. a scored rotation pool, a live-match cue, an editorial
+   * override). The returned string is prepended to the tick prompt; return
+   * null/undefined to add nothing.
+   *
+   * Use this — instead of persona rules — when you want a constraint the
+   * LLM cannot ignore. Rules in the persona compete with the LLM's training
+   * prior; data injected into the tick input doesn't.
+   *
+   * Errors are caught and logged; the tick proceeds without the directive.
+   */
+  composeTickContext?(args: {
+    jobId: string;
+    tickId: string;
+    timestamp: string;
+    cfg: OperatorJobConfig;
+    mcpManager: McpManager;
+  }): Promise<string | null | undefined> | string | null | undefined;
+
+  /**
    * Per-tick event handler. Called once per `tick_started` / `tick_published`
    * / `tick_silent` / `tick_failed` / `tick_skipped` emission. Sinks may
    * `await` the call — the daemon awaits it before the next tick can fire.

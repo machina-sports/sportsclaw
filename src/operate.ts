@@ -525,6 +525,14 @@ async function runOnce(jobId: string): Promise<void> {
       onToolCall: sink.onToolCall
         ? (evt) => { void sink.onToolCall!(evt, ctx); }
         : undefined,
+      onComposeTickContext: sink.composeTickContext
+        ? async (args) =>
+            sink.composeTickContext!({
+              ...args,
+              cfg,
+              mcpManager: tools.mcpManager,
+            })
+        : undefined,
     });
     const event = await daemon.tickOnce();
     console.log(JSON.stringify(event, null, 2));
@@ -587,6 +595,14 @@ async function runForeground(jobId: string): Promise<void> {
       : (evt) => console.log(JSON.stringify(evt)),
     onToolCall: sink.onToolCall
       ? (evt) => { void sink.onToolCall!(evt, ctx); }
+      : undefined,
+    onComposeTickContext: sink.composeTickContext
+      ? async (args) =>
+          sink.composeTickContext!({
+            ...args,
+            cfg,
+            mcpManager: tools.mcpManager,
+          })
       : undefined,
   });
 
