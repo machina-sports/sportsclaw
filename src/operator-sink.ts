@@ -24,13 +24,10 @@
  *   - onTickEvent       — handle every TickEvent (the existing callback)
  *   - onToolCall        — handle every ToolCallEvent (the existing callback)
  *
- * Sinks are resolved from `OperatorJobConfig.sink`. Built-ins:
- *   "noop"      — no-op; tick events stream to stdout as NDJSON
- *   "broadcast" — sportsclaw's bundled broadcast sink (deprecated; TV will
- *                 move to its own package, scheduled for a follow-up PR)
- *
- * External sinks (npm package or filesystem path) will land in a follow-up
- * once the TV sink moves to machina-sports-tv. The interface is stable.
+ * Sinks are resolved from `OperatorJobConfig.sink`. The only built-in is
+ * `"noop"` (tick events stream to stdout as NDJSON). Any other value is
+ * loaded at runtime — npm package name or filesystem path — via dynamic
+ * import. See `resolveSink` / `loadExternalSink` below.
  */
 
 import path from "node:path";
