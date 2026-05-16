@@ -22,15 +22,26 @@ export async function generateImageForProvider(
   provider: LLMProvider,
   prompt: string,
   size?: string,
+  aspectRatio?: string,
 ): Promise<GeneratedImage> {
-  if (provider === "google") return generateImageGoogle(prompt);
+  if (provider === "google") return generateImageGoogle(prompt, aspectRatio);
   if (provider === "openai") return generateImageOpenAI(prompt, size);
   throw new Error("Provider does not support image generation.");
 }
 
-export async function generateImageGoogle(prompt: string): Promise<GeneratedImage> {
+export async function generateImageGoogle(
+  prompt: string,
+  aspectRatio?: string,
+): Promise<GeneratedImage> {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY is not set.");
+
+  const generationConfig: Record<string, unknown> = {
+    responseModalities: ["IMAGE", "TEXT"],
+  };
+  if (typeof aspectRatio === "string" && aspectRatio.length > 0) {
+    generationConfig.imageConfig = { aspectRatio };
+  }
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${apiKey}`,
@@ -39,7 +50,7 @@ export async function generateImageGoogle(prompt: string): Promise<GeneratedImag
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+        generationConfig,
       }),
     },
   );
@@ -105,6 +116,14 @@ export interface CreateGenerateImageToolOpts {
   isHalt?: (err: unknown) => boolean;
   /** Optional: override the default tool description. The default is chat-oriented ("sent to the user in their channel"); the operator daemon should pass a broadcaster-oriented description so the LLM knows when to call it. */
   description?: string;
+  /**
+   * Force a specific aspect ratio for every generated image, regardless of
+   * what the LLM passes in `aspectRatio`. Currently only honored by the
+   * Google provider (fed into Gemini's `imageConfig`). Use for fixed-canvas
+   * operators (e.g. a 1920×1080 16:9 stage). Omit for chat-mode so the LLM
+   * may request portrait/landscape via the tool's `aspectRatio` input.
+   */
+  forceAspectRatio?: string;
 }
 
 const DEFAULT_DESCRIPTION =
@@ -131,7 +150,14 @@ export function createGenerateImageTool(opts: CreateGenerateImageToolOpts) {
         size: {
           type: "string",
           enum: ["1024x1024", "1024x1792", "1792x1024"],
-          description: "Image dimensions. Default: 1024x1024.",
+          description: "Image dimensions (OpenAI/DALL-E only). Default: 1024x1024.",
+        },
+        aspectRatio: {
+          type: "string",
+          enum: ["1:1", "16:9", "9:16", "4:3", "3:4"],
+          description:
+            "Aspect ratio (Google/Gemini only). Default: provider default. " +
+            "Ignored by OpenAI — use `size` there instead.",
         },
       },
       required: ["prompt"],
@@ -139,12 +165,15 @@ export function createGenerateImageTool(opts: CreateGenerateImageToolOpts) {
     execute: async (args: Record<string, unknown>) => {
       const prompt = typeof args.prompt === "string" ? args.prompt : "";
       const size = typeof args.size === "string" ? args.size : undefined;
+      const aspectRatio =
+        opts.forceAspectRatio ??
+        (typeof args.aspectRatio === "string" ? args.aspectRatio : undefined);
       if (!prompt) return "Error: prompt is required.";
       if (opts.provider === "anthropic") {
         return "Anthropic does not support image generation. Please switch to Google or OpenAI.";
       }
       try {
-        const image = await generateImageForProvider(opts.provider, prompt, size);
+        const image = await generateImageForProvider(opts.provider, prompt, size, aspectRatio);
         await opts.onImage(image);
         return `Image generated successfully with prompt: "${prompt}"`;
       } catch (error) {

@@ -62,6 +62,16 @@ export interface OperatorJobConfig {
   /** Tool guardrail overrides — passed through to ToolGuardController. */
   guardOptions?: Record<string, unknown>;
   /**
+   * Free-form sink role flag. sportsclaw doesn't interpret it; the resolved
+   * sink reads it via `ctx.cfg.sinkRole` to branch behaviour (e.g. the tv
+   * broadcast sink switches between "broadcast" anchor mode and
+   * "video-producer" cadence mode). Keep it short and slugged.
+   *
+   * Named `sinkRole` (not `role`) to avoid collision with
+   * `OperatorDaemonConfig.role`, which holds the persona/system-prompt text.
+   */
+  sinkRole?: string;
+  /**
    * Register the daemon-owned memory writeback tools (add_lesson,
    * replace_lesson, remove_lesson). The LLM can call these to evolve its
    * own cross-tick memory. Writes appear in the NEXT tick's system prompt
@@ -267,6 +277,7 @@ export function validateOperatorJobConfig(
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
+      sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
     },
   };

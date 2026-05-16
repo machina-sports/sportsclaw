@@ -24,13 +24,10 @@
  *   - onTickEvent       — handle every TickEvent (the existing callback)
  *   - onToolCall        — handle every ToolCallEvent (the existing callback)
  *
- * Sinks are resolved from `OperatorJobConfig.sink`. Built-ins:
- *   "noop"      — no-op; tick events stream to stdout as NDJSON
- *   "broadcast" — sportsclaw's bundled broadcast sink (deprecated; TV will
- *                 move to its own package, scheduled for a follow-up PR)
- *
- * External sinks (npm package or filesystem path) will land in a follow-up
- * once the TV sink moves to machina-sports-tv. The interface is stable.
+ * Sinks are resolved from `OperatorJobConfig.sink`. The only built-in is
+ * `"noop"` (tick events stream to stdout as NDJSON). Any other value is
+ * loaded at runtime — npm package name or filesystem path — via dynamic
+ * import. See `resolveSink` / `loadExternalSink` below.
  */
 
 import path from "node:path";
@@ -108,6 +105,27 @@ export interface OperatorSinkPlugin {
     cfg: OperatorJobConfig;
     mcpManager: McpManager;
   }): CreateGenerateImageToolOpts;
+
+  /**
+   * Pre-tick context composer. Called once per tick BEFORE the LLM call so
+   * the sink can inject deterministic, daemon-side directives into the tick
+   * input (e.g. a scored rotation pool, a live-match cue, an editorial
+   * override). The returned string is prepended to the tick prompt; return
+   * null/undefined to add nothing.
+   *
+   * Use this — instead of persona rules — when you want a constraint the
+   * LLM cannot ignore. Rules in the persona compete with the LLM's training
+   * prior; data injected into the tick input doesn't.
+   *
+   * Errors are caught and logged; the tick proceeds without the directive.
+   */
+  composeTickContext?(args: {
+    jobId: string;
+    tickId: string;
+    timestamp: string;
+    cfg: OperatorJobConfig;
+    mcpManager: McpManager;
+  }): Promise<string | null | undefined> | string | null | undefined;
 
   /**
    * Per-tick event handler. Called once per `tick_started` / `tick_published`

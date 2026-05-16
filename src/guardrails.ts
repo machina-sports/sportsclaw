@@ -82,8 +82,8 @@ export interface GuardrailDetail {
 // ---------------------------------------------------------------------------
 
 /**
- * Read-only / idempotent MCP tools commonly available on the machina-sports-tv
- * pod. The set is conservative — anything that *could* mutate is excluded.
+ * Read-only / idempotent MCP tools commonly exposed by sports-data MCP pods.
+ * The set is conservative — anything that *could* mutate is excluded.
  * Operators can override via `idempotentTools` in options.
  */
 export const DEFAULT_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
