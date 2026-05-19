@@ -46,7 +46,8 @@
     "test:tool-call-part-guard": "npm run build && node --test test/tool-call-part-guard.test.mjs",
     "test:operator-sink": "npm run build && node --test test/operator-sink.test.mjs",
     "test:operator-sink-external": "npm run build && node --test test/operator-sink-external.test.mjs",
-    "test:operator-memory-tools": "npm run build && node --test test/operator-memory-tools.test.mjs"
+    "test:operator-memory-tools": "npm run build && node --test test/operator-memory-tools.test.mjs",
+    "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs"
   },
   "keywords": [
     "sports",

@@ -35,7 +35,18 @@ What this does **not** give you:
 
 ---
 
-## Quickstart
+## Easy path — bundled wizard
+
+```bash
+sportsclaw openshell doctor    # diagnose what's installed and what's missing
+sportsclaw openshell setup     # interactive: install, gateway, provider, image build, config scaffold
+```
+
+The wizard shells out to `openshell` and `docker` for each step and asks before doing anything destructive. It does **not** create the sandbox or run the daemon for you — those are still explicit OpenShell commands so the runtime stays the user's mental model. After `setup` finishes, jump to step 5 of the manual quickstart below.
+
+---
+
+## Manual quickstart
 
 1. **Start an OpenShell gateway** (one-time per machine):
    ```bash
