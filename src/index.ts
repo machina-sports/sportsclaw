@@ -98,6 +98,7 @@ import {
   type DaemonPlatform,
 } from "./daemon.js";
 import { cmdOperate } from "./operate.js";
+import { cmdOpenshell } from "./openshell-cli.js";
 import { runSetup } from "./setup.js";
 import {
   loadMcpConfigs,
@@ -2293,6 +2294,8 @@ function printHelp(): void {
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
   console.log("  sportsclaw operate --job <jobId>   Run an autonomous operator daemon (foreground)");
   console.log("  sportsclaw operate --list          List configured operator jobs");
+  console.log("  sportsclaw openshell doctor        Diagnose OpenShell prereqs (optional integration)");
+  console.log("  sportsclaw openshell setup         Interactive wizard for OpenShell integration");
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
   console.log("  sportsclaw start operator <jobId>  Start a supervised operator daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");
@@ -2510,6 +2513,8 @@ async function main(): Promise<void> {
       return cmdLogs(subArgs);
     case "operate":
       return cmdOperate(subArgs);
+    case "openshell":
+      return cmdOpenshell(subArgs);
     case "agents":
       return cmdAgents();
     case "analytics":
