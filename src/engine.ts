@@ -17,9 +17,8 @@ import {
   stepCountIs,
   type ToolSet,
 } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
-import { google } from "@ai-sdk/google";
+
+import { resolveModel } from "./llm-providers.js";
 
 import {
   DEFAULT_CONFIG,
@@ -188,22 +187,6 @@ function filterDefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
     }
   }
   return result;
-}
-
-/** Create a Vercel AI SDK model instance for the given provider + model ID */
-function resolveModel(provider: LLMProvider, modelId: string) {
-  switch (provider) {
-    case "anthropic":
-      return anthropic(modelId);
-    case "openai":
-      return openai(modelId);
-    case "google":
-      return google(modelId);
-    default:
-      throw new Error(
-        `Unsupported provider: "${provider}". Use "anthropic", "openai", or "google".`
-      );
-  }
 }
 
 type ResolvedModel = ReturnType<typeof resolveModel>;

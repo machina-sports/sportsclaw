@@ -23,10 +23,8 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
-import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
-import { openai, createOpenAI } from "@ai-sdk/openai";
-import { google } from "@ai-sdk/google";
 
+import { resolveModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
 import {
   createOperatorDaemon,
   type TickEvent,
@@ -387,27 +385,11 @@ async function resolvePersona(
 }
 
 // ---------------------------------------------------------------------------
-// Model resolution — small dup of engine's private helper. Extended here to
-// route through OpenShell's Privacy Router when the job opts in.
+// OpenShell — config interpretation + env-var application
+//
+// Model construction lives in `./llm-providers.ts`; this file owns the
+// config → resolved-state translation and the env-var side-effects.
 // ---------------------------------------------------------------------------
-
-/**
- * Provider-specific default base URLs for OpenShell's `inference.local`.
- * Each SDK has its own path convention — Anthropic appends `/v1/messages`,
- * OpenAI clients expect the `/v1` prefix already in the base URL.
- */
-function defaultOpenShellBaseUrl(provider: LLMProvider): string {
-  switch (provider) {
-    case "anthropic":
-      return "https://inference.local";
-    case "openai":
-      return "https://inference.local/v1";
-    case "google":
-      throw new Error(
-        "OpenShell does not support Google's API protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-      );
-  }
-}
 
 interface ResolvedOpenShell {
   enabled: boolean;
@@ -423,44 +405,6 @@ function resolveOpenShell(
   if (!enabled) return { enabled: false, baseUrl: "" };
   const baseUrl = openshell.baseUrl ?? defaultOpenShellBaseUrl(provider);
   return { enabled: true, baseUrl };
-}
-
-function resolveModel(
-  provider: LLMProvider,
-  modelId: string,
-  openshell?: ResolvedOpenShell,
-) {
-  if (openshell?.enabled) {
-    // Privacy Router strips client credentials and injects backend ones,
-    // so the apiKey here is a placeholder that satisfies SDK validation.
-    switch (provider) {
-      case "anthropic":
-        return createAnthropic({
-          baseURL: openshell.baseUrl,
-          apiKey: "openshell-unused",
-        })(modelId);
-      case "openai":
-        return createOpenAI({
-          baseURL: openshell.baseUrl,
-          apiKey: "openshell-unused",
-        })(modelId);
-      case "google":
-        // Unreachable in practice — config validator rejects this combo.
-        throw new Error(
-          `OpenShell mode does not support provider "${provider}".`,
-        );
-    }
-  }
-  switch (provider) {
-    case "anthropic":
-      return anthropic(modelId);
-    case "openai":
-      return openai(modelId);
-    case "google":
-      return google(modelId);
-    default:
-      throw new Error(`Unsupported provider: "${provider}"`);
-  }
 }
 
 /**
@@ -651,7 +595,7 @@ async function runOnce(jobId: string): Promise<void> {
       jobId: cfg.jobId,
       jobLabel: cfg.label,
       intervalMs: cfg.intervalMs,
-      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell),
+      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
       role: inputs.personaText,
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
@@ -726,7 +670,7 @@ async function runForeground(jobId: string): Promise<void> {
     jobId: cfg.jobId,
     jobLabel: cfg.label,
     intervalMs: cfg.intervalMs,
-    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell),
+    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
     role: inputs.personaText,
     tools: tools.toolSet,
     rootDir: inputs.rootDir,
