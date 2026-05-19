@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 
-import type { LLMProvider } from "./types.js";
+import type { LLMProvider, OpenShellConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +78,14 @@ export interface OperatorJobConfig {
    * — the current tick sees a frozen snapshot. Default: true.
    */
   enableMemoryTools?: boolean;
+  /**
+   * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
+   * Absent block = default direct LLM calls; nothing changes. When present
+   * and enabled, the launcher constructs the AI SDK provider with a
+   * `baseURL` pointing at `inference.local` (or the configured `baseUrl`).
+   * See `openshell/README.md` for the deployment runbook.
+   */
+  openshell?: OpenShellConfig;
 }
 
 export interface ValidationIssue {
@@ -257,6 +265,47 @@ export function validateOperatorJobConfig(
     push("enableMemoryTools", "must be a boolean");
   }
 
+  // openshell — optional opt-in routing block
+  let parsedOpenShell: OpenShellConfig | undefined;
+  if (raw.openshell !== undefined) {
+    if (typeof raw.openshell !== "object" || raw.openshell === null || Array.isArray(raw.openshell)) {
+      push("openshell", "must be an object");
+    } else {
+      const os = raw.openshell as Record<string, unknown>;
+      if (os.enabled !== undefined && typeof os.enabled !== "boolean") {
+        push("openshell.enabled", "must be a boolean");
+      }
+      if (os.baseUrl !== undefined) {
+        if (typeof os.baseUrl !== "string") {
+          push("openshell.baseUrl", "must be a string URL");
+        } else {
+          try {
+            const url = new URL(os.baseUrl);
+            if (url.protocol !== "http:" && url.protocol !== "https:") {
+              push("openshell.baseUrl", "must be http(s)");
+            }
+          } catch {
+            push("openshell.baseUrl", `not a valid URL: ${JSON.stringify(os.baseUrl)}`);
+          }
+        }
+      }
+      // D1 — Gemini cannot route through the Privacy Router (Google's API
+      // shape is neither OpenAI-compatible nor Anthropic-compatible). Fail
+      // fast at config-load time rather than at the first generateText.
+      const openShellEnabled = os.enabled !== false; // default true when block present
+      if (openShellEnabled && raw.provider === "google") {
+        push(
+          "openshell",
+          "provider \"google\" is not supported under openshell — the Privacy Router doesn't speak Google's protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
+        );
+      }
+      parsedOpenShell = {
+        enabled: os.enabled as boolean | undefined,
+        baseUrl: os.baseUrl as string | undefined,
+      };
+    }
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -279,6 +328,7 @@ export function validateOperatorJobConfig(
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
+      openshell: parsedOpenShell,
     },
   };
 }

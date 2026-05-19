@@ -1,0 +1,149 @@
+# =============================================================================
+# SportsClaw — Reference OpenShell Sandbox Policy
+#
+# A starting point for running `sportsclaw operate` inside an OpenShell
+# sandbox with LLM calls routed through the Privacy Router.
+#
+# Apply at sandbox creation:
+#   openshell sandbox create \
+#       --from sportsclaw-openshell:latest \
+#       --policy openshell/policy.yaml \
+#       --name sportsclaw-tv
+#
+# Or, hot-reload network rules on a running sandbox:
+#   openshell policy set sportsclaw-tv --policy openshell/policy.yaml
+#
+# Static sections (filesystem_policy, landlock, process) lock at creation
+# and require sandbox recreation to change. network_policies hot-reloads
+# in ~5 seconds.
+#
+# Edit the placeholder hostnames before deploying — uncomment what your
+# sink actually needs, drop what it doesn't. The defaults err on the
+# side of denying egress.
+# =============================================================================
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# STATIC — Filesystem (Landlock LSM enforcement)
+# ---------------------------------------------------------------------------
+
+filesystem_policy:
+  # Read-only system paths the daemon needs to start.
+  # Baseline paths (/usr, /lib, /etc, /var/log) are added automatically.
+  read_only:
+    - /opt/venv          # Python venv used by sports-skills
+    - /app/dist          # Built JS
+    - /app/node_modules  # Resolved npm modules
+    - /app/skills-lock.json
+
+  # Read/write paths.
+  # /sandbox and /tmp are baseline. Add the daemon's persistence root.
+  read_write:
+    - /sandbox
+    - /tmp
+    - /app/.sportsclaw   # Daemon state, briefs, editorial memory
+
+landlock:
+  compatibility: best_effort
+
+# ---------------------------------------------------------------------------
+# STATIC — Process identity
+# ---------------------------------------------------------------------------
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+# ---------------------------------------------------------------------------
+# DYNAMIC — Network egress
+#
+# Every outbound connection except `https://inference.local` is checked
+# against these blocks. Inference traffic to `inference.local` is handled
+# by the Privacy Router (configured via `openshell inference set ...`),
+# not by network_policies.
+#
+# Each block: name + endpoints (host/port/protocol) + allowed binaries.
+# Connections are denied if no block matches. Be specific.
+# ---------------------------------------------------------------------------
+
+network_policies:
+
+  # -------------------------------------------------------------------------
+  # Tail server — telemetry/event POSTs from sinks.
+  # Edit the host + port to match your `tailServer` config field.
+  # -------------------------------------------------------------------------
+  tail_server:
+    name: tail-server
+    endpoints:
+      - host: tail.example.internal
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/node
+
+  # -------------------------------------------------------------------------
+  # Image generation — uncomment whichever provider your sink uses.
+  # OpenAI / Anthropic *text* calls should go via inference.local, but
+  # image-gen APIs aren't covered by the Privacy Router and need explicit
+  # egress here.
+  # -------------------------------------------------------------------------
+  # image_gen_openai:
+  #   name: image-gen-openai
+  #   endpoints:
+  #     - host: api.openai.com
+  #       port: 443
+  #       protocol: rest
+  #       enforcement: enforce
+  #       access: full
+  #   binaries:
+  #     - path: /usr/local/bin/node
+  #
+  # image_gen_google:
+  #   name: image-gen-google
+  #   endpoints:
+  #     - host: generativelanguage.googleapis.com
+  #       port: 443
+  #       protocol: rest
+  #       enforcement: enforce
+  #       access: full
+  #   binaries:
+  #     - path: /usr/local/bin/node
+
+  # -------------------------------------------------------------------------
+  # YouTube Live — broadcast sinks publishing to a live stream.
+  # Uncomment + edit if your sink talks to YouTube's Data API or RTMP.
+  # -------------------------------------------------------------------------
+  # youtube_live:
+  #   name: youtube-live
+  #   endpoints:
+  #     - host: www.googleapis.com
+  #       port: 443
+  #       protocol: rest
+  #       enforcement: enforce
+  #       access: full
+  #     - host: youtube.googleapis.com
+  #       port: 443
+  #       protocol: rest
+  #       enforcement: enforce
+  #       access: full
+  #   binaries:
+  #     - path: /usr/local/bin/node
+
+  # -------------------------------------------------------------------------
+  # MCP server — when SportsClaw resolves persona templates via MCP, it
+  # needs egress to the MCP server's HTTP endpoint. Most production
+  # deployments use a single Machina pod URL; edit to match.
+  # -------------------------------------------------------------------------
+  # mcp_server:
+  #   name: mcp-server
+  #   endpoints:
+  #     - host: mcp.example.internal
+  #       port: 443
+  #       protocol: rest
+  #       enforcement: enforce
+  #       access: full
+  #   binaries:
+  #     - path: /usr/local/bin/node
