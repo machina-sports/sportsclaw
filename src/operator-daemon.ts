@@ -57,6 +57,7 @@ import {
   digestResult,
   type ToolGuardOptions,
 } from "./guardrails.js";
+import type { InferenceRoute } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -96,6 +97,12 @@ export interface TickEvent {
   toolCalls?: number;
   guardrailWarnings?: number;
   guardrailBlocks?: number;
+  /**
+   * Inference routing snapshot. Set when the launcher knows where the
+   * tick's LLM calls go (always populated in production; absent in some
+   * lightweight tests). Sinks unaware of this field can ignore it.
+   */
+  inferenceRoute?: InferenceRoute;
 }
 
 export interface OperatorDaemonConfig {
@@ -178,6 +185,12 @@ export interface OperatorDaemonConfig {
   heartbeat?: HeartbeatService;
   /** Inject a generateText impl (tests). Default: ai SDK's. */
   generateTextImpl?: typeof generateText;
+  /**
+   * Inference routing snapshot. The launcher passes this so every emitted
+   * TickEvent carries the routing decision (direct vs. openshell, base URL,
+   * provider, model). Omit to leave the field off TickEvents.
+   */
+  inferenceRoute?: InferenceRoute;
 }
 
 export interface OperatorDaemon {
@@ -264,6 +277,7 @@ export function createOperatorDaemon(
       jobId,
       tickId,
       timestamp,
+      inferenceRoute: cfg.inferenceRoute,
     });
 
     // 1. Frozen memory snapshot for this tick.
@@ -380,6 +394,7 @@ export function createOperatorDaemon(
         toolCalls: counts.calls,
         guardrailWarnings: counts.warnings,
         guardrailBlocks: counts.blocks,
+        inferenceRoute: cfg.inferenceRoute,
       };
       cfg.onTickEvent?.(event);
       return event;
@@ -397,6 +412,7 @@ export function createOperatorDaemon(
       toolCalls: counts.calls,
       guardrailWarnings: counts.warnings,
       guardrailBlocks: counts.blocks,
+      inferenceRoute: cfg.inferenceRoute,
     };
     cfg.onTickEvent?.(event);
     return event;
@@ -416,6 +432,7 @@ export function createOperatorDaemon(
         tickId,
         reason: event.result ?? "wake gate denied",
         timestamp: event.timestamp,
+        inferenceRoute: cfg.inferenceRoute,
       };
       cfg.onTickEvent?.(skip);
       return;

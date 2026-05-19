@@ -90,6 +90,10 @@ sportsclaw is built for:
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
+### Optional: Run inside NVIDIA OpenShell
+
+For deployments that want sandboxed execution and policy-enforced LLM routing, SportsClaw operator daemons can run inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox with calls routed through the Privacy Router. **This is opt-in via the job config** — direct LLM calls remain the default for everyone else. See [`openshell/README.md`](openshell/README.md) for the runbook and [`docs/openshell-integration-plan.md`](docs/openshell-integration-plan.md) for the integration design.
+
 ### Built-in Sports Data Skills
 
 sportsclaw ships with **14 sports data skills** out of the box, powered by [`sports-skills`](https://sports-skills.sh):
