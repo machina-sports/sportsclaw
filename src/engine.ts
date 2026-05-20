@@ -358,6 +358,7 @@ export class sportsclawEngine {
   private skillGuides: SkillGuide[] = [];
   private _mcpReady = false;
   private _threadLoaded = false;
+  private _loggedMemoryBackend?: string;
 
   /** Images produced by the generate_image tool during the last run. */
   get generatedImages(): readonly GeneratedImage[] {
@@ -3005,10 +3006,35 @@ export class sportsclawEngine {
 
     let strategyContent = "";
     if (options?.userId) {
-      const machinaServer = this.mcpManager.getMachinaServerName();
+      const requestedMemoryBackend = (process.env.SPORTSCLAW_MEMORY_BACKEND ?? "auto").toLowerCase();
+      if (!["auto", "file", "pod"].includes(requestedMemoryBackend)) {
+        throw new Error(
+          `Invalid SPORTSCLAW_MEMORY_BACKEND=${process.env.SPORTSCLAW_MEMORY_BACKEND}. Expected "auto", "file", or "pod".`
+        );
+      }
+
+      const machinaServer = requestedMemoryBackend === "file"
+        ? undefined
+        : this.mcpManager.getMachinaServerName();
+
+      if (requestedMemoryBackend === "pod" && !machinaServer) {
+        throw new Error(
+          "SPORTSCLAW_MEMORY_BACKEND=pod requires a connected Machina MCP server exposing search_documents, create_document, and update_document."
+        );
+      }
+
       const podStorage = machinaServer
         ? new PodMemoryStorage(this.mcpManager, machinaServer)
         : undefined;
+      const selectedMemoryBackend = podStorage ? "pod" : "file";
+      const memoryLogKey = `${requestedMemoryBackend}:${selectedMemoryBackend}:${machinaServer ?? "local"}`;
+      if (this._loggedMemoryBackend !== memoryLogKey) {
+        console.error(
+          `[sportsclaw] memory_backend requested=${requestedMemoryBackend} selected=${selectedMemoryBackend}${machinaServer ? ` server=${machinaServer}` : ""}`
+        );
+        this._loggedMemoryBackend = memoryLogKey;
+      }
+
       memory = new MemoryManager(options.userId, podStorage);
       options?.onProgress?.({ type: "phase", label: "Loading memory" });
       [memoryBlock, strategyContent] = await Promise.all([

@@ -124,4 +124,18 @@ describe("PodMemoryStorage.append — concurrent-write safety", () => {
       `expected 'a\\nb\\nc'; got: ${JSON.stringify(reflections)}`
     );
   });
+
+  it("does not create an empty consolidated doc when a read finds no existing or legacy memory", async () => {
+    const { mcpManager, calls } = makeMcpStub({ writeDelayMs: 1 });
+    const storage = new PodMemoryStorage(mcpManager, "machina-test");
+
+    const value = await storage.read("empty-user", "SOUL.md");
+
+    assert.equal(value, "");
+    assert.equal(
+      calls.filter((c) => c.toolName === "create_document").length,
+      0,
+      "read-only access with no legacy content must not create zombie empty memory docs"
+    );
+  });
 });

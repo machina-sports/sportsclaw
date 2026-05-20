@@ -347,7 +347,14 @@ export class PodMemoryStorage implements MemoryStorage {
       // Skip
     }
 
-    // Create the consolidated document
+    // If there was nothing to migrate, do not create an empty consolidated
+    // memory doc. Empty docs can outrank real memory during later unsorted
+    // searches and make the agent appear stateless.
+    if (Object.keys(doc).length === 0) {
+      return { doc, docId: null };
+    }
+
+    // Create the consolidated document only when there is real memory content.
     const createResult = await this.callPod("create_document", {
       name: `memory-${userId}`,
       content: { value: doc },

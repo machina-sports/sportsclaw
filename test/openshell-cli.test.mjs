@@ -14,6 +14,10 @@ import {
   formatReport,
 } from "../dist/openshell-cli.js";
 
+function stripAnsi(text) {
+  return text.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
 // ---------------------------------------------------------------------------
 // formatReport
 // ---------------------------------------------------------------------------
@@ -31,7 +35,7 @@ describe("formatReport", () => {
     assert.match(out, /v1\.2\.3/);
     assert.match(out, /Item B/);
     assert.match(out, /not found/);
-    assert.match(out, /→ do X/);
+    assert.match(stripAnsi(out), /→ do X/);
   });
 
   it("prints the all-ok banner when every check passes", () => {
@@ -63,7 +67,7 @@ describe("formatReport", () => {
     });
     assert.match(out, /API key/);
     assert.match(out, /not set/);
-    assert.match(out, /→ export X/);
+    assert.match(stripAnsi(out), /→ export X/);
   });
 
   it("does not print a remediation arrow for OK rows", () => {
