@@ -12,6 +12,40 @@ import type { ModelMessage } from "ai";
 
 export type LLMProvider = "anthropic" | "openai" | "google";
 
+// ---------------------------------------------------------------------------
+// OpenShell — optional opt-in routing through NVIDIA OpenShell's Privacy
+// Router. Absent / disabled block = default direct LLM calls, unchanged.
+// See docs/openshell-integration-plan.md.
+// ---------------------------------------------------------------------------
+
+export interface OpenShellConfig {
+  /**
+   * Whether the launcher should route LLM calls through the Privacy Router.
+   * Default: `true` when the openshell block is present.
+   */
+  enabled?: boolean;
+  /**
+   * Base URL handed to the AI SDK provider. Only set when you need to point
+   * at something other than the default. Defaults are provider-specific
+   * (`https://inference.local` for Anthropic, `https://inference.local/v1`
+   * for OpenAI-compatible) and assume you are inside an OpenShell sandbox.
+   */
+  baseUrl?: string;
+}
+
+/**
+ * Snapshot of the inference routing decision, attached to every TickEvent
+ * so sinks can render or forward it. Optional + additive — sinks that
+ * don't know about this field ignore it.
+ */
+export interface InferenceRoute {
+  via: "direct" | "openshell";
+  /** Set when `via === "openshell"`. */
+  baseUrl?: string;
+  provider: LLMProvider;
+  model: string;
+}
+
 export interface ProviderModelOption {
   value: string;
   label: string;

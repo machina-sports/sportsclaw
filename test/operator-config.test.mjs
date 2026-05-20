@@ -256,3 +256,118 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(fields.has("persona|personaText"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// validateOperatorJobConfig — openshell block (Phase 2a)
+// ---------------------------------------------------------------------------
+
+describe("validateOperatorJobConfig — openshell block", () => {
+  const base = {
+    jobId: "openshell-job",
+    intervalMs: 60_000,
+    personaText: "You are an autonomous operator.",
+  };
+
+  it("accepts a config with no openshell block (default direct mode)", () => {
+    const r = validateOperatorJobConfig(base);
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.openshell, undefined);
+  });
+
+  it("accepts an empty openshell block (defaults to enabled)", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "anthropic",
+      openshell: {},
+    });
+    assert.strictEqual(r.valid, true);
+    assert.deepStrictEqual(r.config.openshell, {
+      enabled: undefined,
+      baseUrl: undefined,
+    });
+  });
+
+  it("accepts openshell with explicit enabled=true", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "anthropic",
+      openshell: { enabled: true, baseUrl: "https://inference.local" },
+    });
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.openshell.enabled, true);
+    assert.strictEqual(r.config.openshell.baseUrl, "https://inference.local");
+  });
+
+  it("accepts openshell with enabled=false (block present but inert)", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "google",  // would normally fail D1, but disabled block is fine
+      openshell: { enabled: false },
+    });
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.openshell.enabled, false);
+  });
+
+  it("rejects non-object openshell", () => {
+    for (const bad of ["yes", 42, true, []]) {
+      const r = validateOperatorJobConfig({ ...base, openshell: bad });
+      assert.strictEqual(r.valid, false, `openshell=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "openshell"));
+    }
+  });
+
+  it("rejects non-boolean openshell.enabled", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      openshell: { enabled: "true" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell.enabled"));
+  });
+
+  it("rejects non-string openshell.baseUrl", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      openshell: { baseUrl: 42 },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell.baseUrl"));
+  });
+
+  it("rejects openshell.baseUrl that isn't a URL", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      openshell: { baseUrl: "not a url" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell.baseUrl"));
+  });
+
+  it("rejects openshell.baseUrl with file:// scheme", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      openshell: { baseUrl: "file:///etc/passwd" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell.baseUrl"));
+  });
+
+  it("rejects openshell + provider=google (D1)", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "google",
+      openshell: {},
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell"));
+  });
+
+  it("rejects openshell + provider=google even with explicit enabled=true", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "google",
+      openshell: { enabled: true },
+    });
+    assert.strictEqual(r.valid, false);
+  });
+});

@@ -23,10 +23,8 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
-import { google } from "@ai-sdk/google";
 
+import { resolveModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
 import {
   createOperatorDaemon,
   type TickEvent,
@@ -59,7 +57,7 @@ import {
   TICK_BRIEF_FRAGMENT_HEADER,
   TOOL_DISCIPLINE_FRAGMENT,
 } from "./prompts.js";
-import type { LLMProvider } from "./types.js";
+import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Public entry — wired into src/index.ts main dispatcher
@@ -387,20 +385,48 @@ async function resolvePersona(
 }
 
 // ---------------------------------------------------------------------------
-// Model resolution — small dup of engine's private helper; spec forbids
-// engine.ts changes, so we reproduce 3 lines rather than expose a getter.
+// OpenShell — config interpretation + env-var application
+//
+// Model construction lives in `./llm-providers.ts`; this file owns the
+// config → resolved-state translation and the env-var side-effects.
 // ---------------------------------------------------------------------------
 
-function resolveModel(provider: LLMProvider, modelId: string) {
+interface ResolvedOpenShell {
+  enabled: boolean;
+  baseUrl: string;
+}
+
+function resolveOpenShell(
+  provider: LLMProvider,
+  openshell: OpenShellConfig | undefined,
+): ResolvedOpenShell | undefined {
+  if (!openshell) return undefined;
+  const enabled = openshell.enabled !== false; // default true when block present
+  if (!enabled) return { enabled: false, baseUrl: "" };
+  const baseUrl = openshell.baseUrl ?? defaultOpenShellBaseUrl(provider);
+  return { enabled: true, baseUrl };
+}
+
+/**
+ * Set provider-specific base-URL env vars so any code path inside this
+ * process (e.g. engine.ts singletons used by sub-tools) also routes
+ * through `inference.local`. The factory call in resolveModel covers the
+ * daemon's own generateText path; this covers everything else.
+ */
+function applyOpenShellEnv(
+  provider: LLMProvider,
+  openshell: ResolvedOpenShell,
+): void {
   switch (provider) {
     case "anthropic":
-      return anthropic(modelId);
+      process.env.ANTHROPIC_BASE_URL = openshell.baseUrl;
+      break;
     case "openai":
-      return openai(modelId);
+      process.env.OPENAI_BASE_URL = openshell.baseUrl;
+      break;
     case "google":
-      return google(modelId);
-    default:
-      throw new Error(`Unsupported provider: "${provider}"`);
+      // Never reached — config validator + resolveOpenShell both reject.
+      break;
   }
 }
 
@@ -410,6 +436,8 @@ interface ResolvedDaemonInputs {
   rootDir: string;
   personaText: string;
   extraFragments: string[];
+  openshell?: ResolvedOpenShell;
+  inferenceRoute: InferenceRoute;
 }
 
 async function resolveJobInputs(
@@ -429,7 +457,54 @@ async function resolveJobInputs(
   }
   const personaText = await resolvePersona(cfg, mcpManager);
   const extraFragments = resolveExtraFragments(cfg.extraFragments);
-  return { provider, modelId, rootDir, personaText, extraFragments };
+  const openshell = resolveOpenShell(provider, cfg.openshell);
+  if (openshell?.enabled) {
+    applyOpenShellEnv(provider, openshell);
+  }
+  const inferenceRoute: InferenceRoute = openshell?.enabled
+    ? { via: "openshell", baseUrl: openshell.baseUrl, provider, model: modelId }
+    : { via: "direct", provider, model: modelId };
+  return {
+    provider,
+    modelId,
+    rootDir,
+    personaText,
+    extraFragments,
+    openshell,
+    inferenceRoute,
+  };
+}
+
+/**
+ * Best-effort startup probe: when openshell is enabled, confirm
+ * `inference.local` (or the configured host) resolves before we hand
+ * control to the daemon. Fails fast with a clear error message rather
+ * than letting the first generateText surface an opaque DNS error.
+ * Mitigates Risk R4 in docs/openshell-integration-plan.md.
+ */
+async function probeOpenShellHost(baseUrl: string): Promise<void> {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname;
+  } catch {
+    throw new Error(`OpenShell mode: invalid baseUrl ${JSON.stringify(baseUrl)}`);
+  }
+  const { promises: dnsp } = await import("node:dns");
+  try {
+    await Promise.race([
+      dnsp.lookup(host),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("dns lookup timeout (1.5s)")), 1500),
+      ),
+    ]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `OpenShell mode: cannot resolve "${host}" (${msg}). ` +
+        `Are you running inside an OpenShell sandbox? ` +
+        `Set openshell.enabled=false or remove the openshell block to disable.`,
+    );
+  }
 }
 
 function expandTilde(p: string): string {
@@ -486,6 +561,11 @@ async function runDryRun(jobId: string): Promise<void> {
     console.log(`rootDir:           ${inputs.rootDir}`);
     console.log(`sink:              ${sink.name}`);
     console.log(`memory writeback:  ${memoryToolsOn ? "enabled" : "disabled"}`);
+    if (inputs.openshell?.enabled) {
+      console.log(`inference:         openshell (${inputs.openshell.baseUrl})`);
+    } else {
+      console.log(`inference:         direct`);
+    }
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
   }
@@ -501,6 +581,9 @@ async function runOnce(jobId: string): Promise<void> {
   const tools = await buildOperatorTools(cfg, false, sink);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+    if (inputs.openshell?.enabled) {
+      await probeOpenShellHost(inputs.openshell.baseUrl);
+    }
     const ctx: SinkContext = {
       jobId: cfg.jobId,
       modelId: inputs.modelId,
@@ -512,13 +595,14 @@ async function runOnce(jobId: string): Promise<void> {
       jobId: cfg.jobId,
       jobLabel: cfg.label,
       intervalMs: cfg.intervalMs,
-      model: resolveModel(inputs.provider, inputs.modelId),
+      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
       role: inputs.personaText,
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
       extraFragments: inputs.extraFragments,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
+      inferenceRoute: inputs.inferenceRoute,
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -571,6 +655,9 @@ async function runForeground(jobId: string): Promise<void> {
   const sink = await resolveSink(cfg);
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+  if (inputs.openshell?.enabled) {
+    await probeOpenShellHost(inputs.openshell.baseUrl);
+  }
 
   const ctx: SinkContext = {
     jobId: cfg.jobId,
@@ -583,13 +670,14 @@ async function runForeground(jobId: string): Promise<void> {
     jobId: cfg.jobId,
     jobLabel: cfg.label,
     intervalMs: cfg.intervalMs,
-    model: resolveModel(inputs.provider, inputs.modelId),
+    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
     role: inputs.personaText,
     tools: tools.toolSet,
     rootDir: inputs.rootDir,
     extraFragments: inputs.extraFragments,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
+    inferenceRoute: inputs.inferenceRoute,
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
@@ -625,8 +713,11 @@ async function runForeground(jobId: string): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+  const inferenceTag = inputs.openshell?.enabled
+    ? ` inference=openshell(${inputs.openshell.baseUrl})`
+    : "";
   console.error(
-    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}`,
+    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}`,
   );
   daemon.start();
   // Keep the process alive without unref'd heartbeat timers exiting early.

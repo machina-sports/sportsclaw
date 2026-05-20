@@ -91,6 +91,63 @@ describe("tickOnce — published path", () => {
     assert.match(event.tickId, /^tick_/);
   });
 
+  it("omits inferenceRoute when the launcher doesn't pass one", async () => {
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({ onTickEvent: (e) => events.push(e) }),
+    );
+    await daemon.tickOnce();
+    for (const e of events) {
+      assert.strictEqual(e.inferenceRoute, undefined, `event ${e.type}`);
+    }
+  });
+
+  it("propagates inferenceRoute to every TickEvent the daemon emits", async () => {
+    const route = {
+      via: "openshell",
+      baseUrl: "https://inference.local",
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+    };
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        inferenceRoute: route,
+        onTickEvent: (e) => events.push(e),
+      }),
+    );
+    await daemon.tickOnce();
+    // We expect at least tick_started + tick_published, each carrying the route.
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("tick_started"));
+    assert.ok(types.includes("tick_published"));
+    for (const e of events) {
+      assert.deepStrictEqual(e.inferenceRoute, route, `event ${e.type}`);
+    }
+  });
+
+  it("propagates inferenceRoute even on tick_failed", async () => {
+    const route = {
+      via: "direct",
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+    };
+    const failing = async () => {
+      throw new Error("boom");
+    };
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: failing,
+        inferenceRoute: route,
+        onTickEvent: (e) => events.push(e),
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_failed");
+    assert.deepStrictEqual(event.inferenceRoute, route);
+  });
+
   it("writes the brief to disk under <briefDir>/<jobId>/<tickId>.md", async () => {
     const daemon = createOperatorDaemon(baseConfig());
     const event = await daemon.tickOnce();

@@ -16,10 +16,9 @@ import {
   type ToolSet,
   type ModelMessage,
 } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
-import { google } from "@ai-sdk/google";
 import pc from "picocolors";
+
+import { resolveModel } from "./llm-providers.js";
 
 import {
   ENV_PATH,
@@ -40,23 +39,6 @@ import {
 import { daemonStart, isValidPlatform } from "./daemon.js";
 import { formatResponse } from "./formatters/index.js";
 import { DEFAULT_MODELS, type LLMProvider } from "./types.js";
-
-// ---------------------------------------------------------------------------
-// Model resolver (local copy — avoids importing engine.ts dependency chain)
-// ---------------------------------------------------------------------------
-
-function resolveModel(provider: LLMProvider, modelId: string) {
-  switch (provider) {
-    case "anthropic":
-      return anthropic(modelId);
-    case "openai":
-      return openai(modelId);
-    case "google":
-      return google(modelId);
-    default:
-      throw new Error(`Unsupported provider: "${provider}".`);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Phase 1 — Deterministic API key bootstrap
