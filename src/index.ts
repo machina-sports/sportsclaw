@@ -2136,7 +2136,7 @@ async function cmdWatch(args: string[]): Promise<void> {
 function serverNameFromUrl(url: string): string {
   try {
     const hostname = new URL(url).hostname;
-    // e.g. "machina-podcasts-adidas-tracker.org.machina.gg" → "adidas-tracker"
+    // e.g. "mcp-sports-data.example.org" → "sports-data"
     const parts = hostname.split(".");
     const sub = parts[0];
     // Strip common prefixes like "machina-podcasts-"
