@@ -817,6 +817,102 @@ export class sportsclawEngine {
     return draft;
   }
 
+  /**
+   * Validate the final response text against raw tool outputs.
+   * If a hallucination is detected (e.g. mismatched scores, dates, stats),
+   * trigger self-correction or return a corrected version.
+   */
+  private async validateResponseEvidence(params: {
+    draft: string;
+    toolOutputs: Array<{ toolName: string; output: string }>;
+  }): Promise<string> {
+    const { draft, toolOutputs } = params;
+    if (toolOutputs.length === 0) return draft;
+
+    const serializedToolOutputs = toolOutputs
+      .slice(0, 10)
+      .map((item, idx) => `[Tool ${idx + 1}: ${item.toolName}]\n${item.output}`)
+      .join("\n\n");
+
+    try {
+      // Step 1: LLM-driven verification pass to detect conflicts
+      const validationRes = await generateText({
+        model: this.mainModel,
+        system:
+          "You are a strict sports fact-checker. Compare the draft response against the raw tool outputs.\n" +
+          "Identify any numerical values (scores, player statistics, dates, or standings) in the draft " +
+          "that DO NOT match or are completely unsupported by the raw tool outputs.\n" +
+          "Respond in strict JSON with the following format:\n" +
+          "{\n" +
+          "  \"isValid\": boolean,\n" +
+          "  \"discrepancies\": [\n" +
+          "    { \"claim\": \"what draft says\", \"evidence\": \"what raw tools say\", \"severity\": \"high\" | \"medium\" }\n" +
+          "  ]\n" +
+          "}",
+        prompt: [
+          `Raw tool outputs (Source of Truth):`,
+          serializedToolOutputs,
+          `Draft response to check:`,
+          draft,
+        ].join("\n\n"),
+        maxOutputTokens: 2000,
+      });
+
+      let parsed: { isValid: boolean; discrepancies?: Array<{ claim: string; evidence: string; severity: string }> };
+      try {
+        const text = validationRes.text?.trim() || "{}";
+        const cleanJson = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
+        parsed = JSON.parse(cleanJson);
+      } catch {
+        return draft; // fallback to unverified
+      }
+
+      if (parsed.isValid || !parsed.discrepancies || parsed.discrepancies.length === 0) {
+        return draft; // clean!
+      }
+
+      // Step 2: Hallucination detected! self-correct!
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] evidence_validation: detected ${parsed.discrepancies.length} fact discrepancies!`
+        );
+        for (const d of parsed.discrepancies) {
+          console.error(`  - Discrepancy: Claim="${d.claim}" vs Evidence="${d.evidence}"`);
+        }
+      }
+
+      const correctionRes = await generateText({
+        model: this.mainModel,
+        system:
+          "You are an expert sports editor. You MUST rewrite the draft response to completely correct " +
+          "any factual inaccuracies, mismatched scores, or unsupported claims. " +
+          "Make sure EVERY score, number, and team record matches the raw tool outputs exactly. " +
+          "Do not introduce any conversational fluff. Keep citations.",
+        prompt: [
+          `Raw tool outputs (Source of Truth):`,
+          serializedToolOutputs,
+          `Original draft response with errors:`,
+          draft,
+          `Identified discrepancies to resolve:`,
+          JSON.stringify(parsed.discrepancies, null, 2),
+        ].join("\n\n"),
+        maxOutputTokens: 4000,
+      });
+
+      const corrected = correctionRes.text?.trim();
+      if (corrected) {
+        const warning = "⚠️ Self-correction pass completed: verified and aligned response with raw data.";
+        return `${warning}\n\n${corrected}`;
+      }
+    } catch (e) {
+      if (this.config.verbose) {
+        console.error(`[sportsclaw] evidence validation failed: ${e}`);
+      }
+    }
+
+    return draft;
+  }
+
   /** Build the Vercel AI SDK tool map from our registry */
   private buildTools(
     memory?: MemoryManager,
@@ -3688,6 +3784,25 @@ export class sportsclawEngine {
         maxOutputTokens: budgets.evidenceGate,
       });
       responseText = `${warning}\n\n${responseText}`;
+    }
+
+    // --- Evidence Validation Gate (Hermes fact-checker pattern) ---
+    if (successes.length > 0) {
+      const successIds = new Set(succeededExternalTools.keys());
+      const toolOutputs = this.collectToolOutputSnippets(
+        result.steps as Array<{
+          toolResults?: Array<{
+            toolCallId: string;
+            toolName: string;
+            output: unknown;
+          }>;
+        }>,
+        successIds
+      );
+      responseText = await this.validateResponseEvidence({
+        draft: responseText,
+        toolOutputs,
+      });
     }
 
     // --- Memory: write after LLM reply (async, non-blocking) ---
