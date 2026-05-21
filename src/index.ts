@@ -114,6 +114,12 @@ import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
 import { runSetup } from "./setup.js";
 import {
+  resolveAnthropicAuth,
+  setAnthropicAuthMethod,
+  getAuthMethods,
+} from "./credentials.js";
+import { inspectClaudeCodeSession } from "./anthropic-oauth.js";
+import {
   loadMcpConfigs,
   saveMcpConfigs,
   removeMcpConfig,
@@ -991,8 +997,23 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
     }
   }
 
-  // 5. API key
-  if (apiKey) {
+  // 5. Auth (API key OR Claude Code OAuth, for Anthropic)
+  if (provider === "anthropic") {
+    const anthroAuth = resolveAnthropicAuth();
+    if (anthroAuth?.kind === "oauth_claude_code") {
+      const minLeft = Math.max(0, Math.floor((anthroAuth.tokens.expiresAt - Date.now()) / 60_000));
+      const sub = anthroAuth.tokens.subscriptionType ? ` ${anthroAuth.tokens.subscriptionType}` : "";
+      console.log(pc.green("  ✓") + ` Anthropic auth: OAuth (Claude Code${sub}, expires in ${minLeft} min)`);
+    } else if (anthroAuth?.kind === "api_key") {
+      const masked = anthroAuth.value.slice(0, 6) + "..." + anthroAuth.value.slice(-4);
+      const src = anthroAuth.source === "env" ? "env" : "keychain";
+      console.log(pc.green("  ✓") + ` Anthropic API key (${masked}, ${src})`);
+    } else {
+      console.log(pc.red("  ✗") + ` No Anthropic credentials`);
+      console.log(`    Set ANTHROPIC_API_KEY, run ${pc.cyan("sportsclaw config")}, or ${pc.cyan("sportsclaw login claude")}`);
+      allGood = false;
+    }
+  } else if (apiKey) {
     const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
     console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
   } else {
@@ -1047,6 +1068,18 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
 // Config drift detection — compares env / ~/.sportsclaw/.env / config.json
 // for known keys and reports which one wins at runtime.
 // ---------------------------------------------------------------------------
+
+/**
+ * True if the current config has a usable Anthropic credential (API key OR
+ * Claude Code OAuth). Other providers still need an API key — only Anthropic
+ * has the OAuth opt-in today.
+ */
+function hasUsableAuth(resolved: ReturnType<typeof resolveConfig>): boolean {
+  if (resolved.apiKey) return true;
+  if (resolved.provider !== "anthropic") return false;
+  const auth = resolveAnthropicAuth();
+  return auth?.kind === "oauth_claude_code";
+}
 
 function detectConfigDrift(): string[] {
   const file = loadConfig();
@@ -1331,7 +1364,7 @@ async function cmdListen(args: string[]): Promise<void> {
   }
 
   let resolved = applyConfigToEnv();
-  if (!resolved.apiKey) {
+  if (!hasUsableAuth(resolved)) {
     await runConfigFlow();
     resolved = applyConfigToEnv();
   }
@@ -1627,8 +1660,8 @@ async function cmdChat(args: string[]): Promise<void> {
   // Merge config file + env vars, push into process.env
   let resolved = applyConfigToEnv();
 
-  // No API key → interactive setup
-  if (!resolved.apiKey) {
+  // No usable credentials → interactive setup
+  if (!hasUsableAuth(resolved)) {
     await runConfigFlow();
     resolved = applyConfigToEnv();
   }
@@ -1918,10 +1951,10 @@ async function cmdQuery(args: string[]): Promise<void> {
   // Merge config file + env vars (env wins), push into process.env
   let resolved = applyConfigToEnv();
 
-  // No API key anywhere → interactive setup (skip in headless mode)
-  if (!resolved.apiKey) {
+  // No usable credentials anywhere → interactive setup (skip in headless mode)
+  if (!hasUsableAuth(resolved)) {
     if (forceJson || !process.stdout.isTTY) {
-      emitNdjson({ type: "error", error: "No API key configured. Run `sportsclaw config` interactively first." });
+      emitNdjson({ type: "error", error: "No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first." });
       process.exit(1);
     }
     await runConfigFlow();
@@ -2413,6 +2446,64 @@ async function cmdMcp(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw login <provider>` — opt into OAuth-based authentication
+// ---------------------------------------------------------------------------
+
+async function cmdLogin(args: string[]): Promise<void> {
+  const target = args[0];
+  if (target !== "claude") {
+    console.error(
+      `Unknown login target: "${target ?? ""}". Currently supported: ${pc.cyan("claude")}.`,
+    );
+    console.error("Example: sportsclaw login claude");
+    process.exit(1);
+  }
+
+  const session = inspectClaudeCodeSession();
+  if (!session.available) {
+    console.error(pc.red("No Claude Code session found."));
+    console.error(`  ${session.reason ?? "Install Claude Code and run `claude login` first."}`);
+    console.error(`  https://docs.anthropic.com/en/docs/claude-code`);
+    process.exit(1);
+  }
+
+  setAnthropicAuthMethod("oauth_claude_code");
+
+  const sub = session.subscriptionType ? `Claude Code ${session.subscriptionType}` : "Claude Code";
+  const minLeft = Math.max(0, Math.floor((session.expiresInMs ?? 0) / 60_000));
+  console.log(pc.green(`Signed in via ${sub}.`));
+  console.log(pc.dim(`  Source: ${session.source}, access token valid for ${minLeft} min.`));
+  console.log(pc.dim(`  Anthropic API key is no longer required (env still wins if set).`));
+  console.log("");
+  console.log(`Run ${pc.cyan("sportsclaw doctor")} to verify, or ${pc.cyan("sportsclaw logout claude")} to revert.`);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw logout <provider>` — back to API key
+// ---------------------------------------------------------------------------
+
+function cmdLogout(args: string[]): void {
+  const target = args[0];
+  if (target !== "claude") {
+    console.error(
+      `Unknown logout target: "${target ?? ""}". Currently supported: ${pc.cyan("claude")}.`,
+    );
+    process.exit(1);
+  }
+
+  const before = getAuthMethods().anthropic;
+  if (before !== "oauth_claude_code") {
+    console.log(pc.dim("Claude Code OAuth was not enabled — nothing to do."));
+    return;
+  }
+
+  setAnthropicAuthMethod(undefined);
+  console.log(pc.green("Disabled Claude Code OAuth."));
+  console.log(pc.dim("  Claude Code's own session was not touched."));
+  console.log(pc.dim("  Anthropic calls will now use ANTHROPIC_API_KEY (env or keychain)."));
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw --help` — usage text
 // ---------------------------------------------------------------------------
 
@@ -2427,6 +2518,8 @@ function printHelp(): void {
   console.log("  sportsclaw health [--json]         Check system health and status");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
+  console.log("  sportsclaw login claude            Sign in via existing Claude Code session");
+  console.log("  sportsclaw logout claude           Stop using Claude Code OAuth (revert to API key)");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
@@ -2607,10 +2700,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // No arguments: show help, or trigger config if no API key configured
+  // No arguments: show help, or trigger config if no usable credentials
   if (args.length === 0) {
     const resolved = resolveConfig();
-    if (!resolved.apiKey) {
+    if (!hasUsableAuth(resolved)) {
       await runConfigFlow();
       applyConfigToEnv();
     }
@@ -2628,6 +2721,10 @@ async function main(): Promise<void> {
       return cmdConfig();
     case "channels":
       return cmdChannels();
+    case "login":
+      return cmdLogin(subArgs);
+    case "logout":
+      return cmdLogout(subArgs);
     case "chat":
       return cmdChat(subArgs);
     case "doctor":

@@ -16,6 +16,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import * as p from "@clack/prompts";
 
+import {
+  loadClaudeCodeTokens,
+  inspectClaudeCodeSession,
+  type ClaudeCodeOAuthTokens,
+} from "./anthropic-oauth.js";
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -44,6 +50,20 @@ export const ALL_CREDENTIAL_FIELDS = Object.values(PROVIDER_MAP).map((v) => v.fi
 // Types
 // ---------------------------------------------------------------------------
 
+/** Per-provider authentication method. Forward-compatible with future
+ * `oauth_chatgpt` for OpenAI/Codex; right now only Anthropic OAuth is wired. */
+export type AnthropicAuthMethod = "api_key" | "oauth_claude_code";
+
+export interface AuthMethodMap {
+  anthropic?: AnthropicAuthMethod;
+}
+
+/**
+ * On-disk credential store. API-key fields live at the top level keyed by
+ * their env-var name (so legacy reads keep working); `authMethod` is the
+ * one structured exception. The string index signature only types the
+ * key fields — callers that touch `authMethod` go through the helpers below.
+ */
 export interface CredentialStore {
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
@@ -55,8 +75,15 @@ export interface ProviderStatus {
   provider: CredentialProvider;
   label: string;
   authenticated: boolean;
-  source: "env" | "keychain" | "none";
+  source: "env" | "keychain" | "oauth" | "none";
+  /** Free-text detail for the OAuth source ("Claude Code Max, expires in 42 min"). */
+  detail?: string;
 }
+
+/** Resolved authentication for an LLM provider. Discriminated by `kind`. */
+export type ResolvedAuth =
+  | { kind: "api_key"; value: string; source: "env" | "keychain" }
+  | { kind: "oauth_claude_code"; tokens: ClaudeCodeOAuthTokens; tokenSource: "file" | "keychain" };
 
 // ---------------------------------------------------------------------------
 // Read / Write
@@ -66,32 +93,75 @@ function ensureDir(): void {
   if (!existsSync(CRED_DIR)) mkdirSync(CRED_DIR, { recursive: true });
 }
 
-export function getCredentials(): CredentialStore {
+/** Raw, untyped view of the JSON file. Holds string fields *and* authMethod. */
+function readRawStore(): Record<string, unknown> {
   if (!existsSync(CRED_FILE)) return {};
   try {
-    return JSON.parse(readFileSync(CRED_FILE, "utf-8")) as CredentialStore;
+    const parsed = JSON.parse(readFileSync(CRED_FILE, "utf-8"));
+    return (parsed && typeof parsed === "object") ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
   }
 }
 
-export function saveCredentials(creds: Partial<CredentialStore>): void {
+function writeRawStore(raw: Record<string, unknown>): void {
   ensureDir();
-  const existing = getCredentials();
-  const merged = { ...existing, ...creds };
-  writeFileSync(CRED_FILE, JSON.stringify(merged, null, 2) + "\n", "utf-8");
-  try {
-    chmodSync(CRED_FILE, 0o600);
-  } catch {
-    // chmod may not be supported on all platforms
+  writeFileSync(CRED_FILE, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+  try { chmodSync(CRED_FILE, 0o600); } catch { /* chmod best-effort */ }
+}
+
+export function getCredentials(): CredentialStore {
+  const raw = readRawStore();
+  const out: CredentialStore = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === "authMethod") continue;
+    if (typeof v === "string") out[k] = v;
   }
+  return out;
+}
+
+export function saveCredentials(creds: Partial<CredentialStore>): void {
+  const raw = readRawStore();
+  for (const [k, v] of Object.entries(creds)) {
+    if (k === "authMethod") continue;
+    if (v === undefined) delete raw[k]; else raw[k] = v;
+  }
+  writeRawStore(raw);
 }
 
 export function deleteCredential(field: string): void {
-  const existing = getCredentials();
-  delete existing[field];
-  ensureDir();
-  writeFileSync(CRED_FILE, JSON.stringify(existing, null, 2) + "\n", "utf-8");
+  const raw = readRawStore();
+  delete raw[field];
+  writeRawStore(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Auth-method accessor (typed view of the `authMethod` JSON field)
+// ---------------------------------------------------------------------------
+
+export function getAuthMethods(): AuthMethodMap {
+  const raw = readRawStore();
+  const am = raw.authMethod;
+  if (!am || typeof am !== "object") return {};
+  return am as AuthMethodMap;
+}
+
+export function setAnthropicAuthMethod(method: AnthropicAuthMethod | undefined): void {
+  const raw = readRawStore();
+  const current = (raw.authMethod && typeof raw.authMethod === "object")
+    ? { ...(raw.authMethod as AuthMethodMap) }
+    : {};
+  if (method === undefined) {
+    delete current.anthropic;
+  } else {
+    current.anthropic = method;
+  }
+  if (Object.keys(current).length === 0) {
+    delete raw.authMethod;
+  } else {
+    raw.authMethod = current;
+  }
+  writeRawStore(raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +204,10 @@ export function migrateLegacyConfig(): void {
 /**
  * Resolve a provider's API key without prompting.
  * Returns the key string or undefined if not found anywhere.
+ *
+ * Note: this only looks at API-key sources. Anthropic OAuth is handled
+ * separately via `resolveAnthropicAuth`, because OAuth callers need the
+ * full token object, not a string.
  */
 export function resolveCredential(provider: CredentialProvider): string | undefined {
   migrateLegacyConfig();
@@ -156,6 +230,51 @@ export function resolveCredential(provider: CredentialProvider): string | undefi
  */
 export function hasCredential(provider: CredentialProvider): boolean {
   return resolveCredential(provider) !== undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic auth — API key OR Claude Code OAuth
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve which authentication path Anthropic calls should use.
+ *
+ * Precedence:
+ *   1. `ANTHROPIC_API_KEY` in the process env (explicit override always wins)
+ *   2. `ANTHROPIC_API_KEY` in the keychain JSON
+ *   3. Claude Code OAuth — only if the user opted in via
+ *      `authMethod.anthropic === "oauth_claude_code"` AND a session is loadable
+ *
+ * The opt-in flag matters: having Claude Code installed must not silently
+ * change which credentials we use. The user enables OAuth via
+ * `sportsclaw login claude` (or the config wizard).
+ */
+export function resolveAnthropicAuth(): ResolvedAuth | undefined {
+  migrateLegacyConfig();
+
+  const envVal = process.env.ANTHROPIC_API_KEY;
+  if (envVal && envVal.trim().length > 0) {
+    return { kind: "api_key", value: envVal.trim(), source: "env" };
+  }
+
+  const creds = getCredentials();
+  const stored = creds.ANTHROPIC_API_KEY;
+  if (stored && stored.trim().length > 0) {
+    return { kind: "api_key", value: stored.trim(), source: "keychain" };
+  }
+
+  if (getAuthMethods().anthropic === "oauth_claude_code") {
+    const loaded = loadClaudeCodeTokens();
+    if (loaded) {
+      return {
+        kind: "oauth_claude_code",
+        tokens: loaded.tokens,
+        tokenSource: loaded.source,
+      };
+    }
+  }
+
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +347,22 @@ export function listProviderStatus(): ProviderStatus[] {
         return { provider, label: info.label, authenticated: true, source: "keychain" as const };
       }
 
+      // OAuth path is opt-in and Anthropic-only.
+      if (provider === "anthropic" && getAuthMethods().anthropic === "oauth_claude_code") {
+        const session = inspectClaudeCodeSession();
+        if (session.available) {
+          const minLeft = Math.max(0, Math.floor((session.expiresInMs ?? 0) / 60_000));
+          const sub = session.subscriptionType ? `Claude Code ${session.subscriptionType}` : "Claude Code";
+          return {
+            provider,
+            label: info.label,
+            authenticated: true,
+            source: "oauth" as const,
+            detail: `${sub}, expires in ${minLeft} min`,
+          };
+        }
+      }
+
       return { provider, label: info.label, authenticated: false, source: "none" as const };
     }
   );
@@ -240,7 +375,11 @@ export function printCredentialStatus(): void {
   const statuses = listProviderStatus();
   for (const s of statuses) {
     const icon = s.authenticated ? "+" : "-";
-    const sourceHint = s.source === "env" ? " (env)" : s.source === "keychain" ? " (keychain)" : "";
+    const sourceHint =
+      s.source === "env" ? " (env)" :
+      s.source === "keychain" ? " (keychain)" :
+      s.source === "oauth" ? ` (oauth · ${s.detail ?? "Claude Code"})` :
+      "";
     const status = s.authenticated ? `authenticated${sourceHint}` : "not configured";
     p.log.info(`[${icon}] ${s.label}: ${status}`);
   }

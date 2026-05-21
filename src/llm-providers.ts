@@ -26,6 +26,11 @@ import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { openai, createOpenAI } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
 
+import {
+  createAnthropicOAuthProvider,
+  type ClaudeCodeOAuthTokens,
+} from "./anthropic-oauth.js";
+import { resolveAnthropicAuth } from "./credentials.js";
 import type { LLMProvider } from "./types.js";
 
 /**
@@ -92,6 +97,19 @@ export interface OpenShellRoute {
 }
 
 /**
+ * Auth context passed into `resolveModel`. Today only Anthropic OAuth needs
+ * special wiring — API-key paths flow transparently through the provider's
+ * env-var pickup. `undefined` means "use the SDK default for this provider".
+ */
+export interface ResolvedModelAuth {
+  anthropic?: {
+    kind: "oauth_claude_code";
+    tokens: ClaudeCodeOAuthTokens;
+    tokenSource: "file" | "keychain";
+  };
+}
+
+/**
  * Provider-specific default base URL for OpenShell's `inference.local`.
  * Each SDK has its own path convention — Anthropic appends
  * `/v1/messages`, OpenAI clients expect the `/v1` prefix already in
@@ -110,13 +128,41 @@ export function defaultOpenShellBaseUrl(provider: LLMProvider): string {
   }
 }
 
+/**
+ * Build a `ResolvedModelAuth` from the persisted credential store. Returns
+ * `undefined` (i.e. "use SDK defaults") if no OAuth opt-in is recorded —
+ * the API-key path doesn't need a value here because the AI SDK reads the
+ * env var directly.
+ */
+export function resolveAuthForModel(): ResolvedModelAuth | undefined {
+  const auth = resolveAnthropicAuth();
+  if (auth?.kind === "oauth_claude_code") {
+    return {
+      anthropic: {
+        kind: "oauth_claude_code",
+        tokens: auth.tokens,
+        tokenSource: auth.tokenSource,
+      },
+    };
+  }
+  return undefined;
+}
+
 /** Create a Vercel AI SDK model instance for the given provider + model ID. */
 export function resolveModel(
   provider: LLMProvider,
   modelId: string,
   openshell?: OpenShellRoute,
+  auth?: ResolvedModelAuth,
 ) {
   if (openshell) {
+    if (auth?.anthropic?.kind === "oauth_claude_code") {
+      throw new Error(
+        "OpenShell mode is incompatible with Claude Code OAuth — the Privacy " +
+        "Router injects its own credentials. Either drop the openshell block " +
+        "or run `sportsclaw logout claude` to fall back to the API key.",
+      );
+    }
     switch (provider) {
       case "anthropic":
         return createAnthropic({
@@ -143,6 +189,12 @@ export function resolveModel(
   }
   switch (provider) {
     case "anthropic":
+      if (auth?.anthropic?.kind === "oauth_claude_code") {
+        return createAnthropicOAuthProvider({
+          tokens: auth.anthropic.tokens,
+          source: auth.anthropic.tokenSource,
+        })(modelId);
+      }
       return anthropic(modelId);
     case "openai": {
       // When OPENAI_BASE_URL points at a self-hosted endpoint (NIM, vLLM,

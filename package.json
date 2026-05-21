@@ -53,7 +53,8 @@
     "test:operator-context-chaining": "npm run build && node --test test/operator-context-chaining.test.mjs",
     "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs",
     "test:formatters-telegram": "npm run build && node --test test/formatters-telegram.test.mjs",
-    "test:formatters-discord": "npm run build && node --test test/formatters-discord.test.mjs"
+    "test:formatters-discord": "npm run build && node --test test/formatters-discord.test.mjs",
+    "test:anthropic-oauth": "npm run build && node --test test/anthropic-oauth.test.mjs"
   },
   "keywords": [
     "sports",
