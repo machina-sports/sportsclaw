@@ -406,7 +406,15 @@ export function createOperatorDaemon(
         system,
         prompt: tickPrompt,
         ...(wrappedTools ? { tools: wrappedTools } : {}),
-        maxOutputTokens: cfg.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+        // Structured-output mode emits the full schema payload (narrative +
+        // arrays) plus tool-call reasoning in one budget. 2048 is fine for
+        // free-text ticks; tight for structured ones. Bump the default when
+        // `cfg.outputSchema` is set so the model has headroom to finish.
+        maxOutputTokens:
+          cfg.maxOutputTokens ??
+          (useStructuredOutput
+            ? DEFAULT_MAX_OUTPUT_TOKENS * 2
+            : DEFAULT_MAX_OUTPUT_TOKENS),
         // Allow the model multiple steps so it can call tools and THEN
         // produce a final synthesis text. Without stopWhen, generateText
         // takes a single step and ends with empty text whenever the
@@ -481,12 +489,16 @@ export function createOperatorDaemon(
     // Silent decision:
     //   - structured-output mode: trust the schema's `silent` field. If the
     //     object never came back (SDK couldn't produce a valid match), also
-    //     treat as silent rather than crashing.
+    //     treat as silent rather than crashing. Do NOT also gate on
+    //     `text.length === 0` — a schema-validated payload with silent=false
+    //     but an empty narrative is *malformed*, not silent; the sink decides
+    //     whether to suppress the overlay card (it has malformedBroadcast
+    //     checks that emit nothing to viewers but still keep the trace).
     //   - free-text mode: keep the [SILENT] sentinel match on text.
     let silent: boolean;
     if (useStructuredOutput) {
       const obj = structuredOutput as { silent?: unknown } | undefined;
-      silent = !obj || obj.silent === true || text.length === 0;
+      silent = !obj || obj.silent === true;
     } else {
       silent = LastTickBrief.isSilent(text);
     }

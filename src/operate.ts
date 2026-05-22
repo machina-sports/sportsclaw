@@ -260,6 +260,16 @@ async function buildOperatorTools(
   verbose: boolean,
   sink?: OperatorSinkPlugin,
 ): Promise<OperatorTools> {
+  // Apply the per-job skill filter BEFORE loadAllSchemas reads
+  // process.env.SPORTSCLAW_SKILLS. Lets focused jobs (e.g. a World Cup
+  // channel that only needs football + news + prediction markets) trim
+  // the ~300-tool default to a tight subset — smaller prompts, faster
+  // ticks, and the toolset fits within Gemini's responseSchema +
+  // function-calling complexity envelope. If the env var is already set
+  // by the caller (e.g. integration tests), respect that — don't override.
+  if (cfg.skills && cfg.skills.length > 0 && !process.env.SPORTSCLAW_SKILLS) {
+    process.env.SPORTSCLAW_SKILLS = cfg.skills.join(",");
+  }
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);
