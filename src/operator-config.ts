@@ -100,13 +100,25 @@ export interface OperatorJobConfig {
    */
   enableMemoryTools?: boolean;
   /**
-   * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
-   * Absent block = default direct LLM calls; nothing changes. When present
-   * and enabled, the launcher constructs the AI SDK provider with a
-   * `baseURL` pointing at `inference.local` (or the configured `baseUrl`).
-   * See `openshell/README.md` for the deployment runbook.
+   * Optional structured-output spec the daemon enforces.
    */
   openshell?: OpenShellConfig;
+  /**
+   * Optional broadcast safety validation options.
+   */
+  broadcastSafety?: {
+    enabled: boolean;
+    options?: {
+      minimumTotalDurationSec?: number;
+      maximumTotalDurationSec?: number;
+      requireFallbackForEveryBlock?: boolean;
+      requireFreshnessForLiveBlocks?: boolean;
+      maxLiveAgeMs?: number;
+      nowMs?: number;
+      expectedBlockCountMin?: number;
+    };
+    fallbackManifest?: unknown;
+  };
 }
 
 export interface ValidationIssue {
@@ -340,6 +352,43 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // broadcastSafety
+  if (raw.broadcastSafety !== undefined) {
+    if (typeof raw.broadcastSafety !== "object" || raw.broadcastSafety === null || Array.isArray(raw.broadcastSafety)) {
+      push("broadcastSafety", "must be an object");
+    } else {
+      const bs = raw.broadcastSafety as Record<string, unknown>;
+      if (bs.enabled !== undefined && typeof bs.enabled !== "boolean") {
+        push("broadcastSafety.enabled", "must be a boolean");
+      }
+      if (bs.options !== undefined) {
+        if (typeof bs.options !== "object" || bs.options === null || Array.isArray(bs.options)) {
+          push("broadcastSafety.options", "must be an object");
+        } else {
+          const opts = bs.options as Record<string, unknown>;
+          if (opts.minimumTotalDurationSec !== undefined && typeof opts.minimumTotalDurationSec !== "number") {
+            push("broadcastSafety.options.minimumTotalDurationSec", "must be a number");
+          }
+          if (opts.maximumTotalDurationSec !== undefined && typeof opts.maximumTotalDurationSec !== "number") {
+            push("broadcastSafety.options.maximumTotalDurationSec", "must be a number");
+          }
+          if (opts.requireFallbackForEveryBlock !== undefined && typeof opts.requireFallbackForEveryBlock !== "boolean") {
+            push("broadcastSafety.options.requireFallbackForEveryBlock", "must be a boolean");
+          }
+          if (opts.requireFreshnessForLiveBlocks !== undefined && typeof opts.requireFreshnessForLiveBlocks !== "boolean") {
+            push("broadcastSafety.options.requireFreshnessForLiveBlocks", "must be a boolean");
+          }
+          if (opts.maxLiveAgeMs !== undefined && typeof opts.maxLiveAgeMs !== "number") {
+            push("broadcastSafety.options.maxLiveAgeMs", "must be a number");
+          }
+          if (opts.expectedBlockCountMin !== undefined && typeof opts.expectedBlockCountMin !== "number") {
+            push("broadcastSafety.options.expectedBlockCountMin", "must be a number");
+          }
+        }
+      }
+    }
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -364,6 +413,7 @@ export function validateOperatorJobConfig(
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
       openshell: parsedOpenShell,
+      broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],
     },
   };
 }

@@ -60,6 +60,7 @@ import {
   type ToolGuardOptions,
 } from "./guardrails.js";
 import type { InferenceRoute } from "./types.js";
+import { validateManifestCoverage, type ManifestCoverageOptions } from "./schema/tv.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,6 +116,16 @@ export interface TickEvent {
    * lightweight tests). Sinks unaware of this field can ignore it.
    */
   inferenceRoute?: InferenceRoute;
+  /**
+   * Optional safety validation summary. Populated when broadcast safety
+   * checks are configured and executed on the tick's output.
+   */
+  safetyValidation?: {
+    passed: boolean;
+    error?: string;
+    fallbackTriggered: boolean;
+    originalOutput?: unknown;
+  };
 }
 
 export interface OperatorDaemonConfig {
@@ -131,6 +142,12 @@ export interface OperatorDaemonConfig {
   model: LanguageModel;
   /** Persona / role paragraph — top of every system prompt. */
   role: string;
+  /** Optional broadcast safety validation options. */
+  broadcastSafety?: {
+    enabled: boolean;
+    options?: ManifestCoverageOptions;
+    fallbackManifest?: unknown;
+  };
   /** Per-tick user prompt template. `{tickId}` and `{timestamp}` are substituted. */
   tickPrompt?: string;
   /** Tools handed to the model. Each tool's `execute` is wrapped by the guardrail. */
@@ -446,6 +463,53 @@ export function createOperatorDaemon(
       failureReason = err instanceof Error ? err.message : String(err);
     }
 
+    // Broadcast Safety Validation Gate (PR 2)
+    let safetyValidation: TickEvent["safetyValidation"] = undefined;
+    if (!failureReason && cfg.broadcastSafety?.enabled && useStructuredOutput && structuredOutput) {
+      const validationOpts = cfg.broadcastSafety.options ?? {};
+      const nowMs = Date.parse(timestamp);
+      const validationResult = validateManifestCoverage(structuredOutput, {
+        nowMs,
+        ...validationOpts,
+      });
+
+      if (!validationResult.ok) {
+        const originalOutput = structuredOutput;
+        const fallbackManifest = cfg.broadcastSafety.fallbackManifest ?? {
+          id: `fallback-${tickId}`,
+          channelId: jobId,
+          blocks: [
+            {
+              id: `fallback-evergreen-${tickId}`,
+              title: "Emergency Backup Playout (Evergreen)",
+              durationSec: 300,
+              freshness: "EVERGREEN",
+              fallback: {
+                blockId: "emergency-slate",
+                reason: `Broadcast safety gate fallback triggered: ${validationResult.error}`
+              }
+            }
+          ],
+          createdAt: timestamp
+        };
+
+        structuredOutput = fallbackManifest;
+        text = `Emergency fallback active: output failed broadcast safety checks. Error: ${validationResult.error}`;
+        
+        safetyValidation = {
+          passed: false,
+          error: validationResult.error,
+          fallbackTriggered: true,
+          originalOutput,
+        };
+      } else {
+        safetyValidation = {
+          passed: true,
+          fallbackTriggered: false,
+        };
+      }
+    }
+
     // 6. Persist a brief either way (failures get a body too — handoff).
     const briefBody = failureReason
       ? `**tick failed**: ${failureReason}`
@@ -515,6 +579,7 @@ export function createOperatorDaemon(
       guardrailWarnings: counts.warnings,
       guardrailBlocks: counts.blocks,
       inferenceRoute: cfg.inferenceRoute,
+      ...(safetyValidation !== undefined ? { safetyValidation } : {}),
     };
     cfg.onTickEvent?.(event);
     return event;
