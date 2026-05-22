@@ -59,6 +59,27 @@ export interface OperatorJobConfig {
    * BROADCAST_DIRECTIVE_FRAGMENT) and used as inline text otherwise.
    */
   extraFragments?: string[];
+  /**
+   * Sport-skill schemas to load for this job. When set, the launcher applies
+   * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
+   * is invoked — only the named skills' tools become available to the LLM.
+   *
+   * Why: the default behaviour loads every installed schema (~14 sports +
+   * markets + metadata + betting → ~300 tool surfaces in a typical install).
+   * For a focused job (e.g. a World Cup channel that only needs football +
+   * news + prediction markets) this is wasteful in two ways: every tool
+   * description goes into the system prompt, and the combination of the
+   * full toolset with structured output (`OperatorSinkPlugin.getOutputSchema`)
+   * trips a Gemini `responseSchema` complexity limit. Setting a tight
+   * `skills` list fixes both.
+   *
+   * Strings should match schema filenames in `~/.sportsclaw/schemas/`
+   * (without the `.json` suffix), e.g.
+   * `["football","kalshi","polymarket","news","markets","metadata","betting"]`.
+   *
+   * Omit to keep the legacy "load everything" behaviour.
+   */
+  skills?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
   guardOptions?: Record<string, unknown>;
   /**
@@ -252,6 +273,19 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // skills — sport-skill filter applied as SPORTSCLAW_SKILLS by the launcher
+  if (raw.skills !== undefined) {
+    if (!Array.isArray(raw.skills)) {
+      push("skills", "must be an array of strings");
+    } else {
+      for (let i = 0; i < raw.skills.length; i++) {
+        if (typeof raw.skills[i] !== "string") {
+          push(`skills[${i}]`, "must be a string");
+        }
+      }
+    }
+  }
+
   // guardOptions
   if (
     raw.guardOptions !== undefined &&
@@ -325,6 +359,7 @@ export function validateOperatorJobConfig(
       tailServer: raw.tailServer as string | undefined,
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
+      skills: raw.skills as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,

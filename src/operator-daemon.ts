@@ -36,6 +36,8 @@
 import path from "node:path";
 import {
   generateText,
+  jsonSchema,
+  Output,
   stepCountIs,
   type LanguageModel,
   type ToolSet,
@@ -89,6 +91,16 @@ export interface TickEvent {
   tickId: string;
   /** Final assistant text, if any. Omitted when silent or failed. */
   text?: string;
+  /**
+   * Structured output validated against `cfg.outputSchema`. Populated only
+   * when the daemon ran in structured-output mode (i.e. cfg.outputSchema
+   * was provided) and the model emitted a valid object. When this is set,
+   * `text` is populated with the schema's `narrative` field (if any) for
+   * backwards compatibility with text-consuming sinks. Sinks aware of
+   * structured output should prefer `output` over re-parsing `text` —
+   * the SDK already validated the shape and there's no envelope-leak risk.
+   */
+  output?: unknown;
   /** Reason string for skipped, error message for failed. */
   reason?: string;
   /** ISO 8601 timestamp. */
@@ -180,6 +192,30 @@ export interface OperatorDaemonConfig {
     tickId: string;
     timestamp: string;
   }) => Promise<string | null | undefined> | string | null | undefined;
+
+  /**
+   * Optional structured output spec. When provided, the daemon configures
+   * the LLM call with Vercel AI SDK's `experimental_output: Output.object()`
+   * — the model is forced to emit a JSON object validated against `schema`.
+   *
+   * The shape is the same one returned by `OperatorSinkPlugin.getOutputSchema`:
+   *   { schema: <JSON Schema object>, name?: string, description?: string }
+   *
+   * Two consequences when set:
+   *   1. The `silentSentinel: true` system-prompt fragment is suppressed —
+   *      the model expresses "skip" via the schema's `silent` field
+   *      (sinks that want silent capability should include it in their schema).
+   *   2. The emitted `TickEvent.output` carries the parsed object; `text`
+   *      gets the object's `narrative` field if present (for backwards
+   *      compat with sinks that still read text).
+   *
+   * Omit to keep the legacy free-text path (with `[SILENT]` sentinel parsing).
+   */
+  outputSchema?: {
+    schema: unknown;
+    name?: string;
+    description?: string;
+  };
 
   /** Inject a HeartbeatService (tests). Default: a fresh instance. */
   heartbeat?: HeartbeatService;
@@ -289,12 +325,16 @@ export function createOperatorDaemon(
       perJobLimit: recentBriefLimit,
     });
 
-    // 3. System prompt composition.
+    // 3. System prompt composition. When structured output is in play, the
+    // `[SILENT]` sentinel mechanism is replaced by a `silent` field on the
+    // schema — suppress the prompt fragment so the model doesn't get two
+    // conflicting instructions for the same "skip this tick" intent.
+    const useStructuredOutput = !!cfg.outputSchema;
     const system = buildSystemPrompt({
       role: cfg.role,
       isCron: true,
       toolDiscipline: true,
-      silentSentinel: true,
+      silentSentinel: !useStructuredOutput,
       editorialMemorySnapshot: memorySnapshot,
       recentTickBrief,
       extras: cfg.extraFragments,
@@ -341,23 +381,67 @@ export function createOperatorDaemon(
       .replace("{tickId}", tickId)
       .replace("{timestamp}", timestamp);
 
-    // 5. LLM pass.
+    // 5. LLM pass. Two flavours:
+    //   - Free-text mode (legacy): result.text holds the raw model output;
+    //     `[SILENT]` is matched downstream.
+    //   - Structured mode: `experimental_output: Output.object({schema})`
+    //     constrains + validates the model's final answer; result.experimental_output
+    //     holds the parsed object. text is set to the object's narrative (when
+    //     present) for backwards-compat with text-consuming sinks.
     let text = "";
+    let structuredOutput: unknown;
     let failureReason: string | undefined;
+    const experimental_output = useStructuredOutput
+      ? Output.object({
+          schema: jsonSchema(cfg.outputSchema!.schema as object),
+          ...(cfg.outputSchema!.name ? { name: cfg.outputSchema!.name } : {}),
+          ...(cfg.outputSchema!.description
+            ? { description: cfg.outputSchema!.description }
+            : {}),
+        })
+      : undefined;
     try {
       const result = await generateImpl({
         model: cfg.model,
         system,
         prompt: tickPrompt,
         ...(wrappedTools ? { tools: wrappedTools } : {}),
-        maxOutputTokens: cfg.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+        // Structured-output mode emits the full schema payload (narrative +
+        // arrays) plus tool-call reasoning in one budget. 2048 is fine for
+        // free-text ticks; tight for structured ones. Bump the default when
+        // `cfg.outputSchema` is set so the model has headroom to finish.
+        maxOutputTokens:
+          cfg.maxOutputTokens ??
+          (useStructuredOutput
+            ? DEFAULT_MAX_OUTPUT_TOKENS * 2
+            : DEFAULT_MAX_OUTPUT_TOKENS),
         // Allow the model multiple steps so it can call tools and THEN
         // produce a final synthesis text. Without stopWhen, generateText
         // takes a single step and ends with empty text whenever the
         // model chose to call tools first.
         stopWhen: stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
+        ...(experimental_output ? { experimental_output } : {}),
       });
-      text = (result.text ?? "").trim();
+      if (useStructuredOutput) {
+        // SDK populates result.experimental_output with the validated object.
+        // If the SDK couldn't produce a valid match (rare, since it retries),
+        // experimental_output is undefined — treat as silent rather than
+        // failing the tick.
+        structuredOutput = (result as { experimental_output?: unknown })
+          .experimental_output;
+        const narrative =
+          structuredOutput &&
+          typeof structuredOutput === "object" &&
+          typeof (structuredOutput as { narrative?: unknown }).narrative ===
+            "string"
+            ? ((structuredOutput as { narrative: string }).narrative).trim()
+            : "";
+        // text is the synthesised narrative (for back-compat) when the
+        // object has one; otherwise empty.
+        text = narrative;
+      } else {
+        text = (result.text ?? "").trim();
+      }
     } catch (err) {
       failureReason = err instanceof Error ? err.message : String(err);
     }
@@ -402,12 +486,30 @@ export function createOperatorDaemon(
 
     await heartbeat.markJobSucceeded(jobId).catch(() => {});
 
-    const silent = LastTickBrief.isSilent(text);
+    // Silent decision:
+    //   - structured-output mode: trust the schema's `silent` field. If the
+    //     object never came back (SDK couldn't produce a valid match), also
+    //     treat as silent rather than crashing. Do NOT also gate on
+    //     `text.length === 0` — a schema-validated payload with silent=false
+    //     but an empty narrative is *malformed*, not silent; the sink decides
+    //     whether to suppress the overlay card (it has malformedBroadcast
+    //     checks that emit nothing to viewers but still keep the trace).
+    //   - free-text mode: keep the [SILENT] sentinel match on text.
+    let silent: boolean;
+    if (useStructuredOutput) {
+      const obj = structuredOutput as { silent?: unknown } | undefined;
+      silent = !obj || obj.silent === true;
+    } else {
+      silent = LastTickBrief.isSilent(text);
+    }
     const event: TickEvent = {
       type: silent ? "tick_silent" : "tick_published",
       jobId,
       tickId,
       text: silent ? undefined : text,
+      // Carry structured output even on silent ticks so downstream tools can
+      // observe what the model chose to skip (debugging / metrics).
+      ...(structuredOutput !== undefined ? { output: structuredOutput } : {}),
       timestamp,
       toolCalls: counts.calls,
       guardrailWarnings: counts.warnings,
