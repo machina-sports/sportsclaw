@@ -162,6 +162,38 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "extraFragments[1]"));
   });
 
+  it("accepts a skills list of strings", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      skills: ["football", "kalshi", "polymarket"],
+    });
+    assert.strictEqual(r.valid, true);
+    assert.deepStrictEqual(r.config.skills, ["football", "kalshi", "polymarket"]);
+  });
+
+  it("accepts an empty skills array (caller's choice — launcher won't set the env var)", () => {
+    const r = validateOperatorJobConfig({ ...base, skills: [] });
+    assert.strictEqual(r.valid, true);
+    assert.deepStrictEqual(r.config.skills, []);
+  });
+
+  it("rejects a non-array skills value", () => {
+    for (const bad of ["football", 42, { football: true }]) {
+      const r = validateOperatorJobConfig({ ...base, skills: bad });
+      assert.strictEqual(r.valid, false, `skills=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "skills"));
+    }
+  });
+
+  it("rejects a skills entry that is not a string", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      skills: ["football", 42, "polymarket"],
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "skills[1]"));
+  });
+
   it("rejects a tailServer that isn't a URL", () => {
     const r = validateOperatorJobConfig({ ...base, tailServer: "not a url" });
     assert.strictEqual(r.valid, false);
