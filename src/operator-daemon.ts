@@ -60,7 +60,10 @@ import {
   type ToolGuardOptions,
 } from "./guardrails.js";
 import type { InferenceRoute } from "./types.js";
-import { validateManifestCoverage, type ManifestCoverageOptions } from "./schema/tv.js";
+import { validateManifestCoverage, type ManifestCoverageOptions, type DecisionRecord, type AgentRunRecord, type IncidentRecord } from "./schema/tv.js";
+import type { McpManager } from "./mcp.js";
+import { FileAgentRunLedger, PodOperatorRunsLedger } from "./operator-runs.js";
+import { FileIncidentLedger, PodIncidentLedger } from "./incident-log.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -238,6 +241,8 @@ export interface OperatorDaemonConfig {
   heartbeat?: HeartbeatService;
   /** Inject a generateText impl (tests). Default: ai SDK's. */
   generateTextImpl?: typeof generateText;
+  /** MCP manager handle (for ledger syncing to the Pod) */
+  mcpManager?: McpManager;
   /**
    * Inference routing snapshot. The launcher passes this so every emitted
    * TickEvent carries the routing decision (direct vs. openshell, base URL,
@@ -519,6 +524,7 @@ export function createOperatorDaemon(
         tickId,
         jobId,
         body: briefBody,
+        ...(structuredOutput !== undefined ? { payload: structuredOutput } : {}),
       });
     } catch (err) {
       // brief-write failure is logged but does not promote a successful
@@ -530,8 +536,113 @@ export function createOperatorDaemon(
       );
     }
 
+    const recordLedger = async (errorReason?: string, isSilent: boolean = false): Promise<void> => {
+      const endedAt = new Date().toISOString();
+      const decisions: DecisionRecord[] = [];
+
+      if (errorReason) {
+        decisions.push({
+          id: `decision-${tickId}-fail`,
+          timestamp: endedAt,
+          action: "fail",
+          reason: errorReason,
+          agentId: jobId,
+        });
+      } else if (safetyValidation && safetyValidation.fallbackTriggered) {
+        decisions.push({
+          id: `decision-${tickId}-fallback`,
+          timestamp: endedAt,
+          action: "fallback",
+          reason: safetyValidation.error || "Broadcast safety check failed",
+          agentId: jobId,
+          meta: { error: safetyValidation.error },
+        });
+      } else if (isSilent) {
+        decisions.push({
+          id: `decision-${tickId}-silent`,
+          timestamp: endedAt,
+          action: "silence",
+          reason: "Model chose to remain silent (no worth-surfacing updates)",
+          agentId: jobId,
+        });
+      } else {
+        decisions.push({
+          id: `decision-${tickId}-publish`,
+          timestamp: endedAt,
+          action: "publish",
+          reason: text || "Published broadcast block",
+          agentId: jobId,
+        });
+      }
+
+      const runRecord: AgentRunRecord = {
+        id: tickId,
+        agentId: jobId,
+        startedAt: timestamp,
+        endedAt,
+        decisions,
+        status: errorReason ? "failed" : "completed",
+      };
+
+      // 1. Write local run ledger
+      try {
+        const localRunLedger = new FileAgentRunLedger(path.join(cfg.rootDir, "operator-runs.jsonl"));
+        await localRunLedger.append(runRecord);
+      } catch (err) {
+        console.error(`[operator-daemon] Failed to write local agent run ledger: ${err}`);
+      }
+
+      // 2. Write local incident ledger if safety validation triggered fallback or failure
+      if (errorReason || (safetyValidation && safetyValidation.fallbackTriggered)) {
+        const incident: IncidentRecord = {
+          id: `incident-${tickId}`,
+          timestamp,
+          level: errorReason ? "critical" : "error",
+          message: errorReason ? `Tick crashed: ${errorReason}` : `Broadcast safety gate triggered fallback: ${safetyValidation?.error || "unknown validation error"}`,
+          component: errorReason ? "operator-daemon" : "safety-gate",
+          resolvedAt: timestamp,
+          resolution: errorReason ? "System logged crash." : "Emergency playout fallback manifest loaded.",
+          meta: { error: errorReason || safetyValidation?.error, jobId },
+        };
+
+        try {
+          const localIncidentLedger = new FileIncidentLedger(path.join(cfg.rootDir, "incidents.jsonl"));
+          await localIncidentLedger.append(incident);
+        } catch (err) {
+          console.error(`[operator-daemon] Failed to write local incident ledger: ${err}`);
+        }
+
+        // Write MCP Incident Ledger if available
+        if (cfg.mcpManager) {
+          const serverName = cfg.mcpManager.getMachinaServerName();
+          if (serverName) {
+            try {
+              const podIncidentLedger = new PodIncidentLedger(cfg.mcpManager, serverName);
+              await podIncidentLedger.append(incident);
+            } catch (err) {
+              console.error(`[operator-daemon] Failed to sync incident to Pod: ${err}`);
+            }
+          }
+        }
+      }
+
+      // 3. Write MCP run ledger if available
+      if (cfg.mcpManager) {
+        const serverName = cfg.mcpManager.getMachinaServerName();
+        if (serverName) {
+          try {
+            const podRunLedger = new PodOperatorRunsLedger(cfg.mcpManager, serverName);
+            await podRunLedger.append(runRecord);
+          } catch (err) {
+            console.error(`[operator-daemon] Failed to sync agent run ledger to Pod: ${err}`);
+          }
+        }
+      }
+    };
+
     // 7. Heartbeat status + telemetry.
     if (failureReason) {
+      await recordLedger(failureReason).catch(() => {});
       await heartbeat.markJobFailed(jobId, failureReason).catch(() => {});
       const event: TickEvent = {
         type: "tick_failed",
@@ -566,6 +677,7 @@ export function createOperatorDaemon(
     } else {
       silent = LastTickBrief.isSilent(text);
     }
+    await recordLedger(undefined, silent).catch(() => {});
     const event: TickEvent = {
       type: silent ? "tick_silent" : "tick_published",
       jobId,
