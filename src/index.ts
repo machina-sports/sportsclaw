@@ -105,6 +105,7 @@ import {
   saveMcpConfigs,
   removeMcpConfig,
   getMcpConfigPath,
+  McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
 import type { WatchOutputMode, WatcherConfig } from "./types.js";
@@ -1107,6 +1108,123 @@ function detectConfigDrift(): string[] {
   }
 
   return issues;
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw health` — check setup, MCP connection, and pipeline health
+// ---------------------------------------------------------------------------
+
+async function cmdHealth(args: string[]): Promise<void> {
+  const jsonMode = args.includes("--json");
+  const { pythonPath, provider, model, apiKey } = resolveConfig();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // 1. Check Node version
+  const nodeVersion = process.versions.node;
+  const nodeMajor = Number.parseInt(nodeVersion.split(".")[0], 10);
+  if (nodeMajor < 18) {
+    errors.push(`Node.js version ${nodeVersion} is below required v18.`);
+  }
+
+  // 2. Check Python path and sports-skills
+  const pyCheck = checkPythonVersion(pythonPath);
+  if (!pyCheck.ok) {
+    warnings.push(`Python not fully configured or outdated (path: ${pythonPath}).`);
+  }
+
+  // 3. Check API configuration
+  if (!apiKey) {
+    errors.push(`API key for provider "${provider}" is not configured.`);
+  }
+
+  // 4. Check MCP Server statuses
+  const mcpManager = new McpManager(false, false);
+  let mcpDetails: Array<{ name: string; connected: boolean; url: string; failures: number; toolsDiscovered: number }> = [];
+  
+  try {
+    await mcpManager.connectAll();
+    mcpDetails = mcpManager.getHealthDetails();
+  } catch (err) {
+    errors.push("Failed to verify MCP server connectivity: " + (err instanceof Error ? err.message : String(err)));
+  } finally {
+    try {
+      await mcpManager.disconnectAll();
+    } catch {
+      // ignore
+    }
+  }
+
+  // Determine overall status
+  let status: "healthy" | "degraded" | "down" = "healthy";
+  const failedMcps = mcpDetails.filter((m) => !m.connected);
+
+  if (errors.length > 0 || (failedMcps.length === mcpDetails.length && mcpDetails.length > 0)) {
+    status = "down";
+  } else if (warnings.length > 0 || failedMcps.length > 0) {
+    status = "degraded";
+  }
+
+  const schemasCount = listSchemas().length;
+
+  if (jsonMode) {
+    const payload = {
+      timestamp: new Date().toISOString(),
+      status,
+      version: PKG_VERSION,
+      config: {
+        provider,
+        model: model || null,
+        pythonPath,
+        apiKeyConfigured: !!apiKey,
+      },
+      mcp: mcpDetails,
+      schemasInstalled: schemasCount,
+      errors,
+      warnings,
+    };
+    console.log(JSON.stringify(payload, null, 2));
+    process.exit(status === "down" ? 1 : 0);
+  }
+
+  // Human-readable terminal output
+  console.log(pc.bold("\nsportsclaw health status\n"));
+  console.log(`  Overall Status:  ${status === "healthy" ? pc.green(status.toUpperCase()) : status === "degraded" ? pc.yellow(status.toUpperCase()) : pc.red(status.toUpperCase())}`);
+  console.log(`  Engine Version:  v${PKG_VERSION}`);
+  console.log(`  Provider/Model:  ${provider} (${model || "default"})`);
+  console.log(`  Schemas Active:  ${schemasCount} installed`);
+  console.log("");
+
+  console.log(pc.bold("  MCP Connectivity:"));
+  if (mcpDetails.length === 0) {
+    console.log("    No MCP servers configured.");
+  } else {
+    for (const mcp of mcpDetails) {
+      const stateText = mcp.connected
+        ? pc.green(`✓ ONLINE [${mcp.toolsDiscovered} tools]`)
+        : pc.red(`✗ OFFLINE`);
+      console.log(`    - ${pc.cyan(mcp.name.padEnd(20))} ${stateText} — ${mcp.url}`);
+    }
+  }
+  console.log("");
+
+  if (errors.length > 0) {
+    console.log(pc.bold(pc.red("  Errors:")));
+    for (const err of errors) {
+      console.log(`    - ${pc.red(err)}`);
+    }
+    console.log("");
+  }
+
+  if (warnings.length > 0) {
+    console.log(pc.bold(pc.yellow("  Warnings:")));
+    for (const warn of warnings) {
+      console.log(`    - ${pc.yellow(warn)}`);
+    }
+    console.log("");
+  }
+
+  process.exit(status === "down" ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2284,6 +2402,7 @@ function printHelp(): void {
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
   console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
+  console.log("  sportsclaw health [--json]         Check system health and status");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
@@ -2491,6 +2610,8 @@ async function main(): Promise<void> {
       return cmdChat(subArgs);
     case "doctor":
       return cmdDoctor();
+    case "health":
+      return cmdHealth(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":
