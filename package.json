@@ -48,6 +48,7 @@
     "test:operator-sink": "npm run build && node --test test/operator-sink.test.mjs",
     "test:operator-sink-external": "npm run build && node --test test/operator-sink-external.test.mjs",
     "test:operator-memory-tools": "npm run build && node --test test/operator-memory-tools.test.mjs",
+    "test:operator-safety": "npm run build && node --test test/operator-safety.test.mjs",
     "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs"
   },
   "keywords": [

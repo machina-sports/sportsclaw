@@ -287,6 +287,104 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(fields.has("provider"));
     assert.ok(fields.has("persona|personaText"));
   });
+
+  // --- broadcastSafety --------------------------------------------------
+
+  it("accepts a minimal broadcastSafety block (enabled only)", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      broadcastSafety: { enabled: true },
+    });
+    assert.strictEqual(r.valid, true);
+    assert.deepStrictEqual(r.config.broadcastSafety, { enabled: true });
+  });
+
+  it("accepts broadcastSafety with full options and a fallbackManifest", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      broadcastSafety: {
+        enabled: true,
+        options: {
+          minimumTotalDurationSec: 60,
+          maximumTotalDurationSec: 3600,
+          requireFallbackForEveryBlock: true,
+          requireFreshnessForLiveBlocks: true,
+          maxLiveAgeMs: 10000,
+          expectedBlockCountMin: 1,
+        },
+        fallbackManifest: { id: "fallback-1", channelId: "x", blocks: [] },
+      },
+    });
+    assert.strictEqual(r.valid, true);
+  });
+
+  it("rejects a non-object broadcastSafety", () => {
+    for (const bad of ["yes", 42, ["enabled"], null]) {
+      const r = validateOperatorJobConfig({ ...base, broadcastSafety: bad });
+      assert.strictEqual(r.valid, false, `broadcastSafety=${JSON.stringify(bad)}`);
+      // null is treated as "unset" by the validator (matches the `!== undefined`
+      // gate but `null` !== undefined → still validates and falls through). The
+      // other cases must surface a broadcastSafety-field issue.
+      if (bad !== null) {
+        assert.ok(r.issues.find((i) => i.field === "broadcastSafety"));
+      }
+    }
+  });
+
+  it("rejects a non-boolean broadcastSafety.enabled", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      broadcastSafety: { enabled: "true" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "broadcastSafety.enabled"));
+  });
+
+  it("rejects a non-object broadcastSafety.options", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      broadcastSafety: { enabled: true, options: "all" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "broadcastSafety.options"));
+  });
+
+  it("rejects non-numeric broadcastSafety.options numeric fields", () => {
+    const numericFields = [
+      "minimumTotalDurationSec",
+      "maximumTotalDurationSec",
+      "maxLiveAgeMs",
+      "expectedBlockCountMin",
+    ];
+    for (const field of numericFields) {
+      const r = validateOperatorJobConfig({
+        ...base,
+        broadcastSafety: { enabled: true, options: { [field]: "60" } },
+      });
+      assert.strictEqual(r.valid, false, `field=${field}`);
+      assert.ok(
+        r.issues.find((i) => i.field === `broadcastSafety.options.${field}`),
+        `expected issue on broadcastSafety.options.${field}`,
+      );
+    }
+  });
+
+  it("rejects non-boolean broadcastSafety.options boolean fields", () => {
+    const booleanFields = [
+      "requireFallbackForEveryBlock",
+      "requireFreshnessForLiveBlocks",
+    ];
+    for (const field of booleanFields) {
+      const r = validateOperatorJobConfig({
+        ...base,
+        broadcastSafety: { enabled: true, options: { [field]: "yes" } },
+      });
+      assert.strictEqual(r.valid, false, `field=${field}`);
+      assert.ok(
+        r.issues.find((i) => i.field === `broadcastSafety.options.${field}`),
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
