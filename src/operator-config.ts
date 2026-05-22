@@ -100,11 +100,23 @@ export interface OperatorJobConfig {
    */
   enableMemoryTools?: boolean;
   /**
-   * Optional structured-output spec the daemon enforces.
+   * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
+   * Absent block = default direct LLM calls; nothing changes. When present
+   * and enabled, the launcher constructs the AI SDK provider with a
+   * `baseURL` pointing at `inference.local` (or the configured `baseUrl`).
+   * See `openshell/README.md` for the deployment runbook.
    */
   openshell?: OpenShellConfig;
   /**
-   * Optional broadcast safety validation options.
+   * Broadcast-safety validation gate. When `enabled` is true and the daemon
+   * is in structured-output mode, the validated payload is passed through
+   * `validateManifestCoverage(structuredOutput, options)`. If validation
+   * fails, the daemon emits `fallbackManifest` (or a default emergency-slate
+   * manifest) in place of the model's output and records the original on
+   * `TickEvent.safetyValidation.originalOutput` for the trace.
+   *
+   * The gate only fires when both `outputSchema` and `broadcastSafety` are
+   * set — sinks that don't model a broadcast manifest can ignore this.
    */
   broadcastSafety?: {
     enabled: boolean;
