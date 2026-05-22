@@ -591,6 +591,7 @@ async function runOnce(jobId: string): Promise<void> {
       mcpManager: tools.mcpManager,
       cfg,
     };
+    const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
       jobId: cfg.jobId,
       jobLabel: cfg.label,
@@ -603,6 +604,7 @@ async function runOnce(jobId: string): Promise<void> {
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
       inferenceRoute: inputs.inferenceRoute,
+      ...(outputSchema ? { outputSchema } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -666,6 +668,7 @@ async function runForeground(jobId: string): Promise<void> {
     mcpManager: tools.mcpManager,
     cfg,
   };
+  const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
     jobId: cfg.jobId,
     jobLabel: cfg.label,
@@ -678,6 +681,7 @@ async function runForeground(jobId: string): Promise<void> {
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
     inferenceRoute: inputs.inferenceRoute,
+    ...(outputSchema ? { outputSchema } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
