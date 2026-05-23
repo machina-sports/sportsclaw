@@ -225,6 +225,72 @@ function validateIdentifier(value: string, label: string): string | null {
   return null;
 }
 
+/**
+ * Sanitize bare year values to fully qualified ESPN / League slugs
+ * (e.g., season_id="2026" -> "espn.mlb.2026")
+ */
+export function sanitizeToolInput(toolName: string, input: ToolCallInput): void {
+  let sport = "";
+  let targetObj = input;
+
+  if (toolName === "sports_query" && typeof input.sport === "string") {
+    sport = input.sport.toLowerCase();
+    if (input.args && typeof input.args === "object" && !Array.isArray(input.args)) {
+      targetObj = input.args as Record<string, unknown>;
+    }
+  } else {
+    const sportMatch = toolName.match(/^([a-z0-9_-]+?)_/i);
+    if (!sportMatch) return;
+    sport = sportMatch[1].toLowerCase();
+  }
+
+  const seasonKeys = ["season", "season_id", "season_year"];
+  for (const key of seasonKeys) {
+    if (targetObj[key] !== undefined && targetObj[key] !== null) {
+      const originalValue = String(targetObj[key]).trim();
+      
+      const isBareYear = /^\d{4}$/.test(originalValue) || /^\d{4}-\d{2,4}$/.test(originalValue);
+      if (isBareYear) {
+        let mappedValue: string | null = null;
+        
+        switch (sport) {
+          case "mlb":
+            mappedValue = `espn.mlb.${originalValue}`;
+            break;
+          case "nfl":
+            mappedValue = `espn.nfl.${originalValue}`;
+            break;
+          case "nba":
+            mappedValue = `espn.nba.${originalValue}`;
+            break;
+          case "nhl":
+            mappedValue = `espn.nhl.${originalValue}`;
+            break;
+          case "wnba":
+            mappedValue = `espn.wnba.${originalValue}`;
+            break;
+          case "cfb":
+            mappedValue = `espn.cfb.${originalValue}`;
+            break;
+          case "cbb":
+            mappedValue = `espn.cbb.${originalValue}`;
+            break;
+          case "football":
+            if (/^\d{4}$/.test(originalValue)) {
+              mappedValue = `premier-league-${originalValue}`;
+            }
+            break;
+        }
+
+        if (mappedValue) {
+          console.error(`[sportsclaw] Sanitized bare year for ${toolName}: ${key}="${originalValue}" -> "${mappedValue}"`);
+          targetObj[key] = mappedValue;
+        }
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tool dispatch types
 // ---------------------------------------------------------------------------
@@ -468,6 +534,9 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    // Sanitize input bare years
+    sanitizeToolInput(toolName, input);
+
     // Security: Check blocklist FIRST, before any other processing
     const blockReason = isBlockedTool(toolName, config?.allowTrading);
     if (blockReason) {
