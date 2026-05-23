@@ -50,6 +50,18 @@ export interface TickBrief {
 
 export const SILENT_SENTINEL = "[SILENT]";
 
+/**
+ * Max bytes a chained payload may occupy in a brief's serialized form before
+ * we elide it. The chained payload is re-injected into every subsequent
+ * tick's system prompt via `contextFrom` + `renderJobSection`, so an
+ * unbounded payload would compound across ticks and blow the prompt budget.
+ *
+ * 4 KB lets a typical "next-tick state" (cue id, remaining duration, channel
+ * meta) through while clipping multi-block manifests that belong on the
+ * sink's structured-output channel, not the chained brief context.
+ */
+export const MAX_PAYLOAD_BYTES = 4096;
+
 export interface ContextFromOptions {
   /** How many briefs per job to pull. Default 1 (the most recent). */
   perJobLimit?: number;
@@ -191,7 +203,22 @@ export function serializeBrief(brief: TickBrief): string {
     `silent: ${brief.silent ? "true" : "false"}`,
   ];
   if (brief.payload !== undefined) {
-    fm.push(`payload: ${JSON.stringify(brief.payload)}`);
+    const serialized = JSON.stringify(brief.payload);
+    // Elide oversized payloads. A truncated JSON string in the frontmatter
+    // would be unparseable and would also corrupt every downstream prompt
+    // that re-renders it via renderJobSection. Replace with a marker the
+    // next tick can recognise and reason about ("there was state, but it
+    // was too big to chain — fetch fresh via tools if you need it").
+    if (serialized.length > MAX_PAYLOAD_BYTES) {
+      const marker = JSON.stringify({
+        _elided: true,
+        reason: "payload exceeded MAX_PAYLOAD_BYTES",
+        approxBytes: serialized.length,
+      });
+      fm.push(`payload: ${marker}`);
+    } else {
+      fm.push(`payload: ${serialized}`);
+    }
   }
   fm.push(FRONTMATTER_DELIM);
   return `${fm.join("\n")}\n\n${brief.body}\n`;

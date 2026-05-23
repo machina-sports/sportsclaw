@@ -15,6 +15,7 @@ import os from "node:os";
 import {
   LastTickBrief,
   SILENT_SENTINEL,
+  MAX_PAYLOAD_BYTES,
   serializeBrief,
   parseBrief,
   newTickId,
@@ -244,6 +245,63 @@ describe("serializeBrief / parseBrief", () => {
 
   it("rejects missing required frontmatter fields", () => {
     assert.throws(() => parseBrief("---\ntickId: t\n---\n\nbody"));
+  });
+
+  it("round-trips a small payload verbatim", () => {
+    const brief = {
+      tickId: "tick_pl",
+      jobId: "tv-channel-1",
+      timestamp: "2026-05-22T12:00:00.000Z",
+      body: "Playing live feed.",
+      silent: false,
+      payload: { remainingPlayoutSec: 420, cue: "midroll_1" },
+    };
+    const text = serializeBrief(brief);
+    const parsed = parseBrief(text);
+    assert.deepStrictEqual(parsed.payload, brief.payload);
+  });
+
+  it("elides a payload that exceeds MAX_PAYLOAD_BYTES with an _elided marker", () => {
+    // Build a payload guaranteed to exceed the cap.
+    const big = { junk: "x".repeat(MAX_PAYLOAD_BYTES + 100) };
+    const brief = {
+      tickId: "tick_big",
+      jobId: "tv-channel-1",
+      timestamp: "2026-05-22T12:01:00.000Z",
+      body: "Tick with oversized payload.",
+      silent: false,
+      payload: big,
+    };
+    const text = serializeBrief(brief);
+
+    // The serialized form must NOT contain the original junk string.
+    assert.ok(
+      !text.includes(big.junk),
+      "oversized payload content must not be persisted",
+    );
+
+    // The frontmatter must carry an elision marker that re-parses cleanly.
+    const parsed = parseBrief(text);
+    assert.ok(parsed.payload && typeof parsed.payload === "object");
+    assert.strictEqual(parsed.payload._elided, true);
+    assert.strictEqual(typeof parsed.payload.approxBytes, "number");
+    assert.ok(parsed.payload.approxBytes > MAX_PAYLOAD_BYTES);
+  });
+
+  it("does not elide a payload exactly at the cap", () => {
+    // A payload whose JSON length is below the cap survives intact.
+    // Build one carefully: { "s": "<chars>" } — overhead of `{"s":""}` is 8 bytes.
+    const filler = "y".repeat(MAX_PAYLOAD_BYTES - 16);
+    const brief = {
+      tickId: "tick_edge",
+      jobId: "tv-channel-1",
+      timestamp: "2026-05-22T12:02:00.000Z",
+      body: "Edge case.",
+      silent: false,
+      payload: { s: filler },
+    };
+    const parsed = parseBrief(serializeBrief(brief));
+    assert.deepStrictEqual(parsed.payload, brief.payload);
   });
 });
 

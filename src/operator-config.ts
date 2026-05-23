@@ -110,10 +110,18 @@ export interface OperatorJobConfig {
   /**
    * Broadcast-safety validation gate. When `enabled` is true and the daemon
    * is in structured-output mode, the validated payload is passed through
-   * `validateManifestCoverage(structuredOutput, options)`. If validation
-   * fails, the daemon emits `fallbackManifest` (or a default emergency-slate
-   * manifest) in place of the model's output and records the original on
-   * `TickEvent.safetyValidation.originalOutput` for the trace.
+   * `validateManifestCoverage(structuredOutput, options)`.
+   *
+   * On validation failure:
+   *   - If `fallbackManifest` is configured, the daemon emits it in place
+   *     of the model's output. The tick is `tick_published` with
+   *     `safetyValidation.fallbackTriggered = true` and the original on
+   *     `safetyValidation.originalOutput`.
+   *   - If `fallbackManifest` is NOT configured, the tick escalates to
+   *     `tick_failed`. The daemon refuses to invent broadcast content —
+   *     supplying the fallback shape is the sink's responsibility, not the
+   *     daemon's. The original output is still preserved on
+   *     `safetyValidation.originalOutput` for trace.
    *
    * The gate only fires when both `outputSchema` and `broadcastSafety` are
    * set — sinks that don't model a broadcast manifest can ignore this.
