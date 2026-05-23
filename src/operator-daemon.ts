@@ -129,6 +129,28 @@ export interface TickEvent {
     fallbackTriggered: boolean;
     originalOutput?: unknown;
   };
+  /**
+   * Outcome of the per-tick ledger sync (local JSONL + optional Pod MCP).
+   * Populated whenever the daemon's audit ledger code ran for this tick.
+   * Lets downstream observers detect Pod-sync drift (the local trail wrote
+   * fine but the Pod copy never landed) instead of relying on stderr scrapes.
+   *
+   *   localRun     — `ok` | `failed` | `skipped` (no writer configured)
+   *   podRun       — `ok` | `failed` | `skipped` (no MCP server)
+   *   localIncident, podIncident — present only when an incident was raised
+   *
+   * Errors are surfaced as short strings; full traces still go to stderr.
+   */
+  ledgerSync?: {
+    localRun: "ok" | "failed" | "skipped";
+    localRunError?: string;
+    podRun: "ok" | "failed" | "skipped";
+    podRunError?: string;
+    localIncident?: "ok" | "failed";
+    localIncidentError?: string;
+    podIncident?: "ok" | "failed" | "skipped";
+    podIncidentError?: string;
+  };
 }
 
 export interface OperatorDaemonConfig {
@@ -536,7 +558,10 @@ export function createOperatorDaemon(
       );
     }
 
-    const recordLedger = async (errorReason?: string, isSilent: boolean = false): Promise<void> => {
+    const recordLedger = async (
+      errorReason?: string,
+      isSilent: boolean = false,
+    ): Promise<NonNullable<TickEvent["ledgerSync"]>> => {
       const endedAt = new Date().toISOString();
       const decisions: DecisionRecord[] = [];
 
@@ -584,11 +609,21 @@ export function createOperatorDaemon(
         status: errorReason ? "failed" : "completed",
       };
 
+      const sync: NonNullable<TickEvent["ledgerSync"]> = {
+        localRun: "skipped",
+        podRun: "skipped",
+      };
+      const errMsg = (err: unknown): string =>
+        err instanceof Error ? err.message : String(err);
+
       // 1. Write local run ledger
       try {
         const localRunLedger = new FileAgentRunLedger(path.join(cfg.rootDir, "operator-runs.jsonl"));
         await localRunLedger.append(runRecord);
+        sync.localRun = "ok";
       } catch (err) {
+        sync.localRun = "failed";
+        sync.localRunError = errMsg(err);
         console.error(`[operator-daemon] Failed to write local agent run ledger: ${err}`);
       }
 
@@ -608,18 +643,25 @@ export function createOperatorDaemon(
         try {
           const localIncidentLedger = new FileIncidentLedger(path.join(cfg.rootDir, "incidents.jsonl"));
           await localIncidentLedger.append(incident);
+          sync.localIncident = "ok";
         } catch (err) {
+          sync.localIncident = "failed";
+          sync.localIncidentError = errMsg(err);
           console.error(`[operator-daemon] Failed to write local incident ledger: ${err}`);
         }
 
         // Write MCP Incident Ledger if available
+        sync.podIncident = "skipped";
         if (cfg.mcpManager) {
           const serverName = cfg.mcpManager.getMachinaServerName();
           if (serverName) {
             try {
               const podIncidentLedger = new PodIncidentLedger(cfg.mcpManager, serverName);
               await podIncidentLedger.append(incident);
+              sync.podIncident = "ok";
             } catch (err) {
+              sync.podIncident = "failed";
+              sync.podIncidentError = errMsg(err);
               console.error(`[operator-daemon] Failed to sync incident to Pod: ${err}`);
             }
           }
@@ -633,18 +675,24 @@ export function createOperatorDaemon(
           try {
             const podRunLedger = new PodOperatorRunsLedger(cfg.mcpManager, serverName);
             await podRunLedger.append(runRecord);
+            sync.podRun = "ok";
           } catch (err) {
+            sync.podRun = "failed";
+            sync.podRunError = errMsg(err);
             console.error(`[operator-daemon] Failed to sync agent run ledger to Pod: ${err}`);
           }
         }
       }
+      return sync;
     };
 
     // 7. Heartbeat status + telemetry.
     // Event emission goes BEFORE recordLedger so sinks (Discord, Telegram,
     // broadcast surfaces) react at the speed of local I/O rather than the
-    // speed of the Pod MCP round-trip. tickOnce still awaits the ledger
-    // before returning so tests can observe ledger state via `await tickOnce`.
+    // speed of the Pod MCP round-trip. The ledger sync result is mutated
+    // onto the same event object after the await — sinks that observed the
+    // event synchronously won't see `ledgerSync`, but callers that await
+    // `tickOnce()` (tests, batch consumers) read the final populated form.
     if (failureReason) {
       await heartbeat.markJobFailed(jobId, failureReason).catch(() => {});
       const event: TickEvent = {
@@ -659,7 +707,8 @@ export function createOperatorDaemon(
         inferenceRoute: cfg.inferenceRoute,
       };
       cfg.onTickEvent?.(event);
-      await recordLedger(failureReason).catch(() => {});
+      const ledgerSync = await recordLedger(failureReason).catch(() => undefined);
+      if (ledgerSync) event.ledgerSync = ledgerSync;
       return event;
     }
 
@@ -697,7 +746,8 @@ export function createOperatorDaemon(
       ...(safetyValidation !== undefined ? { safetyValidation } : {}),
     };
     cfg.onTickEvent?.(event);
-    await recordLedger(undefined, silent).catch(() => {});
+    const ledgerSync = await recordLedger(undefined, silent).catch(() => undefined);
+    if (ledgerSync) event.ledgerSync = ledgerSync;
     return event;
   }
 

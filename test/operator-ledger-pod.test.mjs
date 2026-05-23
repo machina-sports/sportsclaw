@@ -192,4 +192,67 @@ describe("Operator Daemon — Ledgers & Pod Sync", () => {
     assert.strictEqual(incidentRecord.level, "error");
     assert.strictEqual(incidentRecord.component, "safety-gate");
   });
+
+  // -------------------------------------------------------------------------
+  // TickEvent.ledgerSync — visibility for downstream observers
+  // -------------------------------------------------------------------------
+
+  it("populates TickEvent.ledgerSync with local=ok / pod=skipped when MCP is absent", async () => {
+    const gen = makeGenWithResult({ text: "Standard published broadcast" });
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen }),
+    );
+
+    const event = await daemon.tickOnce();
+    assert.ok(event.ledgerSync, "ledgerSync should be populated on tick_published");
+    assert.strictEqual(event.ledgerSync.localRun, "ok");
+    assert.strictEqual(event.ledgerSync.podRun, "skipped");
+  });
+
+  it("populates ledgerSync with podRun=ok when MCP succeeds", async () => {
+    const mcpManager = new MockMcpManager();
+    const gen = makeGenWithResult({ text: "Standard published broadcast" });
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen, mcpManager }),
+    );
+
+    const event = await daemon.tickOnce();
+    assert.ok(event.ledgerSync);
+    assert.strictEqual(event.ledgerSync.localRun, "ok");
+    assert.strictEqual(event.ledgerSync.podRun, "ok");
+  });
+
+  it("surfaces podRun=failed with an error string when the Pod sync throws", async () => {
+    // MockMcpManager that throws on every callToolDirect.
+    const flakyMcp = {
+      getMachinaServerName() { return "mock-machina-server"; },
+      async callToolDirect() { throw new Error("ECONNRESET"); },
+    };
+    const gen = makeGenWithResult({ text: "Standard published broadcast" });
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen, mcpManager: flakyMcp }),
+    );
+
+    const event = await daemon.tickOnce();
+    assert.ok(event.ledgerSync);
+    assert.strictEqual(event.ledgerSync.localRun, "ok", "local ledger is independent");
+    assert.strictEqual(event.ledgerSync.podRun, "failed");
+    assert.match(event.ledgerSync.podRunError ?? "", /ECONNRESET/);
+  });
+
+  it("populates ledgerSync on tick_failed (carrying the incident sync outcome too)", async () => {
+    const mcpManager = new MockMcpManager();
+    const gen = async () => { throw new Error("Inference Timeout Error"); };
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen, mcpManager }),
+    );
+
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_failed");
+    assert.ok(event.ledgerSync);
+    assert.strictEqual(event.ledgerSync.localRun, "ok");
+    assert.strictEqual(event.ledgerSync.localIncident, "ok");
+    assert.strictEqual(event.ledgerSync.podRun, "ok");
+    assert.strictEqual(event.ledgerSync.podIncident, "ok");
+  });
 });
