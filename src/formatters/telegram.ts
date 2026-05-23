@@ -2,20 +2,16 @@
  * sportsclaw — Telegram Renderer
  *
  * Converts a ParsedResponse into an HTML string for Telegram's HTML parse mode.
- * Headers → <b>, tables → inline text (no <pre> codeblocks), code → <pre>,
- * bold → <b>, inline code → <code>.
+ * Headers → <b>, code → <pre>, bold → <b>, inline code → <code>.
  *
- * Tables are rendered as formatted text lines with mid-dot separators so they
- * flow naturally in Telegram without the monospace codeblock treatment.
+ * Tables get a Telegram-native treatment: each data row becomes a labelled
+ * multi-line item (bold first cell as heading, remaining cells as bulleted
+ * "Header: value" lines). Telegram has no native table support and `<pre>`
+ * table renderings wrap awkwardly on phone screens, so we drop the
+ * spreadsheet metaphor entirely.
  */
 
-import {
-  stripBold,
-  isComparisonTable,
-  renderComparisonText,
-  renderTableAligned,
-  columnWidths,
-} from "./parser.js";
+import { stripBold } from "./parser.js";
 import type { ParsedResponse, ParsedBlock } from "./parser.js";
 
 // ---------------------------------------------------------------------------
@@ -69,53 +65,64 @@ export function renderTelegram(parsed: ParsedResponse): string {
 }
 
 // ---------------------------------------------------------------------------
-// renderTableAsText — render tables as monospace-aligned <pre> blocks
+// renderTableAsText — Telegram-native labelled multi-line rendering
 // ---------------------------------------------------------------------------
 
 /**
- * Render a table as Telegram HTML.
+ * Render a table as Telegram HTML, one labelled "card" per data row.
  *
- * - Comparison tables (3 cols): center-aligned in <pre> for readable match stats
- * - Compact tables (≤6 cols, ≤15 data rows): column-padded in <pre>
- * - Wide tables (>6 cols): flowing text with bold first column and | separators
+ * Layout per row:
+ *   <b>{first-cell}</b>
+ *   • <b>{header[1]}:</b> {cell[1]}
+ *   • <b>{header[2]}:</b> {cell[2]}
+ *   ...
+ *
+ * Why: Telegram has no native tables. `<pre>`-wrapped grids wrap awkwardly
+ * on narrow screens and pipe-separated flowing text reads like CSV. The
+ * labelled-card format keeps the data without the spreadsheet metaphor.
+ *
+ * Edge cases:
+ *   - 1-column tables: just bold the value (no labels to attach).
+ *   - Empty cells: skipped (no "Label:" line emitted for blank values).
+ *   - Header has fewer cells than a data row: extra cells fall back to "Col N".
+ *   - No data rows: the header itself is bolded with ` · ` separators.
  */
 function renderTableAsText(block: ParsedBlock & { type: "table" }): string {
   const rows = block.rows.map((row) => row.map((c) => stripBold(c)));
   const headerIdx = block.headerIndex >= 0 ? block.headerIndex : 0;
-  const headerRow = rows[headerIdx];
+  const headerRow = rows[headerIdx] ?? [];
   const dataRows = rows.filter((_, i) => i !== headerIdx);
 
   if (dataRows.length === 0) {
-    return `<b>${escapeHtml(headerRow.join("  "))}</b>`;
+    return `<b>${escapeHtml(headerRow.join(" · "))}</b>`;
   }
 
-  // Comparison tables (3 columns): center-aligned in <pre>
-  if (isComparisonTable(rows)) {
-    return `<pre>${escapeHtml(renderComparisonText(rows, block.headerIndex))}</pre>`;
-  }
-
-  const numCols = Math.max(...rows.map((r) => r.length));
-
-  // Compact tables: column-padded in <pre> for proper alignment.
-  // Telegram <pre> blocks scroll horizontally, so an aligned table that
-  // scrolls is far better than an unaligned one that doesn't.
-  const widths = columnWidths(rows);
-  const totalWidth = widths.reduce((s, w) => s + w, 0) + Math.max(0, numCols - 1) * 3;
-  if (numCols <= 6 && dataRows.length <= 15 && totalWidth <= 64) {
-    return `<pre>${escapeHtml(renderTableAligned(rows, block.headerIndex))}</pre>`;
-  }
-
-  // Wide tables: flowing text with bold first column
-  const lines: string[] = [];
+  const cards: string[] = [];
   for (const row of dataRows) {
-    const parts: string[] = [];
-    for (let c = 0; c < row.length; c++) {
-      const val = row[c] || "";
-      parts.push(c === 0 ? `<b>${escapeHtml(val)}</b>` : escapeHtml(val));
+    const lines: string[] = [];
+    // First cell is the row heading (bold).
+    const heading = (row[0] ?? "").trim();
+    if (heading) {
+      lines.push(`<b>${escapeHtml(heading)}</b>`);
     }
-    lines.push(parts.join(" | "));
+    // Remaining cells become labelled bullets keyed by the header.
+    for (let c = 1; c < row.length; c++) {
+      const val = (row[c] ?? "").trim();
+      if (val.length === 0) continue;
+      const label = (headerRow[c] ?? `Col ${c + 1}`).trim();
+      // 1-column tables (no header label) — just dump the value bolded above.
+      // (Shouldn't normally hit since c >= 1 implies a second column exists.)
+      if (label.length === 0) {
+        lines.push(`• ${escapeHtml(val)}`);
+      } else {
+        lines.push(`• <b>${escapeHtml(label)}:</b> ${escapeHtml(val)}`);
+      }
+    }
+    if (lines.length > 0) {
+      cards.push(lines.join("\n"));
+    }
   }
-  return lines.join("\n");
+  return cards.join("\n\n");
 }
 
 // ---------------------------------------------------------------------------

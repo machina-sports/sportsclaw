@@ -51,7 +51,9 @@
     "test:operator-safety": "npm run build && node --test test/operator-safety.test.mjs",
     "test:operator-ledger-pod": "npm run build && node --test test/operator-ledger-pod.test.mjs",
     "test:operator-context-chaining": "npm run build && node --test test/operator-context-chaining.test.mjs",
-    "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs"
+    "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs",
+    "test:formatters-telegram": "npm run build && node --test test/formatters-telegram.test.mjs",
+    "test:formatters-discord": "npm run build && node --test test/formatters-discord.test.mjs"
   },
   "keywords": [
     "sports",
