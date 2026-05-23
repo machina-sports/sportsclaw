@@ -615,6 +615,7 @@ async function runOnce(jobId: string): Promise<void> {
       enableMemoryTools: cfg.enableMemoryTools,
       inferenceRoute: inputs.inferenceRoute,
       broadcastSafety: cfg.broadcastSafety,
+      mcpManager: tools.mcpManager,
       ...(outputSchema ? { outputSchema } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
@@ -693,6 +694,7 @@ async function runForeground(jobId: string): Promise<void> {
     enableMemoryTools: cfg.enableMemoryTools,
     inferenceRoute: inputs.inferenceRoute,
     broadcastSafety: cfg.broadcastSafety,
+    mcpManager: tools.mcpManager,
     ...(outputSchema ? { outputSchema } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }

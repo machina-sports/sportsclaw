@@ -44,6 +44,8 @@ export interface TickBrief {
   body: string;
   /** True if `body` trimmed equals `SILENT_SENTINEL`. */
   silent: boolean;
+  /** Optional structured payload context from this tick to carry over. */
+  payload?: unknown;
 }
 
 export const SILENT_SENTINEL = "[SILENT]";
@@ -68,7 +70,7 @@ export class LastTickBrief {
    * Persist a brief and return the parsed record. Creates the per-job dir
    * lazily. The body is trimmed; `silent` is computed from the trimmed body.
    */
-  async write(input: { tickId: string; jobId: string; body: string }): Promise<TickBrief> {
+  async write(input: { tickId: string; jobId: string; body: string; payload?: unknown }): Promise<TickBrief> {
     if (!input.tickId) throw new Error("LastTickBrief: tickId is required.");
     if (!input.jobId) throw new Error("LastTickBrief: jobId is required.");
     const trimmed = (input.body ?? "").trim();
@@ -79,6 +81,7 @@ export class LastTickBrief {
       timestamp: new Date().toISOString(),
       body: trimmed,
       silent,
+      ...(input.payload !== undefined ? { payload: input.payload } : {}),
     };
     const filePath = this.pathFor(brief.jobId, brief.tickId);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -186,9 +189,12 @@ export function serializeBrief(brief: TickBrief): string {
     `jobId: ${brief.jobId}`,
     `timestamp: ${brief.timestamp}`,
     `silent: ${brief.silent ? "true" : "false"}`,
-    FRONTMATTER_DELIM,
-  ].join("\n");
-  return `${fm}\n\n${brief.body}\n`;
+  ];
+  if (brief.payload !== undefined) {
+    fm.push(`payload: ${JSON.stringify(brief.payload)}`);
+  }
+  fm.push(FRONTMATTER_DELIM);
+  return `${fm.join("\n")}\n\n${brief.body}\n`;
 }
 
 export function parseBrief(text: string): TickBrief {
@@ -213,12 +219,21 @@ export function parseBrief(text: string): TickBrief {
   if (!fm.tickId || !fm.jobId || !fm.timestamp) {
     throw new Error("LastTickBrief: required frontmatter field missing (tickId / jobId / timestamp).");
   }
+  let payload: unknown = undefined;
+  if (fm.payload) {
+    try {
+      payload = JSON.parse(fm.payload);
+    } catch {
+      // ignore invalid payload format
+    }
+  }
   return {
     tickId: fm.tickId,
     jobId: fm.jobId,
     timestamp: fm.timestamp,
     body,
     silent: fm.silent === "true" || body === SILENT_SENTINEL,
+    ...(payload !== undefined ? { payload } : {}),
   };
 }
 
@@ -238,7 +253,11 @@ function renderJobSection(jobId: string, briefs: TickBrief[]): string {
   const header = `## Recent brief from job '${jobId}'`;
   const items = briefs.map((b) => {
     const tag = b.silent ? " (silent)" : "";
-    return `### tick ${b.tickId} · ${b.timestamp}${tag}\n\n${b.body}`;
+    let payloadStr = "";
+    if (b.payload !== undefined) {
+      payloadStr = `\n\n#### Structured Payload / Context Chaining:\n\`\`\`json\n${JSON.stringify(b.payload, null, 2)}\n\`\`\``;
+    }
+    return `### tick ${b.tickId} · ${b.timestamp}${tag}\n\n${b.body}${payloadStr}`;
   });
   return [header, ...items].join("\n\n");
 }
