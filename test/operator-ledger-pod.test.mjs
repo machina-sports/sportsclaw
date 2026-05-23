@@ -152,6 +152,22 @@ describe("Operator Daemon — Ledgers & Pod Sync", () => {
       createdAt: new Date().toISOString(),
     };
 
+    // Caller must supply the fallback — the daemon no longer invents content.
+    const sinkFallback = {
+      id: "test-fallback",
+      channelId: "test-ledger-job",
+      blocks: [
+        {
+          id: "evergreen-1",
+          title: "Evergreen",
+          durationSec: 300,
+          freshness: "EVERGREEN",
+          fallback: { blockId: "evergreen", reason: "test fallback" },
+        },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+
     const mcpManager = new MockMcpManager();
     const gen = makeGenWithResult({ experimental_output: invalidManifest });
 
@@ -166,6 +182,7 @@ describe("Operator Daemon — Ledgers & Pod Sync", () => {
         },
         broadcastSafety: {
           enabled: true,
+          fallbackManifest: sinkFallback,
         },
         mcpManager,
       }),

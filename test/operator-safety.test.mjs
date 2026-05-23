@@ -92,7 +92,10 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
     assert.strictEqual(event.safetyValidation.fallbackTriggered, false);
   });
 
-  it("triggers fallback gate and replaces manifest when validation fails (missing fallback policy)", async () => {
+  it("escalates to tick_failed when validation fails and no fallbackManifest is configured", async () => {
+    // Per the new contract, the daemon refuses to invent broadcast content.
+    // Without a sink-supplied fallback, a failed safety check is a hard
+    // failure — the sink decides what viewers see, not the daemon.
     const invalidManifest = {
       id: "manifest-bad",
       channelId: "test-safety-job",
@@ -120,18 +123,12 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
     );
 
     const event = await daemon.tickOnce();
-    assert.strictEqual(event.type, "tick_published");
+    assert.strictEqual(event.type, "tick_failed");
+    assert.match(event.reason, /Broadcast safety check failed and no fallbackManifest configured/);
     assert.ok(event.safetyValidation);
     assert.strictEqual(event.safetyValidation.passed, false);
-    assert.strictEqual(event.safetyValidation.fallbackTriggered, true);
-    assert.match(event.safetyValidation.error, /Block must have a fallback policy/);
+    assert.strictEqual(event.safetyValidation.fallbackTriggered, false);
     assert.deepEqual(event.safetyValidation.originalOutput, invalidManifest);
-
-    // Output is replaced by fallback manifest
-    assert.ok(event.output);
-    assert.strictEqual(event.output.channelId, "test-safety-job");
-    assert.strictEqual(event.output.blocks[0].id.startsWith("fallback-evergreen-"), true);
-    assert.match(event.text, /Emergency fallback active/);
   });
 
   it("respects custom fallbackManifest when fallback gate is triggered", async () => {
@@ -177,7 +174,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
     assert.deepEqual(event.output, customFallback);
   });
 
-  it("checks freshness and triggers fallback gate for stale LIVE blocks", async () => {
+  it("checks freshness and triggers fallback gate for stale LIVE blocks (with configured fallback)", async () => {
     const staleTimestamp = new Date(Date.now() - 30000).toISOString(); // 30s ago
     const staleManifest = {
       id: "manifest-stale",
@@ -196,6 +193,21 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
       createdAt: new Date().toISOString(),
     };
 
+    const sinkFallback = {
+      id: "sink-emergency",
+      channelId: "test-safety-job",
+      blocks: [
+        {
+          id: "sink-evergreen",
+          title: "Sink-supplied evergreen",
+          durationSec: 300,
+          freshness: "EVERGREEN",
+          fallback: { blockId: "evergreen", reason: "sink fallback" },
+        },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+
     const gen = makeGenWithResult({ experimental_output: staleManifest });
     const daemon = createOperatorDaemon(
       baseConfig({
@@ -207,6 +219,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
             requireFreshnessForLiveBlocks: true,
             maxLiveAgeMs: 10000, // 10s maximum age
           },
+          fallbackManifest: sinkFallback,
         },
       }),
     );
@@ -217,5 +230,6 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
     assert.strictEqual(event.safetyValidation.passed, false);
     assert.strictEqual(event.safetyValidation.fallbackTriggered, true);
     assert.match(event.safetyValidation.error, /freshness is stale/);
+    assert.deepEqual(event.output, sinkFallback);
   });
 });

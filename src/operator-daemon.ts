@@ -490,7 +490,12 @@ export function createOperatorDaemon(
       failureReason = err instanceof Error ? err.message : String(err);
     }
 
-    // Broadcast Safety Validation Gate (PR 2)
+    // Broadcast Safety Validation Gate.
+    // The fallback must be supplied by the caller — the daemon refuses to
+    // invent broadcast content. Without a configured `fallbackManifest`,
+    // a failed safety check turns into a `tick_failed` event so the sink
+    // can apply its own emergency-slate logic rather than viewers seeing
+    // a daemon-shaped fake.
     let safetyValidation: TickEvent["safetyValidation"] = undefined;
     if (!failureReason && cfg.broadcastSafety?.enabled && useStructuredOutput && structuredOutput) {
       const validationOpts = cfg.broadcastSafety.options ?? {};
@@ -502,33 +507,30 @@ export function createOperatorDaemon(
 
       if (!validationResult.ok) {
         const originalOutput = structuredOutput;
-        const fallbackManifest = cfg.broadcastSafety.fallbackManifest ?? {
-          id: `fallback-${tickId}`,
-          channelId: jobId,
-          blocks: [
-            {
-              id: `fallback-evergreen-${tickId}`,
-              title: "Emergency Backup Playout (Evergreen)",
-              durationSec: 300,
-              freshness: "EVERGREEN",
-              fallback: {
-                blockId: "emergency-slate",
-                reason: `Broadcast safety gate fallback triggered: ${validationResult.error}`
-              }
-            }
-          ],
-          createdAt: timestamp
-        };
+        const fallbackManifest = cfg.broadcastSafety.fallbackManifest;
 
-        structuredOutput = fallbackManifest;
-        text = `Emergency fallback active: output failed broadcast safety checks. Error: ${validationResult.error}`;
-        
-        safetyValidation = {
-          passed: false,
-          error: validationResult.error,
-          fallbackTriggered: true,
-          originalOutput,
-        };
+        if (fallbackManifest === undefined) {
+          // No fallback supplied → escalate to tick_failed. The original
+          // output is preserved on safetyValidation so the sink can still
+          // observe what the model produced.
+          failureReason =
+            `Broadcast safety check failed and no fallbackManifest configured: ${validationResult.error}`;
+          safetyValidation = {
+            passed: false,
+            error: validationResult.error,
+            fallbackTriggered: false,
+            originalOutput,
+          };
+        } else {
+          structuredOutput = fallbackManifest;
+          text = `Emergency fallback active: output failed broadcast safety checks. Error: ${validationResult.error}`;
+          safetyValidation = {
+            passed: false,
+            error: validationResult.error,
+            fallbackTriggered: true,
+            originalOutput,
+          };
+        }
       } else {
         safetyValidation = {
           passed: true,
@@ -705,6 +707,9 @@ export function createOperatorDaemon(
         guardrailWarnings: counts.warnings,
         guardrailBlocks: counts.blocks,
         inferenceRoute: cfg.inferenceRoute,
+        // When the failure comes from the safety gate (no fallback configured),
+        // safetyValidation carries the original output and validator error.
+        ...(safetyValidation !== undefined ? { safetyValidation } : {}),
       };
       cfg.onTickEvent?.(event);
       const ledgerSync = await recordLedger(failureReason).catch(() => undefined);
