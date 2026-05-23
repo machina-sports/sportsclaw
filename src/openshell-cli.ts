@@ -52,11 +52,15 @@ export interface DoctorReport {
 // Process probes (small, side-effect-free, no throws)
 // ---------------------------------------------------------------------------
 
-interface ProbeResult {
+export interface ProbeResult {
   ok: boolean;
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** True when spawnSync killed the process because the timeout elapsed.
+   *  For the sandbox-creation probe this is the actual signal we want:
+   *  a healthy driver finishes in seconds, so any timeout is a hang. */
+  timedOut: boolean;
 }
 
 function probe(cmd: string, args: string[], timeoutMs = 5_000): ProbeResult {
@@ -65,11 +69,16 @@ function probe(cmd: string, args: string[], timeoutMs = 5_000): ProbeResult {
     timeout: timeoutMs,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // spawnSync kills the child with SIGTERM on timeout — status becomes null
+  // and signal is set. We don't get a distinct error code, so use signal
+  // presence as the timeout discriminator.
+  const timedOut = out.status === null && out.signal != null;
   return {
     ok: out.status === 0,
     stdout: out.stdout ?? "",
     stderr: out.stderr ?? "",
     exitCode: out.status,
+    timedOut,
   };
 }
 
@@ -145,8 +154,45 @@ function checkGateway(): CheckResult {
   return { id: "gateway", label: "OpenShell gateway", status: "ok", detail: "registered" };
 }
 
+// OpenShell 0.0.47 prints colorized output that wraps fields like
+// "Provider:" in ANSI escape sequences. Strip them before regex matching,
+// otherwise `\S+` captures `\033[0m` as the "value".
+const ANSI_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_REGEX, "");
+}
+
+/** Parse the human-readable `openshell provider list` table. v0.0.47 has
+ *  no `-o json` flag on this subcommand, so we count non-blank lines:
+ *  header alone → no providers; header + ≥1 data row → providers exist. */
+export function parseProviderListOutput(stdout: string): { hasProviders: boolean } {
+  const lines = stripAnsi(stdout)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return { hasProviders: lines.length >= 2 };
+}
+
+/** Parse `openshell inference get` output. Looks at the first section
+ *  (Gateway inference) since that's the one the Privacy Router uses to
+ *  route inference.local traffic. Returns empty fields when neither a
+ *  Provider nor Model line appears — "Not configured" sections naturally
+ *  produce that result without a special case. */
+export function parseInferenceGetOutput(stdout: string): {
+  provider?: string;
+  model?: string;
+} {
+  // Scope to the Gateway inference section so a "Not configured" System
+  // inference block doesn't accidentally satisfy the regex.
+  const clean = stripAnsi(stdout);
+  const gatewaySection = clean.split(/^\s*System inference:/im)[0];
+  const provider = /Provider:\s*(\S+)/.exec(gatewaySection)?.[1];
+  const model = /Model:\s*(\S+)/.exec(gatewaySection)?.[1];
+  return { provider, model };
+}
+
 function checkProvider(): CheckResult {
-  const r = probe("openshell", ["provider", "list", "-o", "json"]);
+  const r = probe("openshell", ["provider", "list"]);
   if (!r.ok) {
     return {
       id: "provider",
@@ -156,8 +202,8 @@ function checkProvider(): CheckResult {
       hint: "openshell provider create --name <name> --type <anthropic|openai|nvidia> --from-existing",
     };
   }
-  const out = r.stdout.trim();
-  if (!out || out === "[]" || out === "null") {
+  const { hasProviders } = parseProviderListOutput(r.stdout);
+  if (!hasProviders) {
     return {
       id: "provider",
       label: "Inference provider",
@@ -176,7 +222,17 @@ function checkProvider(): CheckResult {
 
 function checkInferenceRouting(): CheckResult {
   const r = probe("openshell", ["inference", "get"]);
-  if (!r.ok || !/Provider:/i.test(r.stdout)) {
+  if (!r.ok) {
+    return {
+      id: "inference-routing",
+      label: "Inference routing",
+      status: "missing",
+      detail: "openshell inference get failed",
+      hint: "openshell inference set --provider <name> --model <model> --timeout 300",
+    };
+  }
+  const { provider, model } = parseInferenceGetOutput(r.stdout);
+  if (!provider || !model) {
     return {
       id: "inference-routing",
       label: "Inference routing",
@@ -185,14 +241,11 @@ function checkInferenceRouting(): CheckResult {
       hint: "openshell inference set --provider <name> --model <model> --timeout 300",
     };
   }
-  // Extract Provider + Model lines, lightly tolerant of formatting.
-  const provider = /Provider:\s*(\S+)/i.exec(r.stdout)?.[1];
-  const model = /Model:\s*(\S+)/i.exec(r.stdout)?.[1];
   return {
     id: "inference-routing",
     label: "Inference routing",
     status: "ok",
-    detail: provider && model ? `${provider} / ${model}` : "configured",
+    detail: `${provider} / ${model}`,
   };
 }
 
@@ -202,6 +255,72 @@ function checkImage(image: string, id: string, label: string, buildHint: string)
     return { id, label, status: "missing", detail: "not built", hint: buildHint };
   }
   return { id, label, status: "ok", detail: "present" };
+}
+
+/** Interpret the result of a sandbox-creation probe. The OpenShell CLI
+ *  exits 0 even when provisioning times out, so we look at output content
+ *  rather than just the exit code. Catches the case where the gateway is
+ *  up but no compute driver is registered — the symptom we hit in e2e
+ *  testing on 2026-05-23. */
+export function interpretSandboxProbeResult(result: ProbeResult): CheckResult {
+  const combined = `${result.stdout}\n${result.stderr}`;
+  // Driver-missing manifests as either:
+  //  (a) the CLI printing its own "supervisor relay" timeout after ~300s
+  //  (b) our 45s probe killing the CLI before it gets a chance to print
+  // Both mean the same thing: no compute driver picked up the request.
+  if (
+    result.timedOut ||
+    /supervisor relay|DependenciesNotReady|provisioning timed out/i.test(combined)
+  ) {
+    return {
+      id: "compute-driver",
+      label: "Compute driver",
+      status: "missing",
+      detail: "sandbox provisioning hangs — no compute driver",
+      hint: "Restart the OpenShell service: `brew services restart nvidia/openshell/openshell`. If sandboxes still hang, the openshell-driver-vm may need separate setup — see https://github.com/NVIDIA/OpenShell.",
+    };
+  }
+  if (result.ok) {
+    return {
+      id: "compute-driver",
+      label: "Compute driver",
+      status: "ok",
+      detail: "sandbox provisions",
+    };
+  }
+  const firstError =
+    combined
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => /^(error|✗)/i.test(l)) ?? "";
+  return {
+    id: "compute-driver",
+    label: "Compute driver",
+    status: "missing",
+    detail: firstError.slice(0, 120) || `sandbox create failed (exit ${result.exitCode ?? "?"})`,
+    hint: "Run `openshell sandbox create --from sportsclaw:latest --name probe --no-keep -- true` to see the full error.",
+  };
+}
+
+function checkComputeDriver(): CheckResult {
+  // Random name so concurrent doctor runs don't collide.
+  const name = `sc-doctor-${Math.random().toString(36).slice(2, 10)}`;
+  // `--no-keep` auto-deletes after the command exits cleanly, but if
+  // provisioning hangs we never reach that exit and the sandbox lingers in
+  // Provisioning forever. 45s probe timeout: longer than typical provisioning,
+  // shorter than the gateway's 300s patience.
+  const result = probe(
+    "openshell",
+    ["sandbox", "create", "--no-keep", "--name", name, "--from", "sportsclaw:latest", "--", "true"],
+    45_000,
+  );
+  // Best-effort cleanup. Always run — even on success, just in case --no-keep
+  // didn't fire. spawnSync ignores its own non-zero exits via stdio: ignore.
+  spawnSync("openshell", ["sandbox", "delete", name], {
+    timeout: 10_000,
+    stdio: "ignore",
+  });
+  return interpretSandboxProbeResult(result);
 }
 
 function checkApiKey(): CheckResult {
@@ -233,7 +352,7 @@ function checkApiKey(): CheckResult {
 // Doctor — public surface (exported for testing the formatter)
 // ---------------------------------------------------------------------------
 
-export function runChecks(): DoctorReport {
+export function runChecks(opts: { probe?: boolean } = {}): DoctorReport {
   const results: CheckResult[] = [
     checkOpenshellCli(),
     checkContainerRuntime(),
@@ -254,6 +373,12 @@ export function runChecks(): DoctorReport {
     ),
     checkApiKey(),
   ];
+  // Active probe is opt-in: it creates a real (short-lived) sandbox and adds
+  // up to 45s to doctor runtime. The other checks are passive and finish
+  // in well under a second.
+  if (opts.probe) {
+    results.push(checkComputeDriver());
+  }
   const allOk = results.every((r) => r.status === "ok");
   return { results, allOk };
 }
@@ -299,8 +424,8 @@ export function formatReport(report: DoctorReport): string {
   return lines.join("\n");
 }
 
-async function runDoctor(opts: { json: boolean }): Promise<void> {
-  const report = runChecks();
+async function runDoctor(opts: { json: boolean; probe: boolean }): Promise<void> {
+  const report = runChecks({ probe: opts.probe });
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
@@ -539,9 +664,10 @@ function printOpenshellHelp(): void {
     "sportsclaw openshell — optional NVIDIA OpenShell helpers",
     "",
     "Usage:",
-    "  sportsclaw openshell doctor          Diagnose prereqs, print remediation hints",
-    "  sportsclaw openshell doctor --json   Machine-readable doctor output",
-    "  sportsclaw openshell setup           Interactive wizard: install, gateway, provider, image, scaffold",
+    "  sportsclaw openshell doctor           Diagnose prereqs, print remediation hints",
+    "  sportsclaw openshell doctor --probe   Add a live sandbox-provisioning probe (~45s)",
+    "  sportsclaw openshell doctor --json    Machine-readable doctor output",
+    "  sportsclaw openshell setup            Interactive wizard: install, gateway, provider, image, scaffold",
     "",
     "Both subcommands shell out to the `openshell` binary and `docker`; nothing is",
     "imported as a library. OpenShell remains optional at install for everyone else.",
@@ -563,7 +689,10 @@ export async function cmdOpenshell(args: string[]): Promise<void> {
   }
   switch (sub) {
     case "doctor":
-      return runDoctor({ json: rest.includes("--json") });
+      return runDoctor({
+        json: rest.includes("--json"),
+        probe: rest.includes("--probe"),
+      });
     case "setup":
       return runSetup();
     default:

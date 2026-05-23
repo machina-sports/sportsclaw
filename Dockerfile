@@ -7,9 +7,10 @@
 
 FROM node:20-slim AS base
 
-# Install Python 3 and pip into the same image
+# Install Python 3 and pip, plus iproute2 (the OpenShell supervisor's
+# network-namespace setup requires `ip` from iproute2).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv iproute2 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
