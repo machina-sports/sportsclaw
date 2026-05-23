@@ -95,6 +95,6 @@
     "marked-terminal": "^7.3.0",
     "picocolors": "^1.1.1",
     "proper-lockfile": "^4.1.2",
-    "undici": "^6.25.0"
+    "undici": "^6.6.0"
   }
 }
