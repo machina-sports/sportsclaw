@@ -2,18 +2,17 @@
  * sportsclaw — Discord Renderer
  *
  * Converts a ParsedResponse into a DiscordEmbed object.
- * Tables → code blocks, headers → embed fields, source → footer.
- * Also exports formatTextForDiscord() for rendering LLM responses
- * as Discord-friendly plain text (comparison tables → code blocks).
+ * Headers → embed fields, source → footer, tables → labelled multi-line cards.
+ *
+ * Tables get a Discord-native treatment: each data row becomes a card
+ * (bold first cell as heading, remaining cells as `• **Header:** value`
+ * bullets). Code-block-wrapped tables wrap awkwardly on mobile Discord
+ * and read like CSV; the labelled-card format keeps the data without the
+ * spreadsheet metaphor.
  */
 
-import {
-  parseBlocks,
-  isComparisonTable,
-  renderComparisonText,
-  renderTableAligned,
-} from "./parser.js";
-import type { ParsedResponse } from "./parser.js";
+import { parseBlocks, stripBold } from "./parser.js";
+import type { ParsedResponse, ParsedBlock } from "./parser.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,9 +100,8 @@ export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
 
 /**
  * Parses an LLM response and re-renders it for Discord:
- * - Comparison tables (3 columns) → center-aligned code block
- * - Other tables → padded code block
- * - Everything else preserved as-is (bold, italic, etc.)
+ * - Tables → labelled multi-line cards (one card per data row)
+ * - Everything else preserved as-is (bold, italic, code blocks, etc.)
  */
 export function formatTextForDiscord(response: string): string {
   const parsed = parseBlocks(response);
@@ -128,17 +126,8 @@ function renderBlockForDiscord(block: ParsedResponse["blocks"][number]): string 
     case "header":
       return `**${block.text}**`;
 
-    case "table": {
-      if (isComparisonTable(block.rows)) {
-        return (
-          "```\n" +
-          renderComparisonText(block.rows, block.headerIndex) +
-          "\n```"
-        );
-      }
-      // All other tables: column-padded alignment in a code block
-      return "```\n" + renderTableAligned(block.rows, block.headerIndex) + "\n```";
-    }
+    case "table":
+      return renderTableAsCards(block);
 
     case "code":
       return "```" + block.language + "\n" + block.lines.join("\n") + "\n```";
@@ -146,4 +135,52 @@ function renderBlockForDiscord(block: ParsedResponse["blocks"][number]): string 
     case "text":
       return block.lines.join("\n");
   }
+}
+
+/**
+ * Render a table as Discord markdown, one labelled card per data row.
+ *
+ * Layout per row:
+ *   **{first-cell}**
+ *   • **{header[1]}:** {cell[1]}
+ *   • **{header[2]}:** {cell[2]}
+ *   ...
+ *
+ * Mirrors the Telegram renderer's labelled-card format using Discord's
+ * markdown bold (`**`) instead of HTML `<b>`. No HTML escaping — Discord
+ * isn't HTML; the parser already strips `**` from cells via stripBold so
+ * stray markdown inside values doesn't double-bold.
+ */
+function renderTableAsCards(block: ParsedBlock & { type: "table" }): string {
+  const rows = block.rows.map((row) => row.map((c) => stripBold(c)));
+  const headerIdx = block.headerIndex >= 0 ? block.headerIndex : 0;
+  const headerRow = rows[headerIdx] ?? [];
+  const dataRows = rows.filter((_, i) => i !== headerIdx);
+
+  if (dataRows.length === 0) {
+    return `**${headerRow.join(" · ")}**`;
+  }
+
+  const cards: string[] = [];
+  for (const row of dataRows) {
+    const lines: string[] = [];
+    const heading = (row[0] ?? "").trim();
+    if (heading) {
+      lines.push(`**${heading}**`);
+    }
+    for (let c = 1; c < row.length; c++) {
+      const val = (row[c] ?? "").trim();
+      if (val.length === 0) continue;
+      const label = (headerRow[c] ?? `Col ${c + 1}`).trim();
+      if (label.length === 0) {
+        lines.push(`• ${val}`);
+      } else {
+        lines.push(`• **${label}:** ${val}`);
+      }
+    }
+    if (lines.length > 0) {
+      cards.push(lines.join("\n"));
+    }
+  }
+  return cards.join("\n\n");
 }
