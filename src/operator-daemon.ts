@@ -641,8 +641,11 @@ export function createOperatorDaemon(
     };
 
     // 7. Heartbeat status + telemetry.
+    // Event emission goes BEFORE recordLedger so sinks (Discord, Telegram,
+    // broadcast surfaces) react at the speed of local I/O rather than the
+    // speed of the Pod MCP round-trip. tickOnce still awaits the ledger
+    // before returning so tests can observe ledger state via `await tickOnce`.
     if (failureReason) {
-      await recordLedger(failureReason).catch(() => {});
       await heartbeat.markJobFailed(jobId, failureReason).catch(() => {});
       const event: TickEvent = {
         type: "tick_failed",
@@ -656,6 +659,7 @@ export function createOperatorDaemon(
         inferenceRoute: cfg.inferenceRoute,
       };
       cfg.onTickEvent?.(event);
+      await recordLedger(failureReason).catch(() => {});
       return event;
     }
 
@@ -677,7 +681,6 @@ export function createOperatorDaemon(
     } else {
       silent = LastTickBrief.isSilent(text);
     }
-    await recordLedger(undefined, silent).catch(() => {});
     const event: TickEvent = {
       type: silent ? "tick_silent" : "tick_published",
       jobId,
@@ -694,6 +697,7 @@ export function createOperatorDaemon(
       ...(safetyValidation !== undefined ? { safetyValidation } : {}),
     };
     cfg.onTickEvent?.(event);
+    await recordLedger(undefined, silent).catch(() => {});
     return event;
   }
 

@@ -45,7 +45,7 @@ export interface TickBrief {
   /** True if `body` trimmed equals `SILENT_SENTINEL`. */
   silent: boolean;
   /** Optional structured payload context from this tick to carry over. */
-  payload?: any;
+  payload?: unknown;
 }
 
 export const SILENT_SENTINEL = "[SILENT]";
@@ -70,7 +70,7 @@ export class LastTickBrief {
    * Persist a brief and return the parsed record. Creates the per-job dir
    * lazily. The body is trimmed; `silent` is computed from the trimmed body.
    */
-  async write(input: { tickId: string; jobId: string; body: string; payload?: any }): Promise<TickBrief> {
+  async write(input: { tickId: string; jobId: string; body: string; payload?: unknown }): Promise<TickBrief> {
     if (!input.tickId) throw new Error("LastTickBrief: tickId is required.");
     if (!input.jobId) throw new Error("LastTickBrief: jobId is required.");
     const trimmed = (input.body ?? "").trim();
@@ -219,7 +219,7 @@ export function parseBrief(text: string): TickBrief {
   if (!fm.tickId || !fm.jobId || !fm.timestamp) {
     throw new Error("LastTickBrief: required frontmatter field missing (tickId / jobId / timestamp).");
   }
-  let payload: any = undefined;
+  let payload: unknown = undefined;
   if (fm.payload) {
     try {
       payload = JSON.parse(fm.payload);
