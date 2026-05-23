@@ -126,7 +126,7 @@ For policy field reference, see [OpenShell Policy Schema](https://github.com/NVI
 
 ## Troubleshooting
 
-**`OpenShell mode: cannot resolve "inference.local"`** at startup — the launcher's DNS probe is reporting that you're not inside an OpenShell sandbox. Either run via `openshell sandbox exec` / `openshell sandbox connect`, or set `"openshell": {"enabled": false}` to disable.
+**`OpenShell mode: cannot resolve "inference.local" ... and OPENSHELL_SANDBOX is not set`** at startup — the launcher's probe looked for the `OPENSHELL_SANDBOX=1` env var (which the supervisor exports inside every sandbox container) and then fell back to a DNS lookup. Both failed, so you're almost certainly not inside an OpenShell sandbox. Either run via `openshell sandbox exec` / `openshell sandbox connect`, or set `"openshell": {"enabled": false}` to disable.
 
 **`policy_denied` 403 from the gateway** — a network call is hitting a host that isn't in `network_policies`. Either add it to the policy or route inference via `inference.local` (`openshell inference set ...`).
 
@@ -135,6 +135,28 @@ For policy field reference, see [OpenShell Policy Schema](https://github.com/NVI
 **Tick latency longer than 60s** — Privacy Router default per-call timeout is 60s. For long-thinking Nemotron or Claude with extended reasoning, raise it: `openshell inference set ... --timeout 300`.
 
 **`openshell sandbox create --from sportsclaw-openshell:latest` fails to find the image** — the build step (step 3 above) didn't run, or you're targeting a remote gateway. The CLI uses the local Docker daemon for `--from <image>`; remote gateways need a registry reference instead.
+
+---
+
+## Known upstream issues
+
+### macOS Homebrew install: gateway can't mint sandbox JWTs ([NVIDIA/OpenShell#1523](https://github.com/NVIDIA/OpenShell/issues/1523))
+
+Fresh OpenShell 0.0.47 Homebrew installs on macOS leave sandboxes stuck in `Provisioning` for 300 seconds before timing out with `DependenciesNotReady: ... waiting for supervisor relay`. The root cause is that the Homebrew service wrapper mirrors only the TLS material into the runtime path (`~/.local/state/openshell/homebrew/tls/`) and skips the `jwt/` subdirectory, so the gateway can't mint sandbox JWTs and the supervisor's gRPC policy-fetch is rejected at the application layer.
+
+`sportsclaw openshell doctor --probe` will detect this with the message `sandbox provisioning hangs — no compute driver`.
+
+**Workaround until the upstream fix lands:**
+
+```bash
+cp -R /opt/homebrew/var/openshell/tls/jwt ~/.local/state/openshell/homebrew/tls/
+chmod -R go-rwx ~/.local/state/openshell/homebrew/tls/jwt
+brew services restart openshell
+```
+
+You should then see `gateway-minted sandbox JWT enabled gateway_id=openshell ttl_secs=3600` in `/opt/homebrew/var/log/openshell/openshell-gateway.out.log`. A fresh `sportsclaw openshell doctor --probe` should report `Compute driver ✓ sandbox provisions` in under 5 seconds.
+
+Related upstream issue: [NVIDIA/OpenShell#1372](https://github.com/NVIDIA/OpenShell/issues/1372) — broader macOS Homebrew configuration bootstrap. Affects Podman/Kubernetes drivers (not Docker), but the same packaging gap.
 
 ---
 

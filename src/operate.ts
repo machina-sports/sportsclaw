@@ -440,6 +440,41 @@ function applyOpenShellEnv(
   }
 }
 
+// Track installation so we don't replace the dispatcher on repeat
+// invocations (each `operate --once` instantiates resolveJobInputs).
+let openShellProxyDispatcherInstalled = false;
+
+/**
+ * Route all outbound fetch() through the supervisor's egress proxy when
+ * the sandbox sets HTTPS_PROXY (10.200.0.1:3128). Node 20 ships undici 5,
+ * which ignores proxy env vars by default; AI SDK and OpenAI SDK both
+ * fall through to Node's global fetch, so without this they'd try to
+ * resolve `inference.local` via real DNS and fail with EAI_AGAIN.
+ *
+ * Dynamic import + try/catch so a missing/older undici degrades to a
+ * warning rather than crashing the engine. Idempotent across ticks.
+ */
+async function installOpenShellProxyDispatcher(): Promise<void> {
+  if (openShellProxyDispatcherInstalled) return;
+  const proxyUrl =
+    process.env.HTTPS_PROXY ??
+    process.env.HTTP_PROXY ??
+    process.env.https_proxy ??
+    process.env.http_proxy;
+  if (!proxyUrl) return;
+  try {
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = await import("undici");
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+    openShellProxyDispatcherInstalled = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[openshell] failed to install proxy dispatcher (${msg}); ` +
+        `LLM calls to inference.local will fail with EAI_AGAIN until this is fixed.`,
+    );
+  }
+}
+
 interface ResolvedDaemonInputs {
   provider: LLMProvider;
   modelId: string;
@@ -470,6 +505,7 @@ async function resolveJobInputs(
   const openshell = resolveOpenShell(provider, cfg.openshell);
   if (openshell?.enabled) {
     applyOpenShellEnv(provider, openshell);
+    await installOpenShellProxyDispatcher();
   }
   const inferenceRoute: InferenceRoute = openshell?.enabled
     ? { via: "openshell", baseUrl: openshell.baseUrl, provider, model: modelId }
@@ -486,13 +522,20 @@ async function resolveJobInputs(
 }
 
 /**
- * Best-effort startup probe: when openshell is enabled, confirm
- * `inference.local` (or the configured host) resolves before we hand
- * control to the daemon. Fails fast with a clear error message rather
- * than letting the first generateText surface an opaque DNS error.
- * Mitigates Risk R4 in docs/openshell-integration-plan.md.
+ * Best-effort startup probe: confirm we're really inside an OpenShell
+ * sandbox before handing control to the daemon. Fails fast with a clear
+ * error rather than letting the first generateText surface something
+ * opaque. Mitigates Risk R4 in docs/openshell-integration-plan.md.
+ *
+ * The supervisor exports OPENSHELL_SANDBOX=1 inside every container it
+ * manages — that's the authoritative signal. Real DNS lookups for
+ * `inference.local` don't work because the supervisor intercepts that
+ * traffic at the HTTPS_PROXY layer (10.200.0.1:3128) rather than via
+ * /etc/hosts. DNS is kept as a fallback only for unusual setups where
+ * the env var isn't present.
  */
 async function probeOpenShellHost(baseUrl: string): Promise<void> {
+  if (process.env.OPENSHELL_SANDBOX === "1") return;
   let host: string;
   try {
     host = new URL(baseUrl).hostname;
@@ -510,7 +553,7 @@ async function probeOpenShellHost(baseUrl: string): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `OpenShell mode: cannot resolve "${host}" (${msg}). ` +
+      `OpenShell mode: cannot resolve "${host}" (${msg}) and OPENSHELL_SANDBOX is not set. ` +
         `Are you running inside an OpenShell sandbox? ` +
         `Set openshell.enabled=false or remove the openshell block to disable.`,
     );

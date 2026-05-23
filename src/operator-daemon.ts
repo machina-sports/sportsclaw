@@ -487,7 +487,27 @@ export function createOperatorDaemon(
         text = (result.text ?? "").trim();
       }
     } catch (err) {
-      failureReason = err instanceof Error ? err.message : String(err);
+      // AI_APICallError shapes its message as "Unknown" when the upstream
+      // returns a non-JSON body the SDK can't parse into a structured error
+      // (e.g. plain-text "404 page not found"). Pull statusCode + a body
+      // excerpt so the failureReason is actionable instead of opaque.
+      if (err instanceof Error) {
+        const apiErr = err as Error & {
+          statusCode?: number;
+          url?: string;
+          responseBody?: string;
+        };
+        const parts: string[] = [err.message || err.name];
+        if (apiErr.statusCode !== undefined) parts.push(`status=${apiErr.statusCode}`);
+        if (apiErr.url) parts.push(`url=${apiErr.url}`);
+        if (apiErr.responseBody) {
+          const body = String(apiErr.responseBody).trim().slice(0, 200);
+          if (body) parts.push(`body=${JSON.stringify(body)}`);
+        }
+        failureReason = parts.join(" ");
+      } else {
+        failureReason = String(err);
+      }
     }
 
     // Broadcast Safety Validation Gate.

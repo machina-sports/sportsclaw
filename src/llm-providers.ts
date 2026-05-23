@@ -67,10 +67,16 @@ export function resolveModel(
           apiKey: "openshell-unused",
         })(modelId);
       case "openai":
+        // .chat (not the default factory) targets POST /v1/chat/completions.
+        // The default uses /v1/responses, which the OpenShell Privacy Router
+        // proxies through to the upstream — but most OpenAI-compatible
+        // upstreams (NVIDIA API Catalog, Nemotron-on-vLLM, etc.) only serve
+        // /v1/chat/completions and 404 on /v1/responses. Forcing chat keeps
+        // OpenShell mode working across every supported provider.
         return createOpenAI({
           baseURL: openshell.baseUrl,
           apiKey: "openshell-unused",
-        })(modelId);
+        }).chat(modelId);
       case "google":
         throw new Error(
           `OpenShell mode does not support provider "${provider}".`,
