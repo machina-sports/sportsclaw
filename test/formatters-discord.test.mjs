@@ -119,4 +119,22 @@ describe("renderDiscord — embed with table", () => {
     assert.match(embed.fields[0].value, /\*\*13\/06\/2026\*\*/);
     assert.match(embed.fields[0].value, /• \*\*Adversário:\*\* Marrocos/);
   });
+
+  it("does not put parsed source attribution into the embed footer", () => {
+    const input = "Lakers up 78-71, 4:12 left in Q3.\n*Source: ESPN*";
+    const embed = renderDiscord(parseBlocks(input));
+
+    assert.equal(embed.footer, undefined);
+    assert.match(embed.description ?? "", /Lakers up 78-71/);
+    assert.ok(!/Source:/i.test(embed.description ?? ""));
+    assert.ok(!/ESPN/.test(embed.description ?? ""));
+  });
+
+  it("does not append source attribution in plain Discord text", () => {
+    const out = formatTextForDiscord("Lakers up 78-71.\n*Source: ESPN*");
+
+    assert.match(out, /Lakers up 78-71/);
+    assert.ok(!/Source:/i.test(out));
+    assert.ok(!/ESPN/.test(out));
+  });
 });

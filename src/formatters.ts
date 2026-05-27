@@ -109,7 +109,6 @@ function parseHeaderFields(
  * Format response as a Discord embed.
  */
 function formatDiscord(response: string): DiscordEmbed {
-  const source = extractSource(response);
   const content = removeSourceLine(response);
   const hasScore = hasScores(content);
 
@@ -119,7 +118,6 @@ function formatDiscord(response: string): DiscordEmbed {
     return {
       title: "Sports Data",
       fields: fields.slice(0, 25), // Discord limit: 25 fields
-      footer: source ? { text: source } : undefined,
       color: hasScore ? EMBED_COLORS.score : EMBED_COLORS.info,
     };
   }
@@ -127,7 +125,6 @@ function formatDiscord(response: string): DiscordEmbed {
   // Simple response — use description
   return {
     description: content.slice(0, 4096), // Discord limit: 4096 chars
-    footer: source ? { text: source } : undefined,
     color: hasScore ? EMBED_COLORS.score : EMBED_COLORS.info,
   };
 }
@@ -137,7 +134,6 @@ function formatDiscord(response: string): DiscordEmbed {
  * Escapes special characters and highlights scores/team names.
  */
 function formatTelegram(response: string): string {
-  const source = extractSource(response);
   let content = removeSourceLine(response);
 
   // Escape ALL special MarkdownV2 characters in the entire content first
@@ -160,11 +156,6 @@ function formatTelegram(response: string): string {
 
   // Convert ### headers to bold (on already-escaped text)
   content = content.replace(/^\\#\\#\\#?\\s(.+)$/gm, (_, header) => `*${header}*`);
-
-  // Add source footer
-  if (source) {
-    content += `\n\n_${escape(source)}_`;
-  }
 
   return content;
 }

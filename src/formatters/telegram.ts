@@ -3,6 +3,7 @@
  *
  * Converts a ParsedResponse into an HTML string for Telegram's HTML parse mode.
  * Headers → <b>, code → <pre>, bold → <b>, inline code → <code>.
+ * Parsed source footers are stripped for consumer chat UX.
  *
  * Tables get a Telegram-native treatment: each data row becomes a labelled
  * multi-line item (bold first cell as heading, remaining cells as bulleted
@@ -53,12 +54,6 @@ export function renderTelegram(parsed: ParsedResponse): string {
         }
         break;
     }
-  }
-
-  // Source footer
-  if (parsed.source) {
-    result.push("");
-    result.push(`<i>${escapeHtml(parsed.source)}</i>`);
   }
 
   return result.join("\n");

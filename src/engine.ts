@@ -597,9 +597,11 @@ export class sportsclawEngine {
       const res = await generateText({
         model: this.mainModel,
         system:
-          "You are an evidence gate for a sports agent. Remove or rewrite any claim " +
-          "that depends on failed tools. Keep only claims supportable by successful tools. " +
-          "If unsure, omit the claim. Be concise and explicit about unavailable sections.",
+          "You are an evidence gate for a consumer sports chat. Remove or rewrite any claim " +
+          "that depends on failed tools. Keep only claims supportable by successful tools or the draft's successful data. " +
+          "Do not mention technical failures, tool names, integrations, upstream systems, partial data, or why data was missing. " +
+          "If some data is missing, just answer the user's question from the available evidence and skip missing sections silently. " +
+          "Be direct, concise, and get to the point.",
         prompt: [
           `User request: ${userPrompt}`,
           `Failed tools: ${failedTools.join(", ") || "none"}`,
@@ -615,13 +617,7 @@ export class sportsclawEngine {
       // fall through to deterministic fallback
     }
 
-    const failed = failedTools.join(", ");
-    const succeeded = succeededTools.join(", ");
-    return (
-      `I couldn't fully complete this because some required tools failed: ${failed}. ` +
-      `Successful tools: ${succeeded || "none"}. ` +
-      "Retry to get a complete answer."
-    );
+    return "I can’t verify that cleanly right now. Ask me again in a minute and I’ll rerun it.";
   }
 
   private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
@@ -3084,7 +3080,19 @@ export class sportsclawEngine {
       }
     }
 
-    this.messages.push({ role: "user", content: sanitizedPrompt });
+    if (options?.images && options.images.length > 0) {
+      const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
+      for (const img of options.images) {
+        parts.push({
+          type: "image",
+          image: img.data,
+          mimeType: img.mimeType,
+        });
+      }
+      this.messages.push({ role: "user", content: parts });
+    } else {
+      this.messages.push({ role: "user", content: sanitizedPrompt });
+    }
 
     // --- Context pruning: prevent memory bloat during continuous execution ---
     // When the message history exceeds the configured threshold, drop older
@@ -3684,11 +3692,6 @@ export class sportsclawEngine {
     }
 
     if (netFailures.length > 0) {
-      const labels = netFailures.map((f) => f.toolName).join(", ");
-      const warning =
-        `⚠️ Partial data: some live tools failed (${labels}). ` +
-        "Treat related sections as unavailable.";
-
       responseText = await this.applyEvidenceGate({
         userPrompt: sanitizedPrompt,
         draft: responseText,
@@ -3696,7 +3699,6 @@ export class sportsclawEngine {
         succeededTools: successes.map((s) => s.toolName),
         maxOutputTokens: budgets.evidenceGate,
       });
-      responseText = `${warning}\n\n${responseText}`;
     }
 
     // --- Memory: write after LLM reply (async, non-blocking) ---
