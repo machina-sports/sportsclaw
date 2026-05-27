@@ -30,6 +30,19 @@
  *   const answer = await engine.run("What are today's NBA scores?");
  */
 
+// Filter only the AI SDK "reasoningEffort not supported" warning that fires
+// when talking to OpenAI-compatible NIM endpoints that don't honor it (the
+// engine still works — the param is silently dropped). All other SDK warnings
+// pass through unchanged so future deprecations stay visible.
+{
+  const originalWarn = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    const msg = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+    if (msg.includes('"reasoningEffort" is not supported')) return;
+    originalWarn(...args);
+  };
+}
+
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
@@ -1943,9 +1956,18 @@ async function cmdQuery(args: string[]): Promise<void> {
   if (headlessMode) {
     emitNdjson({ type: "start", timestamp: new Date().toISOString(), yolo: yoloMode });
     try {
+      let inboundImages: any[] | undefined;
+      if (process.env.SPORTSCLAW_INBOUND_IMAGES) {
+        try {
+          inboundImages = JSON.parse(process.env.SPORTSCLAW_INBOUND_IMAGES);
+        } catch (err) {
+          console.error("[sportsclaw] Failed to parse SPORTSCLAW_INBOUND_IMAGES env:", err);
+        }
+      }
       const result = await engine.run(prompt, {
         userId,
         systemPrompt,
+        ...(inboundImages && { images: inboundImages }),
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
       const formatted = formatResponse(result, formatArg as any);

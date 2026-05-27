@@ -28,6 +28,31 @@ import { google } from "@ai-sdk/google";
 
 import type { LLMProvider } from "./types.js";
 
+/**
+ * Fetch wrapper that injects Nemotron-specific request body fields.
+ * Nemotron 3 family has reasoning/thinking ON by default, which produces
+ * verbose chain-of-thought in the response. NIM exposes the opt-out via
+ * the per-request `chat_template_kwargs.enable_thinking` body field.
+ * Gated on model name to avoid breaking non-Nemotron models that happen
+ * to route through the same OpenAI-compat path.
+ */
+function nimNemotronFetch(): typeof fetch {
+  return async (input, init) => {
+    if (init?.body && typeof init.body === "string") {
+      try {
+        const parsed = JSON.parse(init.body) as Record<string, unknown>;
+        if (typeof parsed.model === "string" && parsed.model.startsWith("nvidia/")) {
+          parsed.chat_template_kwargs = { enable_thinking: false };
+          init = { ...init, body: JSON.stringify(parsed) };
+        }
+      } catch {
+        // body not JSON — leave alone
+      }
+    }
+    return fetch(input, init);
+  };
+}
+
 /** Resolved OpenShell routing decision passed into `resolveModel`. */
 export interface OpenShellRoute {
   /** Base URL handed to the AI SDK provider factory. */
@@ -76,6 +101,7 @@ export function resolveModel(
         return createOpenAI({
           baseURL: openshell.baseUrl,
           apiKey: "openshell-unused",
+          fetch: nimNemotronFetch(),
         }).chat(modelId);
       case "google":
         throw new Error(
@@ -86,8 +112,23 @@ export function resolveModel(
   switch (provider) {
     case "anthropic":
       return anthropic(modelId);
-    case "openai":
+    case "openai": {
+      // When OPENAI_BASE_URL points at a self-hosted endpoint (NIM, vLLM,
+      // etc.), force POST /v1/chat/completions and inject Nemotron-specific
+      // body kwargs. Most self-hosted endpoints only serve /v1/chat/completions
+      // and 404 on /v1/responses. Real OpenAI keeps the default factory so
+      // o1/o3/gpt-5 reasoning features (reasoningEffort, web_search, etc.)
+      // continue to work via /v1/responses.
+      const customBase = process.env.OPENAI_BASE_URL;
+      if (customBase) {
+        return createOpenAI({
+          baseURL: customBase,
+          apiKey: process.env.OPENAI_API_KEY ?? undefined,
+          fetch: nimNemotronFetch(),
+        }).chat(modelId);
+      }
       return openai(modelId);
+    }
     case "google":
       return google(modelId);
     default:
