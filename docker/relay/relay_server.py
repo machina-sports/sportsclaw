@@ -373,6 +373,8 @@ def _build_env(body: dict | None = None) -> dict[str, str]:
             }
             env_var = key_map.get(provider, "ANTHROPIC_API_KEY")
             env[env_var] = body["api_key"]
+        if body.get("images"):
+            env["SPORTSCLAW_INBOUND_IMAGES"] = json.dumps(body["images"])
 
     return env
 

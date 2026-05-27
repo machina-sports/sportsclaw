@@ -2,7 +2,8 @@
  * sportsclaw — Discord Renderer
  *
  * Converts a ParsedResponse into a DiscordEmbed object.
- * Headers → embed fields, source → footer, tables → labelled multi-line cards.
+ * Headers → embed fields, tables → labelled multi-line cards.
+ * Parsed source footers are stripped for consumer chat UX.
  *
  * Tables get a Discord-native treatment: each data row becomes a card
  * (bold first cell as heading, remaining cells as `• **Header:** value`
@@ -47,7 +48,6 @@ const MAX_DESCRIPTION = 4096;
 
 export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
   const color = parsed.meta.hasScores ? EMBED_COLORS.score : EMBED_COLORS.info;
-  const footer = parsed.source ? { text: parsed.source } : undefined;
 
   // Check if we have any header blocks → use fields layout
   const hasHeaders = parsed.blocks.some((b) => b.type === "header");
@@ -81,7 +81,6 @@ export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
     return {
       title: "Sports Data",
       fields: fields.slice(0, 25), // Discord limit: 25 fields
-      footer,
       color,
     };
   }
@@ -91,7 +90,7 @@ export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
     parsed.blocks.map(renderBlockForDiscord).join("\n").trim().slice(0, MAX_DESCRIPTION) ||
     undefined;
 
-  return { description, footer, color };
+  return { description, color };
 }
 
 // ---------------------------------------------------------------------------
@@ -105,12 +104,7 @@ export function renderDiscord(parsed: ParsedResponse): DiscordEmbed {
  */
 export function formatTextForDiscord(response: string): string {
   const parsed = parseBlocks(response);
-  const rendered = parsed.blocks.map(renderBlockForDiscord).join("\n");
-
-  if (parsed.source) {
-    return rendered + "\n*Source: " + parsed.source + "*";
-  }
-  return rendered;
+  return parsed.blocks.map(renderBlockForDiscord).join("\n");
 }
 
 // ---------------------------------------------------------------------------

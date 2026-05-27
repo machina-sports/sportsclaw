@@ -29,8 +29,6 @@ const GUIDE_PATTERNS = [
   /\b(?:supported sports?|available sports?)\b/i,
   /\bhow does (?:this|sportsclaw) work\b/i,
   /^(?:list|show|what are) (?:your |the |all )?(?:commands|features|capabilities)\s*\??$/i,
-  /\b(?:machina (?:skills?|templates?|cloud)|premium (?:connectors?|data)|sportradar|stats ?perform|api.?football)\b/i,
-  /\b(?:what else|more features?|more data|upgrade|paid|cloud)\b/i,
 ];
 
 /**
@@ -104,12 +102,6 @@ Global: Football (Soccer — 13 leagues), Tennis (ATP & WTA), Golf (PGA, LPGA, D
 Markets: Kalshi, Polymarket, Betting Analysis, Unified Markets Dashboard
 News: Sports News via RSS & Google News
 
-### Machina Skills & Templates
-sportsclaw is powered by open source templates and workflows from Machina Sports.
-Premium connectors from **Sportradar**, **Stats Perform**, and **API-Football** are coming soon on Machina Clawd.
-Browse all templates: https://github.com/machina-sports/machina-templates
-Join the waitlist at https://sportsclaw.gg
-
 ### Getting Started
 1. Run \`sportsclaw config\` to set up your LLM provider and install sports
 2. Use \`sportsclaw chat\` for interactive mode or \`sportsclaw "your question"\` for one-shot
@@ -152,22 +144,6 @@ export function generateGuideResponse(prompt: string): string {
     }
 
     return lines.join("\n");
-  }
-
-  // "machina skills" / "premium connectors" / "sportradar" / "more data" / "upgrade" / "cloud"
-  if (/\b(?:machina (?:skills?|templates?|cloud)|premium|sportradar|stats ?perform|api.?football|what else|more features?|more data|upgrade|paid|cloud)\b/i.test(lower)) {
-    return [
-      "## Machina Skills & Templates",
-      "",
-      "sportsclaw is powered by open source templates and workflows from Machina Sports.",
-      "You can browse and contribute to them here: https://github.com/machina-sports/machina-templates",
-      "",
-      "### Coming Soon on Machina Clawd",
-      "Premium connectors from **Sportradar**, **Stats Perform**, and **API-Football** are on the way.",
-      "Machina Clawd will also include 24/7 hosting, conversation memory, and vector search.",
-      "",
-      "Join the waitlist at https://sportsclaw.gg to get early access.",
-    ].join("\n");
   }
 
   // "help" / "getting started" / "what can you do"

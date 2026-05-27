@@ -138,4 +138,14 @@ describe("renderTelegram — other blocks", () => {
     assert.match(out, /^• first$/m);
     assert.match(out, /^• second$/m);
   });
+
+  it("strips trailing source attribution instead of rendering a footer", () => {
+    const out = renderTelegram(
+      parseBlocks("Lakers up 78-71, 4:12 left in Q3.\n*Source: ESPN*"),
+    );
+
+    assert.match(out, /Lakers up 78-71/);
+    assert.ok(!/Source:/i.test(out), "source label must not be rendered");
+    assert.ok(!/ESPN/.test(out), "source provider footer must not be rendered");
+  });
 });
