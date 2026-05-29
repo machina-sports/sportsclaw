@@ -183,6 +183,18 @@ export interface OperatorDaemonConfig {
    *  and then produce a final synthesis text within one tick. */
   maxSteps?: number;
   /**
+   * Wall-clock budget for a single inference call, in ms. When exceeded the
+   * daemon aborts the generateText call and fails the tick, so the next tick
+   * can start on schedule. Defaults to 60_000 (60s). Set explicitly to a
+   * smaller value during testing, or larger for slow inference targets.
+   *
+   * Why this exists: GPT-OSS-class models can stall in their reasoning
+   * channel for minutes, producing no usable output. Without a watchdog,
+   * a single stall blocks the 90s tick schedule indefinitely and the
+   * channel goes dark.
+   */
+  inferenceTimeoutMs?: number;
+  /**
    * Register the daemon-owned memory writeback tools (add_lesson,
    * replace_lesson, remove_lesson) bound to this job's EditorialMemory.
    * Writes hit disk immediately but the in-prompt memory snapshot for the
@@ -304,8 +316,17 @@ const DEFAULT_TICK_PROMPT = [
   "worth surfacing.",
 ].join("\n");
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
-const DEFAULT_MAX_STEPS = 16;
+// Bumped 2048 → 4096 after observing repeated NoOutputGeneratedError stalls on
+// GPT-OSS-120B's structured-output path. The model's reasoning channel and
+// the final JSON share the same completion budget; structured mode doubles
+// this to 8192, giving reasoning enough headroom to commit a final answer
+// before running out.
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+// Trimmed 16 → 10 after seeing ticks spend 7-8 tool calls + still time out.
+// Capping steps forces the model to commit to a synthesis sooner; the
+// remaining headroom is healthy.
+const DEFAULT_MAX_STEPS = 10;
+const DEFAULT_INFERENCE_TIMEOUT_MS = 60_000;
 const DEFAULT_RECENT_BRIEF_LIMIT = 1;
 
 // ---------------------------------------------------------------------------
@@ -444,12 +465,29 @@ export function createOperatorDaemon(
             : {}),
         })
       : undefined;
+    // Wall-clock watchdog. If the model stalls (e.g. GPT-OSS reasoning loop
+    // burns through the output budget without committing to a final response)
+    // the AbortController fires after inferenceTimeoutMs and the generateText
+    // call rejects. The existing catch block below records it as a tick
+    // failure; the daemon schedules the next tick normally.
+    const inferenceTimeoutMs =
+      cfg.inferenceTimeoutMs ?? DEFAULT_INFERENCE_TIMEOUT_MS;
+    const abortController = new AbortController();
+    const watchdog = setTimeout(() => {
+      abortController.abort(
+        new Error(
+          `inference watchdog timeout after ${inferenceTimeoutMs}ms`,
+        ),
+      );
+    }, inferenceTimeoutMs);
+
     try {
       const result = await generateImpl({
         model: cfg.model,
         system,
         prompt: tickPrompt,
         ...(wrappedTools ? { tools: wrappedTools } : {}),
+        abortSignal: abortController.signal,
         // Structured-output mode emits the full schema payload (narrative +
         // arrays) plus tool-call reasoning in one budget. 2048 is fine for
         // free-text ticks; tight for structured ones. Bump the default when
@@ -491,11 +529,23 @@ export function createOperatorDaemon(
       // returns a non-JSON body the SDK can't parse into a structured error
       // (e.g. plain-text "404 page not found"). Pull statusCode + a body
       // excerpt so the failureReason is actionable instead of opaque.
+      //
+      // For NoObjectGeneratedError / NoOutputGeneratedError (structured-output
+      // path) the SDK carries the raw model output and finish reason on the
+      // error object itself — invaluable diagnostic data that the previous
+      // catch block was silently discarding. Extract them so structured-
+      // output failures surface what the model actually emitted, why the SDK
+      // refused it, and how the token budget was spent.
       if (err instanceof Error) {
         const apiErr = err as Error & {
           statusCode?: number;
           url?: string;
           responseBody?: string;
+          // SDK NoObjectGenerated / NoOutputGenerated shape:
+          text?: string;
+          usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+          finishReason?: string;
+          cause?: unknown;
         };
         const parts: string[] = [err.message || err.name];
         if (apiErr.statusCode !== undefined) parts.push(`status=${apiErr.statusCode}`);
@@ -504,10 +554,63 @@ export function createOperatorDaemon(
           const body = String(apiErr.responseBody).trim().slice(0, 200);
           if (body) parts.push(`body=${JSON.stringify(body)}`);
         }
+        if (apiErr.finishReason) parts.push(`finish=${apiErr.finishReason}`);
+        if (apiErr.usage) {
+          const u = apiErr.usage;
+          const tokens: string[] = [];
+          if (u.inputTokens !== undefined) tokens.push(`in=${u.inputTokens}`);
+          if (u.outputTokens !== undefined) tokens.push(`out=${u.outputTokens}`);
+          if (u.totalTokens !== undefined) tokens.push(`total=${u.totalTokens}`);
+          if (tokens.length) parts.push(`usage(${tokens.join(",")})`);
+        }
+        if (apiErr.text !== undefined) {
+          // Truncate aggressively for the inline reason. The full payload is
+          // also logged to stderr immediately below so it survives even if
+          // the brief truncation drops something interesting.
+          const t = String(apiErr.text).trim().replace(/\s+/g, " ");
+          parts.push(`text=${JSON.stringify(t.slice(0, 400))}`);
+        }
+        if (apiErr.cause) {
+          const causeStr =
+            apiErr.cause instanceof Error
+              ? `${apiErr.cause.name}: ${apiErr.cause.message}`
+              : String(apiErr.cause);
+          parts.push(`cause=${JSON.stringify(causeStr.slice(0, 200))}`);
+        }
         failureReason = parts.join(" ");
+
+        // Unconditional one-line stderr breadcrumb for any inference failure.
+        // Previous version only printed when text/cause was non-empty, which
+        // missed NoOutputGeneratedError entirely (no text, no cause on that
+        // class) and left /sandbox/operator.log silent on 2.5-minute stalls.
+        // This line guarantees at least one record per failed tick so we can
+        // distinguish failure modes without re-running.
+        console.error(
+          `[operator-daemon] inference failure · class=${err.name} · ${failureReason}`,
+        );
+
+        // Always dump the full raw model output to stderr when we have it —
+        // this is the only place the operator's response on a failed tick
+        // survives. The truncated `text` in failureReason above is a hint;
+        // this is the source-of-truth for diagnosis.
+        if (apiErr.text !== undefined) {
+          console.error(
+            `[operator-daemon] structured-output failure raw text (${String(apiErr.text).length} chars):\n${apiErr.text}`,
+          );
+        }
+        if (apiErr.cause) {
+          console.error(
+            `[operator-daemon] structured-output failure cause:`,
+            apiErr.cause,
+          );
+        }
       } else {
         failureReason = String(err);
       }
+    } finally {
+      // Always release the watchdog so the timer doesn't keep the event loop
+      // alive past the tick. Safe to call even if the timer already fired.
+      clearTimeout(watchdog);
     }
 
     // Broadcast Safety Validation Gate.
