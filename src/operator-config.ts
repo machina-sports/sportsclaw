@@ -60,6 +60,12 @@ export interface OperatorJobConfig {
    */
   extraFragments?: string[];
   /**
+   * Max output tokens per tick. Overrides the daemon default (which doubles
+   * for structured-output jobs). Verbose-reasoning models (e.g. gpt-oss) can
+   * exhaust a low budget on reasoning before emitting structured content.
+   */
+  maxOutputTokens?: number;
+  /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
    * is invoked — only the named skills' tools become available to the LLM.
@@ -428,6 +434,7 @@ export function validateOperatorJobConfig(
       tailServer: raw.tailServer as string | undefined,
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
+      maxOutputTokens: raw.maxOutputTokens as number | undefined,
       skills: raw.skills as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
