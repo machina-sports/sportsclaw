@@ -298,6 +298,20 @@ export function validateOperatorJobConfig(
     push("sink", "must be a non-empty string (e.g. \"noop\", \"broadcast\", or a package/path)");
   }
 
+  // maxOutputTokens
+  if (raw.maxOutputTokens !== undefined) {
+    if (
+      typeof raw.maxOutputTokens !== "number" ||
+      !Number.isFinite(raw.maxOutputTokens) ||
+      raw.maxOutputTokens <= 0
+    ) {
+      push(
+        "maxOutputTokens",
+        `must be a positive number (got ${JSON.stringify(raw.maxOutputTokens)})`,
+      );
+    }
+  }
+
   // extraFragments
   if (raw.extraFragments !== undefined) {
     if (!Array.isArray(raw.extraFragments)) {
