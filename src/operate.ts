@@ -275,6 +275,18 @@ async function buildOperatorTools(
     registry.injectSchema(schema, false);
   }
 
+  // Install the OpenShell egress-proxy dispatcher BEFORE the first MCP
+  // connect. The MCP transport uses global fetch, and Node 20's undici
+  // ignores HTTPS_PROXY env vars by default — so inside an OpenShell
+  // sandbox (network-isolated, all egress via 10.200.0.1:3128) the SSE
+  // connect resolves the Machina pod host via real DNS and fails with
+  // EAI_AGAIN. It used to be installed in resolveJobInputs(), which runs
+  // AFTER connectAll() + resolvePersona(), so the boot-time MCP connect
+  // (and the persona fetch that depends on it) failed before the proxy
+  // was ever wired up. The call is idempotent and no-ops when no proxy
+  // env is set, so it's safe to run unconditionally here.
+  await installOpenShellProxyDispatcher();
+
   const mcpManager = new McpManager(verbose, false);
   if (mcpManager.serverCount > 0) {
     await mcpManager.connectAll();
@@ -654,6 +666,7 @@ async function runOnce(jobId: string): Promise<void> {
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
       extraFragments: inputs.extraFragments,
+      maxOutputTokens: cfg.maxOutputTokens,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
       inferenceRoute: inputs.inferenceRoute,
@@ -733,6 +746,7 @@ async function runForeground(jobId: string): Promise<void> {
     tools: tools.toolSet,
     rootDir: inputs.rootDir,
     extraFragments: inputs.extraFragments,
+    maxOutputTokens: cfg.maxOutputTokens,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
     inferenceRoute: inputs.inferenceRoute,

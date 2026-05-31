@@ -840,7 +840,7 @@ describe("tickOnce — structured output", () => {
     assert.match(gen.calls[0].system, /\[SILENT\] sentinel/);
   });
 
-  it("doubles maxOutputTokens default (2048 → 4096) when outputSchema is set", async () => {
+  it("doubles maxOutputTokens default (4096 → 8192) when outputSchema is set", async () => {
     const gen = makeGenWithResult({
       experimental_output: { silent: false, narrative: "x" },
     });
@@ -851,7 +851,7 @@ describe("tickOnce — structured output", () => {
       }),
     );
     await daemon.tickOnce();
-    assert.strictEqual(gen.calls[0].maxOutputTokens, 4096);
+    assert.strictEqual(gen.calls[0].maxOutputTokens, 8192);
   });
 
   it("respects explicit cfg.maxOutputTokens override even with outputSchema", async () => {

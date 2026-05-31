@@ -29,20 +29,52 @@ import { google } from "@ai-sdk/google";
 import type { LLMProvider } from "./types.js";
 
 /**
- * Fetch wrapper that injects Nemotron-specific request body fields.
- * Nemotron 3 family has reasoning/thinking ON by default, which produces
- * verbose chain-of-thought in the response. NIM exposes the opt-out via
- * the per-request `chat_template_kwargs.enable_thinking` body field.
- * Gated on model name to avoid breaking non-Nemotron models that happen
- * to route through the same OpenAI-compat path.
+ * Fetch wrapper that suppresses Nemotron's chain-of-thought output.
+ *
+ * Nemotron families have reasoning/thinking ON by default. Different
+ * variants use different opt-out mechanisms — there is no single field
+ * that works across the family:
+ *   - Nemotron-3 (Nano/Super):      `chat_template_kwargs.enable_thinking=false`
+ *   - Llama-3.3-Nemotron-Super-v1.5: `/no_think` directive in system message
+ *
+ * We inject BOTH unconditionally for any `nvidia/*` model. Whichever
+ * mechanism the served model honors wins; the other is a silent no-op.
+ * Gated on model name so non-Nemotron OpenAI-compat targets aren't
+ * affected.
  */
 function nimNemotronFetch(): typeof fetch {
   return async (input, init) => {
     if (init?.body && typeof init.body === "string") {
       try {
         const parsed = JSON.parse(init.body) as Record<string, unknown>;
-        if (typeof parsed.model === "string" && parsed.model.startsWith("nvidia/")) {
+        const model = typeof parsed.model === "string" ? parsed.model : "";
+        if (model.startsWith("nvidia/")) {
+          // Chat template flag for Nemotron-3 family (Nano, Super-3, etc.).
+          // Llama-3.3-Nemotron-Super-49B-v1.5 ignores this — harmless when ignored.
           parsed.chat_template_kwargs = { enable_thinking: false };
+          // /no_think system directive: only inject for Nemotron-3-Nano family,
+          // which dumps `<think>...</think>` blocks into `content` instead of
+          // the `reasoning` field, breaking JSON-mode outputs.
+          //
+          // Llama-3.3-Nemotron-Super-49B-v1.5 is deliberately allowed to think:
+          // its tool-calling reliability drops sharply without deliberation,
+          // and the custom llama_nemotron_json parser correctly extracts tool
+          // calls even when thinking is on.
+          const needsNoThink = model.includes("nemotron-3-nano");
+          if (needsNoThink && Array.isArray(parsed.messages)) {
+            const messages = parsed.messages as Array<Record<string, unknown>>;
+            const firstSystemIdx = messages.findIndex((m) => m?.role === "system");
+            if (firstSystemIdx >= 0) {
+              const sys = messages[firstSystemIdx];
+              const content = typeof sys.content === "string" ? sys.content : "";
+              if (!content.startsWith("/no_think")) {
+                messages[firstSystemIdx] = { ...sys, content: `/no_think\n\n${content}` };
+              }
+            } else {
+              messages.unshift({ role: "system", content: "/no_think" });
+            }
+            parsed.messages = messages;
+          }
           init = { ...init, body: JSON.stringify(parsed) };
         }
       } catch {

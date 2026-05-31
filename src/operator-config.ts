@@ -60,6 +60,12 @@ export interface OperatorJobConfig {
    */
   extraFragments?: string[];
   /**
+   * Max output tokens per tick. Overrides the daemon default (which doubles
+   * for structured-output jobs). Verbose-reasoning models (e.g. gpt-oss) can
+   * exhaust a low budget on reasoning before emitting structured content.
+   */
+  maxOutputTokens?: number;
+  /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
    * is invoked — only the named skills' tools become available to the LLM.
@@ -292,6 +298,20 @@ export function validateOperatorJobConfig(
     push("sink", "must be a non-empty string (e.g. \"noop\", \"broadcast\", or a package/path)");
   }
 
+  // maxOutputTokens
+  if (raw.maxOutputTokens !== undefined) {
+    if (
+      typeof raw.maxOutputTokens !== "number" ||
+      !Number.isFinite(raw.maxOutputTokens) ||
+      raw.maxOutputTokens <= 0
+    ) {
+      push(
+        "maxOutputTokens",
+        `must be a positive number (got ${JSON.stringify(raw.maxOutputTokens)})`,
+      );
+    }
+  }
+
   // extraFragments
   if (raw.extraFragments !== undefined) {
     if (!Array.isArray(raw.extraFragments)) {
@@ -428,6 +448,7 @@ export function validateOperatorJobConfig(
       tailServer: raw.tailServer as string | undefined,
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
+      maxOutputTokens: raw.maxOutputTokens as number | undefined,
       skills: raw.skills as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
