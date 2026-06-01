@@ -34,6 +34,11 @@ import {
   getVenvPythonPath,
   MIN_PYTHON_VERSION,
 } from "./python.js";
+import {
+  getAuthMethods,
+  setAnthropicAuthMethod,
+} from "./credentials.js";
+import { inspectClaudeCodeSession } from "./anthropic-oauth.js";
 
 // ---------------------------------------------------------------------------
 // Config shape persisted to disk
@@ -440,11 +445,19 @@ export async function runConfigFlow(): Promise<CLIConfig> {
     const discord = savedConfig.chatIntegrations?.discord;
     const telegram = savedConfig.chatIntegrations?.telegram;
 
+    const anthroAuthMethod = getAuthMethods().anthropic;
+    const oauthActive = anthroAuthMethod === "oauth_claude_code" && inspectClaudeCodeSession().available;
+
     console.log("");
     console.log(pc.bold("  Current Configuration"));
     console.log("");
     console.log(`  ${pc.dim("Provider")}     ${savedConfig.provider}${savedConfig.model ? ` (${savedConfig.model})` : ""}`);
-    console.log(`  ${pc.dim("API Key")}      ${savedConfig.apiKey ? pc.green("configured") : pc.yellow("missing")}`);
+    const authLabel = oauthActive
+      ? pc.green("Claude Code OAuth")
+      : savedConfig.apiKey
+        ? pc.green("API key configured")
+        : pc.yellow("missing");
+    console.log(`  ${pc.dim("Auth")}         ${authLabel}`);
     console.log(`  ${pc.dim("Python")}       ${savedConfig.pythonPath || "python3"}`);
     console.log(`  ${pc.dim("Sports")}       ${existingSchemas.length > 0 ? existingSchemas.join(", ") : pc.yellow("none installed")}`);
     console.log(`  ${pc.dim("Machina MCP")}  ${mcpCount > 0 ? Object.keys(mcpConfigs).join(", ") : pc.dim("none")}`);
@@ -809,6 +822,10 @@ export async function runChannelsFlow(): Promise<void> {
 function hasApiKey(savedConfig: CLIConfig, prov: LLMProvider): boolean {
   if (process.env[PROVIDER_ENV[prov]]) return true;
   if (savedConfig.provider === prov && savedConfig.apiKey) return true;
+  // For Anthropic, an active Claude Code OAuth opt-in counts as authenticated.
+  if (prov === "anthropic" && getAuthMethods().anthropic === "oauth_claude_code") {
+    if (inspectClaudeCodeSession().available) return true;
+  }
   return false;
 }
 
@@ -845,6 +862,54 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
 
   const selectedProvider = provider as LLMProvider;
   const envName = PROVIDER_ENV[selectedProvider];
+
+  // Anthropic-only: offer "Sign in with Claude" as a sibling to the API-key flow.
+  if (selectedProvider === "anthropic") {
+    const session = inspectClaudeCodeSession();
+    const oauthCurrentlyActive = getAuthMethods().anthropic === "oauth_claude_code";
+
+    const authChoiceOptions: Array<{ value: "api_key" | "oauth"; label: string; hint?: string }> = [];
+    if (session.available) {
+      const sub = session.subscriptionType ? `Claude Code ${session.subscriptionType}` : "Claude Code";
+      authChoiceOptions.push({
+        value: "oauth",
+        label: `Sign in with Claude (${sub})`,
+        hint: oauthCurrentlyActive ? "currently active" : "use existing Claude Code session",
+      });
+    }
+    authChoiceOptions.push({
+      value: "api_key",
+      label: "Use an Anthropic API key",
+      hint: oauthCurrentlyActive ? "switch back to API-key auth" : "default",
+    });
+
+    const initialAuthChoice: "api_key" | "oauth" =
+      oauthCurrentlyActive && session.available ? "oauth" : "api_key";
+
+    const authChoice = authChoiceOptions.length > 1
+      ? await p.select({
+          message: "How do you want to authenticate with Anthropic?",
+          options: authChoiceOptions,
+          initialValue: initialAuthChoice,
+        })
+      : "api_key";
+    if (p.isCancel(authChoice)) { p.cancel("Cancelled."); process.exit(0); }
+
+    if (authChoice === "oauth") {
+      setAnthropicAuthMethod("oauth_claude_code");
+      const minLeft = Math.max(0, Math.floor((session.expiresInMs ?? 0) / 60_000));
+      p.log.success(`Signed in via Claude Code (token expires in ${minLeft} min).`);
+      // No API key needed; return an empty string so the saved config doesn't claim a key.
+      return { provider: selectedProvider, model: model as string, apiKey: "" };
+    }
+
+    // User explicitly chose API key — ensure any prior OAuth opt-in is cleared.
+    if (oauthCurrentlyActive) {
+      setAnthropicAuthMethod(undefined);
+      p.log.info("Switched off Claude Code OAuth — will use Anthropic API key from here on.");
+    }
+  }
+
   const existingKey = process.env[PROVIDER_ENV[selectedProvider]]
     || (savedConfig.provider === selectedProvider ? savedConfig.apiKey : undefined);
 

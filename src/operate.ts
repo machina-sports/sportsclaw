@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
 
-import { resolveModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
+import { resolveModel, resolveAuthForModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
 import {
   createOperatorDaemon,
   type TickEvent,
@@ -661,7 +661,7 @@ async function runOnce(jobId: string): Promise<void> {
       jobId: cfg.jobId,
       jobLabel: cfg.label,
       intervalMs: cfg.intervalMs,
-      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
+      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
       role: inputs.personaText,
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
@@ -741,7 +741,7 @@ async function runForeground(jobId: string): Promise<void> {
     jobId: cfg.jobId,
     jobLabel: cfg.label,
     intervalMs: cfg.intervalMs,
-    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
+    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
     role: inputs.personaText,
     tools: tools.toolSet,
     rootDir: inputs.rootDir,

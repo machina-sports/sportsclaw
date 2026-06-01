@@ -44,6 +44,15 @@ export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 sportsclaw "What are today's NFL scores?"
 ```
 
+**Already use Claude Code?** If you have a Claude Code Max / Pro subscription, you can skip the Anthropic API key and reuse that session:
+
+```bash
+sportsclaw login claude   # picks up the session your `claude` CLI is already signed into
+sportsclaw "What are today's NFL scores?"
+```
+
+This reads tokens from your existing Claude Code install (macOS Keychain or `~/.claude/.credentials.json`) and refreshes them as needed — your `claude` CLI keeps working. Revert any time with `sportsclaw logout claude`. `ANTHROPIC_API_KEY` (if set in the environment) always wins over the OAuth session.
+
 For an interactive conversation, start chat mode:
 
 ```bash

@@ -18,7 +18,8 @@ import {
 } from "ai";
 import pc from "picocolors";
 
-import { resolveModel } from "./llm-providers.js";
+import { resolveModel, resolveAuthForModel } from "./llm-providers.js";
+import { resolveAnthropicAuth } from "./credentials.js";
 
 import {
   ENV_PATH,
@@ -69,6 +70,17 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
       console.log(pc.dim(`Using existing ${envVar} from environment.`));
       return { provider, apiKey: val.trim() };
     }
+  }
+
+  // Claude Code OAuth — only if the user opted in via `sportsclaw login claude`.
+  // No API key string is returned (callers shouldn't read it on the OAuth path),
+  // but the placeholder satisfies the existing return shape so the rest of
+  // setup.ts stays untouched. The model construction path picks OAuth up via
+  // `resolveAuthForModel()`.
+  const anthroAuth = resolveAnthropicAuth();
+  if (anthroAuth?.kind === "oauth_claude_code") {
+    console.log(pc.dim("Using Claude Code OAuth session (sportsclaw login claude)."));
+    return { provider: "anthropic", apiKey: "<oauth-claude-code>" };
   }
 
   // No key found — prompt the user
@@ -387,7 +399,7 @@ export async function runSetup(initialPrompt?: string): Promise<void> {
 
   // Resolve model
   const modelId = DEFAULT_MODELS[provider];
-  const model = resolveModel(provider, modelId);
+  const model = resolveModel(provider, modelId, undefined, resolveAuthForModel());
 
   // Build tools
   const tools = buildSetupTools();

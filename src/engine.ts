@@ -18,7 +18,7 @@ import {
   type ToolSet,
 } from "ai";
 
-import { resolveModel } from "./llm-providers.js";
+import { resolveModel, resolveAuthForModel } from "./llm-providers.js";
 
 import {
   DEFAULT_CONFIG,
@@ -379,7 +379,12 @@ export class sportsclawEngine {
     }
 
     this.config = merged;
-    this.mainModel = resolveModel(this.config.provider, this.config.model);
+    this.mainModel = resolveModel(
+      this.config.provider,
+      this.config.model,
+      undefined,
+      resolveAuthForModel(),
+    );
     this.mainModelId = readModelId(this.mainModel);
     this.registry = new ToolRegistry();
     this.registry.configureCaching({
