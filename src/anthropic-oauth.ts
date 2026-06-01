@@ -208,13 +208,21 @@ function writeCredentialsFile(tokens: ClaudeCodeOAuthTokens): boolean {
 }
 
 function persistTokens(tokens: ClaudeCodeOAuthTokens, source: TokenSource): void {
-  if (source === "keychain") {
-    if (writeKeychain(tokens)) return;
-    // Fallback to file if Keychain write failed
-    writeCredentialsFile(tokens);
-    return;
+  const persisted =
+    source === "keychain"
+      ? // Fallback to file if Keychain write failed
+        writeKeychain(tokens) || writeCredentialsFile(tokens)
+      : writeCredentialsFile(tokens);
+  if (!persisted) {
+    // The server already rotated the refresh token, but we couldn't save it.
+    // The next process will read the old (now-invalid) refresh token and fail
+    // to authenticate. Warn loudly rather than failing silently here.
+    console.error(
+      "[anthropic-oauth] WARNING: refreshed OAuth token could not be persisted " +
+        `(source=${source}); a future run may re-use a rotated, invalid refresh ` +
+        "token. Re-run `claude login` if Anthropic auth starts failing.",
+    );
   }
-  writeCredentialsFile(tokens);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,13 +320,44 @@ export function injectSystemPrefix(body: MessagesRequestBody): MessagesRequestBo
 
 interface TokenHolder {
   loaded: LoadedTokens;
+  /**
+   * In-flight refresh, shared across concurrent requests. Anthropic rotates
+   * the refresh token on every refresh, so without this dedup, N parallel
+   * requests against an expired token would each POST the *same* refresh
+   * token — only one rotation is valid server-side, and they'd race to
+   * rewrite the shared `~/.claude/.credentials.json` that `claude` itself
+   * reads. One shared promise means one refresh, one write.
+   */
+  refreshInFlight?: Promise<ClaudeCodeOAuthTokens>;
+}
+
+/**
+ * Return a valid token for the holder, refreshing at most once even under
+ * concurrent callers. Updates `holder.loaded` and clears the in-flight latch
+ * when the refresh settles (success or failure) so a later expiry refreshes
+ * again.
+ */
+function refreshHolderToken(holder: TokenHolder): Promise<ClaudeCodeOAuthTokens> {
+  if (!isExpired(holder.loaded.tokens)) {
+    return Promise.resolve(holder.loaded.tokens);
+  }
+  if (!holder.refreshInFlight) {
+    holder.refreshInFlight = refreshTokens(holder.loaded.tokens)
+      .then((fresh) => {
+        persistTokens(fresh, holder.loaded.source);
+        holder.loaded = { tokens: fresh, source: holder.loaded.source };
+        return fresh;
+      })
+      .finally(() => {
+        holder.refreshInFlight = undefined;
+      });
+  }
+  return holder.refreshInFlight;
 }
 
 function buildOAuthFetch(holder: TokenHolder): typeof fetch {
   return async (input, init) => {
-    const tokens = await refreshIfNeeded(holder.loaded);
-    // Persist the in-memory snapshot so subsequent requests see the fresh expiry
-    holder.loaded = { tokens, source: holder.loaded.source };
+    const tokens = await refreshHolderToken(holder);
 
     const headers = new Headers(init?.headers ?? {});
     headers.delete("x-api-key");
