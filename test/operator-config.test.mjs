@@ -501,3 +501,86 @@ describe("validateOperatorJobConfig — openshell block", () => {
     assert.strictEqual(r.valid, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// inference block — model-role router config
+// ---------------------------------------------------------------------------
+
+describe("validateOperatorJobConfig — inference block", () => {
+  const base = {
+    jobId: "inference-job",
+    intervalMs: 60_000,
+    personaText: "You are an autonomous operator.",
+  };
+
+  it("accepts a config with no inference block", () => {
+    const r = validateOperatorJobConfig(base);
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.inference, undefined);
+  });
+
+  it("accepts the target four-role NIM/H200 inference config", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      inference: {
+        roles: {
+          eyes: {
+            route: "nim",
+            locality: "h200",
+            accelerator: "h200",
+            model: "nvidia/cosmos3-nano-reasoner",
+          },
+          brain: {
+            route: "nim",
+            locality: "h200",
+            accelerator: "h200",
+            model: "nvidia/nemotron-3-super-120b-a12b",
+          },
+          hands: {
+            route: "nim",
+            locality: "h200",
+            accelerator: "h200",
+            model: "nvidia/cosmos3-super-i2v",
+          },
+          voice: {
+            route: "nim",
+            locality: "h200",
+            accelerator: "h200",
+            model: "nvidia/llama-3.3-nemotron-super-49b",
+          },
+        },
+      },
+    });
+    assert.strictEqual(r.valid, true, JSON.stringify(r.issues));
+    assert.strictEqual(r.config.inference.roles.eyes.model, "nvidia/cosmos3-nano-reasoner");
+    assert.strictEqual(r.config.inference.roles.voice.route, "nim");
+  });
+
+  it("rejects a non-object inference block", () => {
+    for (const bad of ["nim", 42, true, []]) {
+      const r = validateOperatorJobConfig({ ...base, inference: bad });
+      assert.strictEqual(r.valid, false, `inference=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "inference"));
+    }
+  });
+
+  it("rejects an inference block with an unknown role", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      inference: { roles: { ears: { route: "mock", model: "m" } } },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inference"));
+  });
+
+  it("rejects an inference block with a missing model", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      inference: { roles: { eyes: { route: "nim" } } },
+    });
+    assert.strictEqual(r.valid, false);
+    const issue = r.issues.find((i) => i.field === "inference");
+    assert.ok(issue);
+    assert.ok(issue.message.includes("eyes"));
+  });
+});
