@@ -24,6 +24,7 @@
     "test:version": "npm run build && node --test test/version-help.test.mjs",
     "test:tv-contracts": "npm run build && node --test test/tv-contracts.test.mjs",
     "test:operator-health": "npm run build && node --test test/operator-health.test.mjs",
+    "test:cli-health": "npm run build && node --test test/cli-health.test.mjs",
     "test:decision-ledger": "npm run build && node --test test/decision-ledger.test.mjs",
     "test:manifest-coverage": "npm run build && node --test test/manifest-coverage.test.mjs",
     "test:operator-runs": "npm run build && node --test test/operator-runs.test.mjs",
@@ -47,7 +48,16 @@
     "test:operator-sink": "npm run build && node --test test/operator-sink.test.mjs",
     "test:operator-sink-external": "npm run build && node --test test/operator-sink-external.test.mjs",
     "test:operator-memory-tools": "npm run build && node --test test/operator-memory-tools.test.mjs",
-    "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs"
+    "test:operator-safety": "npm run build && node --test test/operator-safety.test.mjs",
+    "test:operator-ledger-pod": "npm run build && node --test test/operator-ledger-pod.test.mjs",
+    "test:operator-context-chaining": "npm run build && node --test test/operator-context-chaining.test.mjs",
+    "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs",
+    "test:formatters-telegram": "npm run build && node --test test/formatters-telegram.test.mjs",
+    "test:formatters-discord": "npm run build && node --test test/formatters-discord.test.mjs",
+    "test:anthropic-oauth": "npm run build && node --test test/anthropic-oauth.test.mjs",
+    "test:inference-contracts": "npm run build && node --test test/inference-contracts.test.mjs",
+    "test:model-role-router": "npm run build && node --test test/model-role-router.test.mjs",
+    "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs"
   },
   "keywords": [
     "sports",
@@ -88,6 +98,7 @@
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "picocolors": "^1.1.1",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "undici": "^6.6.0"
   }
 }

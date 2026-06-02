@@ -44,9 +44,23 @@ export interface TickBrief {
   body: string;
   /** True if `body` trimmed equals `SILENT_SENTINEL`. */
   silent: boolean;
+  /** Optional structured payload context from this tick to carry over. */
+  payload?: unknown;
 }
 
 export const SILENT_SENTINEL = "[SILENT]";
+
+/**
+ * Max bytes a chained payload may occupy in a brief's serialized form before
+ * we elide it. The chained payload is re-injected into every subsequent
+ * tick's system prompt via `contextFrom` + `renderJobSection`, so an
+ * unbounded payload would compound across ticks and blow the prompt budget.
+ *
+ * 4 KB lets a typical "next-tick state" (cue id, remaining duration, channel
+ * meta) through while clipping multi-block manifests that belong on the
+ * sink's structured-output channel, not the chained brief context.
+ */
+export const MAX_PAYLOAD_BYTES = 4096;
 
 export interface ContextFromOptions {
   /** How many briefs per job to pull. Default 1 (the most recent). */
@@ -68,7 +82,7 @@ export class LastTickBrief {
    * Persist a brief and return the parsed record. Creates the per-job dir
    * lazily. The body is trimmed; `silent` is computed from the trimmed body.
    */
-  async write(input: { tickId: string; jobId: string; body: string }): Promise<TickBrief> {
+  async write(input: { tickId: string; jobId: string; body: string; payload?: unknown }): Promise<TickBrief> {
     if (!input.tickId) throw new Error("LastTickBrief: tickId is required.");
     if (!input.jobId) throw new Error("LastTickBrief: jobId is required.");
     const trimmed = (input.body ?? "").trim();
@@ -79,6 +93,7 @@ export class LastTickBrief {
       timestamp: new Date().toISOString(),
       body: trimmed,
       silent,
+      ...(input.payload !== undefined ? { payload: input.payload } : {}),
     };
     const filePath = this.pathFor(brief.jobId, brief.tickId);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -186,9 +201,27 @@ export function serializeBrief(brief: TickBrief): string {
     `jobId: ${brief.jobId}`,
     `timestamp: ${brief.timestamp}`,
     `silent: ${brief.silent ? "true" : "false"}`,
-    FRONTMATTER_DELIM,
-  ].join("\n");
-  return `${fm}\n\n${brief.body}\n`;
+  ];
+  if (brief.payload !== undefined) {
+    const serialized = JSON.stringify(brief.payload);
+    // Elide oversized payloads. A truncated JSON string in the frontmatter
+    // would be unparseable and would also corrupt every downstream prompt
+    // that re-renders it via renderJobSection. Replace with a marker the
+    // next tick can recognise and reason about ("there was state, but it
+    // was too big to chain — fetch fresh via tools if you need it").
+    if (serialized.length > MAX_PAYLOAD_BYTES) {
+      const marker = JSON.stringify({
+        _elided: true,
+        reason: "payload exceeded MAX_PAYLOAD_BYTES",
+        approxBytes: serialized.length,
+      });
+      fm.push(`payload: ${marker}`);
+    } else {
+      fm.push(`payload: ${serialized}`);
+    }
+  }
+  fm.push(FRONTMATTER_DELIM);
+  return `${fm.join("\n")}\n\n${brief.body}\n`;
 }
 
 export function parseBrief(text: string): TickBrief {
@@ -213,12 +246,21 @@ export function parseBrief(text: string): TickBrief {
   if (!fm.tickId || !fm.jobId || !fm.timestamp) {
     throw new Error("LastTickBrief: required frontmatter field missing (tickId / jobId / timestamp).");
   }
+  let payload: unknown = undefined;
+  if (fm.payload) {
+    try {
+      payload = JSON.parse(fm.payload);
+    } catch {
+      // ignore invalid payload format
+    }
+  }
   return {
     tickId: fm.tickId,
     jobId: fm.jobId,
     timestamp: fm.timestamp,
     body,
     silent: fm.silent === "true" || body === SILENT_SENTINEL,
+    ...(payload !== undefined ? { payload } : {}),
   };
 }
 
@@ -238,7 +280,11 @@ function renderJobSection(jobId: string, briefs: TickBrief[]): string {
   const header = `## Recent brief from job '${jobId}'`;
   const items = briefs.map((b) => {
     const tag = b.silent ? " (silent)" : "";
-    return `### tick ${b.tickId} · ${b.timestamp}${tag}\n\n${b.body}`;
+    let payloadStr = "";
+    if (b.payload !== undefined) {
+      payloadStr = `\n\n#### Structured Payload / Context Chaining:\n\`\`\`json\n${JSON.stringify(b.payload, null, 2)}\n\`\`\``;
+    }
+    return `### tick ${b.tickId} · ${b.timestamp}${tag}\n\n${b.body}${payloadStr}`;
   });
   return [header, ...items].join("\n\n");
 }

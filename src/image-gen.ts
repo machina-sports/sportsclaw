@@ -7,7 +7,10 @@
  *
  * Provider routing matches engine's prior behavior:
  *   - google  → Gemini image generation (gemini-3.1-flash-image-preview)
- *   - openai  → DALL-E 3
+ *   - openai  → DALL-E 3 (direct), OR an OpenAI-compat local image NIM
+ *               (Qwen-Image-2512 on the brev H200) when
+ *               NIM_IMAGE_BASE_URL is set. This is the path used in the
+ *               NVIDIA case-study deployment.
  *   - anthropic → unsupported (tool returns a friendly error string)
  */
 
@@ -76,14 +79,22 @@ export async function generateImageGoogle(
 }
 
 export async function generateImageOpenAI(prompt: string, size?: string): Promise<GeneratedImage> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not set.");
+  // When NIM_IMAGE_BASE_URL is set, route to a self-hosted OpenAI-compat
+  // image NIM (Qwen-Image-2512 on the brev H200) instead of DALL-E.
+  // The NIM's served-model-name comes from NIM_IMAGE_MODEL.
+  const nimBase = process.env.NIM_IMAGE_BASE_URL;
+  const nimModel = process.env.NIM_IMAGE_MODEL;
+  const useNim = !!nimBase;
+  const baseUrl = useNim ? nimBase : "https://api.openai.com";
+  const model = useNim ? (nimModel ?? "qwen/qwen-image-2512") : "dall-e-3";
+  const apiKey = useNim ? "nim-unused" : process.env.OPENAI_API_KEY;
+  if (!useNim && !apiKey) throw new Error("OPENAI_API_KEY is not set.");
 
-  const res = await fetch("https://api.openai.com/v1/images/generations", {
+  const res = await fetch(`${baseUrl}/v1/images/generations`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
-      model: "dall-e-3",
+      model,
       prompt,
       n: 1,
       size: size || "1024x1024",
@@ -93,12 +104,12 @@ export async function generateImageOpenAI(prompt: string, size?: string): Promis
 
   if (!res.ok) {
     const errBody = await res.text();
-    throw new Error(`OpenAI image generation failed (${res.status}): ${errBody}`);
+    throw new Error(`${useNim ? "NIM" : "OpenAI"} image generation failed (${res.status}): ${errBody}`);
   }
 
   const data = (await res.json()) as any;
   const imageData = data.data?.[0]?.b64_json;
-  if (!imageData) throw new Error("OpenAI image generation returned no image data.");
+  if (!imageData) throw new Error("Image generation returned no image data.");
 
   return { data: imageData, mimeType: "image/png", prompt, provider: "openai" };
 }

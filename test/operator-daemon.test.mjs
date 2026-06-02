@@ -755,6 +755,208 @@ describe("editorial-memory tools (daemon wiring)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Structured output — cfg.outputSchema path
+// ---------------------------------------------------------------------------
+
+describe("tickOnce — structured output", () => {
+  const minimalSchema = {
+    type: "object",
+    properties: {
+      silent: { type: "boolean" },
+      narrative: { type: "string" },
+    },
+    required: ["silent"],
+    additionalProperties: false,
+  };
+
+  /**
+   * generateText stub that records its args and returns a fixed result.
+   * `result` is what the daemon will see — for structured mode it must set
+   * `experimental_output` to the validated object.
+   */
+  function makeGenWithResult(result) {
+    const calls = [];
+    const impl = async (args) => {
+      calls.push(args);
+      return result;
+    };
+    impl.calls = calls;
+    return impl;
+  }
+
+  it("passes experimental_output to generateText when outputSchema is set", async () => {
+    const gen = makeGenWithResult({
+      experimental_output: { silent: false, narrative: "Tip-off in 5." },
+    });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema, name: "Broadcast" },
+      }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(gen.calls.length, 1);
+    assert.ok(
+      gen.calls[0].experimental_output !== undefined,
+      "expected experimental_output in generateText args",
+    );
+  });
+
+  it("does NOT pass experimental_output when outputSchema is unset (legacy path)", async () => {
+    const gen = makeGenWithResult({ text: "free-text tick" });
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(gen.calls.length, 1);
+    assert.strictEqual(gen.calls[0].experimental_output, undefined);
+  });
+
+  it("suppresses the [SILENT] sentinel fragment in the system prompt", async () => {
+    const gen = makeGenWithResult({
+      experimental_output: { silent: false, narrative: "x" },
+    });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+      }),
+    );
+    await daemon.tickOnce();
+    const sys = gen.calls[0].system;
+    assert.doesNotMatch(
+      sys,
+      /\[SILENT\] sentinel/,
+      "schema's silent field replaces the sentinel; both = conflicting instructions",
+    );
+  });
+
+  it("keeps the [SILENT] sentinel fragment when outputSchema is unset", async () => {
+    const gen = makeGenWithResult({ text: "free-text" });
+    const daemon = createOperatorDaemon(
+      baseConfig({ generateTextImpl: gen }),
+    );
+    await daemon.tickOnce();
+    assert.match(gen.calls[0].system, /\[SILENT\] sentinel/);
+  });
+
+  it("doubles maxOutputTokens default (4096 → 8192) when outputSchema is set", async () => {
+    const gen = makeGenWithResult({
+      experimental_output: { silent: false, narrative: "x" },
+    });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+      }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(gen.calls[0].maxOutputTokens, 8192);
+  });
+
+  it("respects explicit cfg.maxOutputTokens override even with outputSchema", async () => {
+    const gen = makeGenWithResult({
+      experimental_output: { silent: false, narrative: "x" },
+    });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+        maxOutputTokens: 1024,
+      }),
+    );
+    await daemon.tickOnce();
+    assert.strictEqual(gen.calls[0].maxOutputTokens, 1024);
+  });
+
+  it("populates TickEvent.output with the validated object and text with .narrative", async () => {
+    const obj = { silent: false, narrative: "Lakers up 102-99 with 2:14 left." };
+    const gen = makeGenWithResult({ experimental_output: obj });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    assert.deepStrictEqual(event.output, obj);
+    assert.strictEqual(event.text, obj.narrative);
+  });
+
+  it("treats output.silent=true as tick_silent but still carries output for observability", async () => {
+    const obj = { silent: true, narrative: "" };
+    const gen = makeGenWithResult({ experimental_output: obj });
+    const events = [];
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+        onTickEvent: (e) => events.push(e),
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_silent");
+    assert.strictEqual(event.text, undefined);
+    assert.deepStrictEqual(event.output, obj);
+  });
+
+  it("treats silent=false with empty narrative as tick_published (sink decides what to do)", async () => {
+    // The PR comment explicitly says: a schema-validated payload with
+    // silent=false but an empty narrative is *malformed*, not silent — the
+    // sink is responsible for suppressing/handling it.
+    const obj = { silent: false, narrative: "" };
+    const gen = makeGenWithResult({ experimental_output: obj });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    assert.strictEqual(event.text, "");
+    assert.deepStrictEqual(event.output, obj);
+  });
+
+  it("treats missing experimental_output as tick_silent (SDK couldn't produce a match)", async () => {
+    const gen = makeGenWithResult({ text: "ignored in structured mode" });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: { schema: minimalSchema },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_silent");
+    assert.strictEqual(event.text, undefined);
+    assert.strictEqual(event.output, undefined);
+  });
+
+  it("forwards name/description on outputSchema (preserves them through Output.object)", async () => {
+    // We can't introspect Output.object's internals from here; the best we
+    // can do is confirm the daemon still emits experimental_output when
+    // name+description are present (i.e. didn't accidentally crash).
+    const gen = makeGenWithResult({
+      experimental_output: { silent: false, narrative: "ok" },
+    });
+    const daemon = createOperatorDaemon(
+      baseConfig({
+        generateTextImpl: gen,
+        outputSchema: {
+          schema: minimalSchema,
+          name: "Broadcast",
+          description: "TV broadcast tick payload",
+        },
+      }),
+    );
+    const event = await daemon.tickOnce();
+    assert.strictEqual(event.type, "tick_published");
+    assert.ok(gen.calls[0].experimental_output !== undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Public entry re-exports
 // ---------------------------------------------------------------------------
 

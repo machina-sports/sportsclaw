@@ -162,6 +162,23 @@ export class McpManager {
     return Object.keys(this.configs).length;
   }
 
+  /** Get health details of all configured MCP servers */
+  getHealthDetails(): Array<{ name: string; connected: boolean; url: string; failures: number; toolsDiscovered: number }> {
+    const result: Array<{ name: string; connected: boolean; url: string; failures: number; toolsDiscovered: number }> = [];
+    for (const [name, config] of Object.entries(this.configs)) {
+      const conn = this.connections.get(name);
+      const toolsCount = this.toolSpecs.filter(t => t.name.startsWith(`mcp__${name}__`)).length;
+      result.push({
+        name,
+        connected: !!conn,
+        url: config.url,
+        failures: conn?.failures ?? 0,
+        toolsDiscovered: toolsCount,
+      });
+    }
+    return result;
+  }
+
   /** Set the user ID for MCP request context propagation */
   setUserId(id: string | undefined): void {
     this.userId = id;

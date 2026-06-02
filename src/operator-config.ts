@@ -16,6 +16,10 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 import type { LLMProvider, OpenShellConfig } from "./types.js";
+import {
+  validateModelRoleRouterConfig,
+  type ModelRoleRouterConfig,
+} from "./inference/model-role-router.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,6 +63,33 @@ export interface OperatorJobConfig {
    * BROADCAST_DIRECTIVE_FRAGMENT) and used as inline text otherwise.
    */
   extraFragments?: string[];
+  /**
+   * Max output tokens per tick. Overrides the daemon default (which doubles
+   * for structured-output jobs). Verbose-reasoning models (e.g. gpt-oss) can
+   * exhaust a low budget on reasoning before emitting structured content.
+   */
+  maxOutputTokens?: number;
+  /**
+   * Sport-skill schemas to load for this job. When set, the launcher applies
+   * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
+   * is invoked — only the named skills' tools become available to the LLM.
+   *
+   * Why: the default behaviour loads every installed schema (~14 sports +
+   * markets + metadata + betting → ~300 tool surfaces in a typical install).
+   * For a focused job (e.g. a World Cup channel that only needs football +
+   * news + prediction markets) this is wasteful in two ways: every tool
+   * description goes into the system prompt, and the combination of the
+   * full toolset with structured output (`OperatorSinkPlugin.getOutputSchema`)
+   * trips a Gemini `responseSchema` complexity limit. Setting a tight
+   * `skills` list fixes both.
+   *
+   * Strings should match schema filenames in `~/.sportsclaw/schemas/`
+   * (without the `.json` suffix), e.g.
+   * `["football","kalshi","polymarket","news","markets","metadata","betting"]`.
+   *
+   * Omit to keep the legacy "load everything" behaviour.
+   */
+  skills?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
   guardOptions?: Record<string, unknown>;
   /**
@@ -86,6 +117,46 @@ export interface OperatorJobConfig {
    * See `openshell/README.md` for the deployment runbook.
    */
   openshell?: OpenShellConfig;
+  /**
+   * Model-role inference routing — maps `eyes/brain/hands/voice` roles to
+   * OpenShell/NIM/mock routes. Consumed by `invokeModelRole` in
+   * `inference/model-role-router.ts`. Hardware (locality/accelerator) is
+   * runtime metadata only — callers request roles, never GPUs. Never put
+   * credentials or endpoint tokens here.
+   */
+  inference?: ModelRoleRouterConfig;
+  /**
+   * Broadcast-safety validation gate. When `enabled` is true and the daemon
+   * is in structured-output mode, the validated payload is passed through
+   * `validateManifestCoverage(structuredOutput, options)`.
+   *
+   * On validation failure:
+   *   - If `fallbackManifest` is configured, the daemon emits it in place
+   *     of the model's output. The tick is `tick_published` with
+   *     `safetyValidation.fallbackTriggered = true` and the original on
+   *     `safetyValidation.originalOutput`.
+   *   - If `fallbackManifest` is NOT configured, the tick escalates to
+   *     `tick_failed`. The daemon refuses to invent broadcast content —
+   *     supplying the fallback shape is the sink's responsibility, not the
+   *     daemon's. The original output is still preserved on
+   *     `safetyValidation.originalOutput` for trace.
+   *
+   * The gate only fires when both `outputSchema` and `broadcastSafety` are
+   * set — sinks that don't model a broadcast manifest can ignore this.
+   */
+  broadcastSafety?: {
+    enabled: boolean;
+    options?: {
+      minimumTotalDurationSec?: number;
+      maximumTotalDurationSec?: number;
+      requireFallbackForEveryBlock?: boolean;
+      requireFreshnessForLiveBlocks?: boolean;
+      maxLiveAgeMs?: number;
+      nowMs?: number;
+      expectedBlockCountMin?: number;
+    };
+    fallbackManifest?: unknown;
+  };
 }
 
 export interface ValidationIssue {
@@ -239,6 +310,20 @@ export function validateOperatorJobConfig(
     push("sink", "must be a non-empty string (e.g. \"noop\", \"broadcast\", or a package/path)");
   }
 
+  // maxOutputTokens
+  if (raw.maxOutputTokens !== undefined) {
+    if (
+      typeof raw.maxOutputTokens !== "number" ||
+      !Number.isFinite(raw.maxOutputTokens) ||
+      raw.maxOutputTokens <= 0
+    ) {
+      push(
+        "maxOutputTokens",
+        `must be a positive number (got ${JSON.stringify(raw.maxOutputTokens)})`,
+      );
+    }
+  }
+
   // extraFragments
   if (raw.extraFragments !== undefined) {
     if (!Array.isArray(raw.extraFragments)) {
@@ -247,6 +332,19 @@ export function validateOperatorJobConfig(
       for (let i = 0; i < raw.extraFragments.length; i++) {
         if (typeof raw.extraFragments[i] !== "string") {
           push(`extraFragments[${i}]`, "must be a string");
+        }
+      }
+    }
+  }
+
+  // skills — sport-skill filter applied as SPORTSCLAW_SKILLS by the launcher
+  if (raw.skills !== undefined) {
+    if (!Array.isArray(raw.skills)) {
+      push("skills", "must be an array of strings");
+    } else {
+      for (let i = 0; i < raw.skills.length; i++) {
+        if (typeof raw.skills[i] !== "string") {
+          push(`skills[${i}]`, "must be a string");
         }
       }
     }
@@ -306,6 +404,51 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // inference — model-role router config, validated by its own module
+  if (raw.inference !== undefined) {
+    const inferenceCheck = validateModelRoleRouterConfig(raw.inference);
+    if (!inferenceCheck.ok) {
+      push("inference", inferenceCheck.error);
+    }
+  }
+
+  // broadcastSafety
+  if (raw.broadcastSafety !== undefined) {
+    if (typeof raw.broadcastSafety !== "object" || raw.broadcastSafety === null || Array.isArray(raw.broadcastSafety)) {
+      push("broadcastSafety", "must be an object");
+    } else {
+      const bs = raw.broadcastSafety as Record<string, unknown>;
+      if (bs.enabled !== undefined && typeof bs.enabled !== "boolean") {
+        push("broadcastSafety.enabled", "must be a boolean");
+      }
+      if (bs.options !== undefined) {
+        if (typeof bs.options !== "object" || bs.options === null || Array.isArray(bs.options)) {
+          push("broadcastSafety.options", "must be an object");
+        } else {
+          const opts = bs.options as Record<string, unknown>;
+          if (opts.minimumTotalDurationSec !== undefined && typeof opts.minimumTotalDurationSec !== "number") {
+            push("broadcastSafety.options.minimumTotalDurationSec", "must be a number");
+          }
+          if (opts.maximumTotalDurationSec !== undefined && typeof opts.maximumTotalDurationSec !== "number") {
+            push("broadcastSafety.options.maximumTotalDurationSec", "must be a number");
+          }
+          if (opts.requireFallbackForEveryBlock !== undefined && typeof opts.requireFallbackForEveryBlock !== "boolean") {
+            push("broadcastSafety.options.requireFallbackForEveryBlock", "must be a boolean");
+          }
+          if (opts.requireFreshnessForLiveBlocks !== undefined && typeof opts.requireFreshnessForLiveBlocks !== "boolean") {
+            push("broadcastSafety.options.requireFreshnessForLiveBlocks", "must be a boolean");
+          }
+          if (opts.maxLiveAgeMs !== undefined && typeof opts.maxLiveAgeMs !== "number") {
+            push("broadcastSafety.options.maxLiveAgeMs", "must be a number");
+          }
+          if (opts.expectedBlockCountMin !== undefined && typeof opts.expectedBlockCountMin !== "number") {
+            push("broadcastSafety.options.expectedBlockCountMin", "must be a number");
+          }
+        }
+      }
+    }
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -325,10 +468,14 @@ export function validateOperatorJobConfig(
       tailServer: raw.tailServer as string | undefined,
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
+      maxOutputTokens: raw.maxOutputTokens as number | undefined,
+      skills: raw.skills as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
       openshell: parsedOpenShell,
+      inference: raw.inference as ModelRoleRouterConfig | undefined,
+      broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],
     },
   };
 }

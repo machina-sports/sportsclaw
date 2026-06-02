@@ -11,7 +11,13 @@ dist/
 
 skills-lock.json
 
-# K8s overlays — allow example, ignore user-specific overlays with secrets
+# K8s overlays — only the public `example/` overlay is versioned. Customer- or
+# environment-specific overlays (e.g. `sportsclaw-machina/`) stay local: they
+# tend to carry internal hostnames, image tags, and a sibling secrets.env.
+docker/relay/k8s/overlays/*/
+!docker/relay/k8s/overlays/example/
+# Defense-in-depth: secrets.env never enters the index, even if a new overlay
+# directory is later un-ignored.
 docker/relay/k8s/overlays/*/secrets.env
 !docker/relay/k8s/overlays/example/secrets.env
 .vscode/settings.json

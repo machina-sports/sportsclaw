@@ -30,6 +30,19 @@
  *   const answer = await engine.run("What are today's NBA scores?");
  */
 
+// Filter only the AI SDK "reasoningEffort not supported" warning that fires
+// when talking to OpenAI-compatible NIM endpoints that don't honor it (the
+// engine still works — the param is silently dropped). All other SDK warnings
+// pass through unchanged so future deprecations stay visible.
+{
+  const originalWarn = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    const msg = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+    if (msg.includes('"reasoningEffort" is not supported')) return;
+    originalWarn(...args);
+  };
+}
+
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
@@ -101,10 +114,17 @@ import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
 import { runSetup } from "./setup.js";
 import {
+  resolveAnthropicAuth,
+  setAnthropicAuthMethod,
+  getAuthMethods,
+} from "./credentials.js";
+import { inspectClaudeCodeSession } from "./anthropic-oauth.js";
+import {
   loadMcpConfigs,
   saveMcpConfigs,
   removeMcpConfig,
   getMcpConfigPath,
+  McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
 import type { WatchOutputMode, WatcherConfig } from "./types.js";
@@ -273,12 +293,15 @@ export { runSetup } from "./setup.js";
 // TV Operator Contracts
 export {
   FRESHNESS_CLASSES,
+  MATCH_MOMENT_TYPES,
+  MATCH_MOMENT_SOURCES,
   buildHealthSnapshot,
   validateHealthSnapshot,
   validatePlaylistBlock,
   validatePlaylistManifest,
   validateLiveContentMeta,
   validateManifestCoverage,
+  validateMatchMoment,
 } from "./schema/tv.js";
 export type {
   FreshnessClass,
@@ -294,9 +317,43 @@ export type {
   HealthSnapshot,
   HealthSnapshotInput,
   IncidentRecord,
+  MatchMoment,
+  MatchMomentType,
+  MatchMomentSource,
   ValidationResult,
   ManifestCoverageOptions,
 } from "./schema/tv.js";
+
+// Inference Role Contracts + Router
+export { MODEL_ROLES, isModelRole } from "./inference/model-roles.js";
+export type { ModelRole } from "./inference/model-roles.js";
+export {
+  INFERENCE_ROUTES,
+  INFERENCE_TASK_SOURCES,
+  validateInferenceTaskEnvelope,
+  validateInferenceTrace,
+} from "./inference/inference-task.js";
+export type {
+  InferenceRoute,
+  InferenceTaskSource,
+  InferenceTaskEnvelope,
+  InferenceTrace,
+  InferenceResult,
+} from "./inference/inference-task.js";
+export {
+  ROLE_LOCALITIES,
+  ROLE_ACCELERATORS,
+  validateModelRoleRouterConfig,
+  invokeModelRole,
+  InferenceRouteError,
+} from "./inference/model-role-router.js";
+export type {
+  RoleLocality,
+  RoleAccelerator,
+  ModelRoleRouteConfig,
+  ModelRoleRouterConfig,
+  InvokeModelRoleArgs,
+} from "./inference/model-role-router.js";
 
 // Ledger Storage Abstraction
 export { FileLedgerStorage } from "./ledger.js";
@@ -977,8 +1034,23 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
     }
   }
 
-  // 5. API key
-  if (apiKey) {
+  // 5. Auth (API key OR Claude Code OAuth, for Anthropic)
+  if (provider === "anthropic") {
+    const anthroAuth = resolveAnthropicAuth();
+    if (anthroAuth?.kind === "oauth_claude_code") {
+      const minLeft = Math.max(0, Math.floor((anthroAuth.tokens.expiresAt - Date.now()) / 60_000));
+      const sub = anthroAuth.tokens.subscriptionType ? ` ${anthroAuth.tokens.subscriptionType}` : "";
+      console.log(pc.green("  ✓") + ` Anthropic auth: OAuth (Claude Code${sub}, expires in ${minLeft} min)`);
+    } else if (anthroAuth?.kind === "api_key") {
+      const masked = anthroAuth.value.slice(0, 6) + "..." + anthroAuth.value.slice(-4);
+      const src = anthroAuth.source === "env" ? "env" : "keychain";
+      console.log(pc.green("  ✓") + ` Anthropic API key (${masked}, ${src})`);
+    } else {
+      console.log(pc.red("  ✗") + ` No Anthropic credentials`);
+      console.log(`    Set ANTHROPIC_API_KEY, run ${pc.cyan("sportsclaw config")}, or ${pc.cyan("sportsclaw login claude")}`);
+      allGood = false;
+    }
+  } else if (apiKey) {
     const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
     console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
   } else {
@@ -1033,6 +1105,18 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
 // Config drift detection — compares env / ~/.sportsclaw/.env / config.json
 // for known keys and reports which one wins at runtime.
 // ---------------------------------------------------------------------------
+
+/**
+ * True if the current config has a usable Anthropic credential (API key OR
+ * Claude Code OAuth). Other providers still need an API key — only Anthropic
+ * has the OAuth opt-in today.
+ */
+function hasUsableAuth(resolved: ReturnType<typeof resolveConfig>): boolean {
+  if (resolved.apiKey) return true;
+  if (resolved.provider !== "anthropic") return false;
+  const auth = resolveAnthropicAuth();
+  return auth?.kind === "oauth_claude_code";
+}
 
 function detectConfigDrift(): string[] {
   const file = loadConfig();
@@ -1107,6 +1191,123 @@ function detectConfigDrift(): string[] {
   }
 
   return issues;
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw health` — check setup, MCP connection, and pipeline health
+// ---------------------------------------------------------------------------
+
+async function cmdHealth(args: string[]): Promise<void> {
+  const jsonMode = args.includes("--json");
+  const { pythonPath, provider, model, apiKey } = resolveConfig();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // 1. Check Node version
+  const nodeVersion = process.versions.node;
+  const nodeMajor = Number.parseInt(nodeVersion.split(".")[0], 10);
+  if (nodeMajor < 18) {
+    errors.push(`Node.js version ${nodeVersion} is below required v18.`);
+  }
+
+  // 2. Check Python path and sports-skills
+  const pyCheck = checkPythonVersion(pythonPath);
+  if (!pyCheck.ok) {
+    warnings.push(`Python not fully configured or outdated (path: ${pythonPath}).`);
+  }
+
+  // 3. Check API configuration
+  if (!apiKey) {
+    errors.push(`API key for provider "${provider}" is not configured.`);
+  }
+
+  // 4. Check MCP Server statuses
+  const mcpManager = new McpManager(false, false);
+  let mcpDetails: Array<{ name: string; connected: boolean; url: string; failures: number; toolsDiscovered: number }> = [];
+  
+  try {
+    await mcpManager.connectAll();
+    mcpDetails = mcpManager.getHealthDetails();
+  } catch (err) {
+    errors.push("Failed to verify MCP server connectivity: " + (err instanceof Error ? err.message : String(err)));
+  } finally {
+    try {
+      await mcpManager.disconnectAll();
+    } catch {
+      // ignore
+    }
+  }
+
+  // Determine overall status
+  let status: "healthy" | "degraded" | "down" = "healthy";
+  const failedMcps = mcpDetails.filter((m) => !m.connected);
+
+  if (errors.length > 0 || (failedMcps.length === mcpDetails.length && mcpDetails.length > 0)) {
+    status = "down";
+  } else if (warnings.length > 0 || failedMcps.length > 0) {
+    status = "degraded";
+  }
+
+  const schemasCount = listSchemas().length;
+
+  if (jsonMode) {
+    const payload = {
+      timestamp: new Date().toISOString(),
+      status,
+      version: PKG_VERSION,
+      config: {
+        provider,
+        model: model || null,
+        pythonPath,
+        apiKeyConfigured: !!apiKey,
+      },
+      mcp: mcpDetails,
+      schemasInstalled: schemasCount,
+      errors,
+      warnings,
+    };
+    console.log(JSON.stringify(payload, null, 2));
+    process.exit(status === "down" ? 1 : 0);
+  }
+
+  // Human-readable terminal output
+  console.log(pc.bold("\nsportsclaw health status\n"));
+  console.log(`  Overall Status:  ${status === "healthy" ? pc.green(status.toUpperCase()) : status === "degraded" ? pc.yellow(status.toUpperCase()) : pc.red(status.toUpperCase())}`);
+  console.log(`  Engine Version:  v${PKG_VERSION}`);
+  console.log(`  Provider/Model:  ${provider} (${model || "default"})`);
+  console.log(`  Schemas Active:  ${schemasCount} installed`);
+  console.log("");
+
+  console.log(pc.bold("  MCP Connectivity:"));
+  if (mcpDetails.length === 0) {
+    console.log("    No MCP servers configured.");
+  } else {
+    for (const mcp of mcpDetails) {
+      const stateText = mcp.connected
+        ? pc.green(`✓ ONLINE [${mcp.toolsDiscovered} tools]`)
+        : pc.red(`✗ OFFLINE`);
+      console.log(`    - ${pc.cyan(mcp.name.padEnd(20))} ${stateText} — ${mcp.url}`);
+    }
+  }
+  console.log("");
+
+  if (errors.length > 0) {
+    console.log(pc.bold(pc.red("  Errors:")));
+    for (const err of errors) {
+      console.log(`    - ${pc.red(err)}`);
+    }
+    console.log("");
+  }
+
+  if (warnings.length > 0) {
+    console.log(pc.bold(pc.yellow("  Warnings:")));
+    for (const warn of warnings) {
+      console.log(`    - ${pc.yellow(warn)}`);
+    }
+    console.log("");
+  }
+
+  process.exit(status === "down" ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,7 +1401,7 @@ async function cmdListen(args: string[]): Promise<void> {
   }
 
   let resolved = applyConfigToEnv();
-  if (!resolved.apiKey) {
+  if (!hasUsableAuth(resolved)) {
     await runConfigFlow();
     resolved = applyConfigToEnv();
   }
@@ -1496,8 +1697,8 @@ async function cmdChat(args: string[]): Promise<void> {
   // Merge config file + env vars, push into process.env
   let resolved = applyConfigToEnv();
 
-  // No API key → interactive setup
-  if (!resolved.apiKey) {
+  // No usable credentials → interactive setup
+  if (!hasUsableAuth(resolved)) {
     await runConfigFlow();
     resolved = applyConfigToEnv();
   }
@@ -1787,10 +1988,10 @@ async function cmdQuery(args: string[]): Promise<void> {
   // Merge config file + env vars (env wins), push into process.env
   let resolved = applyConfigToEnv();
 
-  // No API key anywhere → interactive setup (skip in headless mode)
-  if (!resolved.apiKey) {
+  // No usable credentials anywhere → interactive setup (skip in headless mode)
+  if (!hasUsableAuth(resolved)) {
     if (forceJson || !process.stdout.isTTY) {
-      emitNdjson({ type: "error", error: "No API key configured. Run `sportsclaw config` interactively first." });
+      emitNdjson({ type: "error", error: "No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first." });
       process.exit(1);
     }
     await runConfigFlow();
@@ -1825,9 +2026,18 @@ async function cmdQuery(args: string[]): Promise<void> {
   if (headlessMode) {
     emitNdjson({ type: "start", timestamp: new Date().toISOString(), yolo: yoloMode });
     try {
+      let inboundImages: any[] | undefined;
+      if (process.env.SPORTSCLAW_INBOUND_IMAGES) {
+        try {
+          inboundImages = JSON.parse(process.env.SPORTSCLAW_INBOUND_IMAGES);
+        } catch (err) {
+          console.error("[sportsclaw] Failed to parse SPORTSCLAW_INBOUND_IMAGES env:", err);
+        }
+      }
       const result = await engine.run(prompt, {
         userId,
         systemPrompt,
+        ...(inboundImages && { images: inboundImages }),
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
       const formatted = formatResponse(result, formatArg as any);
@@ -2273,6 +2483,64 @@ async function cmdMcp(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw login <provider>` — opt into OAuth-based authentication
+// ---------------------------------------------------------------------------
+
+async function cmdLogin(args: string[]): Promise<void> {
+  const target = args[0];
+  if (target !== "claude") {
+    console.error(
+      `Unknown login target: "${target ?? ""}". Currently supported: ${pc.cyan("claude")}.`,
+    );
+    console.error("Example: sportsclaw login claude");
+    process.exit(1);
+  }
+
+  const session = inspectClaudeCodeSession();
+  if (!session.available) {
+    console.error(pc.red("No Claude Code session found."));
+    console.error(`  ${session.reason ?? "Install Claude Code and run `claude login` first."}`);
+    console.error(`  https://docs.anthropic.com/en/docs/claude-code`);
+    process.exit(1);
+  }
+
+  setAnthropicAuthMethod("oauth_claude_code");
+
+  const sub = session.subscriptionType ? `Claude Code ${session.subscriptionType}` : "Claude Code";
+  const minLeft = Math.max(0, Math.floor((session.expiresInMs ?? 0) / 60_000));
+  console.log(pc.green(`Signed in via ${sub}.`));
+  console.log(pc.dim(`  Source: ${session.source}, access token valid for ${minLeft} min.`));
+  console.log(pc.dim(`  Anthropic API key is no longer required (env still wins if set).`));
+  console.log("");
+  console.log(`Run ${pc.cyan("sportsclaw doctor")} to verify, or ${pc.cyan("sportsclaw logout claude")} to revert.`);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw logout <provider>` — back to API key
+// ---------------------------------------------------------------------------
+
+function cmdLogout(args: string[]): void {
+  const target = args[0];
+  if (target !== "claude") {
+    console.error(
+      `Unknown logout target: "${target ?? ""}". Currently supported: ${pc.cyan("claude")}.`,
+    );
+    process.exit(1);
+  }
+
+  const before = getAuthMethods().anthropic;
+  if (before !== "oauth_claude_code") {
+    console.log(pc.dim("Claude Code OAuth was not enabled — nothing to do."));
+    return;
+  }
+
+  setAnthropicAuthMethod(undefined);
+  console.log(pc.green("Disabled Claude Code OAuth."));
+  console.log(pc.dim("  Claude Code's own session was not touched."));
+  console.log(pc.dim("  Anthropic calls will now use ANTHROPIC_API_KEY (env or keychain)."));
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw --help` — usage text
 // ---------------------------------------------------------------------------
 
@@ -2284,8 +2552,11 @@ function printHelp(): void {
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
   console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
+  console.log("  sportsclaw health [--json]         Check system health and status");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
+  console.log("  sportsclaw login claude            Sign in via existing Claude Code session");
+  console.log("  sportsclaw logout claude           Stop using Claude Code OAuth (revert to API key)");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list                    List installed sport schemas");
@@ -2466,10 +2737,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // No arguments: show help, or trigger config if no API key configured
+  // No arguments: show help, or trigger config if no usable credentials
   if (args.length === 0) {
     const resolved = resolveConfig();
-    if (!resolved.apiKey) {
+    if (!hasUsableAuth(resolved)) {
       await runConfigFlow();
       applyConfigToEnv();
     }
@@ -2487,10 +2758,16 @@ async function main(): Promise<void> {
       return cmdConfig();
     case "channels":
       return cmdChannels();
+    case "login":
+      return cmdLogin(subArgs);
+    case "logout":
+      return cmdLogout(subArgs);
     case "chat":
       return cmdChat(subArgs);
     case "doctor":
       return cmdDoctor();
+    case "health":
+      return cmdHealth(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":

@@ -128,6 +128,33 @@ export interface OperatorSinkPlugin {
   }): Promise<string | null | undefined> | string | null | undefined;
 
   /**
+   * Optional structured-output spec the daemon enforces via Vercel AI SDK's
+   * `experimental_output: Output.object({schema})`. When this returns a
+   * value, the daemon:
+   *   - validates every model response against the schema (with SDK-side
+   *     retries on mismatch)
+   *   - suppresses the legacy `[SILENT]` sentinel fragment (the schema is
+   *     expected to carry a `silent` field if the sink wants to support
+   *     "skip this tick")
+   *   - populates `TickEvent.output` with the parsed object, so sinks can
+   *     consume the structured result without any text parsing
+   *
+   * Return `undefined` to keep the legacy free-text path (no SDK validation;
+   * sink owns any envelope parsing). Built-in sinks that don't model a
+   * structured contract should leave this unimplemented.
+   *
+   * Shape:
+   *   { schema: <JSON Schema object>, name?: string, description?: string }
+   *
+   * `name` and `description` are forwarded to `Output.object` — they're hints
+   * that some providers expose to the model (e.g. via the tool/schema name).
+   * Use them; they materially improve adherence on smaller models.
+   */
+  getOutputSchema?(args: { cfg: OperatorJobConfig }):
+    | { schema: unknown; name?: string; description?: string }
+    | undefined;
+
+  /**
    * Per-tick event handler. Called once per `tick_started` / `tick_published`
    * / `tick_silent` / `tick_failed` / `tick_skipped` emission. Sinks may
    * `await` the call — the daemon awaits it before the next tick can fire.

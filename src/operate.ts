@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
 
-import { resolveModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
+import { resolveModel, resolveAuthForModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
 import {
   createOperatorDaemon,
   type TickEvent,
@@ -260,10 +260,32 @@ async function buildOperatorTools(
   verbose: boolean,
   sink?: OperatorSinkPlugin,
 ): Promise<OperatorTools> {
+  // Apply the per-job skill filter BEFORE loadAllSchemas reads
+  // process.env.SPORTSCLAW_SKILLS. Lets focused jobs (e.g. a World Cup
+  // channel that only needs football + news + prediction markets) trim
+  // the ~300-tool default to a tight subset — smaller prompts, faster
+  // ticks, and the toolset fits within Gemini's responseSchema +
+  // function-calling complexity envelope. If the env var is already set
+  // by the caller (e.g. integration tests), respect that — don't override.
+  if (cfg.skills && cfg.skills.length > 0 && !process.env.SPORTSCLAW_SKILLS) {
+    process.env.SPORTSCLAW_SKILLS = cfg.skills.join(",");
+  }
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);
   }
+
+  // Install the OpenShell egress-proxy dispatcher BEFORE the first MCP
+  // connect. The MCP transport uses global fetch, and Node 20's undici
+  // ignores HTTPS_PROXY env vars by default — so inside an OpenShell
+  // sandbox (network-isolated, all egress via 10.200.0.1:3128) the SSE
+  // connect resolves the Machina pod host via real DNS and fails with
+  // EAI_AGAIN. It used to be installed in resolveJobInputs(), which runs
+  // AFTER connectAll() + resolvePersona(), so the boot-time MCP connect
+  // (and the persona fetch that depends on it) failed before the proxy
+  // was ever wired up. The call is idempotent and no-ops when no proxy
+  // env is set, so it's safe to run unconditionally here.
+  await installOpenShellProxyDispatcher();
 
   const mcpManager = new McpManager(verbose, false);
   if (mcpManager.serverCount > 0) {
@@ -430,6 +452,41 @@ function applyOpenShellEnv(
   }
 }
 
+// Track installation so we don't replace the dispatcher on repeat
+// invocations (each `operate --once` instantiates resolveJobInputs).
+let openShellProxyDispatcherInstalled = false;
+
+/**
+ * Route all outbound fetch() through the supervisor's egress proxy when
+ * the sandbox sets HTTPS_PROXY (10.200.0.1:3128). Node 20 ships undici 5,
+ * which ignores proxy env vars by default; AI SDK and OpenAI SDK both
+ * fall through to Node's global fetch, so without this they'd try to
+ * resolve `inference.local` via real DNS and fail with EAI_AGAIN.
+ *
+ * Dynamic import + try/catch so a missing/older undici degrades to a
+ * warning rather than crashing the engine. Idempotent across ticks.
+ */
+async function installOpenShellProxyDispatcher(): Promise<void> {
+  if (openShellProxyDispatcherInstalled) return;
+  const proxyUrl =
+    process.env.HTTPS_PROXY ??
+    process.env.HTTP_PROXY ??
+    process.env.https_proxy ??
+    process.env.http_proxy;
+  if (!proxyUrl) return;
+  try {
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = await import("undici");
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+    openShellProxyDispatcherInstalled = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[openshell] failed to install proxy dispatcher (${msg}); ` +
+        `LLM calls to inference.local will fail with EAI_AGAIN until this is fixed.`,
+    );
+  }
+}
+
 interface ResolvedDaemonInputs {
   provider: LLMProvider;
   modelId: string;
@@ -460,6 +517,7 @@ async function resolveJobInputs(
   const openshell = resolveOpenShell(provider, cfg.openshell);
   if (openshell?.enabled) {
     applyOpenShellEnv(provider, openshell);
+    await installOpenShellProxyDispatcher();
   }
   const inferenceRoute: InferenceRoute = openshell?.enabled
     ? { via: "openshell", baseUrl: openshell.baseUrl, provider, model: modelId }
@@ -476,13 +534,20 @@ async function resolveJobInputs(
 }
 
 /**
- * Best-effort startup probe: when openshell is enabled, confirm
- * `inference.local` (or the configured host) resolves before we hand
- * control to the daemon. Fails fast with a clear error message rather
- * than letting the first generateText surface an opaque DNS error.
- * Mitigates Risk R4 in docs/openshell-integration-plan.md.
+ * Best-effort startup probe: confirm we're really inside an OpenShell
+ * sandbox before handing control to the daemon. Fails fast with a clear
+ * error rather than letting the first generateText surface something
+ * opaque. Mitigates Risk R4 in docs/openshell-integration-plan.md.
+ *
+ * The supervisor exports OPENSHELL_SANDBOX=1 inside every container it
+ * manages — that's the authoritative signal. Real DNS lookups for
+ * `inference.local` don't work because the supervisor intercepts that
+ * traffic at the HTTPS_PROXY layer (10.200.0.1:3128) rather than via
+ * /etc/hosts. DNS is kept as a fallback only for unusual setups where
+ * the env var isn't present.
  */
 async function probeOpenShellHost(baseUrl: string): Promise<void> {
+  if (process.env.OPENSHELL_SANDBOX === "1") return;
   let host: string;
   try {
     host = new URL(baseUrl).hostname;
@@ -500,7 +565,7 @@ async function probeOpenShellHost(baseUrl: string): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `OpenShell mode: cannot resolve "${host}" (${msg}). ` +
+      `OpenShell mode: cannot resolve "${host}" (${msg}) and OPENSHELL_SANDBOX is not set. ` +
         `Are you running inside an OpenShell sandbox? ` +
         `Set openshell.enabled=false or remove the openshell block to disable.`,
     );
@@ -591,18 +656,23 @@ async function runOnce(jobId: string): Promise<void> {
       mcpManager: tools.mcpManager,
       cfg,
     };
+    const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
       jobId: cfg.jobId,
       jobLabel: cfg.label,
       intervalMs: cfg.intervalMs,
-      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
+      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
       role: inputs.personaText,
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
       extraFragments: inputs.extraFragments,
+      maxOutputTokens: cfg.maxOutputTokens,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
       inferenceRoute: inputs.inferenceRoute,
+      broadcastSafety: cfg.broadcastSafety,
+      mcpManager: tools.mcpManager,
+      ...(outputSchema ? { outputSchema } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -666,18 +736,23 @@ async function runForeground(jobId: string): Promise<void> {
     mcpManager: tools.mcpManager,
     cfg,
   };
+  const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
     jobId: cfg.jobId,
     jobLabel: cfg.label,
     intervalMs: cfg.intervalMs,
-    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined),
+    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
     role: inputs.personaText,
     tools: tools.toolSet,
     rootDir: inputs.rootDir,
     extraFragments: inputs.extraFragments,
+    maxOutputTokens: cfg.maxOutputTokens,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
     inferenceRoute: inputs.inferenceRoute,
+    broadcastSafety: cfg.broadcastSafety,
+    mcpManager: tools.mcpManager,
+    ...(outputSchema ? { outputSchema } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
