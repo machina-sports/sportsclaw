@@ -293,12 +293,15 @@ export { runSetup } from "./setup.js";
 // TV Operator Contracts
 export {
   FRESHNESS_CLASSES,
+  MATCH_MOMENT_TYPES,
+  MATCH_MOMENT_SOURCES,
   buildHealthSnapshot,
   validateHealthSnapshot,
   validatePlaylistBlock,
   validatePlaylistManifest,
   validateLiveContentMeta,
   validateManifestCoverage,
+  validateMatchMoment,
 } from "./schema/tv.js";
 export type {
   FreshnessClass,
@@ -314,9 +317,43 @@ export type {
   HealthSnapshot,
   HealthSnapshotInput,
   IncidentRecord,
+  MatchMoment,
+  MatchMomentType,
+  MatchMomentSource,
   ValidationResult,
   ManifestCoverageOptions,
 } from "./schema/tv.js";
+
+// Inference Role Contracts + Router
+export { MODEL_ROLES, isModelRole } from "./inference/model-roles.js";
+export type { ModelRole } from "./inference/model-roles.js";
+export {
+  INFERENCE_ROUTES,
+  INFERENCE_TASK_SOURCES,
+  validateInferenceTaskEnvelope,
+  validateInferenceTrace,
+} from "./inference/inference-task.js";
+export type {
+  InferenceRoute,
+  InferenceTaskSource,
+  InferenceTaskEnvelope,
+  InferenceTrace,
+  InferenceResult,
+} from "./inference/inference-task.js";
+export {
+  ROLE_LOCALITIES,
+  ROLE_ACCELERATORS,
+  validateModelRoleRouterConfig,
+  invokeModelRole,
+  InferenceRouteError,
+} from "./inference/model-role-router.js";
+export type {
+  RoleLocality,
+  RoleAccelerator,
+  ModelRoleRouteConfig,
+  ModelRoleRouterConfig,
+  InvokeModelRoleArgs,
+} from "./inference/model-role-router.js";
 
 // Ledger Storage Abstraction
 export { FileLedgerStorage } from "./ledger.js";

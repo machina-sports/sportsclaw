@@ -16,6 +16,10 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 import type { LLMProvider, OpenShellConfig } from "./types.js";
+import {
+  validateModelRoleRouterConfig,
+  type ModelRoleRouterConfig,
+} from "./inference/model-role-router.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -113,6 +117,14 @@ export interface OperatorJobConfig {
    * See `openshell/README.md` for the deployment runbook.
    */
   openshell?: OpenShellConfig;
+  /**
+   * Model-role inference routing — maps `eyes/brain/hands/voice` roles to
+   * OpenShell/NIM/mock routes. Consumed by `invokeModelRole` in
+   * `inference/model-role-router.ts`. Hardware (locality/accelerator) is
+   * runtime metadata only — callers request roles, never GPUs. Never put
+   * credentials or endpoint tokens here.
+   */
+  inference?: ModelRoleRouterConfig;
   /**
    * Broadcast-safety validation gate. When `enabled` is true and the daemon
    * is in structured-output mode, the validated payload is passed through
@@ -392,6 +404,14 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // inference — model-role router config, validated by its own module
+  if (raw.inference !== undefined) {
+    const inferenceCheck = validateModelRoleRouterConfig(raw.inference);
+    if (!inferenceCheck.ok) {
+      push("inference", inferenceCheck.error);
+    }
+  }
+
   // broadcastSafety
   if (raw.broadcastSafety !== undefined) {
     if (typeof raw.broadcastSafety !== "object" || raw.broadcastSafety === null || Array.isArray(raw.broadcastSafety)) {
@@ -454,6 +474,7 @@ export function validateOperatorJobConfig(
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
       openshell: parsedOpenShell,
+      inference: raw.inference as ModelRoleRouterConfig | undefined,
       broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],
     },
   };

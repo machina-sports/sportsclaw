@@ -5,6 +5,8 @@
  * These are data-only definitions — no engine wiring or behavior.
  */
 
+import type { InferenceTrace } from "../inference/inference-task.js";
+
 // ---------------------------------------------------------------------------
 // FreshnessClass — how stale is this content?
 // ---------------------------------------------------------------------------
@@ -281,6 +283,120 @@ export function validateLiveContentMeta(block: unknown): ValidationResult {
     }
     if (!b.freshnessTimestamp || typeof b.freshnessTimestamp !== "string") {
       return { ok: false, error: `${freshness} block must have a freshness timestamp (freshnessTimestamp).` };
+    }
+  }
+
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// MatchMoment — live visual perception output from the `eyes` model role
+// ---------------------------------------------------------------------------
+
+export const MATCH_MOMENT_TYPES = [
+  "goal",
+  "goal_chance",
+  "foul",
+  "card",
+  "save",
+  "substitution",
+  "tactical_shift",
+  "crowd_reaction",
+  "momentum_swing",
+  "controversy",
+] as const;
+
+export type MatchMomentType = (typeof MATCH_MOMENT_TYPES)[number];
+
+export const MATCH_MOMENT_SOURCES = ["cosmos3", "manual", "stats", "benchmark"] as const;
+
+export type MatchMomentSource = (typeof MATCH_MOMENT_SOURCES)[number];
+
+export interface MatchMoment {
+  id: string;
+  fixtureId: string;
+  clipUrl?: string;
+  keyframeUrls?: string[];
+  sampledFps: number;
+  momentType: MatchMomentType;
+  visualRead: string;
+  tacticalMeaning: string;
+  broadcastAngle: string;
+  confidence: number;
+  createdAt: string;
+  source?: MatchMomentSource;
+  /** Inference trace from the model-role invocation that produced this moment. */
+  trace?: InferenceTrace;
+  meta?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// validateMatchMoment — runtime validation
+// ---------------------------------------------------------------------------
+
+export function validateMatchMoment(moment: unknown): ValidationResult {
+  if (!moment || typeof moment !== "object" || Array.isArray(moment)) {
+    return { ok: false, error: "Moment must be a non-null object." };
+  }
+
+  const m = moment as Record<string, unknown>;
+
+  if (typeof m.id !== "string" || m.id === "") {
+    return { ok: false, error: "Moment must have a non-empty id." };
+  }
+
+  if (typeof m.fixtureId !== "string" || m.fixtureId === "") {
+    return { ok: false, error: "Moment must have a non-empty fixtureId." };
+  }
+
+  if (typeof m.sampledFps !== "number" || !Number.isFinite(m.sampledFps) || m.sampledFps <= 0) {
+    return { ok: false, error: "Moment sampledFps must be a positive number." };
+  }
+
+  if (!(MATCH_MOMENT_TYPES as readonly string[]).includes(m.momentType as string)) {
+    return { ok: false, error: "Moment momentType must be a known match moment type." };
+  }
+
+  if (typeof m.visualRead !== "string" || m.visualRead === "") {
+    return { ok: false, error: "Moment must have a non-empty visualRead." };
+  }
+
+  if (typeof m.tacticalMeaning !== "string" || m.tacticalMeaning === "") {
+    return { ok: false, error: "Moment must have a non-empty tacticalMeaning." };
+  }
+
+  if (typeof m.broadcastAngle !== "string" || m.broadcastAngle === "") {
+    return { ok: false, error: "Moment must have a non-empty broadcastAngle." };
+  }
+
+  if (
+    typeof m.confidence !== "number" ||
+    !Number.isFinite(m.confidence) ||
+    m.confidence < 0 ||
+    m.confidence > 1
+  ) {
+    return { ok: false, error: "Moment confidence must be a number between 0 and 1." };
+  }
+
+  if (typeof m.createdAt !== "string" || m.createdAt === "") {
+    return { ok: false, error: "Moment must have a non-empty createdAt timestamp." };
+  }
+
+  if (
+    m.source !== undefined &&
+    !(MATCH_MOMENT_SOURCES as readonly string[]).includes(m.source as string)
+  ) {
+    return { ok: false, error: "Moment source must be cosmos3, manual, stats, or benchmark." };
+  }
+
+  if (m.source === "cosmos3") {
+    const hasClip = typeof m.clipUrl === "string" && m.clipUrl !== "";
+    const hasKeyframes = Array.isArray(m.keyframeUrls) && m.keyframeUrls.length > 0;
+    if (!hasClip && !hasKeyframes) {
+      return {
+        ok: false,
+        error: "Cosmos-originated moment must have a clipUrl or non-empty keyframeUrls.",
+      };
     }
   }
 
