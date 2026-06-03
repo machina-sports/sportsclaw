@@ -37,7 +37,7 @@ import path from "node:path";
 import {
   generateText,
   jsonSchema,
-  Output,
+  hasToolCall,
   stepCountIs,
   type LanguageModel,
   type ToolSet,
@@ -395,7 +395,8 @@ export function createOperatorDaemon(
     // schema — suppress the prompt fragment so the model doesn't get two
     // conflicting instructions for the same "skip this tick" intent.
     const useStructuredOutput = !!cfg.outputSchema;
-    const system = buildSystemPrompt({
+    const OUTPUT_TOOL_NAME = "submit_broadcast";
+    const baseSystem = buildSystemPrompt({
       role: cfg.role,
       isCron: true,
       toolDiscipline: true,
@@ -404,6 +405,12 @@ export function createOperatorDaemon(
       recentTickBrief,
       extras: cfg.extraFragments,
     });
+    // Structured output travels via a forced tool call (the OpenShell Privacy
+    // Router forwards `tools` but strips `response_format`/json-schema, so the
+    // SDK's experimental_output yields empty objects through the router).
+    const system = useStructuredOutput
+      ? `${baseSystem}\n\n## Final output (MANDATORY — this overrides ALL earlier output instructions)\nYou MUST deliver your output by calling the \`${OUTPUT_TOOL_NAME}\` tool. NEVER write the literal text \`[SILENT]\`, narrative prose, JSON, or a code block in your message — any such message text is discarded and the tick is lost. Call \`${OUTPUT_TOOL_NAME}\` exactly once as your final action. Strongly prefer broadcasting: set silent=false with a full narrative whenever you have ANY World Cup buildup, fixture, market, or storyline to cover (you almost always do). Only set silent=true if every data source this tick was empty or errored. Any earlier instruction to emit \`[SILENT]\` as text is OBSOLETE — express silence by calling the tool with silent=true, never as text.`
+      : baseSystem;
 
     // 4. Wrap tools with the guardrail.
     const guard = new ToolGuardController(cfg.guardOptions);
@@ -456,15 +463,20 @@ export function createOperatorDaemon(
     let text = "";
     let structuredOutput: unknown;
     let failureReason: string | undefined;
-    const experimental_output = useStructuredOutput
-      ? Output.object({
-          schema: jsonSchema(cfg.outputSchema!.schema as object),
-          ...(cfg.outputSchema!.name ? { name: cfg.outputSchema!.name } : {}),
-          ...(cfg.outputSchema!.description
-            ? { description: cfg.outputSchema!.description }
-            : {}),
-        })
-      : undefined;
+    // Output tool: a declarative (execute-less) tool whose inputSchema is the
+    // broadcast schema. wrapTools passes execute-less tools through untouched,
+    // and `hasToolCall` stops generation once the model submits it.
+    const outputToolTools: ToolSet | undefined = useStructuredOutput
+      ? {
+          ...(wrappedTools ?? {}),
+          [OUTPUT_TOOL_NAME]: {
+            description:
+              cfg.outputSchema!.description ??
+              "Submit the final broadcast for this tick. Call exactly once, as your last action, with all required fields. Set silent=true to skip airing.",
+            inputSchema: jsonSchema(cfg.outputSchema!.schema as object),
+          } as Tool,
+        }
+      : wrappedTools;
     // Wall-clock watchdog. If the model stalls (e.g. GPT-OSS reasoning loop
     // burns through the output budget without committing to a final response)
     // the AbortController fires after inferenceTimeoutMs and the generateText
@@ -486,7 +498,7 @@ export function createOperatorDaemon(
         model: cfg.model,
         system,
         prompt: tickPrompt,
-        ...(wrappedTools ? { tools: wrappedTools } : {}),
+        ...(outputToolTools ? { tools: outputToolTools } : {}),
         abortSignal: abortController.signal,
         // Structured-output mode emits the full schema payload (narrative +
         // arrays) plus tool-call reasoning in one budget. 2048 is fine for
@@ -501,16 +513,26 @@ export function createOperatorDaemon(
         // produce a final synthesis text. Without stopWhen, generateText
         // takes a single step and ends with empty text whenever the
         // model chose to call tools first.
-        stopWhen: stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
-        ...(experimental_output ? { experimental_output } : {}),
+        stopWhen: useStructuredOutput
+          ? [
+              stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
+              hasToolCall(OUTPUT_TOOL_NAME),
+            ]
+          : stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
       });
       if (useStructuredOutput) {
         // SDK populates result.experimental_output with the validated object.
         // If the SDK couldn't produce a valid match (rare, since it retries),
         // experimental_output is undefined — treat as silent rather than
         // failing the tick.
-        structuredOutput = (result as { experimental_output?: unknown })
-          .experimental_output;
+        const toolCalls = (result.toolCalls ?? []) as Array<{
+          toolName: string;
+          input?: unknown;
+        }>;
+        const outCall = [...toolCalls]
+          .reverse()
+          .find((c) => c.toolName === OUTPUT_TOOL_NAME);
+        structuredOutput = outCall ? outCall.input : undefined;
         const narrative =
           structuredOutput &&
           typeof structuredOutput === "object" &&

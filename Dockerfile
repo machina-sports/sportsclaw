@@ -43,7 +43,7 @@ RUN npx tsc
 # Stage 2: Install Python sports-skills package
 # ---------------------------------------------------------------------------
 
-RUN pip install sports-skills 2>/dev/null || \
+RUN pip install 'sports-skills[polymarket]' 2>/dev/null || \
     echo "[sportsclaw] Warning: sports-skills not found on PyPI yet. Install manually."
 
 # ---------------------------------------------------------------------------
