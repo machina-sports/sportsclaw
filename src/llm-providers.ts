@@ -65,7 +65,7 @@ function nimNemotronFetch(): typeof fetch {
           // its tool-calling reliability drops sharply without deliberation,
           // and the custom llama_nemotron_json parser correctly extracts tool
           // calls even when thinking is on.
-          const needsNoThink = model.includes("nemotron-3-nano");
+          const needsNoThink = model.includes("nemotron-3-nano") || model.includes("nemotron-3-super-120b");
           if (needsNoThink && Array.isArray(parsed.messages)) {
             const messages = parsed.messages as Array<Record<string, unknown>>;
             const firstSystemIdx = messages.findIndex((m) => m?.role === "system");

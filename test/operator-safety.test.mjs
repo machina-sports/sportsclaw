@@ -42,6 +42,13 @@ function makeGenWithResult(result) {
   return impl;
 }
 
+// Structured output now travels via a forced `submit_broadcast` tool call
+// (the Privacy Router strips `response_format`). Build the generateText result
+// shape the daemon reads: the validated object as the tool call's `input`.
+function outputToolResult(input) {
+  return { toolCalls: [{ toolName: "submit_broadcast", input }], text: "" };
+}
+
 describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
   const playlistSchema = {
     type: "object",
@@ -70,7 +77,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const gen = makeGenWithResult({ experimental_output: validManifest });
+    const gen = makeGenWithResult(outputToolResult(validManifest));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -111,7 +118,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const gen = makeGenWithResult({ experimental_output: invalidManifest });
+    const gen = makeGenWithResult(outputToolResult(invalidManifest));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -154,7 +161,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const gen = makeGenWithResult({ experimental_output: invalidManifest });
+    const gen = makeGenWithResult(outputToolResult(invalidManifest));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -208,7 +215,7 @@ describe("Operator Daemon — Broadcast Safety & Fallback Gates", () => {
       createdAt: new Date().toISOString(),
     };
 
-    const gen = makeGenWithResult({ experimental_output: staleManifest });
+    const gen = makeGenWithResult(outputToolResult(staleManifest));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
