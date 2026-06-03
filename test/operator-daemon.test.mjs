@@ -771,8 +771,9 @@ describe("tickOnce — structured output", () => {
 
   /**
    * generateText stub that records its args and returns a fixed result.
-   * `result` is what the daemon will see — for structured mode it must set
-   * `experimental_output` to the validated object.
+   * `result` is what the daemon will see — for structured mode the validated
+   * object arrives as the input of the forced `submit_broadcast` tool call
+   * (see outputToolResult), since the Privacy Router strips `response_format`.
    */
   function makeGenWithResult(result) {
     const calls = [];
@@ -784,10 +785,15 @@ describe("tickOnce — structured output", () => {
     return impl;
   }
 
-  it("passes experimental_output to generateText when outputSchema is set", async () => {
-    const gen = makeGenWithResult({
-      experimental_output: { silent: false, narrative: "Tip-off in 5." },
-    });
+  /** Build the generateText result shape the daemon reads in structured mode. */
+  function outputToolResult(input) {
+    return { toolCalls: [{ toolName: "submit_broadcast", input }], text: "" };
+  }
+
+  it("injects the submit_broadcast output tool when outputSchema is set", async () => {
+    const gen = makeGenWithResult(
+      outputToolResult({ silent: false, narrative: "Tip-off in 5." }),
+    );
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -796,13 +802,25 @@ describe("tickOnce — structured output", () => {
     );
     await daemon.tickOnce();
     assert.strictEqual(gen.calls.length, 1);
+    // Structured output travels via a forced tool call, not experimental_output
+    // (the Privacy Router strips response_format).
+    assert.strictEqual(gen.calls[0].experimental_output, undefined);
     assert.ok(
-      gen.calls[0].experimental_output !== undefined,
-      "expected experimental_output in generateText args",
+      gen.calls[0].tools?.submit_broadcast,
+      "expected submit_broadcast tool in generateText args",
+    );
+    assert.ok(
+      gen.calls[0].tools.submit_broadcast.inputSchema,
+      "output tool carries the schema as its inputSchema",
+    );
+    // execute-less: it's a declarative sink, the daemon reads its input.
+    assert.strictEqual(
+      gen.calls[0].tools.submit_broadcast.execute,
+      undefined,
     );
   });
 
-  it("does NOT pass experimental_output when outputSchema is unset (legacy path)", async () => {
+  it("does NOT inject the output tool when outputSchema is unset (legacy path)", async () => {
     const gen = makeGenWithResult({ text: "free-text tick" });
     const daemon = createOperatorDaemon(
       baseConfig({ generateTextImpl: gen }),
@@ -810,12 +828,13 @@ describe("tickOnce — structured output", () => {
     await daemon.tickOnce();
     assert.strictEqual(gen.calls.length, 1);
     assert.strictEqual(gen.calls[0].experimental_output, undefined);
+    assert.strictEqual(gen.calls[0].tools?.submit_broadcast, undefined);
   });
 
   it("suppresses the [SILENT] sentinel fragment in the system prompt", async () => {
-    const gen = makeGenWithResult({
-      experimental_output: { silent: false, narrative: "x" },
-    });
+    const gen = makeGenWithResult(
+      outputToolResult({ silent: false, narrative: "x" }),
+    );
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -841,9 +860,9 @@ describe("tickOnce — structured output", () => {
   });
 
   it("doubles maxOutputTokens default (4096 → 8192) when outputSchema is set", async () => {
-    const gen = makeGenWithResult({
-      experimental_output: { silent: false, narrative: "x" },
-    });
+    const gen = makeGenWithResult(
+      outputToolResult({ silent: false, narrative: "x" }),
+    );
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -855,9 +874,9 @@ describe("tickOnce — structured output", () => {
   });
 
   it("respects explicit cfg.maxOutputTokens override even with outputSchema", async () => {
-    const gen = makeGenWithResult({
-      experimental_output: { silent: false, narrative: "x" },
-    });
+    const gen = makeGenWithResult(
+      outputToolResult({ silent: false, narrative: "x" }),
+    );
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -871,7 +890,7 @@ describe("tickOnce — structured output", () => {
 
   it("populates TickEvent.output with the validated object and text with .narrative", async () => {
     const obj = { silent: false, narrative: "Lakers up 102-99 with 2:14 left." };
-    const gen = makeGenWithResult({ experimental_output: obj });
+    const gen = makeGenWithResult(outputToolResult(obj));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -886,7 +905,7 @@ describe("tickOnce — structured output", () => {
 
   it("treats output.silent=true as tick_silent but still carries output for observability", async () => {
     const obj = { silent: true, narrative: "" };
-    const gen = makeGenWithResult({ experimental_output: obj });
+    const gen = makeGenWithResult(outputToolResult(obj));
     const events = [];
     const daemon = createOperatorDaemon(
       baseConfig({
@@ -906,7 +925,7 @@ describe("tickOnce — structured output", () => {
     // silent=false but an empty narrative is *malformed*, not silent — the
     // sink is responsible for suppressing/handling it.
     const obj = { silent: false, narrative: "" };
-    const gen = makeGenWithResult({ experimental_output: obj });
+    const gen = makeGenWithResult(outputToolResult(obj));
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -919,8 +938,8 @@ describe("tickOnce — structured output", () => {
     assert.deepStrictEqual(event.output, obj);
   });
 
-  it("treats missing experimental_output as tick_silent (SDK couldn't produce a match)", async () => {
-    const gen = makeGenWithResult({ text: "ignored in structured mode" });
+  it("treats a missing submit_broadcast tool call as tick_silent (model never emitted)", async () => {
+    const gen = makeGenWithResult({ text: "ignored in structured mode", toolCalls: [] });
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -933,13 +952,10 @@ describe("tickOnce — structured output", () => {
     assert.strictEqual(event.output, undefined);
   });
 
-  it("forwards name/description on outputSchema (preserves them through Output.object)", async () => {
-    // We can't introspect Output.object's internals from here; the best we
-    // can do is confirm the daemon still emits experimental_output when
-    // name+description are present (i.e. didn't accidentally crash).
-    const gen = makeGenWithResult({
-      experimental_output: { silent: false, narrative: "ok" },
-    });
+  it("forwards outputSchema.description onto the submit_broadcast tool", async () => {
+    const gen = makeGenWithResult(
+      outputToolResult({ silent: false, narrative: "ok" }),
+    );
     const daemon = createOperatorDaemon(
       baseConfig({
         generateTextImpl: gen,
@@ -952,7 +968,10 @@ describe("tickOnce — structured output", () => {
     );
     const event = await daemon.tickOnce();
     assert.strictEqual(event.type, "tick_published");
-    assert.ok(gen.calls[0].experimental_output !== undefined);
+    assert.strictEqual(
+      gen.calls[0].tools.submit_broadcast.description,
+      "TV broadcast tick payload",
+    );
   });
 });
 

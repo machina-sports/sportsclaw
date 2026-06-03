@@ -464,8 +464,9 @@ export function createOperatorDaemon(
     let structuredOutput: unknown;
     let failureReason: string | undefined;
     // Output tool: a declarative (execute-less) tool whose inputSchema is the
-    // broadcast schema. wrapTools passes execute-less tools through untouched,
-    // and `hasToolCall` stops generation once the model submits it.
+    // broadcast schema. Added *after* the guard wrap so it bypasses the
+    // guardrail (it's our own sink, not a model-discovered tool), and
+    // `hasToolCall` stops generation once the model submits it.
     const outputToolTools: ToolSet | undefined = useStructuredOutput
       ? {
           ...(wrappedTools ?? {}),
@@ -521,10 +522,11 @@ export function createOperatorDaemon(
           : stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
       });
       if (useStructuredOutput) {
-        // SDK populates result.experimental_output with the validated object.
-        // If the SDK couldn't produce a valid match (rare, since it retries),
-        // experimental_output is undefined — treat as silent rather than
-        // failing the tick.
+        // Structured output arrives as the input of the forced
+        // `submit_broadcast` tool call (the Privacy Router strips
+        // `response_format`, so `experimental_output` would come back empty).
+        // If the model never called the tool, treat the tick as silent rather
+        // than failing it.
         const toolCalls = (result.toolCalls ?? []) as Array<{
           toolName: string;
           input?: unknown;

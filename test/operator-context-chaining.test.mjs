@@ -47,6 +47,12 @@ function makeGenWithResult(result) {
   return impl;
 }
 
+// Structured output travels via a forced `submit_broadcast` tool call (the
+// Privacy Router strips `response_format`); the validated object is its input.
+function outputToolResult(input) {
+  return { toolCalls: [{ toolName: "submit_broadcast", input }], text: "" };
+}
+
 describe("Operator Daemon — Context Chaining & Scheduled Payload Handover", () => {
   
   describe("Serialization & Parsing of Brief Payloads", () => {
@@ -163,7 +169,7 @@ No payload here, just text.`;
         pendingCues: ["cue_midroll_1"]
       };
 
-      const gen1 = makeGenWithResult({ experimental_output: tick1Output });
+      const gen1 = makeGenWithResult(outputToolResult(tick1Output));
       const daemon1 = createOperatorDaemon(
         baseConfig({
           generateTextImpl: gen1,
@@ -190,7 +196,7 @@ No payload here, just text.`;
         pendingCues: []
       };
 
-      const gen2 = makeGenWithResult({ experimental_output: tick2Output });
+      const gen2 = makeGenWithResult(outputToolResult(tick2Output));
       const daemon2 = createOperatorDaemon(
         baseConfig({
           generateTextImpl: gen2,

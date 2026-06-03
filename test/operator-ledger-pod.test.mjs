@@ -42,6 +42,12 @@ function makeGenWithResult(result) {
   return impl;
 }
 
+// Structured output travels via a forced `submit_broadcast` tool call (the
+// Privacy Router strips `response_format`); the validated object is its input.
+function outputToolResult(input) {
+  return { toolCalls: [{ toolName: "submit_broadcast", input }], text: "" };
+}
+
 class MockMcpManager {
   constructor() {
     this.calls = [];
@@ -169,7 +175,7 @@ describe("Operator Daemon — Ledgers & Pod Sync", () => {
     };
 
     const mcpManager = new MockMcpManager();
-    const gen = makeGenWithResult({ experimental_output: invalidManifest });
+    const gen = makeGenWithResult(outputToolResult(invalidManifest));
 
     const daemon = createOperatorDaemon(
       baseConfig({
