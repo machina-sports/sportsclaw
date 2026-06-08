@@ -84,12 +84,16 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
     ],
   },
   google: {
-    defaultModel: "gemini-3-flash-preview",
+    defaultModel: "gemini-3.5-flash",
     selectableModels: [
+      {
+        value: "gemini-3.5-flash",
+        label: "Gemini 3.5 Flash",
+        hint: "recommended",
+      },
       {
         value: "gemini-3-flash-preview",
         label: "Gemini 3 Flash",
-        hint: "recommended",
       },
       {
         value: "gemini-3-pro-preview",
