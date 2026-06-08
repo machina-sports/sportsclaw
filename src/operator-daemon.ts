@@ -322,11 +322,19 @@ const DEFAULT_TICK_PROMPT = [
 // this to 8192, giving reasoning enough headroom to commit a final answer
 // before running out.
 const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+// Structured-output ticks now run with reasoning ON (nemotron-3-super-120b):
+// CoT + multi-step tool calls + the final submit_broadcast JSON share one
+// completion budget, so give it generous headroom to avoid mid-reasoning stalls.
+const STRUCTURED_MAX_OUTPUT_TOKENS = 16384;
 // Trimmed 16 → 10 after seeing ticks spend 7-8 tool calls + still time out.
 // Capping steps forces the model to commit to a synthesis sooner; the
 // remaining headroom is healthy.
 const DEFAULT_MAX_STEPS = 10;
-const DEFAULT_INFERENCE_TIMEOUT_MS = 60_000;
+// Raised 60s → 240s: nemotron-3-super-120b runs with reasoning ON now, so a
+// tick (CoT + multi-step tool calls + final submit_broadcast) legitimately
+// takes longer than the old non-thinking 60s ceiling. Generous so reasoning
+// ticks complete; pair with a longer intervalMs so ticks don't overlap.
+const DEFAULT_INFERENCE_TIMEOUT_MS = 240_000;
 const DEFAULT_RECENT_BRIEF_LIMIT = 1;
 
 // ---------------------------------------------------------------------------
@@ -508,7 +516,7 @@ export function createOperatorDaemon(
         maxOutputTokens:
           cfg.maxOutputTokens ??
           (useStructuredOutput
-            ? DEFAULT_MAX_OUTPUT_TOKENS * 2
+            ? STRUCTURED_MAX_OUTPUT_TOKENS
             : DEFAULT_MAX_OUTPUT_TOKENS),
         // Allow the model multiple steps so it can call tools and THEN
         // produce a final synthesis text. Without stopWhen, generateText
