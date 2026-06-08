@@ -47,25 +47,32 @@ import type { LLMProvider } from "./types.js";
  * Gated on model name so non-Nemotron OpenAI-compat targets aren't
  * affected.
  */
+/** Remove <think>…</think> reasoning (closed + unclosed) so it never leaks into parsed content. */
+function stripThink(s: string): string {
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .trim();
+}
+
 function nimNemotronFetch(): typeof fetch {
   return async (input, init) => {
+    let thinkingOn = false;
     if (init?.body && typeof init.body === "string") {
       try {
         const parsed = JSON.parse(init.body) as Record<string, unknown>;
         const model = typeof parsed.model === "string" ? parsed.model : "";
         if (model.startsWith("nvidia/")) {
-          // Chat template flag for Nemotron-3 family (Nano, Super-3, etc.).
-          // Llama-3.3-Nemotron-Super-49B-v1.5 ignores this — harmless when ignored.
-          parsed.chat_template_kwargs = { enable_thinking: false };
-          // /no_think system directive: only inject for Nemotron-3-Nano family,
-          // which dumps `<think>...</think>` blocks into `content` instead of
-          // the `reasoning` field, breaking JSON-mode outputs.
-          //
-          // Llama-3.3-Nemotron-Super-49B-v1.5 is deliberately allowed to think:
-          // its tool-calling reliability drops sharply without deliberation,
-          // and the custom llama_nemotron_json parser correctly extracts tool
-          // calls even when thinking is on.
-          const needsNoThink = model.includes("nemotron-3-nano") || model.includes("nemotron-3-super-120b");
+          // Reasoning ON for the brain (nemotron-3-super-120b) so it can
+          // orchestrate the scene + author the commentary; OFF for other nvidia
+          // models. We strip the resulting <think> from the RESPONSE below so it
+          // never reaches the structured-output / tool-call parser.
+          thinkingOn = model.includes("nemotron-3-super-120b");
+          parsed.chat_template_kwargs = { enable_thinking: thinkingOn };
+          // /no_think still suppresses thinking for Nemotron-3-Nano (it dumps
+          // <think> into content and breaks JSON-mode). Super-120b is now allowed
+          // to think (response-side strip handles the leakage).
+          const needsNoThink = model.includes("nemotron-3-nano");
           if (needsNoThink && Array.isArray(parsed.messages)) {
             const messages = parsed.messages as Array<Record<string, unknown>>;
             const firstSystemIdx = messages.findIndex((m) => m?.role === "system");
@@ -86,7 +93,37 @@ function nimNemotronFetch(): typeof fetch {
         // body not JSON — leave alone
       }
     }
-    return fetch(input, init);
+    const res = await fetch(input, init);
+    // Strip <think> from the (non-streaming) JSON response so reasoning never
+    // reaches the tool-call/JSON parser. Best-effort: pass through on any issue.
+    if (thinkingOn && res.ok) {
+      try {
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("application/json")) {
+          const data = (await res.clone().json()) as {
+            choices?: Array<{ message?: { content?: unknown } }>;
+          };
+          let changed = false;
+          for (const ch of data?.choices ?? []) {
+            const m = ch?.message;
+            if (m && typeof m.content === "string" && m.content.includes("<think>")) {
+              m.content = stripThink(m.content);
+              changed = true;
+            }
+          }
+          if (changed) {
+            return new Response(JSON.stringify(data), {
+              status: res.status,
+              statusText: res.statusText,
+              headers: { "content-type": "application/json" },
+            });
+          }
+        }
+      } catch {
+        // streaming or unparseable — leave the original response untouched
+      }
+    }
+    return res;
   };
 }
 

@@ -97,3 +97,14 @@ network_policies:
     binaries:
       - path: /opt/venv/bin/python3
       - path: /usr/bin/python3.11
+
+  overlay_feed:
+    name: overlay-feed
+    endpoints:
+      - host: 172.17.0.1
+        port: 8090
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/node
