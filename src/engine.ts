@@ -52,7 +52,10 @@ import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
+import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent } from "./security.js";
 import {
@@ -239,8 +242,29 @@ const SESSION_MAX_MESSAGES = 100;
 
 export class SessionStore {
   private store = new Map<string, SessionEntry>();
+  private persistDir: string | null;
+  private dirReady = false;
 
-  /** Load message history for a session. Returns empty array if not found or expired. */
+  /**
+   * @param persistDir Directory for on-disk session files. Defaults to
+   * ~/.sportsclaw/sessions (overridable via SPORTSCLAW_SESSION_DIR).
+   * Pass null to disable persistence (in-memory only).
+   */
+  constructor(persistDir?: string | null) {
+    this.persistDir =
+      persistDir === null
+        ? null
+        : persistDir ??
+          process.env.SPORTSCLAW_SESSION_DIR ??
+          join(homedir(), ".sportsclaw", "sessions");
+  }
+
+  private filePath(sessionId: string): string {
+    const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+    return join(this.persistDir!, `${safe}.json`);
+  }
+
+  /** Load message history from memory only. Returns empty array if not found or expired. */
   get(sessionId: string): Message[] {
     const entry = this.store.get(sessionId);
     if (!entry) return [];
@@ -251,28 +275,75 @@ export class SessionStore {
     return entry.messages;
   }
 
+  /**
+   * Load message history, falling back to disk on memory miss so sessions
+   * survive process restarts. Corrupt or expired files yield an empty session.
+   */
+  async load(sessionId: string): Promise<Message[]> {
+    const inMemory = this.get(sessionId);
+    if (inMemory.length > 0) return inMemory;
+    if (!this.persistDir) return [];
+    try {
+      const raw = await readFile(this.filePath(sessionId), "utf-8");
+      const parsed = JSON.parse(raw) as SessionEntry;
+      if (!parsed || !Array.isArray(parsed.messages) || typeof parsed.updatedAt !== "number") {
+        return [];
+      }
+      if (Date.now() - parsed.updatedAt > SESSION_TTL_MS) {
+        void unlink(this.filePath(sessionId)).catch(() => {});
+        return [];
+      }
+      this.store.set(sessionId, parsed);
+      return parsed.messages;
+    } catch {
+      // Missing or corrupt file — start a fresh session.
+      return [];
+    }
+  }
+
   /** Save message history for a session, trimming to keep within bounds. */
-  save(sessionId: string, messages: Message[]): void {
+  async save(sessionId: string, messages: Message[]): Promise<void> {
     // Trim oldest messages if over limit (keep the most recent ones)
     const trimmed =
       messages.length > SESSION_MAX_MESSAGES
         ? messages.slice(messages.length - SESSION_MAX_MESSAGES)
         : messages;
 
-    this.store.set(sessionId, {
-      messages: trimmed,
-      updatedAt: Date.now(),
-    });
+    const entry: SessionEntry = { messages: trimmed, updatedAt: Date.now() };
+    this.store.set(sessionId, entry);
 
     // Evict oldest sessions when over capacity
     if (this.store.size > SESSION_MAX_ENTRIES) {
       this.evict();
     }
+
+    if (!this.persistDir) return;
+    try {
+      if (!this.dirReady) {
+        mkdirSync(this.persistDir, { recursive: true });
+        this.dirReady = true;
+      }
+      const path = this.filePath(sessionId);
+      // Atomic write: temp file + rename so a crash mid-write never leaves
+      // a torn session file. Random suffix avoids concurrent-save collisions.
+      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+      await writeFile(tmp, JSON.stringify(entry), "utf-8");
+      await rename(tmp, path);
+    } catch (err) {
+      // Persistence is best-effort; the in-memory session is already saved.
+      console.error(
+        `[sportsclaw] session persist error: ${err instanceof Error ? err.message : err}`
+      );
+    }
   }
 
-  /** Clear a specific session. */
+  /** Clear a specific session (memory and disk). */
   clear(sessionId: string): boolean {
-    return this.store.delete(sessionId);
+    const had = this.store.delete(sessionId);
+    if (this.persistDir) {
+      void unlink(this.filePath(sessionId)).catch(() => {});
+    }
+    return had;
   }
 
   /** Number of active sessions. */
@@ -3082,7 +3153,7 @@ export class sportsclawEngine {
     // --- Session: restore prior conversation history ---
     const sessionId = options?.sessionId;
     if (sessionId) {
-      const prior = sessionStore.get(sessionId);
+      const prior = await sessionStore.load(sessionId);
       if (prior.length > 0) {
         this.messages = prior;
         if (this.config.verbose) {
@@ -3505,7 +3576,7 @@ export class sportsclawEngine {
 
       // Session persistence
       if (sessionId) {
-        sessionStore.save(sessionId, this.messages);
+        await sessionStore.save(sessionId, this.messages);
       }
 
       // Analytics
@@ -3841,7 +3912,7 @@ export class sportsclawEngine {
 
     // --- Session: persist updated conversation history ---
     if (sessionId) {
-      sessionStore.save(sessionId, this.messages);
+      await sessionStore.save(sessionId, this.messages);
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] session saved: ${sessionId} (${this.messages.length} messages)`
