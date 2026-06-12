@@ -7,6 +7,7 @@
  * a failed probe re-opens it for another full cooldown.
  *
  * Pure in-memory state with an injectable clock — no I/O, fully unit-testable.
+ * Only degraded keys hold an entry — healthy keys cost nothing, so the map stays bounded even with caller-supplied key strings.
  */
 
 export interface CircuitBreakerOptions {
@@ -46,15 +47,13 @@ export class CircuitBreaker {
 
   /** True if calls for this key may proceed (closed, or cooldown elapsed → half-open). */
   canProceed(key: string): boolean {
-    const e = this.entry(key);
-    if (e.openedAt === null) return true;
+    const e = this.entries.get(key);
+    if (!e || e.openedAt === null) return true;
     return this.now() - e.openedAt >= this.cooldownMs;
   }
 
   recordSuccess(key: string): void {
-    const e = this.entry(key);
-    e.consecutiveFailures = 0;
-    e.openedAt = null;
+    this.entries.delete(key);
   }
 
   recordFailure(key: string): void {
