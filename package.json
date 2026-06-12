@@ -59,6 +59,7 @@
     "test:model-role-router": "npm run build && node --test test/model-role-router.test.mjs",
     "test:bridge-retry-plan": "npm run build && node --test test/bridge-retry-plan.test.mjs",
     "test:circuit-breaker": "npm run build && node --test test/circuit-breaker.test.mjs",
+    "test:bridge-resilience": "npm run build && node --test test/bridge-resilience.test.mjs",
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs"
   },
   "keywords": [
