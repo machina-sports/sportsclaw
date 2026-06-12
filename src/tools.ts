@@ -27,6 +27,7 @@ type BridgeErrorCode =
   | "network_dns"
   | "rate_limited"
   | "python_version_incompatible"
+  | "circuit_open"
   | "tool_execution_failed";
 
 function classifyBridgeError(
@@ -88,10 +89,61 @@ function classifyBridgeError(
     };
   }
 
+  if (haystack.includes("circuit breaker open")) {
+    return {
+      errorCode: "circuit_open",
+      hint:
+        "This data source is cooling down after repeated failures. " +
+        "Try a different question or retry in about a minute.",
+    };
+  }
+
   return {
     errorCode: "tool_execution_failed",
     hint: "The tool execution failed. Retry and inspect stderr for details.",
   };
+}
+
+export interface RetryPlan {
+  retry: boolean;
+  delayMs: number;
+}
+
+/**
+ * Decide whether a failed bridge attempt should be retried and how long to
+ * wait first. `attempt` is the zero-based index of the attempt that just
+ * failed. Deterministic failures (missing deps, incompatible Python, open
+ * circuit) never retry; transient failures back off with jitter so parallel
+ * lanes don't stampede a recovering provider.
+ */
+export function resolveRetryPlan(
+  errorCode: BridgeErrorCode,
+  attempt: number
+): RetryPlan {
+  const jitter = () => Math.floor(Math.random() * 250);
+  switch (errorCode) {
+    case "dependency_missing":
+    case "python_version_incompatible":
+    case "circuit_open":
+      return { retry: false, delayMs: 0 };
+    case "rate_limited":
+      return attempt < 2
+        ? { retry: true, delayMs: 1500 * 2 ** attempt + jitter() }
+        : { retry: false, delayMs: 0 };
+    case "network_dns":
+      return attempt < 2
+        ? { retry: true, delayMs: 500 * 2 ** attempt + jitter() }
+        : { retry: false, delayMs: 0 };
+    case "timeout":
+      // One retry; executePythonBridge widens the timeout window instead of sleeping.
+      return attempt < 1
+        ? { retry: true, delayMs: 0 }
+        : { retry: false, delayMs: 0 };
+    default:
+      return attempt < 1
+        ? { retry: true, delayMs: 250 + jitter() }
+        : { retry: false, delayMs: 0 };
+  }
 }
 
 // ---------------------------------------------------------------------------
