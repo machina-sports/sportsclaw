@@ -87,10 +87,22 @@ export class GameSubscriptionStore {
     return all;
   }
 
-  /** All subscriptions for a given sport+team, across all users. */
+  /** True if team names refer to the same team: exact, or one's tokens ⊆ the other's. */
+  private teamMatches(a: string, b: string): boolean {
+    const norm = (s: string) => s.toLowerCase().split(/\s+/).filter(Boolean);
+    const at = norm(a), bt = norm(b);
+    if (at.length === 0 || bt.length === 0) return false;
+    const aset = new Set(at), bset = new Set(bt);
+    const subset = (small: string[], big: Set<string>) => small.every((t) => big.has(t));
+    return subset(at, bset) || subset(bt, aset);
+  }
+
+  /** All subscriptions for a given sport whose team matches (exact or token-subset). */
   async findSubscribers(sport: string, team: string): Promise<GameSubscription[]> {
-    const target = `${sport.toLowerCase()}:${team.toLowerCase()}`;
-    return (await this.allSubs()).filter((s) => this.key(s) === target);
+    const sportLc = sport.toLowerCase();
+    return (await this.allSubs()).filter(
+      (s) => s.sport.toLowerCase() === sportLc && this.teamMatches(s.team, team)
+    );
   }
 
   /** Distinct sports across all subscriptions (drives which scoreboards to poll). */

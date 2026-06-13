@@ -80,4 +80,32 @@ describe("GameSubscriptionStore", () => {
       assert.ok(!f.includes("..") && !f.includes("/"), `unsafe: ${f}`);
     }
   });
+
+  it("findSubscribers matches a nickname subscription against a full team name", async () => {
+    const store = new GameSubscriptionStore(dir);
+    // user subscribed with the short name; scoreboard reports the full name
+    await store.add(sub({ team: "Lakers", sport: "nba" }));
+    const subs = await store.findSubscribers("nba", "Los Angeles Lakers");
+    assert.equal(subs.length, 1);
+    assert.equal(subs[0].team, "Lakers");
+  });
+
+  it("findSubscribers matches a full-name subscription against a short scoreboard name", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Oakland Athletics", sport: "mlb" }));
+    const subs = await store.findSubscribers("mlb", "Athletics");
+    assert.equal(subs.length, 1);
+  });
+
+  it("findSubscribers does not match unrelated teams", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Brazil", sport: "football" }));
+    assert.equal((await store.findSubscribers("football", "France")).length, 0);
+  });
+
+  it("findSubscribers still matches exact names", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Brazil", sport: "football" }));
+    assert.equal((await store.findSubscribers("football", "brazil")).length, 1);
+  });
 });

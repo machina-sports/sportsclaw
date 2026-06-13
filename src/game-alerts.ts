@@ -38,7 +38,7 @@ export function renderAlert(event: GameEvent, _sub: GameSubscription): string {
   const score = `${state.home} ${state.homeScore}–${state.awayScore} ${state.away}`;
   switch (event.type) {
     case "game_start": return `🟢 Kickoff: ${score}`;
-    case "score_change": return `⚽ Score: ${score}`;
+    case "score_change": return `📣 Score: ${score}`;
     case "lead_change": {
       const leader = state.leader === "home" ? state.home : state.away;
       return `🔄 ${leader} take the lead — ${score}`;
