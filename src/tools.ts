@@ -20,6 +20,7 @@ import type { McpManager } from "./mcp.js";
 import { buildSportsSkillsRepairCommand, isVenvSetup, getVenvDir } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 import { DataFusionEngine, entityResolver } from "./intelligence/index.js";
+import { CircuitBreaker } from "./circuit-breaker.js";
 
 type BridgeErrorCode =
   | "timeout"
@@ -27,6 +28,7 @@ type BridgeErrorCode =
   | "network_dns"
   | "rate_limited"
   | "python_version_incompatible"
+  | "circuit_open"
   | "tool_execution_failed";
 
 function classifyBridgeError(
@@ -88,10 +90,61 @@ function classifyBridgeError(
     };
   }
 
+  if (haystack.includes("circuit breaker open")) {
+    return {
+      errorCode: "circuit_open",
+      hint:
+        "This data source is cooling down after repeated failures. " +
+        "Try a different question or retry in about a minute.",
+    };
+  }
+
   return {
     errorCode: "tool_execution_failed",
     hint: "The tool execution failed. Retry and inspect stderr for details.",
   };
+}
+
+export interface RetryPlan {
+  retry: boolean;
+  delayMs: number;
+}
+
+/**
+ * Decide whether a failed bridge attempt should be retried and how long to
+ * wait first. `attempt` is the zero-based index of the attempt that just
+ * failed. Deterministic failures (missing deps, incompatible Python, open
+ * circuit) never retry; transient failures back off with jitter so parallel
+ * lanes don't stampede a recovering provider.
+ */
+export function resolveRetryPlan(
+  errorCode: BridgeErrorCode,
+  attempt: number
+): RetryPlan {
+  const jitter = () => Math.floor(Math.random() * 250);
+  switch (errorCode) {
+    case "dependency_missing":
+    case "python_version_incompatible":
+    case "circuit_open":
+      return { retry: false, delayMs: 0 };
+    case "rate_limited":
+      return attempt < 2
+        ? { retry: true, delayMs: 1500 * 2 ** attempt + jitter() }
+        : { retry: false, delayMs: 0 };
+    case "network_dns":
+      return attempt < 2
+        ? { retry: true, delayMs: 500 * 2 ** attempt + jitter() }
+        : { retry: false, delayMs: 0 };
+    case "timeout":
+      // One retry; executePythonBridge widens the timeout window instead of sleeping.
+      return attempt < 1
+        ? { retry: true, delayMs: 0 }
+        : { retry: false, delayMs: 0 };
+    default:
+      return attempt < 1
+        ? { retry: true, delayMs: 250 + jitter() }
+        : { retry: false, delayMs: 0 };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1000,13 @@ function buildArgs(
 }
 
 /**
+ * Shared per-sport circuit breaker for the Python bridge. Module-level by
+ * design: a data source that is down is down for every engine instance in
+ * this process, so they should all fail fast together.
+ */
+export const bridgeBreaker = new CircuitBreaker();
+
+/**
  * Execute a sports-skills command via an async child process.
  *
  * Returns a structured result with stdout parsed as JSON when possible.
@@ -1018,38 +1078,40 @@ export function executePythonBridge(
     });
 
   return (async () => {
-    const firstAttempt = await runOnce(timeout);
-    if (firstAttempt.success) {
-      return firstAttempt;
+    if (!bridgeBreaker.canProceed(sport)) {
+      return {
+        success: false,
+        error:
+          `circuit breaker open for "${sport}": repeated failures reaching the data source. ` +
+          `Cooling down before new attempts.`,
+      };
     }
 
-    // Retry once on any failure (timeout gets a longer window; transient
-    // errors like network blips / RSS parse failures get a second chance).
-    if (firstAttempt.timedOut) {
+    let attempt = 0;
+    let lastResult = await runOnce(timeout);
+    while (!lastResult.success) {
+      const { errorCode } = classifyBridgeError(lastResult.error, lastResult.stderr);
+      const plan = resolveRetryPlan(errorCode, attempt);
+      if (!plan.retry) break;
+      if (plan.delayMs > 0) {
+        await new Promise((r) => setTimeout(r, plan.delayMs));
+      }
+      attempt++;
+      // Timeouts get a widened window on retry; other errors keep the original.
+      const nextTimeout = errorCode === "timeout" ? retryTimeout : timeout;
       if (config?.verbose) {
         console.error(
-          `[sportsclaw] exec timeout after ${timeout}ms; retrying with ${retryTimeout}ms`
+          `[sportsclaw] bridge retry attempt=${attempt} code=${errorCode} timeout=${nextTimeout}ms`
         );
       }
-    } else if (config?.verbose) {
-      console.error(
-        `[sportsclaw] exec failed; retrying once: ${firstAttempt.error?.slice(0, 120)}`
-      );
+      lastResult = await runOnce(nextTimeout);
     }
 
-    const secondTimeout = firstAttempt.timedOut ? retryTimeout : timeout;
-    const secondAttempt = await runOnce(secondTimeout);
-    if (secondAttempt.success) {
-      return secondAttempt;
+    if (lastResult.success) {
+      bridgeBreaker.recordSuccess(sport);
+    } else {
+      bridgeBreaker.recordFailure(sport);
     }
-
-    // Preserve first error context so callers can surface the true cause.
-    return {
-      ...secondAttempt,
-      error: firstAttempt.timedOut
-        ? `Command timed out after ${timeout}ms and retry after ${retryTimeout}ms failed. ` +
-          `${secondAttempt.error ?? firstAttempt.error ?? ""}`.trim()
-        : secondAttempt.error ?? firstAttempt.error,
-    };
+    return lastResult;
   })();
 }

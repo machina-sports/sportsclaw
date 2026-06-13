@@ -52,7 +52,10 @@ import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
+import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent } from "./security.js";
 import {
@@ -67,6 +70,7 @@ import {
   ApprovalPendingHalt,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
+import { recordTokens, tokensUsedToday } from "./token-ledger.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
 import { renderChart, type ChartType, type BracketMatch } from "./charts.js";
 import {
@@ -101,6 +105,38 @@ try {
   if (parsed.version) _packageVersion = parsed.version;
 } catch {
   // best-effort
+}
+
+// ---------------------------------------------------------------------------
+// Token usage helpers
+// ---------------------------------------------------------------------------
+
+/** Normalized token usage extracted from a generateText result. */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+function usageOf(result: {
+  totalUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+}): TokenUsage {
+  const u = result.totalUsage ?? {};
+  const input = u.inputTokens ?? 0;
+  const output = u.outputTokens ?? 0;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: u.totalTokens ?? input + output,
+  };
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -241,8 +277,29 @@ const SESSION_MAX_MESSAGES = 100;
 
 export class SessionStore {
   private store = new Map<string, SessionEntry>();
+  private persistDir: string | null;
+  private dirReady = false;
 
-  /** Load message history for a session. Returns empty array if not found or expired. */
+  /**
+   * @param persistDir Directory for on-disk session files. Defaults to
+   * ~/.sportsclaw/sessions (overridable via SPORTSCLAW_SESSION_DIR).
+   * Pass null to disable persistence (in-memory only).
+   */
+  constructor(persistDir?: string | null) {
+    this.persistDir =
+      persistDir === null
+        ? null
+        : persistDir ??
+          process.env.SPORTSCLAW_SESSION_DIR ??
+          join(homedir(), ".sportsclaw", "sessions");
+  }
+
+  private filePath(sessionId: string): string {
+    const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+    return join(this.persistDir!, `${safe}.json`);
+  }
+
+  /** Load message history from memory only. Returns empty array if not found or expired. */
   get(sessionId: string): Message[] {
     const entry = this.store.get(sessionId);
     if (!entry) return [];
@@ -253,28 +310,75 @@ export class SessionStore {
     return entry.messages;
   }
 
+  /**
+   * Load message history, falling back to disk on memory miss so sessions
+   * survive process restarts. Corrupt or expired files yield an empty session.
+   */
+  async load(sessionId: string): Promise<Message[]> {
+    const inMemory = this.get(sessionId);
+    if (inMemory.length > 0) return inMemory;
+    if (!this.persistDir) return [];
+    try {
+      const raw = await readFile(this.filePath(sessionId), "utf-8");
+      const parsed = JSON.parse(raw) as SessionEntry;
+      if (!parsed || !Array.isArray(parsed.messages) || typeof parsed.updatedAt !== "number") {
+        return [];
+      }
+      if (Date.now() - parsed.updatedAt > SESSION_TTL_MS) {
+        void unlink(this.filePath(sessionId)).catch(() => {});
+        return [];
+      }
+      this.store.set(sessionId, parsed);
+      return parsed.messages;
+    } catch {
+      // Missing or corrupt file — start a fresh session.
+      return [];
+    }
+  }
+
   /** Save message history for a session, trimming to keep within bounds. */
-  save(sessionId: string, messages: Message[]): void {
+  async save(sessionId: string, messages: Message[]): Promise<void> {
     // Trim oldest messages if over limit (keep the most recent ones)
     const trimmed =
       messages.length > SESSION_MAX_MESSAGES
         ? messages.slice(messages.length - SESSION_MAX_MESSAGES)
         : messages;
 
-    this.store.set(sessionId, {
-      messages: trimmed,
-      updatedAt: Date.now(),
-    });
+    const entry: SessionEntry = { messages: trimmed, updatedAt: Date.now() };
+    this.store.set(sessionId, entry);
 
     // Evict oldest sessions when over capacity
     if (this.store.size > SESSION_MAX_ENTRIES) {
       this.evict();
     }
+
+    if (!this.persistDir) return;
+    try {
+      if (!this.dirReady) {
+        mkdirSync(this.persistDir, { recursive: true });
+        this.dirReady = true;
+      }
+      const path = this.filePath(sessionId);
+      // Atomic write: temp file + rename so a crash mid-write never leaves
+      // a torn session file. Random suffix avoids concurrent-save collisions.
+      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+      await writeFile(tmp, JSON.stringify(entry), "utf-8");
+      await rename(tmp, path);
+    } catch (err) {
+      // Persistence is best-effort; the in-memory session is already saved.
+      console.error(
+        `[sportsclaw] session persist error: ${err instanceof Error ? err.message : err}`
+      );
+    }
   }
 
-  /** Clear a specific session. */
+  /** Clear a specific session (memory and disk). */
   clear(sessionId: string): boolean {
-    return this.store.delete(sessionId);
+    const had = this.store.delete(sessionId);
+    if (this.persistDir) {
+      void unlink(this.filePath(sessionId)).catch(() => {});
+    }
+    return had;
   }
 
   /** Number of active sessions. */
@@ -361,10 +465,16 @@ export class sportsclawEngine {
   private _mcpReady = false;
   private _threadLoaded = false;
   private _loggedMemoryBackend?: string;
+  private _lastUsage: TokenUsage | null = null;
 
   /** Images produced by the generate_image tool during the last run. */
   get generatedImages(): readonly GeneratedImage[] {
     return [...this._generatedImages];
+  }
+
+  /** Token usage of the most recent run() (main loop only). Null before first run. */
+  get lastTokenUsage(): TokenUsage | null {
+    return this._lastUsage;
   }
 
   /** Videos produced by the generate_video tool during the last run. */
@@ -3100,6 +3210,7 @@ export class sportsclawEngine {
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
     this._generatedImages = [];
     this._generatedVideos = [];
+    this._lastUsage = null;
 
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
@@ -3140,10 +3251,21 @@ export class sportsclawEngine {
       return generateGuideResponse(sanitizedPrompt);
     }
 
+    // --- Spend guardrail: refuse to start a run once the daily budget is hit ---
+    if ((this.config.dailyTokenBudget ?? 0) > 0) {
+      const used = tokensUsedToday();
+      if (used >= this.config.dailyTokenBudget!) {
+        throw new Error(
+          `Daily token budget exhausted (${used}/${this.config.dailyTokenBudget} tokens used today, UTC). ` +
+            `Raise dailyTokenBudget in config or wait until tomorrow.`
+        );
+      }
+    }
+
     // --- Session: restore prior conversation history ---
     const sessionId = options?.sessionId;
     if (sessionId) {
-      const prior = sessionStore.get(sessionId);
+      const prior = await sessionStore.load(sessionId);
       if (prior.length > 0) {
         this.messages = prior;
         if (this.config.verbose) {
@@ -3518,6 +3640,9 @@ export class sportsclawEngine {
       });
 
       const laneResults = await Promise.all(lanePromises);
+      this._lastUsage = laneResults
+        .map(usageOf)
+        .reduce(addUsage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 
       // Collect text from each agent lane
       const agentTexts: string[] = [];
@@ -3549,6 +3674,7 @@ export class sportsclawEngine {
             prompt: agentTexts.join("\n\n---\n\n"),
             maxOutputTokens: budgets.synthesis,
           });
+          this._lastUsage = addUsage(this._lastUsage!, usageOf(synthesisResult));
           responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
         } catch {
           responseText = agentTexts.join("\n\n");
@@ -3572,7 +3698,7 @@ export class sportsclawEngine {
 
       // Session persistence
       if (sessionId) {
-        sessionStore.save(sessionId, this.messages);
+        await sessionStore.save(sessionId, this.messages);
       }
 
       // Analytics
@@ -3586,6 +3712,7 @@ export class sportsclawEngine {
             toolsCalled: toolCallsForAnalytics,
             totalLatencyMs: Date.now() - analyticsStartTime,
             clarificationNeeded: routing.decision?.mode === "ambiguous",
+            usage: this._lastUsage ?? undefined,
           });
           logQuery(queryEvent);
         } catch {
@@ -3593,6 +3720,7 @@ export class sportsclawEngine {
         }
       }
 
+      recordTokens(this._lastUsage?.totalTokens ?? 0);
       return responseText;
     }
 
@@ -3755,6 +3883,15 @@ export class sportsclawEngine {
       }
     }
 
+    this._lastUsage = usageOf(result);
+    if (this.config.verbose) {
+      console.error(
+        `[sportsclaw] tokens input=${this._lastUsage.inputTokens} ` +
+          `output=${this._lastUsage.outputTokens} total=${this._lastUsage.totalTokens}`
+      );
+    }
+    recordTokens(this._lastUsage.totalTokens);
+
     // Append the full response messages to our history for multi-turn support
     for (const msg of result.response.messages) {
       this.messages.push(msg as Message);
@@ -3908,7 +4045,7 @@ export class sportsclawEngine {
 
     // --- Session: persist updated conversation history ---
     if (sessionId) {
-      sessionStore.save(sessionId, this.messages);
+      await sessionStore.save(sessionId, this.messages);
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] session saved: ${sessionId} (${this.messages.length} messages)`
@@ -3927,6 +4064,7 @@ export class sportsclawEngine {
           toolsCalled: toolCallsForAnalytics,
           totalLatencyMs: Date.now() - analyticsStartTime,
           clarificationNeeded: routing.decision?.mode === "ambiguous",
+          usage: this._lastUsage ?? undefined,
         });
         logQuery(queryEvent);
       } catch (err) {
