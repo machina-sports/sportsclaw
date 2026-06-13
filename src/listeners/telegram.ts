@@ -20,7 +20,11 @@ import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { sportsclawEngine } from "../engine.js";
-import type { sportsclawConfig } from "../types.js";
+import type { sportsclawConfig, GameState } from "../types.js";
+import { gameSubscriptionStore } from "../game-subscriptions.js";
+import { GameAlertService, publishGameEvent } from "../game-alerts.js";
+import { detectGameEvents, normalizeScoreboard } from "../game-events.js";
+import { executePythonBridge } from "../tools.js";
 import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
 import { formatResponse, isGameRelatedResponse } from "../formatters/index.js";
 import {
@@ -348,6 +352,48 @@ async function fetchWithHardTimeout(
   }
 }
 
+function startGameAlertLoop(apiBase: string, engineConfig: Partial<sportsclawConfig>): () => void {
+  const service = new GameAlertService({
+    store: gameSubscriptionStore,
+    platform: "telegram",
+    deliver: async (target, text) => sendMessage(apiBase, Number(target.chatId), text),
+    runEngine: async (prompt, sub) => {
+      const engine = new sportsclawEngine(engineConfig);
+      return engine.run(prompt, { userId: sub.userId, platform: "telegram", chatId: sub.chatId });
+    },
+  });
+
+  const lastStates = new Map<string, GameState>();
+  let stopped = false;
+  const POLL_MS = 20_000;
+
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const sports = await gameSubscriptionStore.activeSports();
+      for (const sport of sports) {
+        const res = await executePythonBridge(sport, "scores", {}, engineConfig);
+        if (!res.success) continue;
+        for (const curr of normalizeScoreboard(sport, res.data)) {
+          const prev = lastStates.get(curr.gameId);
+          for (const event of detectGameEvents(prev, curr)) {
+            void publishGameEvent(event);
+            await service.handleEvent(event);
+          }
+          lastStates.set(curr.gameId, curr);
+        }
+      }
+    } catch (err) {
+      console.error(`[sportsclaw] alert loop tick error: ${err instanceof Error ? err.message : err}`);
+    }
+    if (!stopped) setTimeout(tick, POLL_MS);
+  };
+
+  setTimeout(tick, POLL_MS);
+  console.error("[sportsclaw] game alert loop started");
+  return () => { stopped = true; };
+}
+
 export async function startTelegramListener(): Promise<void> {
   // Process-level safety net: any unhandled error exits non-zero so the
   // OS-level supervisor (launchd / systemd / Task Scheduler) can restart us.
@@ -378,6 +424,8 @@ export async function startTelegramListener(): Promise<void> {
   }
 
   const engineConfig: Partial<sportsclawConfig> = buildListenerEngineConfig();
+
+  startGameAlertLoop(apiBase, engineConfig);
 
   // Verify the bot token is valid
   const meRes = await fetch(`${apiBase}/getMe`);
@@ -712,7 +760,13 @@ async function processMessage(
     // Fresh engine per request — session state lives in the global SessionStore
     const images = await extractImages(msg, apiBase);
       const engine = new sportsclawEngine(engineConfig);
-    const response = await engine.run(prompt, { userId, sessionId: userId, images: images.length > 0 ? images : undefined });
+    const response = await engine.run(prompt, {
+      userId,
+      sessionId: userId,
+      platform: "telegram",
+      chatId: String(msg.chat.id),
+      images: images.length > 0 ? images : undefined,
+    });
 
     // Format response for Telegram (HTML)
     const formatted = formatResponse(response, "telegram");
@@ -851,7 +905,12 @@ async function processCallbackQuery(
     try {
       const resumePrompt = `${suspended.originalPrompt}\n\n[User selected: ${selectedOption.value}]`;
       const engine = new sportsclawEngine(engineConfig);
-      const response = await engine.run(resumePrompt, { userId, sessionId: userId });
+      const response = await engine.run(resumePrompt, {
+        userId,
+        sessionId: userId,
+        platform: "telegram",
+        chatId: String(cqMessage.chat.id),
+      });
 
       const formatted = formatResponse(response, "telegram");
       const textToSend = formatted.telegram || formatted.text;

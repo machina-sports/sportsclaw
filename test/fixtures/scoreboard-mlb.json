@@ -1,0 +1,59 @@
+{
+  "status": true,
+  "data": {
+    "events": [
+      {
+        "id": "401815732",
+        "name": "Colorado Rockies at Athletics Athletics",
+        "status": "live",
+        "status_detail": "Bot 8th",
+        "competitors": [
+          {
+            "team": {
+              "name": "Athletics",
+              "abbreviation": "ATH"
+            },
+            "home_away": "home",
+            "score": "6",
+            "winner": false
+          },
+          {
+            "team": {
+              "name": "Colorado Rockies",
+              "abbreviation": "COL"
+            },
+            "home_away": "away",
+            "score": "4",
+            "winner": false
+          }
+        ]
+      },
+      {
+        "id": "401815722",
+        "name": "Miami Marlins at Pittsburgh Pirates",
+        "status": "closed",
+        "status_detail": "Final",
+        "competitors": [
+          {
+            "team": {
+              "name": "Pittsburgh Pirates",
+              "abbreviation": "PIT"
+            },
+            "home_away": "home",
+            "score": "3",
+            "winner": false
+          },
+          {
+            "team": {
+              "name": "Miami Marlins",
+              "abbreviation": "MIA"
+            },
+            "home_away": "away",
+            "score": "8",
+            "winner": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -84,6 +84,8 @@ import {
   type SimConfig, type SimBracketStrategy,
 } from "./bracket-sim.js";
 import { subagentManager } from "./subagent.js";
+import { gameSubscriptionStore } from "./game-subscriptions.js";
+import { applyAlertSubscription, removeAlertSubscription } from "./game-alerts.js";
 import { heartbeatService } from "./heartbeat.js";
 import { createGenerateImageTool } from "./image-gen.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
@@ -1012,7 +1014,9 @@ export class sportsclawEngine {
   private buildTools(
     memory?: MemoryManager,
     failedToolSignaturesThisTurn?: Map<string, string>,
-    runUserId?: string
+    runUserId?: string,
+    runPlatform?: "telegram" | "discord" | "cli",
+    runChatId?: string
   ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
@@ -1678,6 +1682,8 @@ export class sportsclawEngine {
 
     const watcherUserId = runUserId ?? "anonymous";
     const bracketUserId = runUserId ?? "anonymous";
+    const watcherPlatform = runPlatform ?? "cli";
+    const watcherChatId = runChatId ?? runUserId ?? "";
 
     toolMap["create_task"] = defineTool({
       description:
@@ -1783,6 +1789,61 @@ export class sportsclawEngine {
           task_id: task.id,
           completed_at: task.completedAt,
         });
+      },
+    });
+
+    toolMap["subscribe_team_alerts"] = defineTool({
+      description:
+        "Subscribe the current user to proactive live-game alerts for a team. " +
+        "When the team plays, the user gets messaged on kickoff, scores, lead changes, and the final. " +
+        "Use when the user says things like 'alert me about Brazil' or 'tell me when the Lakers score'.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          sport: { type: "string", description: "Sport key, e.g. football (soccer), nba, nfl, mlb." },
+          team: { type: "string", description: "Team name, e.g. Athletics, Lakers." },
+        },
+        required: ["sport", "team"],
+      }),
+      execute: async (args: { sport?: string; team?: string }) => {
+        try {
+          return await applyAlertSubscription(gameSubscriptionStore, {
+            userId: watcherUserId,
+            platform: watcherPlatform,
+            chatId: watcherChatId,
+            sport: args.sport ?? "",
+            team: args.team ?? "",
+            now: new Date().toISOString(),
+          });
+        } catch (err) {
+          if (isHalt(err)) throw err;
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+    });
+
+    toolMap["unsubscribe_team_alerts"] = defineTool({
+      description: "Unsubscribe the current user from live-game alerts for a team.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          sport: { type: "string", description: "Sport key, e.g. football, nba, mlb." },
+          team: { type: "string", description: "Team name, e.g. Athletics." },
+        },
+        required: ["sport", "team"],
+      }),
+      execute: async (args: { sport?: string; team?: string }) => {
+        try {
+          return await removeAlertSubscription(gameSubscriptionStore, {
+            userId: watcherUserId,
+            platform: watcherPlatform,
+            sport: args.sport ?? "",
+            team: args.team ?? "",
+          });
+        } catch (err) {
+          if (isHalt(err)) throw err;
+          return `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
       },
     });
 
@@ -3353,7 +3414,13 @@ export class sportsclawEngine {
     const budgets = resolveTokenBudgets(this.config.tokenBudgets);
     if (!this.config.tokenBudgets?.main) budgets.main = this.config.maxTokens;
 
-    const tools = this.buildTools(memory, failedToolSignaturesThisTurn, options?.userId);
+    const tools = this.buildTools(
+      memory,
+      failedToolSignaturesThisTurn,
+      options?.userId,
+      options?.platform,
+      options?.chatId,
+    );
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,

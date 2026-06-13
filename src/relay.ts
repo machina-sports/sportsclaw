@@ -81,6 +81,7 @@ import type { MarketOdds } from "./schema/machina.js";
 import type { PredictionPayload } from "./schema/machina.js";
 import type { CoverageInsight } from "./schema/machina.js";
 import type { WatchEvent } from "./types.js";
+import type { GameEvent } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Channel map — strict typing for segregated pub/sub channels
@@ -102,6 +103,7 @@ export type SportsClawChannels = {
   "predictions": PredictionPayload;
   "intel": CoverageInsight;
   "watch": WatchEvent;
+  "game-events": GameEvent;
 };
 
 /** All valid channel names */
@@ -228,4 +230,5 @@ export const relayManager = new RelayManager<SportsClawChannels>([
   "predictions",
   "intel",
   "watch",
+  "game-events",
 ]);
