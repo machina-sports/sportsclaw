@@ -12,7 +12,7 @@
  */
 
 import type { GameEvent, GameState, GameSubscription, GameEventType } from "./types.js";
-import type { GameSubscriptionStore } from "./game-subscriptions.js";
+import { GameSubscriptionStore } from "./game-subscriptions.js";
 
 const HEADLINE: ReadonlySet<GameEventType> = new Set(["lead_change", "final"]);
 const DEDUP_TTL_MS = 30 * 60 * 1000; // 30 min
@@ -129,4 +129,35 @@ export class GameAlertService {
       }
     }
   }
+}
+
+/** Tool helper: validate + persist a subscription. Returns a user-facing string. */
+export async function applyAlertSubscription(
+  store: GameSubscriptionStore,
+  params: {
+    userId: string; platform: GameSubscription["platform"]; chatId: string;
+    sport: string; team: string; now: string;
+  }
+): Promise<string> {
+  const sport = params.sport?.trim().toLowerCase();
+  const team = params.team?.trim();
+  if (!sport || !team) return "Error: both sport and team are required.";
+  if (!params.chatId) return "Error: no delivery target available for alerts on this platform.";
+  await store.add({
+    userId: params.userId, platform: params.platform, chatId: params.chatId,
+    sport, team, createdAt: params.now,
+  });
+  return `Subscribed to ${team} (${sport}) alerts. I'll message you on goals, lead changes, and the final.`;
+}
+
+/** Tool helper: remove a subscription. Returns a user-facing string. */
+export async function removeAlertSubscription(
+  store: GameSubscriptionStore,
+  params: { userId: string; platform: GameSubscription["platform"]; sport: string; team: string }
+): Promise<string> {
+  const sport = params.sport?.trim().toLowerCase();
+  const team = params.team?.trim();
+  if (!sport || !team) return "Error: both sport and team are required.";
+  const removed = await store.remove(params.userId, params.platform, sport, team);
+  return removed ? `Unsubscribed from ${team} (${sport}) alerts.` : `You weren't subscribed to ${team} (${sport}).`;
 }

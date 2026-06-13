@@ -372,6 +372,10 @@ export interface RunOptions {
   images?: ImageAttachment[];
   /** Additional system prompt injected by the caller (e.g. relay user context). */
   systemPrompt?: string;
+  /** Platform the request arrived on (used by alert-subscription tools). */
+  platform?: "telegram" | "discord" | "cli";
+  /** Delivery target id for proactive alerts (e.g. Telegram chat_id). */
+  chatId?: string;
   /** @deprecated Use onProgress instead */
   onSpinnerUpdate?: (msg: string) => void;
 }
