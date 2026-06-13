@@ -105,6 +105,38 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Token usage helpers
+// ---------------------------------------------------------------------------
+
+/** Normalized token usage extracted from a generateText result. */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+function usageOf(result: {
+  totalUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+}): TokenUsage {
+  const u = result.totalUsage ?? {};
+  const input = u.inputTokens ?? 0;
+  const output = u.outputTokens ?? 0;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: u.totalTokens ?? input + output,
+  };
+}
+
+function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Token budget resolution
 // ---------------------------------------------------------------------------
 
@@ -430,10 +462,16 @@ export class sportsclawEngine {
   private _mcpReady = false;
   private _threadLoaded = false;
   private _loggedMemoryBackend?: string;
+  private _lastUsage: TokenUsage | null = null;
 
   /** Images produced by the generate_image tool during the last run. */
   get generatedImages(): readonly GeneratedImage[] {
     return [...this._generatedImages];
+  }
+
+  /** Token usage of the most recent run() (main loop only). Null before first run. */
+  get lastTokenUsage(): TokenUsage | null {
+    return this._lastUsage;
   }
 
   /** Videos produced by the generate_video tool during the last run. */
@@ -3522,6 +3560,9 @@ export class sportsclawEngine {
       });
 
       const laneResults = await Promise.all(lanePromises);
+      this._lastUsage = laneResults
+        .map(usageOf)
+        .reduce(addUsage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 
       // Collect text from each agent lane
       const agentTexts: string[] = [];
@@ -3553,6 +3594,7 @@ export class sportsclawEngine {
             prompt: agentTexts.join("\n\n---\n\n"),
             maxOutputTokens: budgets.synthesis,
           });
+          this._lastUsage = addUsage(this._lastUsage!, usageOf(synthesisResult));
           responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
         } catch {
           responseText = agentTexts.join("\n\n");
@@ -3590,6 +3632,7 @@ export class sportsclawEngine {
             toolsCalled: toolCallsForAnalytics,
             totalLatencyMs: Date.now() - analyticsStartTime,
             clarificationNeeded: routing.decision?.mode === "ambiguous",
+            usage: this._lastUsage ?? undefined,
           });
           logQuery(queryEvent);
         } catch {
@@ -3757,6 +3800,14 @@ export class sportsclawEngine {
       } catch {
         // keep the original result path
       }
+    }
+
+    this._lastUsage = usageOf(result);
+    if (this.config.verbose) {
+      console.error(
+        `[sportsclaw] tokens input=${this._lastUsage.inputTokens} ` +
+          `output=${this._lastUsage.outputTokens} total=${this._lastUsage.totalTokens}`
+      );
     }
 
     // Append the full response messages to our history for multi-turn support
@@ -3931,6 +3982,7 @@ export class sportsclawEngine {
           toolsCalled: toolCallsForAnalytics,
           totalLatencyMs: Date.now() - analyticsStartTime,
           clarificationNeeded: routing.decision?.mode === "ambiguous",
+          usage: this._lastUsage ?? undefined,
         });
         logQuery(queryEvent);
       } catch (err) {
