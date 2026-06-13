@@ -505,6 +505,41 @@ export interface WatchEvent {
   snapshot: unknown;
 }
 
+// ---------------------------------------------------------------------------
+// Proactive game presence — subscriptions & semantic events
+// ---------------------------------------------------------------------------
+
+export interface GameSubscription {
+  userId: string;
+  platform: "telegram" | "discord" | "cli";
+  chatId: string;
+  sport: string;
+  team: string;
+  createdAt: string;
+}
+
+export interface GameState {
+  gameId: string;
+  sport: string;
+  home: string;
+  away: string;
+  homeScore: number;
+  awayScore: number;
+  status: "scheduled" | "in_progress" | "final" | "other";
+  leader: "home" | "away" | "tie";
+}
+
+export type GameEventType = "game_start" | "score_change" | "lead_change" | "final";
+
+export interface GameEvent {
+  type: GameEventType;
+  gameId: string;
+  sport: string;
+  state: GameState;
+  scoreSignature: string;
+  timestamp: string;
+}
+
 export type WatchOutputMode = "relay" | "stdout" | "file";
 
 /** Configuration for a single watcher instance. */

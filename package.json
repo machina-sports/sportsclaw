@@ -57,6 +57,7 @@
     "test:anthropic-oauth": "npm run build && node --test test/anthropic-oauth.test.mjs",
     "test:inference-contracts": "npm run build && node --test test/inference-contracts.test.mjs",
     "test:model-role-router": "npm run build && node --test test/model-role-router.test.mjs",
+    "test:game-events": "npm run build && node --test test/game-events.test.mjs",
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs"
   },
   "keywords": [
