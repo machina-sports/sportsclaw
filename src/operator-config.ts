@@ -70,6 +70,18 @@ export interface OperatorJobConfig {
    */
   maxOutputTokens?: number;
   /**
+   * Wall-clock budget for a single inference call, in ms. Overrides the daemon
+   * default (60s, or whatever the daemon sets). Raise for jobs whose ticks make
+   * many slow tool calls (e.g. multi-workflow + market-data lookups) and would
+   * otherwise hit the watchdog. Pair with an `intervalMs` larger than this so
+   * ticks don't overlap.
+   */
+  inferenceTimeoutMs?: number;
+  /**
+   * Max LLM steps (tool-call rounds) per tick. Overrides the daemon default.
+   */
+  maxSteps?: number;
+  /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
    * is invoked — only the named skills' tools become available to the LLM.
@@ -324,6 +336,16 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // inferenceTimeoutMs / maxSteps
+  for (const field of ["inferenceTimeoutMs", "maxSteps"] as const) {
+    if (raw[field] !== undefined) {
+      const v = raw[field];
+      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+        push(field, `must be a positive number (got ${JSON.stringify(v)})`);
+      }
+    }
+  }
+
   // extraFragments
   if (raw.extraFragments !== undefined) {
     if (!Array.isArray(raw.extraFragments)) {
@@ -469,6 +491,8 @@ export function validateOperatorJobConfig(
       sink: raw.sink as string | undefined,
       extraFragments: raw.extraFragments as string[] | undefined,
       maxOutputTokens: raw.maxOutputTokens as number | undefined,
+      inferenceTimeoutMs: raw.inferenceTimeoutMs as number | undefined,
+      maxSteps: raw.maxSteps as number | undefined,
       skills: raw.skills as string[] | undefined,
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,

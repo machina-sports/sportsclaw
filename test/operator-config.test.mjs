@@ -148,6 +148,29 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.strictEqual(r.valid, false);
   });
 
+  it("accepts and carries through inferenceTimeoutMs and maxSteps", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      inferenceTimeoutMs: 600_000,
+      maxSteps: 14,
+    });
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.inferenceTimeoutMs, 600_000);
+    assert.strictEqual(r.config.maxSteps, 14);
+  });
+
+  it("rejects a non-positive inferenceTimeoutMs", () => {
+    const r = validateOperatorJobConfig({ ...base, inferenceTimeoutMs: 0 });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
+  it("rejects a non-numeric maxSteps", () => {
+    const r = validateOperatorJobConfig({ ...base, maxSteps: "lots" });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "maxSteps"));
+  });
+
   it("rejects a non-array extraFragments", () => {
     const r = validateOperatorJobConfig({ ...base, extraFragments: "broadcast" });
     assert.strictEqual(r.valid, false);
