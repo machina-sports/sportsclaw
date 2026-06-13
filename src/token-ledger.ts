@@ -41,7 +41,9 @@ export function recordTokens(tokens: number, ledgerPath: string = DEFAULT_LEDGER
     const key = todayKey();
     ledger[key] = (ledger[key] ?? 0) + tokens;
     // Atomic write: temp + rename so a crash never corrupts the ledger.
-    const tmp = `${ledgerPath}.${process.pid}.tmp`;
+    // Random suffix (matching SessionStore/FileMemoryStorage) avoids two
+    // concurrent same-process writers colliding on one temp file.
+    const tmp = `${ledgerPath}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     writeFileSync(tmp, JSON.stringify(ledger), "utf-8");
     renameSync(tmp, ledgerPath);
   } catch {
