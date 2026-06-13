@@ -22,7 +22,7 @@ import { homedir } from "node:os";
 import { sportsclawEngine } from "../engine.js";
 import type { sportsclawConfig, GameState } from "../types.js";
 import { gameSubscriptionStore } from "../game-subscriptions.js";
-import { GameAlertService } from "../game-alerts.js";
+import { GameAlertService, publishGameEvent } from "../game-alerts.js";
 import { detectGameEvents, normalizeScoreboard } from "../game-events.js";
 import { executePythonBridge } from "../tools.js";
 import { splitMessage, saveImageToDisk, saveVideoToDisk } from "../utils.js";
@@ -355,6 +355,7 @@ async function fetchWithHardTimeout(
 function startGameAlertLoop(apiBase: string, engineConfig: Partial<sportsclawConfig>): () => void {
   const service = new GameAlertService({
     store: gameSubscriptionStore,
+    platform: "telegram",
     deliver: async (target, text) => sendMessage(apiBase, Number(target.chatId), text),
     runEngine: async (prompt, sub) => {
       const engine = new sportsclawEngine(engineConfig);
@@ -376,6 +377,7 @@ function startGameAlertLoop(apiBase: string, engineConfig: Partial<sportsclawCon
         for (const curr of normalizeScoreboard(sport, res.data)) {
           const prev = lastStates.get(curr.gameId);
           for (const event of detectGameEvents(prev, curr)) {
+            void publishGameEvent(event);
             await service.handleEvent(event);
           }
           lastStates.set(curr.gameId, curr);
