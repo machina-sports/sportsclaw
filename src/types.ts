@@ -197,6 +197,12 @@ export interface sportsclawConfig {
    * Set to 0 to disable automatic pruning.  Default: 80.
    */
   contextPruneThreshold?: number;
+  /**
+   * Daily LLM token budget (input + output, UTC day). When today's recorded
+   * usage reaches this value, run() throws before making any LLM call.
+   * 0 disables the gate. Default: 0.
+   */
+  dailyTokenBudget?: number;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -223,6 +229,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   parallelAgents: false,
   yoloMode: false,
   contextPruneThreshold: 80,
+  dailyTokenBudget: 0,
 };
 
 // ---------------------------------------------------------------------------

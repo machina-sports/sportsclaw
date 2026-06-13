@@ -17,7 +17,7 @@
  * Backend is selected once at MemoryManager construction — no hybrid, no sync.
  */
 
-import { mkdir, readFile, writeFile, appendFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { McpManager } from "./mcp.js";
@@ -120,7 +120,7 @@ function sanitizeId(id: string): string {
   return safe;
 }
 
-class FileMemoryStorage implements MemoryStorage {
+export class FileMemoryStorage implements MemoryStorage {
   private base: string;
   private dirCache = new Set<string>();
 
@@ -148,7 +148,11 @@ class FileMemoryStorage implements MemoryStorage {
 
   async write(userId: string, file: string, content: string): Promise<void> {
     const dir = await this.ensureDir(userId);
-    await writeFile(join(dir, file), content, "utf-8");
+    const path = join(dir, file);
+    // Atomic write: temp + rename so a crash mid-write never tears the file.
+    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    await writeFile(tmp, content, "utf-8");
+    await rename(tmp, path);
   }
 
   async append(userId: string, file: string, content: string): Promise<void> {

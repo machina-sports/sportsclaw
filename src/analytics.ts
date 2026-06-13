@@ -48,6 +48,8 @@ export interface QueryEvent {
   latencyMs: number;
   success: boolean;
   clarificationNeeded: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export interface ToolMetrics {
@@ -129,6 +131,7 @@ export function buildQueryEvent(params: {
   toolsCalled: Array<{ name: string; success: boolean; latencyMs?: number }>;
   totalLatencyMs: number;
   clarificationNeeded: boolean;
+  usage?: { inputTokens: number; outputTokens: number };
 }): QueryEvent {
   const succeeded = params.toolsCalled.filter((t) => t.success).map((t) => t.name);
   const failed = params.toolsCalled.filter((t) => !t.success).map((t) => t.name);
@@ -145,6 +148,9 @@ export function buildQueryEvent(params: {
     latencyMs: params.totalLatencyMs,
     success: failed.length === 0 || succeeded.length > 0,
     clarificationNeeded: params.clarificationNeeded,
+    ...(params.usage
+      ? { inputTokens: params.usage.inputTokens, outputTokens: params.usage.outputTokens }
+      : {}),
   };
 }
 
