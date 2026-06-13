@@ -12,6 +12,24 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { GameSubscription } from "./types.js";
 
+/** Well-known non-substring nicknames → a canonical token present in the full name.
+ * Token-subset matching already covers substring nicknames (e.g. "Lakers"). */
+const TEAM_ALIASES: Record<string, string> = {
+  "niners": "49ers",
+  "the niners": "49ers",
+  "man u": "manchester united",
+  "man utd": "manchester united",
+  "red devils": "manchester united",
+  "man city": "manchester city",
+  "spurs": "tottenham",
+  "gunners": "arsenal",
+  "a's": "athletics",
+  "nats": "nationals",
+  "g-men": "giants",
+  "habs": "canadiens",
+  "cards": "cardinals",
+};
+
 function sanitize(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 160);
 }
@@ -87,9 +105,13 @@ export class GameSubscriptionStore {
     return all;
   }
 
-  /** True if team names refer to the same team: exact, or one's tokens ⊆ the other's. */
+  /** True if team names refer to the same team: exact, alias-expanded, or token-subset. */
   private teamMatches(a: string, b: string): boolean {
-    const norm = (s: string) => s.toLowerCase().split(/\s+/).filter(Boolean);
+    const expand = (s: string): string => {
+      const key = s.trim().toLowerCase();
+      return TEAM_ALIASES[key] ?? key;
+    };
+    const norm = (s: string) => expand(s).split(/\s+/).filter(Boolean);
     const at = norm(a), bt = norm(b);
     if (at.length === 0 || bt.length === 0) return false;
     const aset = new Set(at), bset = new Set(bt);

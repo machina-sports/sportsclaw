@@ -108,4 +108,23 @@ describe("GameSubscriptionStore", () => {
     await store.add(sub({ team: "Brazil", sport: "football" }));
     assert.equal((await store.findSubscribers("football", "brazil")).length, 1);
   });
+
+  it("alias map resolves a non-substring nickname (Niners -> 49ers)", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Niners", sport: "nfl" }));
+    const subs = await store.findSubscribers("nfl", "San Francisco 49ers");
+    assert.equal(subs.length, 1);
+  });
+
+  it("alias map resolves Man U -> Manchester United", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Man U", sport: "football" }));
+    assert.equal((await store.findSubscribers("football", "Manchester United")).length, 1);
+  });
+
+  it("aliasing does not over-match unrelated teams", async () => {
+    const store = new GameSubscriptionStore(dir);
+    await store.add(sub({ team: "Niners", sport: "nfl" }));
+    assert.equal((await store.findSubscribers("nfl", "Dallas Cowboys")).length, 0);
+  });
 });
