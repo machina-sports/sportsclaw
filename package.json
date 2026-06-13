@@ -59,6 +59,7 @@
     "test:model-role-router": "npm run build && node --test test/model-role-router.test.mjs",
     "test:game-events": "npm run build && node --test test/game-events.test.mjs",
     "test:game-subscriptions": "npm run build && node --test test/game-subscriptions.test.mjs",
+    "test:game-alerts": "npm run build && node --test test/game-alerts.test.mjs",
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs"
   },
   "keywords": [
