@@ -13,6 +13,7 @@
 
 import type { GameEvent, GameState, GameSubscription, GameEventType } from "./types.js";
 import { GameSubscriptionStore } from "./game-subscriptions.js";
+import { relayManager } from "./relay.js";
 
 const HEADLINE: ReadonlySet<GameEventType> = new Set(["lead_change", "final"]);
 const DEDUP_TTL_MS = 30 * 60 * 1000; // 30 min
@@ -30,6 +31,8 @@ export interface GameAlertServiceDeps {
   runEngine: (prompt: string, sub: GameSubscription) => Promise<string>;
   /** Clock injection for dedup TTL (default Date.now). */
   now?: () => number;
+  /** When set, only deliver to subscribers on this platform (per-listener loops). */
+  platform?: GameSubscription["platform"];
 }
 
 /** Render a deterministic, zero-LLM alert line for an event. */
@@ -64,11 +67,13 @@ export function headlinePrompt(event: GameEvent, sub: GameSubscription): string 
 export class GameAlertService {
   private deps: GameAlertServiceDeps;
   private now: () => number;
+  private platform?: GameSubscription["platform"];
   private seen = new Map<string, number>(); // dedup key → timestamp
 
   constructor(deps: GameAlertServiceDeps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    this.platform = deps.platform;
   }
 
   private dedupKey(event: GameEvent): string {
@@ -95,7 +100,8 @@ export class GameAlertService {
     ]);
     const byTarget = new Map<string, GameSubscription>();
     for (const s of [...home, ...away]) byTarget.set(`${s.platform}:${s.chatId}`, s);
-    return [...byTarget.values()];
+    const resolved = [...byTarget.values()];
+    return this.platform ? resolved.filter((s) => s.platform === this.platform) : resolved;
   }
 
   /** Process one semantic event: dedup, resolve, route, deliver. */
@@ -160,4 +166,17 @@ export async function removeAlertSubscription(
   if (!sport || !team) return "Error: both sport and team are required.";
   const removed = await store.remove(params.userId, params.platform, sport, team);
   return removed ? `Unsubscribed from ${team} (${sport}) alerts.` : `You weren't subscribed to ${team} (${sport}).`;
+}
+
+/** Best-effort publish of a GameEvent to the relay's game-events channel.
+ * No-op unless SPORTSCLAW_RELAY_PUBLISH is set AND a relay is configured
+ * (RELAY_API_KEY). Relay availability must never affect core alert delivery,
+ * so this is opt-in and swallows all errors. */
+export async function publishGameEvent(event: GameEvent): Promise<void> {
+  if (process.env.SPORTSCLAW_RELAY_PUBLISH !== "1") return;
+  try {
+    await relayManager.publish("game-events", event);
+  } catch {
+    // relay broker unavailable / not configured — ignore.
+  }
 }

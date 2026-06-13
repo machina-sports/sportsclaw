@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { GameSubscriptionStore } from "../dist/game-subscriptions.js";
-import { GameAlertService } from "../dist/game-alerts.js";
+import { GameAlertService, publishGameEvent } from "../dist/game-alerts.js";
 
 const evt = (over = {}) => ({
   type: "score_change", gameId: "g1", sport: "soccer",
@@ -96,5 +96,39 @@ describe("GameAlertService", () => {
     await svc.handleEvent(evt());
     assert.equal(calls, 2, "attempted both");
     assert.equal(sent.length, 1, "the healthy target still received it");
+  });
+
+  it("a platform-filtered service ignores subscribers on other platforms", async () => {
+    await store.add({ userId: "d1", platform: "discord", chatId: "chan1",
+      sport: "soccer", team: "Brazil", createdAt: "2026-06-12T00:00:00.000Z" });
+    const svc = makeService({ platform: "telegram" });
+    await svc.handleEvent(evt());
+    assert.equal(sent.length, 1, "only the telegram subscriber delivered");
+    assert.equal(sent[0].target.platform, "telegram");
+  });
+
+  it("a discord-filtered service delivers to the discord subscriber", async () => {
+    await store.add({ userId: "d1", platform: "discord", chatId: "chan1",
+      sport: "soccer", team: "Brazil", createdAt: "2026-06-12T00:00:00.000Z" });
+    const svc = makeService({ platform: "discord" });
+    await svc.handleEvent(evt());
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].target.platform, "discord");
+    assert.equal(sent[0].target.chatId, "chan1");
+  });
+
+  it("no platform set delivers to all (backward compatible)", async () => {
+    await store.add({ userId: "d1", platform: "discord", chatId: "chan1",
+      sport: "soccer", team: "Brazil", createdAt: "2026-06-12T00:00:00.000Z" });
+    const svc = makeService(); // no platform
+    await svc.handleEvent(evt());
+    assert.equal(sent.length, 2);
+  });
+});
+
+describe("publishGameEvent", () => {
+  it("is a no-op (resolves, never throws) when relay publishing is not enabled", async () => {
+    // SPORTSCLAW_RELAY_PUBLISH unset → no broker spawn, no network, instant resolve.
+    await assert.doesNotReject(() => publishGameEvent(evt()));
   });
 });
