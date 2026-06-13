@@ -44,6 +44,11 @@ import {
   buildListenerEngineConfig,
   formatListenerError,
 } from "./shared.js";
+import { gameSubscriptionStore } from "../game-subscriptions.js";
+import { GameAlertService, publishGameEvent } from "../game-alerts.js";
+import { detectGameEvents, normalizeScoreboard } from "../game-events.js";
+import { executePythonBridge } from "../tools.js";
+import type { GameState, sportsclawConfig } from "../types.js";
 
 const PREFIX = process.env.DISCORD_PREFIX || "!sportsclaw";
 
@@ -102,6 +107,66 @@ const buttonContexts = new ButtonContextStore();
 
 function storeButtonContext(prompt: string, userId: string, sport: DetectedSport): string {
   return buttonContexts.store(prompt, userId, sport);
+}
+
+// ---------------------------------------------------------------------------
+// Game alert loop
+// ---------------------------------------------------------------------------
+
+function startDiscordGameAlertLoop(
+  client: import("discord.js").Client,
+  engineConfig: Partial<sportsclawConfig>
+): () => void {
+  const service = new GameAlertService({
+    store: gameSubscriptionStore,
+    platform: "discord",
+    deliver: async (target, text) => {
+      try {
+        const ch = await client.channels.fetch(target.chatId);
+        if (ch && ch.isTextBased() && "send" in ch) {
+          await (ch as import("discord.js").TextChannel).send(text);
+          return true;
+        }
+      } catch (err) {
+        console.error(`[sportsclaw] discord alert deliver error: ${err instanceof Error ? err.message : err}`);
+      }
+      return false;
+    },
+    runEngine: async (prompt, sub) => {
+      const engine = new sportsclawEngine(engineConfig);
+      return engine.run(prompt, { userId: sub.userId, platform: "discord", chatId: sub.chatId });
+    },
+  });
+
+  const lastStates = new Map<string, GameState>();
+  let stopped = false;
+  const POLL_MS = 20_000;
+
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const sports = await gameSubscriptionStore.activeSports();
+      for (const sport of sports) {
+        const res = await executePythonBridge(sport, "scores", {}, engineConfig);
+        if (!res.success) continue;
+        for (const curr of normalizeScoreboard(sport, res.data)) {
+          const prev = lastStates.get(curr.gameId);
+          for (const event of detectGameEvents(prev, curr)) {
+            void publishGameEvent(event);
+            await service.handleEvent(event);
+          }
+          lastStates.set(curr.gameId, curr);
+        }
+      }
+    } catch (err) {
+      console.error(`[sportsclaw] discord alert loop tick error: ${err instanceof Error ? err.message : err}`);
+    }
+    if (!stopped) setTimeout(tick, POLL_MS);
+  };
+
+  setTimeout(tick, POLL_MS);
+  console.error("[sportsclaw] discord game alert loop started");
+  return () => { stopped = true; };
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +642,7 @@ export async function startDiscordListener(): Promise<void> {
     console.log(
       `[sportsclaw] Listening for "${PREFIX}" commands and mentions.`
     );
+    startDiscordGameAlertLoop(client, engineConfig);
 
     // Register /menu slash command globally
     if (client.user && process.env.DISCORD_BOT_TOKEN) {
@@ -697,7 +763,12 @@ export async function startDiscordListener(): Promise<void> {
     try {
       await message.channel.sendTyping();
       const engine = new sportsclawEngine(engineConfig);
-      const response = await engine.run(prompt, { userId, sessionId: userId });
+      const response = await engine.run(prompt, {
+        userId,
+        sessionId: userId,
+        platform: "discord",
+        chatId: String(message.channel.id),
+      });
 
       await sendGameResponse(response, prompt, userId, message);
       await sendGeneratedImages(engine, message);
