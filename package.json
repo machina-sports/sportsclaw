@@ -63,7 +63,8 @@
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs",
     "test:session-store": "npm run build && node --test test/session-store.test.mjs",
     "test:file-memory-atomic": "npm run build && node --test test/file-memory-atomic.test.mjs",
-    "test:analytics-tokens": "npm run build && node --test test/analytics-tokens.test.mjs"
+    "test:analytics-tokens": "npm run build && node --test test/analytics-tokens.test.mjs",
+    "test:token-ledger": "npm run build && node --test test/token-ledger.test.mjs"
   },
   "keywords": [
     "sports",

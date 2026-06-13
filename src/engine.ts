@@ -70,6 +70,7 @@ import {
   ApprovalPendingHalt,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
+import { recordTokens, tokensUsedToday } from "./token-ledger.js";
 import { createTask, listTasks, completeTask } from "./taskbus.js";
 import { renderChart, type ChartType, type BracketMatch } from "./charts.js";
 import {
@@ -3148,6 +3149,7 @@ export class sportsclawEngine {
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
     this._generatedImages = [];
     this._generatedVideos = [];
+    this._lastUsage = null;
 
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
@@ -3186,6 +3188,17 @@ export class sportsclawEngine {
         console.error("[sportsclaw] guide intercept: handling meta-query");
       }
       return generateGuideResponse(sanitizedPrompt);
+    }
+
+    // --- Spend guardrail: refuse to start a run once the daily budget is hit ---
+    if ((this.config.dailyTokenBudget ?? 0) > 0) {
+      const used = tokensUsedToday();
+      if (used >= this.config.dailyTokenBudget!) {
+        throw new Error(
+          `Daily token budget exhausted (${used}/${this.config.dailyTokenBudget} tokens used today, UTC). ` +
+            `Raise dailyTokenBudget in config or wait until tomorrow.`
+        );
+      }
     }
 
     // --- Session: restore prior conversation history ---
@@ -3640,6 +3653,7 @@ export class sportsclawEngine {
         }
       }
 
+      recordTokens(this._lastUsage?.totalTokens ?? 0);
       return responseText;
     }
 
@@ -3809,6 +3823,7 @@ export class sportsclawEngine {
           `output=${this._lastUsage.outputTokens} total=${this._lastUsage.totalTokens}`
       );
     }
+    recordTokens(this._lastUsage.totalTokens);
 
     // Append the full response messages to our history for multi-turn support
     for (const msg of result.response.messages) {
