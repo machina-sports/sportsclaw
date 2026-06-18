@@ -20,7 +20,7 @@ describe("premium signal prompt section", () => {
     assert.ok(/`upgrade`/.test(PREMIUM_SIGNAL), "must reference the `upgrade` field");
     assert.ok(
       /never invent/i.test(PREMIUM_SIGNAL),
-      "must forbid inventing an upsell — the data layer decides what is premium"
+      "must forbid inventing a premium hint — the data layer decides what is premium"
     );
   });
 
