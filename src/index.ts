@@ -126,7 +126,6 @@ import {
   getMcpConfigPath,
   McpManager,
 } from "./mcp.js";
-import { startMcpServer } from "./mcp-server.js";
 import { WatchManager } from "./watch.js";
 import type { WatchOutputMode, WatcherConfig } from "./types.js";
 
@@ -2476,18 +2475,9 @@ async function cmdMcp(args: string[]): Promise<void> {
     }
     console.log("");
 
-  } else if (sub === "start") {
-    const isVerbose = args.includes("--verbose") || args.includes("-v");
-    try {
-      await startMcpServer({ verbose: isVerbose });
-    } catch (err) {
-      console.error(pc.red("Failed to run client-facing MCP Server:"), err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-
   } else {
     console.error(`Unknown mcp subcommand: "${sub}"`);
-    console.error("Usage: sportsclaw mcp [add|remove|list|start]");
+    console.error("Usage: sportsclaw mcp [add|remove|list]");
     process.exit(1);
   }
 }
@@ -2587,7 +2577,6 @@ function printHelp(): void {
   console.log("  sportsclaw mcp add <url>           Connect an MCP server (Machina pod, etc.)");
   console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
   console.log("  sportsclaw mcp list                List configured MCP servers");
-  console.log("  sportsclaw mcp start               Start the client-facing MCP server (stdio)");
   console.log("  sportsclaw watch <sport> <command>  Watch an endpoint for realtime changes");
   console.log("  sportsclaw watch --config=<path>   Run multiple watchers from config file");
   console.log("  sportsclaw plugin install <name>   Install an optional plugin");
