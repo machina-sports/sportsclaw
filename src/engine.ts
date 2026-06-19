@@ -66,7 +66,7 @@ import {
 } from "./analytics.js";
 import { AskUserQuestionHalt } from "./ask.js";
 import {
-  isActionPreApproved,
+  gateApproval,
   ApprovalPendingHalt,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
@@ -1012,6 +1012,12 @@ export class sportsclawEngine {
     const registry = this.registry;
     const verbose = this.config.verbose;
 
+    // Interactive approval prompting is only safe on an interactive CLI terminal.
+    // Everywhere else (operator daemon, piped input, Discord/Telegram) the gate
+    // fails closed with an actionable denial.
+    const interactiveApproval =
+      (runPlatform ?? "cli") === "cli" && !!process.stdin.isTTY;
+
     for (const spec of registry.getAllToolSpecs()) {
       toolMap[spec.name] = defineTool({
         description: spec.description,
@@ -1033,20 +1039,17 @@ export class sportsclawEngine {
             throw new Error(skipReason);
           }
 
-          // Declarative tool-level approval check.
-          // No interactive approval-resume UI is wired into the listeners, so a
-          // denial surfaces as an actionable, model-visible error (which the
-          // agent relays to the user) rather than an unrecoverable halt.
+          // Declarative tool-level approval gate. Interactive CLI prompts the
+          // operator; everywhere else it fails closed with an actionable,
+          // model-visible denial.
           if (!config.yoloMode && spec.needsApproval && spec.needsApproval(args)) {
-            const platform = runPlatform ?? "cli";
-            const userId = runUserId ?? "anonymous";
-            const preApproved = await isActionPreApproved(platform, userId, spec.name as any);
-            if (!preApproved) {
-              throw new Error(
-                `${spec.name} denied: user approval required. Pass --yolo to bypass approval gates, ` +
-                `or pre-approve via /approve.`
-              );
-            }
+            await gateApproval(
+              spec.name,
+              `Execution of ${spec.name} with arguments: ${JSON.stringify(args)}`,
+              runPlatform ?? "cli",
+              runUserId ?? "anonymous",
+              { interactive: interactiveApproval }
+            );
           }
 
           if (verbose) {
@@ -2905,7 +2908,7 @@ export class sportsclawEngine {
     // error (the agent relays the remedy to the user).
     // -----------------------------------------------------------------
 
-    const agenticPlatform = "cli"; // default; listeners override via RunOptions
+    const agenticPlatform = runPlatform ?? "cli";
     const agenticUserId = runUserId ?? "anonymous";
 
     // Blocked path patterns for YOLO mode — prevent writes to sensitive locations
@@ -2981,22 +2984,16 @@ export class sportsclawEngine {
           return executeWriteFile(resolved, fileContent);
         }
 
-        // Check for allow-always rule
-        const preApproved = await isActionPreApproved(
+        // Not YOLO: gate on approval (interactive prompt on a CLI terminal,
+        // fail-closed denial otherwise), then execute.
+        await gateApproval(
+          "write_file",
+          `Write file to ${filePath} (${fileContent.length} bytes)`,
           agenticPlatform,
           agenticUserId,
-          "write_file"
+          { interactive: interactiveApproval }
         );
-        if (preApproved) {
-          return executeWriteFile(filePath, fileContent);
-        }
-
-        // Not approved and not YOLO: deny with an actionable, model-visible
-        // error (no stdin blocking, no dead-end halt).
-        throw new Error(
-          `write_file denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Target: ${filePath} (${fileContent.length} bytes)`
-        );
+        return executeWriteFile(filePath, fileContent);
       },
     });
 
@@ -3088,22 +3085,16 @@ export class sportsclawEngine {
           return runCommand();
         }
 
-        // Check for allow-always rule
-        const preApproved = await isActionPreApproved(
+        // Not YOLO: gate on approval (interactive prompt on a CLI terminal,
+        // fail-closed denial otherwise), then execute.
+        await gateApproval(
+          "execute_command",
+          `Execute command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`,
           agenticPlatform,
           agenticUserId,
-          "execute_command"
+          { interactive: interactiveApproval }
         );
-        if (preApproved) {
-          return runCommand();
-        }
-
-        // Not approved and not YOLO: deny with an actionable, model-visible
-        // error (no stdin blocking, no dead-end halt).
-        throw new Error(
-          `execute_command denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`
-        );
+        return runCommand();
       },
     });
 
