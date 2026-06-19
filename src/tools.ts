@@ -9,219 +9,41 @@
  * Zero TS-to-Python rewriting is required.
  */
 
-import { execFile } from "node:child_process";
 import type {
   ToolSpec,
-  PythonBridgeResult,
   sportsclawConfig,
   SportSchema,
 } from "./types.js";
 import type { McpManager } from "./mcp.js";
-import { buildSportsSkillsRepairCommand, isVenvSetup, getVenvDir } from "./python.js";
+import { buildSportsSkillsRepairCommand } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
-import { DataFusionEngine, entityResolver } from "./intelligence/index.js";
-import { CircuitBreaker } from "./circuit-breaker.js";
-import { ConnectionManager } from "./connections.js";
+import { BUILTIN_TOOLS } from "./tools/index.js";
 
-type BridgeErrorCode =
-  | "timeout"
-  | "dependency_missing"
-  | "network_dns"
-  | "rate_limited"
-  | "python_version_incompatible"
-  | "circuit_open"
-  | "tool_execution_failed";
+export {
+  ToolCallInput,
+  ToolCallResult,
+  validateIdentifier,
+  classifyBridgeError,
+  buildSubprocessEnv,
+  executePythonBridge,
+  bridgeBreaker,
+} from "./bridge.js";
 
-function classifyBridgeError(
-  error?: string,
-  stderr?: string
-): { errorCode: BridgeErrorCode; hint: string } {
-  const haystack = `${error ?? ""}\n${stderr ?? ""}`.toLowerCase();
+import {
+  validateIdentifier,
+  classifyBridgeError,
+  executePythonBridge,
+  type ToolCallInput,
+  type ToolCallResult,
+} from "./bridge.js";
 
-  if (haystack.includes("timed out") || haystack.includes("command timed out")) {
-    return {
-      errorCode: "timeout",
-      hint:
-        "The data provider timed out. Retry the same query; if it persists, increase timeout in config.",
-    };
-  }
-  if (
-    haystack.includes("modulenotfounderror") ||
-    haystack.includes("importerror") ||
-    haystack.includes("optional dependency") ||
-    haystack.includes("dependency_missing") ||
-    haystack.includes("requires extra dependencies")
-  ) {
-    return {
-      errorCode: "dependency_missing",
-      hint: "A required dependency is missing in the selected Python environment.",
-    };
-  }
-  if (
-    haystack.includes("enotfound") ||
-    haystack.includes("name resolution") ||
-    haystack.includes("nodename nor servname") ||
-    haystack.includes("getaddrinfo")
-  ) {
-    return {
-      errorCode: "network_dns",
-      hint: "Network/DNS lookup failed while reaching a data source. Verify internet/DNS and retry.",
-    };
-  }
-  if (
-    haystack.includes("429") ||
-    haystack.includes("rate limit") ||
-    haystack.includes("too many requests")
-  ) {
-    return {
-      errorCode: "rate_limited",
-      hint: "The provider rate-limited requests. Wait briefly and retry.",
-    };
-  }
-  if (
-    haystack.includes("unsupported operand type(s) for |") ||
-    (haystack.includes("typeerror") && haystack.includes("type |")) ||
-    (haystack.includes("syntaxerror") && haystack.includes("x | y"))
-  ) {
-    return {
-      errorCode: "python_version_incompatible",
-      hint:
-        "Python 3.10+ is required. The current interpreter is too old for sports-skills. " +
-        "Upgrade Python or run: sportsclaw config",
-    };
-  }
 
-  if (haystack.includes("circuit breaker open")) {
-    return {
-      errorCode: "circuit_open",
-      hint:
-        "This data source is cooling down after repeated failures. " +
-        "Try a different question or retry in about a minute.",
-    };
-  }
-
-  return {
-    errorCode: "tool_execution_failed",
-    hint: "The tool execution failed. Retry and inspect stderr for details.",
-  };
-}
-
-export interface RetryPlan {
-  retry: boolean;
-  delayMs: number;
-}
-
-/**
- * Decide whether a failed bridge attempt should be retried and how long to
- * wait first. `attempt` is the zero-based index of the attempt that just
- * failed. Deterministic failures (missing deps, incompatible Python, open
- * circuit) never retry; transient failures back off with jitter so parallel
- * lanes don't stampede a recovering provider.
- */
-export function resolveRetryPlan(
-  errorCode: BridgeErrorCode,
-  attempt: number
-): RetryPlan {
-  const jitter = () => Math.floor(Math.random() * 250);
-  switch (errorCode) {
-    case "dependency_missing":
-    case "python_version_incompatible":
-    case "circuit_open":
-      return { retry: false, delayMs: 0 };
-    case "rate_limited":
-      return attempt < 2
-        ? { retry: true, delayMs: 1500 * 2 ** attempt + jitter() }
-        : { retry: false, delayMs: 0 };
-    case "network_dns":
-      return attempt < 2
-        ? { retry: true, delayMs: 500 * 2 ** attempt + jitter() }
-        : { retry: false, delayMs: 0 };
-    case "timeout":
-      // One retry; executePythonBridge widens the timeout window instead of sleeping.
-      return attempt < 1
-        ? { retry: true, delayMs: 0 }
-        : { retry: false, delayMs: 0 };
-    default:
-      return attempt < 1
-        ? { retry: true, delayMs: 250 + jitter() }
-        : { retry: false, delayMs: 0 };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Tool catalogue — these are the built-in tools exposed to the LLM
 // ---------------------------------------------------------------------------
 
-export const TOOL_SPECS: ToolSpec[] = [
-  {
-    name: "sports_query",
-    description: [
-      "Execute a sports data query via the sports-skills Python package.",
-      "This tool fetches live and historical sports data including scores,",
-      "standings, schedules, odds, play-by-play, stats, and more.",
-      "",
-      "Supported sports: nfl, nba, mlb, nhl, soccer, f1, mma, tennis, cfb, cbb.",
-      "",
-      "Examples of sport + command pairs:",
-      '  sport="nfl", command="scores"          → current/recent NFL scores',
-      '  sport="nfl", command="standings"        → NFL standings',
-      '  sport="nba", command="schedule"         → NBA schedule',
-      '  sport="soccer", command="standings", args={"league": "premier_league"}',
-      '  sport="f1", command="race_results", args={"year": 2025, "round": 1}',
-      "",
-      "Pass any extra parameters as key-value pairs in the `args` object.",
-    ].join("\n"),
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        sport: {
-          type: "string",
-          description: "The sport to query (e.g. nfl, nba, mlb, nhl, soccer, f1).",
-        },
-        command: {
-          type: "string",
-          description:
-            "The specific command/action to execute (e.g. scores, standings, schedule).",
-        },
-        args: {
-          type: "object",
-          description: "Optional key-value arguments passed to the command.",
-          additionalProperties: true,
-        },
-      },
-      required: ["sport", "command"],
-    },
-  },
-  {
-    name: "sports_intelligence_snapshot",
-    description: [
-      "Generate a consolidated sports intelligence snapshot combining scores, odds, prediction models,",
-      "news, and player props. Implements multi-source data fusion and canonical entity resolution.",
-      "",
-      "Supported targets: game, player, market.",
-      "Requires a sport discipline and search query/ID."
-    ].join("\n"),
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        sport: {
-          type: "string",
-          description: "The sport discipline (e.g. nfl, nba, mlb, soccer, tennis, f1).",
-        },
-        target: {
-          type: "string",
-          enum: ["game", "player", "market"],
-          description: "The snapshot target: game, player, or market.",
-        },
-        query: {
-          type: "string",
-          description: "The entity query, ID, or name (e.g. 'nba:event:20260520_lal_gsw' or player name 'LeBron James' or team name).",
-        },
-      },
-      required: ["sport", "target", "query"],
-    },
-  },
-];
+export const TOOL_SPECS: ToolSpec[] = BUILTIN_TOOLS.map((t) => t.spec);
 
 // ---------------------------------------------------------------------------
 // Search-First Middleware — intercept guessed IDs before they hit the bridge
@@ -300,14 +122,7 @@ function detectGuessedId(sport: string, input: Record<string, unknown>): string 
 // Input validation
 // ---------------------------------------------------------------------------
 
-const SAFE_IDENTIFIER = /^[a-zA-Z0-9_-]+$/;
 
-function validateIdentifier(value: string, label: string): string | null {
-  if (!SAFE_IDENTIFIER.test(value)) {
-    return `Invalid ${label}: must contain only alphanumeric characters, underscores, and hyphens`;
-  }
-  return null;
-}
 
 /**
  * Sanitize bare year values to fully qualified ESPN / League slugs
@@ -379,17 +194,7 @@ export function sanitizeToolInput(toolName: string, input: ToolCallInput): void 
 // Tool dispatch types
 // ---------------------------------------------------------------------------
 
-export interface ToolCallInput {
-  sport?: string;
-  command?: string;
-  args?: Record<string, unknown>;
-  [key: string]: unknown;
-}
 
-export interface ToolCallResult {
-  content: string;
-  isError: boolean;
-}
 
 // ---------------------------------------------------------------------------
 // Tool Result Cache — TTL-based in-memory caching
@@ -662,10 +467,9 @@ export class ToolRegistry {
 
     // Execute the tool
     let result: ToolCallResult;
-    if (toolName === "sports_query") {
-      result = await this.handleSportsQuery(input, config);
-    } else if (toolName === "sports_intelligence_snapshot") {
-      result = await this.handleSportsIntelligenceSnapshot(input, config);
+    const builtin = BUILTIN_TOOLS.find((t) => t.spec.name === toolName);
+    if (builtin) {
+      result = await builtin.execute(input, config, this);
     } else if (this.mcpRouteMap.has(toolName) && this.mcpManager) {
       // MCP tool — dispatch via MCP client
       result = await this.mcpManager.callTool(toolName, input as Record<string, unknown>);
@@ -695,212 +499,7 @@ export class ToolRegistry {
     return result;
   }
 
-  // -------------------------------------------------------------------------
-  // Private handlers
-  // -------------------------------------------------------------------------
 
-  private async handleSportsIntelligenceSnapshot(
-    input: ToolCallInput,
-    config?: Partial<sportsclawConfig>
-  ): Promise<ToolCallResult> {
-    const { sport, target, query } = input;
-    if (!sport || !target || !query) {
-      return {
-        content: JSON.stringify({ error: "Missing required parameters: sport, target, and query" }),
-        isError: true,
-      };
-    }
-
-    const fusionEngine = DataFusionEngine.getInstance();
-
-    if (target === "game") {
-      let liveGame: any = undefined;
-      let gameId = String(query);
-
-      // Try to get scores/matchups to locate this game/event
-      const bridgeRes = await executePythonBridge(sport, "scores", {}, config, sport).catch(() => null);
-      if (bridgeRes && bridgeRes.success && Array.isArray(bridgeRes.data)) {
-        for (const game of bridgeRes.data) {
-          try {
-            const home = game["sport:competitor"]?.[0]?.["sport:name"] || "";
-            const away = game["sport:competitor"]?.[1]?.["sport:name"] || "";
-            
-            const resolvedQueryId = entityResolver.resolveTeam(sport, String(query));
-            const resolvedHomeId = entityResolver.resolveTeam(sport, home);
-            const resolvedAwayId = entityResolver.resolveTeam(sport, away);
-
-            const matchesHome = resolvedHomeId === resolvedQueryId || home.toLowerCase().includes(String(query).toLowerCase());
-            const matchesAway = resolvedAwayId === resolvedQueryId || away.toLowerCase().includes(String(query).toLowerCase());
-            if (matchesHome || matchesAway || String(game["@id"] || "").includes(String(query))) {
-              liveGame = game;
-              gameId = game["@id"] || game["id"] || gameId;
-              break;
-            }
-          } catch {
-            // ignore
-          }
-        }
-      } else if (bridgeRes && bridgeRes.success && bridgeRes.data && typeof bridgeRes.data === "object") {
-        liveGame = bridgeRes.data;
-        gameId = liveGame["@id"] || liveGame["id"] || gameId;
-      }
-
-      // Try fetching odds for the event
-      let marketOdds: any = undefined;
-      const oddsRes = await executePythonBridge(sport, "odds", { event_id: gameId }, config, sport).catch(() => null);
-      if (oddsRes && oddsRes.success) {
-        marketOdds = oddsRes.data;
-      }
-
-      // Try fetching predictions
-      let prediction: any = undefined;
-      const predRes = await executePythonBridge(sport, "predictions", { event_id: gameId }, config, sport).catch(() => null);
-      if (predRes && predRes.success) {
-        prediction = predRes.data;
-      }
-
-      const snapshot = fusionEngine.fuseGameSnapshot({
-        sport,
-        gameId,
-        liveGame,
-        marketOdds,
-        prediction,
-      });
-
-      return {
-        content: JSON.stringify(snapshot, null, 2),
-        isError: false,
-      };
-    } else if (target === "player") {
-      const canonicalPlayerId = entityResolver.resolvePlayer(sport, String(query));
-
-      const playerStatsRes = await executePythonBridge(sport, "player_stats", { player_id: canonicalPlayerId || String(query) }, config, sport).catch(() => null);
-      const playerProfileRes = await executePythonBridge(sport, "player_profile", { player_id: canonicalPlayerId || String(query) }, config, sport).catch(() => null);
-
-      let statsSummary: any = undefined;
-      let team = "Unknown Team";
-      let status = "active";
-      let injuryDetail = undefined;
-
-      if (playerStatsRes && playerStatsRes.success) {
-        statsSummary = playerStatsRes.data;
-      }
-      if (playerProfileRes && playerProfileRes.success) {
-        const profile: any = playerProfileRes.data;
-        if (profile) {
-          team = profile.team || team;
-          status = profile.status || status;
-          injuryDetail = profile.injuryDetail || injuryDetail;
-        }
-      }
-
-      const snapshot = fusionEngine.fusePlayerSnapshot({
-        sport,
-        playerName: String(query),
-        team,
-        status,
-        injuryDetail,
-        statsSummary,
-      });
-
-      return {
-        content: JSON.stringify(snapshot, null, 2),
-        isError: false,
-      };
-    } else { // market
-      let sportsbookOdds: any = undefined;
-      const oddsRes = await executePythonBridge(sport, "odds", { event_id: String(query) }, config).catch(() => null);
-      if (oddsRes && oddsRes.success) {
-        sportsbookOdds = oddsRes.data;
-      }
-
-      const snapshot = fusionEngine.fuseMarketSnapshot({
-        eventId: String(query),
-        sport,
-        sportsbookOdds,
-      });
-
-      return {
-        content: JSON.stringify(snapshot, null, 2),
-        isError: false,
-      };
-    }
-  }
-
-  private buildBridgeErrorResult(
-    result: { error?: string; stderr?: string },
-    sport: string,
-    repairCmd: string
-  ): ToolCallResult {
-    const classified = classifyBridgeError(result.error, result.stderr);
-    let hint: string;
-    if (classified.errorCode === "dependency_missing") {
-      hint = sport === "f1"
-        ? `F1 support is unavailable. Repair with: ${repairCmd}`
-        : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
-    } else {
-      hint = classified.hint;
-    }
-    return {
-      content: JSON.stringify({
-        error: result.error,
-        error_code: classified.errorCode,
-        stderr: result.stderr,
-        hint,
-      }),
-      isError: true,
-    };
-  }
-
-  private async handleSportsQuery(
-    input: ToolCallInput,
-    config?: Partial<sportsclawConfig>
-  ): Promise<ToolCallResult> {
-    const pythonPath = config?.pythonPath ?? "python3";
-    const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
-
-    if (!input.sport || !input.command) {
-      return {
-        content: JSON.stringify({
-          error: "Missing required parameters: sport and command",
-        }),
-        isError: true,
-      };
-    }
-
-    const sportError = validateIdentifier(input.sport, "sport");
-    if (sportError) {
-      return {
-        content: JSON.stringify({ error: sportError }),
-        isError: true,
-      };
-    }
-
-    const cmdError = validateIdentifier(input.command, "command");
-    if (cmdError) {
-      return {
-        content: JSON.stringify({ error: cmdError }),
-        isError: true,
-      };
-    }
-
-    const result = await executePythonBridge(
-      input.sport,
-      input.command,
-      input.args,
-      config,
-      input.sport
-    );
-
-    if (!result.success) {
-      return this.buildBridgeErrorResult(result, input.sport, repairCmd);
-    }
-
-    return {
-      content: JSON.stringify(result.data),
-      isError: false,
-    };
-  }
 
   private async handleDynamicTool(
     sport: string,
@@ -930,7 +529,24 @@ export class ToolRegistry {
     const result = await executePythonBridge(sport, command, args, config, connectionName);
 
     if (!result.success) {
-      return this.buildBridgeErrorResult(result, sport, repairCmd);
+      const classified = classifyBridgeError(result.error, result.stderr);
+      let hint: string;
+      if (classified.errorCode === "dependency_missing") {
+        hint = sport === "f1"
+          ? `F1 support is unavailable. Repair with: ${repairCmd}`
+          : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
+      } else {
+        hint = classified.hint;
+      }
+      return {
+        content: JSON.stringify({
+          error: result.error,
+          error_code: classified.errorCode,
+          stderr: result.stderr,
+          hint,
+        }),
+        isError: true,
+      };
     }
 
     return {
@@ -940,178 +556,4 @@ export class ToolRegistry {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Minimal env vars for the subprocess
-// ---------------------------------------------------------------------------
 
-export function buildSubprocessEnv(
-  extra?: Record<string, string>,
-  connectionName?: string
-): Record<string, string> {
-  const manager = new ConnectionManager();
-  const env = manager.getSandboxEnv(connectionName, extra);
-
-  // Activate the managed venv for all subprocess calls
-  if (isVenvSetup()) {
-    const venvDir = getVenvDir();
-    env.VIRTUAL_ENV = venvDir;
-    const venvBin = venvDir + "/bin";
-    env.PATH = env.PATH ? `${venvBin}:${env.PATH}` : venvBin;
-  }
-
-  return env;
-}
-
-// ---------------------------------------------------------------------------
-// Python Subprocess Bridge
-// ---------------------------------------------------------------------------
-
-/**
- * Build the CLI arguments for invoking sports-skills.
- *
- * Invocation pattern:
- *   python3 -m sports_skills <sport> <command> [--key value ...]
- */
-function buildArgs(
-  sport: string,
-  command: string,
-  args?: Record<string, unknown>
-): string[] {
-  const cliArgs = ["-m", "sports_skills", sport, command];
-
-  if (args) {
-    for (const [key, value] of Object.entries(args)) {
-      if (value === undefined || value === null) continue;
-      const keyError = validateIdentifier(key, "argument key");
-      if (keyError) continue;
-      
-      if (typeof value === "boolean") {
-        if (value) cliArgs.push(`--${key}`);
-      } else {
-        const strValue =
-          typeof value === "object" ? JSON.stringify(value) : String(value);
-        cliArgs.push(`--${key}=${strValue}`);
-      }
-    }
-  }
-
-  return cliArgs;
-}
-
-/**
- * Shared per-sport circuit breaker for the Python bridge. Module-level by
- * design: a data source that is down is down for every engine instance in
- * this process, so they should all fail fast together.
- */
-export const bridgeBreaker = new CircuitBreaker();
-
-/**
- * Execute a sports-skills command via an async child process.
- *
- * Returns a structured result with stdout parsed as JSON when possible.
- */
-export function executePythonBridge(
-  sport: string,
-  command: string,
-  args?: Record<string, unknown>,
-  config?: Partial<sportsclawConfig>,
-  connectionName?: string
-): Promise<PythonBridgeResult> {
-  const pythonPath = config?.pythonPath ?? "python3";
-  const cliArgs = buildArgs(sport, command, args);
-  const timeout = config?.timeout ?? 60_000;
-  const retryTimeout = Math.max(timeout * 2, 90_000);
-
-  if (config?.verbose) {
-    console.error(`[sportsclaw] exec: ${pythonPath} ${cliArgs.join(" ")}`);
-  }
-
-  const runOnce = (attemptTimeout: number) =>
-    new Promise<(PythonBridgeResult & { timedOut?: boolean })>((resolve) => {
-      execFile(
-        pythonPath,
-        cliArgs,
-        {
-          encoding: "utf-8",
-          timeout: attemptTimeout,
-          maxBuffer: 25 * 1024 * 1024, // 25 MB for verbose FastF1 stderr on degraded networks
-          env: buildSubprocessEnv(config?.env, connectionName),
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            const execErr = error as Error & {
-              signal?: NodeJS.Signals | null;
-              code?: string | number | null;
-            };
-            const timedOut =
-              /timed out/i.test(error.message) ||
-              (execErr.signal === "SIGTERM" && execErr.code === null);
-            resolve({
-              success: false,
-              error: error.message,
-              stdout: stdout || undefined,
-              stderr: stderr || undefined,
-              timedOut,
-            });
-            return;
-          }
-
-          const trimmed = (stdout ?? "").trim();
-          if (!trimmed) {
-            resolve({
-              success: true,
-              data: null,
-              stdout: "",
-            });
-            return;
-          }
-
-          try {
-            const data = JSON.parse(trimmed);
-            resolve({ success: true, data });
-          } catch {
-            // Not JSON — return raw stdout
-            resolve({ success: true, data: trimmed, stdout: trimmed });
-          }
-        }
-      );
-    });
-
-  return (async () => {
-    if (!bridgeBreaker.canProceed(sport)) {
-      return {
-        success: false,
-        error:
-          `circuit breaker open for "${sport}": repeated failures reaching the data source. ` +
-          `Cooling down before new attempts.`,
-      };
-    }
-
-    let attempt = 0;
-    let lastResult = await runOnce(timeout);
-    while (!lastResult.success) {
-      const { errorCode } = classifyBridgeError(lastResult.error, lastResult.stderr);
-      const plan = resolveRetryPlan(errorCode, attempt);
-      if (!plan.retry) break;
-      if (plan.delayMs > 0) {
-        await new Promise((r) => setTimeout(r, plan.delayMs));
-      }
-      attempt++;
-      // Timeouts get a widened window on retry; other errors keep the original.
-      const nextTimeout = errorCode === "timeout" ? retryTimeout : timeout;
-      if (config?.verbose) {
-        console.error(
-          `[sportsclaw] bridge retry attempt=${attempt} code=${errorCode} timeout=${nextTimeout}ms`
-        );
-      }
-      lastResult = await runOnce(nextTimeout);
-    }
-
-    if (lastResult.success) {
-      bridgeBreaker.recordSuccess(sport);
-    } else {
-      bridgeBreaker.recordFailure(sport);
-    }
-    return lastResult;
-  })();
-}
