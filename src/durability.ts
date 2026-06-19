@@ -105,7 +105,30 @@ export class DurableStateStore {
   }
 
   /**
+   * Detect a DurableStatePayload envelope. Pre-substrate files stored the bare
+   * domain object at the same path with no wrapper; the `namespace` field is the
+   * discriminator no legacy object carries (a legacy object that happens to have
+   * a `data` key still won't have a matching `namespace`).
+   */
+  private isEnvelope<T>(
+    parsed: unknown,
+    namespace: StateNamespace
+  ): parsed is DurableStatePayload<T> {
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { namespace?: unknown }).namespace === namespace &&
+      "data" in (parsed as object) &&
+      typeof (parsed as { createdAt?: unknown }).createdAt === "string"
+    );
+  }
+
+  /**
    * Load payload from disk. Auto-expires if TTL is exceeded.
+   *
+   * Backward-compatible: a pre-substrate file (the bare domain object, no
+   * envelope) is returned as the data itself rather than lost. Such files are
+   * upgraded to the envelope format naturally on the next save().
    */
   async load<T>(
     namespace: StateNamespace,
@@ -117,14 +140,19 @@ export class DurableStateStore {
 
     try {
       const raw = await readFile(path, "utf-8");
-      const payload = JSON.parse(raw) as DurableStatePayload<T>;
+      const parsed = JSON.parse(raw) as unknown;
 
-      if (payload.expiresAt && new Date(payload.expiresAt).getTime() < Date.now()) {
+      // Legacy pre-substrate file: the whole object IS the data.
+      if (!this.isEnvelope<T>(parsed, namespace)) {
+        return parsed as T;
+      }
+
+      if (parsed.expiresAt && new Date(parsed.expiresAt).getTime() < Date.now()) {
         await this.delete(namespace, id, opts);
         return null;
       }
 
-      return payload.data;
+      return parsed.data;
     } catch {
       return null;
     }
