@@ -68,8 +68,6 @@ import { AskUserQuestionHalt } from "./ask.js";
 import {
   isActionPreApproved,
   ApprovalPendingHalt,
-  generateApprovalId,
-  saveApprovalRequest,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { recordTokens, tokensUsedToday } from "./token-ledger.js";
@@ -1035,23 +1033,19 @@ export class sportsclawEngine {
             throw new Error(skipReason);
           }
 
-          // Declarative tool-level approval check
+          // Declarative tool-level approval check.
+          // No interactive approval-resume UI is wired into the listeners, so a
+          // denial surfaces as an actionable, model-visible error (which the
+          // agent relays to the user) rather than an unrecoverable halt.
           if (!config.yoloMode && spec.needsApproval && spec.needsApproval(args)) {
             const platform = runPlatform ?? "cli";
             const userId = runUserId ?? "anonymous";
             const preApproved = await isActionPreApproved(platform, userId, spec.name as any);
             if (!preApproved) {
-              const request = {
-                id: generateApprovalId(),
-                action: spec.name as any,
-                description: `Execution of ${spec.name} with arguments: ${JSON.stringify(args)}`,
-                toolArgs: args,
-                platform,
-                userId,
-                createdAt: new Date().toISOString(),
-              };
-              await saveApprovalRequest(request);
-              throw new ApprovalPendingHalt(request);
+              throw new Error(
+                `${spec.name} denied: user approval required. Pass --yolo to bypass approval gates, ` +
+                `or pre-approve via /approve.`
+              );
             }
           }
 
@@ -2906,9 +2900,9 @@ export class sportsclawEngine {
 
     // -----------------------------------------------------------------
     // Agentic Tools — write_file and execute_command
-    // These tools require explicit user approval before execution.
-    // When invoked, they throw ApprovalPendingHalt to halt the engine
-    // loop and prompt the user for consent.
+    // These tools require explicit user consent before execution. Without
+    // --yolo or a pre-approval rule they deny with an actionable, model-visible
+    // error (the agent relays the remedy to the user).
     // -----------------------------------------------------------------
 
     const agenticPlatform = "cli"; // default; listeners override via RunOptions
@@ -2997,18 +2991,12 @@ export class sportsclawEngine {
           return executeWriteFile(filePath, fileContent);
         }
 
-        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
-        const request = {
-          id: generateApprovalId(),
-          action: "write_file" as const,
-          description: `Write file to ${filePath} (${fileContent.length} bytes)`,
-          toolArgs: args,
-          platform: agenticPlatform,
-          userId: agenticUserId,
-          createdAt: new Date().toISOString(),
-        };
-        await saveApprovalRequest(request);
-        throw new ApprovalPendingHalt(request);
+        // Not approved and not YOLO: deny with an actionable, model-visible
+        // error (no stdin blocking, no dead-end halt).
+        throw new Error(
+          `write_file denied: user approval required. Pass --yolo to bypass approval gates, ` +
+          `or pre-approve via /approve. Target: ${filePath} (${fileContent.length} bytes)`
+        );
       },
     });
 
@@ -3110,18 +3098,12 @@ export class sportsclawEngine {
           return runCommand();
         }
 
-        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
-        const request = {
-          id: generateApprovalId(),
-          action: "execute_command" as const,
-          description: `Execute command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`,
-          toolArgs: args,
-          platform: agenticPlatform,
-          userId: agenticUserId,
-          createdAt: new Date().toISOString(),
-        };
-        await saveApprovalRequest(request);
-        throw new ApprovalPendingHalt(request);
+        // Not approved and not YOLO: deny with an actionable, model-visible
+        // error (no stdin blocking, no dead-end halt).
+        throw new Error(
+          `execute_command denied: user approval required. Pass --yolo to bypass approval gates, ` +
+          `or pre-approve via /approve. Command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`
+        );
       },
     });
 

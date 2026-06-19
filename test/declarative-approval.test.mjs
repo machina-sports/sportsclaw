@@ -1,11 +1,16 @@
 /**
  * Declarative Tool Approvals — test suite
  *
- * Verifies that:
- *  1. built-in write_file throws ApprovalPendingHalt when not pre-approved.
- *  2. built-in execute_command throws ApprovalPendingHalt when not pre-approved.
- *  3. Dynamic tools with a declarative needsApproval function throw ApprovalPendingHalt when triggered.
+ * There is no interactive approval-resume UI wired into any listener, so a
+ * denied gate must surface an actionable, model-visible error (which the agent
+ * relays to the user) rather than throwing ApprovalPendingHalt — an
+ * unrecoverable halt that no listener catches, which silently aborts the turn
+ * with a generic error. Verifies that:
+ *  1. built-in write_file returns an actionable denial when not pre-approved.
+ *  2. built-in execute_command returns an actionable denial when not pre-approved.
+ *  3. Dynamic tools with a declarative needsApproval function are denied (not halted) when triggered.
  *  4. Pre-approved rules allow execution to proceed.
+ *  5. The denial is never an ApprovalPendingHalt (no dead-end).
  */
 
 import assert from "node:assert/strict";
@@ -28,7 +33,7 @@ describe("Declarative & Built-in Tool Approvals", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("write_file and execute_command throw ApprovalPendingHalt when yoloMode is off and not pre-approved", async () => {
+  it("write_file and execute_command surface an actionable denial (not a dead-end halt) when yoloMode is off and not pre-approved", async () => {
     const engine = new sportsclawEngine({
       yoloMode: false,
       rootDir: tmpDir,
@@ -39,16 +44,19 @@ describe("Declarative & Built-in Tool Approvals", () => {
     // Test write_file
     const writeFileTool = tools["write_file"];
     assert.ok(writeFileTool, "write_file tool must exist");
+    const targetPath = path.join(tmpDir, "test.txt");
 
     try {
-      await writeFileTool.execute({ path: path.join(tmpDir, "test.txt"), content: "hello" });
-      assert.fail("write_file should have thrown ApprovalPendingHalt");
+      await writeFileTool.execute({ path: targetPath, content: "hello" });
+      assert.fail("write_file should have denied execution");
     } catch (err) {
-      assert.ok(err instanceof ApprovalPendingHalt, `expected ApprovalPendingHalt, got: ${err.name}`);
-      assert.strictEqual(err.request.action, "write_file");
-      assert.strictEqual(err.request.userId, "user_1");
-      assert.strictEqual(err.request.platform, "cli");
+      assert.ok(!(err instanceof ApprovalPendingHalt), "denial must not be an unrecoverable ApprovalPendingHalt");
+      assert.match(err.message, /write_file denied/);
+      assert.match(err.message, /approval required/i);
+      assert.match(err.message, /--yolo/);
     }
+    // The file must NOT have been written.
+    assert.ok(!fs.existsSync(targetPath), "write_file must not write when denied");
 
     // Test execute_command
     const execCmdTool = tools["execute_command"];
@@ -56,10 +64,12 @@ describe("Declarative & Built-in Tool Approvals", () => {
 
     try {
       await execCmdTool.execute({ command: "echo 'hello'" });
-      assert.fail("execute_command should have thrown ApprovalPendingHalt");
+      assert.fail("execute_command should have denied execution");
     } catch (err) {
-      assert.ok(err instanceof ApprovalPendingHalt, `expected ApprovalPendingHalt, got: ${err.name}`);
-      assert.strictEqual(err.request.action, "execute_command");
+      assert.ok(!(err instanceof ApprovalPendingHalt), "denial must not be an unrecoverable ApprovalPendingHalt");
+      assert.match(err.message, /execute_command denied/);
+      assert.match(err.message, /approval required/i);
+      assert.match(err.message, /--yolo/);
     }
   });
 
@@ -104,16 +114,15 @@ describe("Declarative & Built-in Tool Approvals", () => {
       assert.ok(!(err instanceof ApprovalPendingHalt), "should not require approval for amount <= 10");
     }
 
-    // 2. amount > 10 should trigger declarative approval check and throw ApprovalPendingHalt
+    // 2. amount > 10 should trigger the declarative approval check and be denied
+    //    with an actionable error — never a dead-end ApprovalPendingHalt.
     try {
       await betTool.execute({ amount: 15 });
       assert.fail("should have required approval for amount > 10");
     } catch (err) {
-      assert.ok(err instanceof ApprovalPendingHalt, "expected ApprovalPendingHalt");
-      assert.strictEqual(err.request.action, "high_risk_bet");
-      assert.strictEqual(err.request.userId, "user_2");
-      assert.strictEqual(err.request.platform, "cli");
-      assert.deepEqual(err.request.toolArgs, { amount: 15 });
+      assert.ok(!(err instanceof ApprovalPendingHalt), "denial must not be an unrecoverable ApprovalPendingHalt");
+      assert.match(err.message, /high_risk_bet denied/);
+      assert.match(err.message, /approval required/i);
     }
   });
 
