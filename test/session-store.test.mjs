@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,21 +52,23 @@ describe("SessionStore persistence", () => {
   it("expired sessions on disk are dropped and their file deleted", async () => {
     const a = new SessionStore(dir);
     await a.save("old", MESSAGES);
-    const file = readdirSync(dir).find((f) => f.endsWith(".json"));
+    const sessionsDir = join(dir, "sessions");
+    const file = readdirSync(sessionsDir).find((f) => f.endsWith(".json"));
     assert.ok(file, "session file written");
     // Rewrite with an updatedAt older than the 2h TTL.
-    writeFileSync(
-      join(dir, file),
-      JSON.stringify({ messages: MESSAGES, updatedAt: Date.now() - 3 * 60 * 60 * 1000 }),
-      "utf-8"
-    );
+    const filePath = join(sessionsDir, file);
+    const raw = readFileSync(filePath, "utf-8");
+    const payload = JSON.parse(raw);
+    payload.expiresAt = new Date(Date.now() - 1000).toISOString(); // Expired right now
+    payload.updatedAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    writeFileSync(filePath, JSON.stringify(payload), "utf-8");
 
     const b = new SessionStore(dir);
     assert.deepEqual(await b.load("old"), []);
     // unlink is fire-and-forget; give it a tick.
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(
-      readdirSync(dir).filter((f) => f.endsWith(".json")).length, 0,
+      readdirSync(sessionsDir).filter((f) => f.endsWith(".json")).length, 0,
       "expired file removed"
     );
   });
@@ -74,8 +76,9 @@ describe("SessionStore persistence", () => {
   it("corrupt session files are treated as empty", async () => {
     const a = new SessionStore(dir);
     await a.save("bad", MESSAGES);
-    const file = readdirSync(dir).find((f) => f.endsWith(".json"));
-    writeFileSync(join(dir, file), "{not json", "utf-8");
+    const sessionsDir = join(dir, "sessions");
+    const file = readdirSync(sessionsDir).find((f) => f.endsWith(".json"));
+    writeFileSync(join(sessionsDir, file), "{not json", "utf-8");
 
     const b = new SessionStore(dir);
     assert.deepEqual(await b.load("bad"), []);
@@ -84,7 +87,8 @@ describe("SessionStore persistence", () => {
   it("sanitizes hostile session ids into safe filenames", async () => {
     const store = new SessionStore(dir);
     await store.save("../../etc/passwd", MESSAGES);
-    for (const f of readdirSync(dir)) {
+    const sessionsDir = join(dir, "sessions");
+    for (const f of readdirSync(sessionsDir)) {
       assert.ok(!f.includes(".."), `unsafe filename: ${f}`);
       assert.ok(!f.includes("/"), `unsafe filename: ${f}`);
     }

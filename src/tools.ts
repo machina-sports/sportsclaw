@@ -27,6 +27,7 @@ export {
   buildSubprocessEnv,
   executePythonBridge,
   bridgeBreaker,
+  resolveRetryPlan,
 } from "./bridge.js";
 
 import {

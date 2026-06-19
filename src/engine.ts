@@ -280,6 +280,7 @@ const SESSION_MAX_MESSAGES = 100;
 export class SessionStore {
   private store = new Map<string, SessionEntry>();
   private persistDir: string | null;
+  private db: DurableStateStore;
 
   /**
    * @param persistDir Directory for on-disk session files. Defaults to
@@ -293,6 +294,14 @@ export class SessionStore {
         : persistDir ??
           process.env.SPORTSCLAW_SESSION_DIR ??
           join(homedir(), ".sportsclaw", "sessions");
+
+    if (this.persistDir === null) {
+      this.db = DurableStateStore.getInstance();
+    } else if (persistDir === undefined && !process.env.SPORTSCLAW_SESSION_DIR) {
+      this.db = DurableStateStore.getInstance();
+    } else {
+      this.db = new DurableStateStore(this.persistDir);
+    }
   }
 
   /** Load message history from memory only. Returns empty array if not found or expired. */
@@ -315,8 +324,7 @@ export class SessionStore {
     if (inMemory.length > 0) return inMemory;
     if (!this.persistDir) return [];
     try {
-      const store = DurableStateStore.getInstance();
-      const parsed = await store.load<SessionEntry>("sessions", sessionId);
+      const parsed = await this.db.load<SessionEntry>("sessions", sessionId);
       if (!parsed || !Array.isArray(parsed.messages) || typeof parsed.updatedAt !== "number") {
         return [];
       }
@@ -346,8 +354,7 @@ export class SessionStore {
 
     if (!this.persistDir) return;
     try {
-      const store = DurableStateStore.getInstance();
-      await store.save<SessionEntry>("sessions", sessionId, entry, { ttlMs: SESSION_TTL_MS });
+      await this.db.save<SessionEntry>("sessions", sessionId, entry, { ttlMs: SESSION_TTL_MS });
     } catch (err) {
       // Persistence is best-effort; the in-memory session is already saved.
       console.error(
@@ -360,8 +367,7 @@ export class SessionStore {
   clear(sessionId: string): boolean {
     const had = this.store.delete(sessionId);
     if (this.persistDir) {
-      const store = DurableStateStore.getInstance();
-      void store.delete("sessions", sessionId).catch(() => {});
+      void this.db.delete("sessions", sessionId).catch(() => {});
     }
     return had;
   }
