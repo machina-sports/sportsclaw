@@ -165,8 +165,20 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
   });
 
+  it("rejects a floating-point inferenceTimeoutMs", () => {
+    const r = validateOperatorJobConfig({ ...base, inferenceTimeoutMs: 3.14 });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
   it("rejects a non-numeric maxSteps", () => {
     const r = validateOperatorJobConfig({ ...base, maxSteps: "lots" });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "maxSteps"));
+  });
+
+  it("rejects a floating-point maxSteps", () => {
+    const r = validateOperatorJobConfig({ ...base, maxSteps: 14.5 });
     assert.strictEqual(r.valid, false);
     assert.ok(r.issues.find((i) => i.field === "maxSteps"));
   });

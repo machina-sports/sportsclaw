@@ -340,8 +340,8 @@ export function validateOperatorJobConfig(
   for (const field of ["inferenceTimeoutMs", "maxSteps"] as const) {
     if (raw[field] !== undefined) {
       const v = raw[field];
-      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
-        push(field, `must be a positive number (got ${JSON.stringify(v)})`);
+      if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+        push(field, `must be a positive integer (got ${JSON.stringify(v)})`);
       }
     }
   }
