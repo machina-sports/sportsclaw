@@ -13,15 +13,11 @@
  * Persistent allow-always rules are stored per-user on disk so the same
  * operation class won't prompt again in future sessions.
  *
- * Chat integration: listeners can also accept `/approve <id>` as a text
- * command to approve a pending request inline.
+ * Backed by the unified DurableStateStore substrate.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { DurableStateStore } from "./durability.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,27 +83,6 @@ export function generateApprovalId(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem paths
-// ---------------------------------------------------------------------------
-
-function getApprovalDir(platform: string, userId: string): string {
-  const sanitizedId = userId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const dir = join(homedir(), ".sportsclaw", "approvals", `${platform}-${sanitizedId}`);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-function getRequestPath(platform: string, userId: string, requestId: string): string {
-  return join(getApprovalDir(platform, userId), `${requestId}.json`);
-}
-
-function getRulesetPath(platform: string, userId: string): string {
-  return join(getApprovalDir(platform, userId), "ruleset.json");
-}
-
-// ---------------------------------------------------------------------------
 // Pending request persistence
 // ---------------------------------------------------------------------------
 
@@ -116,8 +91,9 @@ function getRulesetPath(platform: string, userId: string): string {
  * and the engine can resume after the user responds.
  */
 export async function saveApprovalRequest(request: ApprovalRequest): Promise<void> {
-  const path = getRequestPath(request.platform, request.userId, request.id);
-  await writeFile(path, JSON.stringify(request, null, 2), "utf-8");
+  const store = DurableStateStore.getInstance();
+  const subPath = `${request.platform}-${request.userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  await store.save<ApprovalRequest>("approvals", request.id, request, { subPath });
 }
 
 /**
@@ -128,14 +104,9 @@ export async function loadApprovalRequest(
   userId: string,
   requestId: string
 ): Promise<ApprovalRequest | null> {
-  const path = getRequestPath(platform, userId, requestId);
-  if (!existsSync(path)) return null;
-  try {
-    const raw = await readFile(path, "utf-8");
-    return JSON.parse(raw) as ApprovalRequest;
-  } catch {
-    return null;
-  }
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  return store.load<ApprovalRequest>("approvals", requestId, { subPath });
 }
 
 /**
@@ -146,17 +117,9 @@ export async function clearApprovalRequest(
   userId: string,
   requestId: string
 ): Promise<void> {
-  const path = getRequestPath(platform, userId, requestId);
-  if (existsSync(path)) {
-    const { unlink } = await import("node:fs/promises");
-    try {
-      await unlink(path);
-    } catch (err) {
-      console.error(
-        `[sportsclaw] Failed to clear approval request: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  }
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  await store.delete("approvals", requestId, { subPath });
 }
 
 // ---------------------------------------------------------------------------
@@ -170,16 +133,11 @@ export async function loadRuleset(
   platform: string,
   userId: string
 ): Promise<ApprovalRuleset> {
-  const path = getRulesetPath(platform, userId);
-  if (!existsSync(path)) {
-    return { allowedActions: [], updatedAt: new Date().toISOString() };
-  }
-  try {
-    const raw = await readFile(path, "utf-8");
-    return JSON.parse(raw) as ApprovalRuleset;
-  } catch {
-    return { allowedActions: [], updatedAt: new Date().toISOString() };
-  }
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const rules = await store.load<ApprovalRuleset>("approvals", "ruleset", { subPath });
+  if (rules) return rules;
+  return { allowedActions: [], updatedAt: new Date().toISOString() };
 }
 
 /**
@@ -195,8 +153,9 @@ export async function addAllowAlwaysRule(
     ruleset.allowedActions.push(action);
   }
   ruleset.updatedAt = new Date().toISOString();
-  const path = getRulesetPath(platform, userId);
-  await writeFile(path, JSON.stringify(ruleset, null, 2), "utf-8");
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  await store.save<ApprovalRuleset>("approvals", "ruleset", ruleset, { subPath });
 }
 
 /**

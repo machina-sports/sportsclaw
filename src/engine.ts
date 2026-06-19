@@ -36,6 +36,7 @@ import {
   type TokenBudgets,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
+import { DurableStateStore } from "./durability.js";
 import { execFile } from "node:child_process";
 import {
   loadAllSchemas,
@@ -52,8 +53,7 @@ import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
-import { readFileSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -68,6 +68,8 @@ import { AskUserQuestionHalt } from "./ask.js";
 import {
   isActionPreApproved,
   ApprovalPendingHalt,
+  generateApprovalId,
+  saveApprovalRequest,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { recordTokens, tokensUsedToday } from "./token-ledger.js";
@@ -278,7 +280,7 @@ const SESSION_MAX_MESSAGES = 100;
 export class SessionStore {
   private store = new Map<string, SessionEntry>();
   private persistDir: string | null;
-  private dirReady = false;
+  private db: DurableStateStore;
 
   /**
    * @param persistDir Directory for on-disk session files. Defaults to
@@ -292,11 +294,14 @@ export class SessionStore {
         : persistDir ??
           process.env.SPORTSCLAW_SESSION_DIR ??
           join(homedir(), ".sportsclaw", "sessions");
-  }
 
-  private filePath(sessionId: string): string {
-    const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
-    return join(this.persistDir!, `${safe}.json`);
+    if (this.persistDir === null) {
+      this.db = DurableStateStore.getInstance();
+    } else if (persistDir === undefined && !process.env.SPORTSCLAW_SESSION_DIR) {
+      this.db = DurableStateStore.getInstance();
+    } else {
+      this.db = new DurableStateStore(this.persistDir);
+    }
   }
 
   /** Load message history from memory only. Returns empty array if not found or expired. */
@@ -319,13 +324,8 @@ export class SessionStore {
     if (inMemory.length > 0) return inMemory;
     if (!this.persistDir) return [];
     try {
-      const raw = await readFile(this.filePath(sessionId), "utf-8");
-      const parsed = JSON.parse(raw) as SessionEntry;
+      const parsed = await this.db.load<SessionEntry>("sessions", sessionId);
       if (!parsed || !Array.isArray(parsed.messages) || typeof parsed.updatedAt !== "number") {
-        return [];
-      }
-      if (Date.now() - parsed.updatedAt > SESSION_TTL_MS) {
-        void unlink(this.filePath(sessionId)).catch(() => {});
         return [];
       }
       this.store.set(sessionId, parsed);
@@ -354,16 +354,7 @@ export class SessionStore {
 
     if (!this.persistDir) return;
     try {
-      if (!this.dirReady) {
-        mkdirSync(this.persistDir, { recursive: true });
-        this.dirReady = true;
-      }
-      const path = this.filePath(sessionId);
-      // Atomic write: temp file + rename so a crash mid-write never leaves
-      // a torn session file. Random suffix avoids concurrent-save collisions.
-      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-      await writeFile(tmp, JSON.stringify(entry), "utf-8");
-      await rename(tmp, path);
+      await this.db.save<SessionEntry>("sessions", sessionId, entry, { ttlMs: SESSION_TTL_MS });
     } catch (err) {
       // Persistence is best-effort; the in-memory session is already saved.
       console.error(
@@ -376,7 +367,7 @@ export class SessionStore {
   clear(sessionId: string): boolean {
     const had = this.store.delete(sessionId);
     if (this.persistDir) {
-      void unlink(this.filePath(sessionId)).catch(() => {});
+      void this.db.delete("sessions", sessionId).catch(() => {});
     }
     return had;
   }
@@ -1042,6 +1033,26 @@ export class sportsclawEngine {
               );
             }
             throw new Error(skipReason);
+          }
+
+          // Declarative tool-level approval check
+          if (!config.yoloMode && spec.needsApproval && spec.needsApproval(args)) {
+            const platform = runPlatform ?? "cli";
+            const userId = runUserId ?? "anonymous";
+            const preApproved = await isActionPreApproved(platform, userId, spec.name as any);
+            if (!preApproved) {
+              const request = {
+                id: generateApprovalId(),
+                action: spec.name as any,
+                description: `Execution of ${spec.name} with arguments: ${JSON.stringify(args)}`,
+                toolArgs: args,
+                platform,
+                userId,
+                createdAt: new Date().toISOString(),
+              };
+              await saveApprovalRequest(request);
+              throw new ApprovalPendingHalt(request);
+            }
           }
 
           if (verbose) {
@@ -2986,11 +2997,18 @@ export class sportsclawEngine {
           return executeWriteFile(filePath, fileContent);
         }
 
-        // Not approved and not YOLO: fail fast with error (no stdin blocking)
-        throw new Error(
-          `write_file denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Target: ${filePath} (${fileContent.length} bytes)`
-        );
+        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
+        const request = {
+          id: generateApprovalId(),
+          action: "write_file" as const,
+          description: `Write file to ${filePath} (${fileContent.length} bytes)`,
+          toolArgs: args,
+          platform: agenticPlatform,
+          userId: agenticUserId,
+          createdAt: new Date().toISOString(),
+        };
+        await saveApprovalRequest(request);
+        throw new ApprovalPendingHalt(request);
       },
     });
 
@@ -3092,11 +3110,18 @@ export class sportsclawEngine {
           return runCommand();
         }
 
-        // Not approved and not YOLO: fail fast with error (no stdin blocking)
-        throw new Error(
-          `execute_command denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`
-        );
+        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
+        const request = {
+          id: generateApprovalId(),
+          action: "execute_command" as const,
+          description: `Execute command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`,
+          toolArgs: args,
+          platform: agenticPlatform,
+          userId: agenticUserId,
+          createdAt: new Date().toISOString(),
+        };
+        await saveApprovalRequest(request);
+        throw new ApprovalPendingHalt(request);
       },
     });
 

@@ -7,32 +7,11 @@
  * buttons / Telegram inline keyboards). When the user taps an option, the
  * listener resumes the engine with the selected value.
  *
- * State file: ~/.sportsclaw/memory/<platform>-<user_id>/state_<contextKey>.json
+ * Backed by the unified DurableStateStore substrate.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, unlink } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { DurableStateStore } from "./durability.js";
 import type { SuspendedState, AskUserQuestionRequest } from "./types.js";
-
-// ---------------------------------------------------------------------------
-// State directory
-// ---------------------------------------------------------------------------
-
-function getMemoryDir(platform: string, userId: string): string {
-  const sanitizedId = userId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const dir = join(homedir(), ".sportsclaw", "memory", `${platform}-${sanitizedId}`);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-function getStatePath(platform: string, userId: string, contextKey?: string): string {
-  const filename = contextKey ? `state_${contextKey}.json` : "state.json";
-  return join(getMemoryDir(platform, userId), filename);
-}
 
 // ---------------------------------------------------------------------------
 // Save / Load / Clear suspended state
@@ -49,8 +28,10 @@ export async function saveSuspendedState(
   state: SuspendedState,
   stateKey?: string
 ): Promise<void> {
-  const path = getStatePath(state.platform, state.userId, stateKey);
-  await writeFile(path, JSON.stringify(state, null, 2), "utf-8");
+  const store = DurableStateStore.getInstance();
+  const subPath = `${state.platform}-${state.userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const filename = stateKey ? `state_${stateKey}` : "state";
+  await store.save<SuspendedState>("memory", filename, state, { subPath });
 }
 
 /**
@@ -61,14 +42,10 @@ export async function loadSuspendedState(
   userId: string,
   contextKey?: string
 ): Promise<SuspendedState | null> {
-  const path = getStatePath(platform, userId, contextKey);
-  if (!existsSync(path)) return null;
-  try {
-    const raw = await readFile(path, "utf-8");
-    return JSON.parse(raw) as SuspendedState;
-  } catch {
-    return null;
-  }
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const filename = contextKey ? `state_${contextKey}` : "state";
+  return store.load<SuspendedState>("memory", filename, { subPath });
 }
 
 /**
@@ -79,16 +56,10 @@ export async function clearSuspendedState(
   userId: string,
   contextKey?: string
 ): Promise<void> {
-  const path = getStatePath(platform, userId, contextKey);
-  if (existsSync(path)) {
-    try {
-      await unlink(path);
-    } catch (err) {
-      console.error(
-        `[sportsclaw] Failed to clear suspended state: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  }
+  const store = DurableStateStore.getInstance();
+  const subPath = `${platform}-${userId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const filename = contextKey ? `state_${contextKey}` : "state";
+  await store.delete("memory", filename, { subPath });
 }
 
 // ---------------------------------------------------------------------------
