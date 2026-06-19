@@ -36,6 +36,7 @@ import {
   type TokenBudgets,
 } from "./types.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
+import { DurableStateStore } from "./durability.js";
 import { execFile } from "node:child_process";
 import {
   loadAllSchemas,
@@ -52,8 +53,7 @@ import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
-import { readFileSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -280,7 +280,6 @@ const SESSION_MAX_MESSAGES = 100;
 export class SessionStore {
   private store = new Map<string, SessionEntry>();
   private persistDir: string | null;
-  private dirReady = false;
 
   /**
    * @param persistDir Directory for on-disk session files. Defaults to
@@ -294,11 +293,6 @@ export class SessionStore {
         : persistDir ??
           process.env.SPORTSCLAW_SESSION_DIR ??
           join(homedir(), ".sportsclaw", "sessions");
-  }
-
-  private filePath(sessionId: string): string {
-    const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
-    return join(this.persistDir!, `${safe}.json`);
   }
 
   /** Load message history from memory only. Returns empty array if not found or expired. */
@@ -321,13 +315,9 @@ export class SessionStore {
     if (inMemory.length > 0) return inMemory;
     if (!this.persistDir) return [];
     try {
-      const raw = await readFile(this.filePath(sessionId), "utf-8");
-      const parsed = JSON.parse(raw) as SessionEntry;
+      const store = DurableStateStore.getInstance();
+      const parsed = await store.load<SessionEntry>("sessions", sessionId);
       if (!parsed || !Array.isArray(parsed.messages) || typeof parsed.updatedAt !== "number") {
-        return [];
-      }
-      if (Date.now() - parsed.updatedAt > SESSION_TTL_MS) {
-        void unlink(this.filePath(sessionId)).catch(() => {});
         return [];
       }
       this.store.set(sessionId, parsed);
@@ -356,16 +346,8 @@ export class SessionStore {
 
     if (!this.persistDir) return;
     try {
-      if (!this.dirReady) {
-        mkdirSync(this.persistDir, { recursive: true });
-        this.dirReady = true;
-      }
-      const path = this.filePath(sessionId);
-      // Atomic write: temp file + rename so a crash mid-write never leaves
-      // a torn session file. Random suffix avoids concurrent-save collisions.
-      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-      await writeFile(tmp, JSON.stringify(entry), "utf-8");
-      await rename(tmp, path);
+      const store = DurableStateStore.getInstance();
+      await store.save<SessionEntry>("sessions", sessionId, entry, { ttlMs: SESSION_TTL_MS });
     } catch (err) {
       // Persistence is best-effort; the in-memory session is already saved.
       console.error(
@@ -378,7 +360,8 @@ export class SessionStore {
   clear(sessionId: string): boolean {
     const had = this.store.delete(sessionId);
     if (this.persistDir) {
-      void unlink(this.filePath(sessionId)).catch(() => {});
+      const store = DurableStateStore.getInstance();
+      void store.delete("sessions", sessionId).catch(() => {});
     }
     return had;
   }
