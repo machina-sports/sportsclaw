@@ -24,6 +24,7 @@
     "test:connections": "npm run build && node --test test/connections.test.mjs",
     "test:durability": "npm run build && node --test test/durability.test.mjs",
     "test:builtin-tools": "npm run build && node --test test/builtin-tools.test.mjs",
+    "test:mcp-server": "npm run build && node --test test/mcp-server.test.mjs",
     "test:version": "npm run build && node --test test/version-help.test.mjs",
     "test:tv-contracts": "npm run build && node --test test/tv-contracts.test.mjs",
     "test:operator-health": "npm run build && node --test test/operator-health.test.mjs",
