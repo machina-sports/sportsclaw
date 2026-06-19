@@ -528,6 +528,7 @@ export class ToolRegistry {
         name: tool.name,
         description: tool.description,
         input_schema: schemaObj as ToolSpec["input_schema"],
+        needsApproval: tool.needsApproval,
       };
 
       if (existingIdx >= 0) {
