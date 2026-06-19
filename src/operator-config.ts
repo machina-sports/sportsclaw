@@ -71,7 +71,7 @@ export interface OperatorJobConfig {
   maxOutputTokens?: number;
   /**
    * Wall-clock budget for a single inference call, in ms. Overrides the daemon
-   * default (60s, or whatever the daemon sets). Raise for jobs whose ticks make
+   * default (240s, or whatever the daemon sets). Raise for jobs whose ticks make
    * many slow tool calls (e.g. multi-workflow + market-data lookups) and would
    * otherwise hit the watchdog. Pair with an `intervalMs` larger than this so
    * ticks don't overlap.
@@ -343,6 +343,18 @@ export function validateOperatorJobConfig(
       if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
         push(field, `must be a positive integer (got ${JSON.stringify(v)})`);
       }
+    }
+  }
+
+  // Cross-field validation: inferenceTimeoutMs < intervalMs
+  if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
+    const timeout = raw.inferenceTimeoutMs;
+    const interval = raw.intervalMs;
+    if (typeof timeout === "number" && typeof interval === "number" && timeout >= interval) {
+      push(
+        "inferenceTimeoutMs",
+        `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
+      );
     }
   }
 

@@ -151,10 +151,12 @@ describe("validateOperatorJobConfig — optional fields", () => {
   it("accepts and carries through inferenceTimeoutMs and maxSteps", () => {
     const r = validateOperatorJobConfig({
       ...base,
+      intervalMs: 900_000,
       inferenceTimeoutMs: 600_000,
       maxSteps: 14,
     });
     assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.intervalMs, 900_000);
     assert.strictEqual(r.config.inferenceTimeoutMs, 600_000);
     assert.strictEqual(r.config.maxSteps, 14);
   });
@@ -181,6 +183,26 @@ describe("validateOperatorJobConfig — optional fields", () => {
     const r = validateOperatorJobConfig({ ...base, maxSteps: 14.5 });
     assert.strictEqual(r.valid, false);
     assert.ok(r.issues.find((i) => i.field === "maxSteps"));
+  });
+
+  it("rejects inferenceTimeoutMs >= intervalMs", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 100_000,
+      inferenceTimeoutMs: 120_000,
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
+  it("rejects inferenceTimeoutMs equal to intervalMs", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 100_000,
+      inferenceTimeoutMs: 100_000,
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
   });
 
   it("rejects a non-array extraFragments", () => {
