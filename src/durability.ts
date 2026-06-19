@@ -11,7 +11,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, unlink, readdir } from "node:fs/promises";
+import { readFile, writeFile, rename, unlink, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -97,14 +97,9 @@ export class DurableStateStore {
     const tempPath = `${path}.tmp`;
     const serialized = JSON.stringify(payload, null, 2);
     
-    // Atomic file save pattern
+    // Atomic file save pattern: write to temp file then rename
     await writeFile(tempPath, serialized, "utf-8");
-    await writeFile(path, serialized, "utf-8"); // Safe overwrite fallback
-    try {
-      await unlink(tempPath);
-    } catch {
-      // Best effort temp file cleanup
-    }
+    await rename(tempPath, path);
 
     return payload;
   }
