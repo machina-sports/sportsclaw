@@ -267,6 +267,7 @@ export interface ToolSpec {
   description: string;
   input_schema: Record<string, unknown>;
   needsApproval?: (input: any) => boolean;
+  connection?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +318,7 @@ export interface SportToolDef {
   /** @deprecated Legacy field from sports-skills v0.7 — use `parameters` */
   input_schema?: Record<string, unknown>;
   needsApproval?: (input: any) => boolean;
+  connection?: string;
 }
 
 // ---------------------------------------------------------------------------

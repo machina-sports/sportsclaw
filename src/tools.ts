@@ -21,6 +21,7 @@ import { buildSportsSkillsRepairCommand, isVenvSetup, getVenvDir } from "./pytho
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 import { DataFusionEngine, entityResolver } from "./intelligence/index.js";
 import { CircuitBreaker } from "./circuit-breaker.js";
+import { ConnectionManager } from "./connections.js";
 
 type BridgeErrorCode =
   | "timeout"
@@ -529,6 +530,7 @@ export class ToolRegistry {
         description: tool.description,
         input_schema: schemaObj as ToolSpec["input_schema"],
         needsApproval: tool.needsApproval,
+        connection: tool.connection,
       };
 
       if (existingIdx >= 0) {
@@ -670,7 +672,9 @@ export class ToolRegistry {
     } else {
       const route = this.routeMap.get(toolName);
       if (route) {
-        result = await this.handleDynamicTool(route.sport, route.command, input, config);
+        const spec = this.dynamicSpecs.find((s) => s.name === toolName);
+        const connectionName = spec?.connection || route.sport;
+        result = await this.handleDynamicTool(route.sport, route.command, input, config, connectionName);
       } else {
         result = {
           content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
@@ -714,7 +718,7 @@ export class ToolRegistry {
       let gameId = String(query);
 
       // Try to get scores/matchups to locate this game/event
-      const bridgeRes = await executePythonBridge(sport, "scores", {}, config).catch(() => null);
+      const bridgeRes = await executePythonBridge(sport, "scores", {}, config, sport).catch(() => null);
       if (bridgeRes && bridgeRes.success && Array.isArray(bridgeRes.data)) {
         for (const game of bridgeRes.data) {
           try {
@@ -743,14 +747,14 @@ export class ToolRegistry {
 
       // Try fetching odds for the event
       let marketOdds: any = undefined;
-      const oddsRes = await executePythonBridge(sport, "odds", { event_id: gameId }, config).catch(() => null);
+      const oddsRes = await executePythonBridge(sport, "odds", { event_id: gameId }, config, sport).catch(() => null);
       if (oddsRes && oddsRes.success) {
         marketOdds = oddsRes.data;
       }
 
       // Try fetching predictions
       let prediction: any = undefined;
-      const predRes = await executePythonBridge(sport, "predictions", { event_id: gameId }, config).catch(() => null);
+      const predRes = await executePythonBridge(sport, "predictions", { event_id: gameId }, config, sport).catch(() => null);
       if (predRes && predRes.success) {
         prediction = predRes.data;
       }
@@ -770,8 +774,8 @@ export class ToolRegistry {
     } else if (target === "player") {
       const canonicalPlayerId = entityResolver.resolvePlayer(sport, String(query));
 
-      const playerStatsRes = await executePythonBridge(sport, "player_stats", { player_id: canonicalPlayerId || String(query) }, config).catch(() => null);
-      const playerProfileRes = await executePythonBridge(sport, "player_profile", { player_id: canonicalPlayerId || String(query) }, config).catch(() => null);
+      const playerStatsRes = await executePythonBridge(sport, "player_stats", { player_id: canonicalPlayerId || String(query) }, config, sport).catch(() => null);
+      const playerProfileRes = await executePythonBridge(sport, "player_profile", { player_id: canonicalPlayerId || String(query) }, config, sport).catch(() => null);
 
       let statsSummary: any = undefined;
       let team = "Unknown Team";
@@ -884,7 +888,8 @@ export class ToolRegistry {
       input.sport,
       input.command,
       input.args,
-      config
+      config,
+      input.sport
     );
 
     if (!result.success) {
@@ -901,8 +906,9 @@ export class ToolRegistry {
     sport: string,
     command: string,
     input: ToolCallInput,
-    config?: Partial<sportsclawConfig>
-  ): Promise<ToolCallResult> {
+    config?: Partial<sportsclawConfig>,
+    connectionName?: string
+): Promise<ToolCallResult> {
     const pythonPath = config?.pythonPath ?? "python3";
     const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
 
@@ -921,7 +927,7 @@ export class ToolRegistry {
       }
     }
 
-    const result = await executePythonBridge(sport, command, args, config);
+    const result = await executePythonBridge(sport, command, args, config, connectionName);
 
     if (!result.success) {
       return this.buildBridgeErrorResult(result, sport, repairCmd);
@@ -939,19 +945,11 @@ export class ToolRegistry {
 // ---------------------------------------------------------------------------
 
 export function buildSubprocessEnv(
-  extra?: Record<string, string>
+  extra?: Record<string, string>,
+  connectionName?: string
 ): Record<string, string> {
-  // Inherit the full parent env — process.env already has ~/.sportsclaw/.env
-  // loaded by applyConfigToEnv(), so all service credentials (POLYMARKET_*,
-  // KALSHI_*, etc.) are available without hardcoding prefixes.
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-
-  if (extra) {
-    Object.assign(env, extra);
-  }
+  const manager = new ConnectionManager();
+  const env = manager.getSandboxEnv(connectionName, extra);
 
   // Activate the managed venv for all subprocess calls
   if (isVenvSetup()) {
@@ -1016,7 +1014,8 @@ export function executePythonBridge(
   sport: string,
   command: string,
   args?: Record<string, unknown>,
-  config?: Partial<sportsclawConfig>
+  config?: Partial<sportsclawConfig>,
+  connectionName?: string
 ): Promise<PythonBridgeResult> {
   const pythonPath = config?.pythonPath ?? "python3";
   const cliArgs = buildArgs(sport, command, args);
@@ -1036,7 +1035,7 @@ export function executePythonBridge(
           encoding: "utf-8",
           timeout: attemptTimeout,
           maxBuffer: 25 * 1024 * 1024, // 25 MB for verbose FastF1 stderr on degraded networks
-          env: buildSubprocessEnv(config?.env),
+          env: buildSubprocessEnv(config?.env, connectionName),
         },
         (error, stdout, stderr) => {
           if (error) {
