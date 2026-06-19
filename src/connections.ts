@@ -68,6 +68,17 @@ export const SAFE_ENV_KEYS = [
   "PYTHONIOENCODING",
   "NODE_ENV",
   "XDG_CACHE_HOME", // sports_skills cricket cache dir (falls back to ~/.cache)
+  // Egress proxy + TLS CA bundle. In a network-isolated sandbox (e.g. OpenShell)
+  // ALL outbound traffic must go through the egress proxy, and the proxy MITMs
+  // TLS so the child needs its CA. Without these the sandboxed sports_skills
+  // child can't resolve DNS ("Temporary failure in name resolution") and every
+  // live data call fails. These are network/TLS config, not credentials — safe
+  // to pass through; harmless (unset) outside a sandbox. Both cases for tools
+  // (Python/urllib reads lowercase; some libs read uppercase).
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "GRPC_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy", "grpc_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+  "NODE_EXTRA_CA_CERTS",
 ];
 
 /**

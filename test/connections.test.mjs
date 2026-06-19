@@ -52,6 +52,28 @@ describe("ConnectionManager & Sandbox Environment", () => {
     assert.strictEqual(sandboxEnv.HOME, "/Users/test");
   });
 
+  it("passes the egress proxy + TLS CA env through to the sandbox (network-isolated deploys need it)", () => {
+    // In an OpenShell-style sandbox all outbound traffic must traverse the egress
+    // proxy, which MITMs TLS — without these the sandboxed sports_skills child
+    // fails DNS ("Temporary failure in name resolution") and every live call dies.
+    process.env.HTTPS_PROXY = "http://10.200.0.1:3128";
+    process.env.https_proxy = "http://10.200.0.1:3128";
+    process.env.NO_PROXY = "127.0.0.1,localhost";
+    process.env.SSL_CERT_FILE = "/etc/openshell-tls/ca-bundle.pem";
+    process.env.REQUESTS_CA_BUNDLE = "/etc/openshell-tls/ca-bundle.pem";
+    process.env.NODE_EXTRA_CA_CERTS = "/etc/openshell-tls/openshell-ca.pem";
+
+    const manager = new ConnectionManager();
+    const sandboxEnv = manager.getSandboxEnv();
+
+    assert.strictEqual(sandboxEnv.HTTPS_PROXY, "http://10.200.0.1:3128");
+    assert.strictEqual(sandboxEnv.https_proxy, "http://10.200.0.1:3128");
+    assert.strictEqual(sandboxEnv.NO_PROXY, "127.0.0.1,localhost");
+    assert.strictEqual(sandboxEnv.SSL_CERT_FILE, "/etc/openshell-tls/ca-bundle.pem");
+    assert.strictEqual(sandboxEnv.REQUESTS_CA_BUNDLE, "/etc/openshell-tls/ca-bundle.pem");
+    assert.strictEqual(sandboxEnv.NODE_EXTRA_CA_CERTS, "/etc/openshell-tls/openshell-ca.pem");
+  });
+
   it("should broker and inject the Polymarket private key the data layer actually reads", () => {
     // sports_skills reads POLYMARKET_PRIVATE_KEY (polymarket/_cli.py) — not an
     // api-key/secret/passphrase trio — so that is the credential we broker.
