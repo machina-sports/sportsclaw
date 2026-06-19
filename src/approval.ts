@@ -23,8 +23,12 @@ import { DurableStateStore } from "./durability.js";
 // Types
 // ---------------------------------------------------------------------------
 
-/** The action classes that can be gated by approval. */
-export type AgenticAction = "write_file" | "execute_command";
+/**
+ * The action being gated by approval. The built-in agentic tools use
+ * "write_file" / "execute_command"; dynamic schema tools with a needsApproval
+ * predicate gate under their own tool name, so this is an open string.
+ */
+export type AgenticAction = string;
 
 /** User's decision for an approval request. */
 export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
@@ -204,6 +208,94 @@ export async function resolveApproval(
     case "deny":
       return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// CLI interactive approval gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a single line of CLI approval input into a decision. Fail-closed:
+ * anything that isn't an explicit allow maps to "deny".
+ */
+export function parseApprovalInput(line: string): ApprovalDecision {
+  const t = line.trim().toLowerCase();
+  if (t === "o" || t === "once") return "allow-once";
+  if (t === "a" || t === "always") return "allow-always";
+  return "deny";
+}
+
+/**
+ * Prompt the operator on an interactive terminal for an approval decision.
+ * The prompt is written to stderr to keep stdout clean for structured output.
+ * Resolves to "deny" on any stream error.
+ */
+export async function promptApprovalDecision(
+  action: string,
+  description: string
+): Promise<ApprovalDecision> {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const banner =
+    `\n⚠  Approval required — ${action}\n` +
+    `   ${description}\n` +
+    `   [o]nce  [a]lways  [d]eny  (default: deny) > `;
+  try {
+    const answer = await new Promise<string>((resolve, reject) => {
+      rl.on("error", reject);
+      // EOF without a line (e.g. Ctrl-D, closed stdin) → empty → fail-closed deny.
+      rl.on("close", () => resolve(""));
+      rl.question(banner, resolve);
+    });
+    return parseApprovalInput(answer);
+  } catch {
+    return "deny";
+  } finally {
+    rl.close();
+  }
+}
+
+export interface GateApprovalOptions {
+  /** Whether an interactive terminal is available to prompt the operator. */
+  interactive: boolean;
+  /** Decision source; defaults to the readline prompt. Injectable for tests. */
+  prompt?: (action: string, description: string) => Promise<ApprovalDecision>;
+}
+
+/**
+ * Centralized approval gate for agentic actions. Returns when the action may
+ * proceed; throws an actionable, model-visible error when denied.
+ *
+ * - Pre-approved (allow-always rule) → proceed.
+ * - Interactive → prompt once/always/deny (always persists a rule).
+ * - Non-interactive → fail-closed denial (operator daemon, pipes, non-CLI).
+ */
+export async function gateApproval(
+  action: AgenticAction,
+  description: string,
+  platform: string,
+  userId: string,
+  opts: GateApprovalOptions
+): Promise<void> {
+  if (await isActionPreApproved(platform, userId, action)) return;
+
+  const deny = (): never => {
+    throw new Error(
+      `${action} denied: user approval required (${description}). ` +
+        `Pass --yolo to bypass approval gates, or pre-approve via /approve.`
+    );
+  };
+
+  if (!opts.interactive) deny();
+
+  const prompt = opts.prompt ?? promptApprovalDecision;
+  const decision = await prompt(action, description);
+  if (decision === "allow-once") return;
+  if (decision === "allow-always") {
+    await addAllowAlwaysRule(platform, userId, action);
+    return;
+  }
+  deny();
 }
 
 // ---------------------------------------------------------------------------
