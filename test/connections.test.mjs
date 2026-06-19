@@ -52,12 +52,11 @@ describe("ConnectionManager & Sandbox Environment", () => {
     assert.strictEqual(sandboxEnv.HOME, "/Users/test");
   });
 
-  it("should securely broker and inject credentials for default connections", () => {
-    // Mock the credentials in parent process.env
-    process.env.POLYMARKET_API_KEY = "poly-key-abc";
-    process.env.POLYMARKET_SECRET = "poly-secret-xyz";
-    process.env.POLYMARKET_PASSPHRASE = "poly-passphrase-123";
-    
+  it("should broker and inject the Polymarket private key the data layer actually reads", () => {
+    // sports_skills reads POLYMARKET_PRIVATE_KEY (polymarket/_cli.py) — not an
+    // api-key/secret/passphrase trio — so that is the credential we broker.
+    process.env.POLYMARKET_PRIVATE_KEY = "0xprivkey-abc";
+
     // Also set a sensitive process key to ensure it gets stripped at the same time
     process.env.ANTHROPIC_API_KEY = "should-be-removed";
 
@@ -67,21 +66,35 @@ describe("ConnectionManager & Sandbox Environment", () => {
     // Verify sensitive key is stripped
     assert.strictEqual(sandboxEnv.ANTHROPIC_API_KEY, undefined);
 
-    // Verify connection credentials are fully resolved and injected
-    assert.strictEqual(sandboxEnv.POLYMARKET_API_KEY, "poly-key-abc");
-    assert.strictEqual(sandboxEnv.POLYMARKET_SECRET, "poly-secret-xyz");
-    assert.strictEqual(sandboxEnv.POLYMARKET_PASSPHRASE, "poly-passphrase-123");
+    // Verify the brokered credential is resolved and injected
+    assert.strictEqual(sandboxEnv.POLYMARKET_PRIVATE_KEY, "0xprivkey-abc");
   });
 
-  it("should support fallback lookup for standard connection names case-insensitively", () => {
-    process.env.KALSHI_API_KEY = "kalshi-key-abc";
-    process.env.KALSHI_SECRET = "kalshi-secret-xyz";
+  it("should resolve standard connection names case-insensitively", () => {
+    process.env.POLYMARKET_PRIVATE_KEY = "0xprivkey-xyz";
 
     const manager = new ConnectionManager();
-    const sandboxEnv = manager.getSandboxEnv("KaLsHi");
+    const sandboxEnv = manager.getSandboxEnv("PoLyMaRkEt");
 
-    assert.strictEqual(sandboxEnv.KALSHI_API_KEY, "kalshi-key-abc");
-    assert.strictEqual(sandboxEnv.KALSHI_SECRET, "kalshi-secret-xyz");
+    assert.strictEqual(sandboxEnv.POLYMARKET_PRIVATE_KEY, "0xprivkey-xyz");
+  });
+
+  it("does not broker credentials for providers the data layer never reads", () => {
+    // kalshi (public API), betfair/sportradar/apifootball (no integration in
+    // sports_skills) were dead mappings — pruned. Brokering must inject nothing.
+    process.env.KALSHI_API_KEY = "k";
+    process.env.SPORTRADAR_API_KEY = "s";
+    process.env.APIFOOTBALL_API_KEY = "a";
+    process.env.BETFAIR_APP_KEY = "b";
+
+    const manager = new ConnectionManager();
+    for (const name of ["kalshi", "betfair", "sportradar", "apifootball"]) {
+      const env = manager.getSandboxEnv(name);
+      assert.strictEqual(env.KALSHI_API_KEY, undefined, `${name} must not inject KALSHI_API_KEY`);
+      assert.strictEqual(env.SPORTRADAR_API_KEY, undefined, `${name} must not inject SPORTRADAR_API_KEY`);
+      assert.strictEqual(env.APIFOOTBALL_API_KEY, undefined, `${name} must not inject APIFOOTBALL_API_KEY`);
+      assert.strictEqual(env.BETFAIR_APP_KEY, undefined, `${name} must not inject BETFAIR_APP_KEY`);
+    }
   });
 
   it("should support customized connection definitions with env mapping", () => {
