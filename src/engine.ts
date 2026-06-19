@@ -68,6 +68,8 @@ import { AskUserQuestionHalt } from "./ask.js";
 import {
   isActionPreApproved,
   ApprovalPendingHalt,
+  generateApprovalId,
+  saveApprovalRequest,
 } from "./approval.js";
 import { isGuideIntent, generateGuideResponse } from "./guide.js";
 import { recordTokens, tokensUsedToday } from "./token-ledger.js";
@@ -1042,6 +1044,26 @@ export class sportsclawEngine {
               );
             }
             throw new Error(skipReason);
+          }
+
+          // Declarative tool-level approval check
+          if (!config.yoloMode && spec.needsApproval && spec.needsApproval(args)) {
+            const platform = runPlatform ?? "cli";
+            const userId = runUserId ?? "anonymous";
+            const preApproved = await isActionPreApproved(platform, userId, spec.name as any);
+            if (!preApproved) {
+              const request = {
+                id: generateApprovalId(),
+                action: spec.name as any,
+                description: `Execution of ${spec.name} with arguments: ${JSON.stringify(args)}`,
+                toolArgs: args,
+                platform,
+                userId,
+                createdAt: new Date().toISOString(),
+              };
+              await saveApprovalRequest(request);
+              throw new ApprovalPendingHalt(request);
+            }
           }
 
           if (verbose) {
@@ -2986,11 +3008,18 @@ export class sportsclawEngine {
           return executeWriteFile(filePath, fileContent);
         }
 
-        // Not approved and not YOLO: fail fast with error (no stdin blocking)
-        throw new Error(
-          `write_file denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Target: ${filePath} (${fileContent.length} bytes)`
-        );
+        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
+        const request = {
+          id: generateApprovalId(),
+          action: "write_file" as const,
+          description: `Write file to ${filePath} (${fileContent.length} bytes)`,
+          toolArgs: args,
+          platform: agenticPlatform,
+          userId: agenticUserId,
+          createdAt: new Date().toISOString(),
+        };
+        await saveApprovalRequest(request);
+        throw new ApprovalPendingHalt(request);
       },
     });
 
@@ -3092,11 +3121,18 @@ export class sportsclawEngine {
           return runCommand();
         }
 
-        // Not approved and not YOLO: fail fast with error (no stdin blocking)
-        throw new Error(
-          `execute_command denied: user approval required. Pass --yolo to bypass approval gates, ` +
-          `or pre-approve via /approve. Command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`
-        );
+        // Not approved and not YOLO: halt and suspend using ApprovalPendingHalt
+        const request = {
+          id: generateApprovalId(),
+          action: "execute_command" as const,
+          description: `Execute command: ${cmd.length > 120 ? cmd.slice(0, 120) + "..." : cmd}`,
+          toolArgs: args,
+          platform: agenticPlatform,
+          userId: agenticUserId,
+          createdAt: new Date().toISOString(),
+        };
+        await saveApprovalRequest(request);
+        throw new ApprovalPendingHalt(request);
       },
     });
 
