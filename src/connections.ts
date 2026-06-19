@@ -67,47 +67,24 @@ export const SAFE_ENV_KEYS = [
   "PYTHONPATH",
   "PYTHONIOENCODING",
   "NODE_ENV",
+  "XDG_CACHE_HOME", // sports_skills cricket cache dir (falls back to ~/.cache)
 ];
 
-/** Standard platform credentials map (for seamless backward compatibility) */
+/**
+ * Standard platform credentials map.
+ *
+ * Only providers whose credentials `sports_skills` actually reads belong here.
+ * Polymarket trading (`polymarket/_cli.py`) reads `POLYMARKET_PRIVATE_KEY`; its
+ * public read endpoints, Kalshi (public API), and the ESPN-backed sports need no
+ * credentials. Betfair/Sportradar/api-football have no integration in the data
+ * layer, so they are intentionally absent — a mapping here would only broker env
+ * vars nothing reads.
+ */
 const STANDARD_CONNECTION_DEFAULTS: Record<string, ConnectionConfig> = {
   polymarket: {
     type: "python-env",
     envMapping: {
-      POLYMARKET_API_KEY: "env:POLYMARKET_API_KEY",
-      POLYMARKET_SECRET: "env:POLYMARKET_SECRET",
-      POLYMARKET_PASSPHRASE: "env:POLYMARKET_PASSPHRASE",
-      POLYMARKET_CLOB_API_URL: "env:POLYMARKET_CLOB_API_URL",
-    },
-  },
-  kalshi: {
-    type: "python-env",
-    envMapping: {
-      KALSHI_API_KEY: "env:KALSHI_API_KEY",
-      KALSHI_SECRET: "env:KALSHI_SECRET",
-      KALSHI_PASSWORD: "env:KALSHI_PASSWORD",
-      KALSHI_USERNAME: "env:KALSHI_USERNAME",
-    },
-  },
-  betfair: {
-    type: "python-env",
-    envMapping: {
-      BETFAIR_APP_KEY: "env:BETFAIR_APP_KEY",
-      BETFAIR_PASSWORD: "env:BETFAIR_PASSWORD",
-      BETFAIR_USERNAME: "env:BETFAIR_USERNAME",
-      BETFAIR_SESSION_TOKEN: "env:BETFAIR_SESSION_TOKEN",
-    },
-  },
-  sportradar: {
-    type: "http",
-    envMapping: {
-      SPORTRADAR_API_KEY: "env:SPORTRADAR_API_KEY",
-    },
-  },
-  apifootball: {
-    type: "http",
-    envMapping: {
-      APIFOOTBALL_API_KEY: "env:APIFOOTBALL_API_KEY",
+      POLYMARKET_PRIVATE_KEY: "env:POLYMARKET_PRIVATE_KEY",
     },
   },
 };
