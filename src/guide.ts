@@ -25,7 +25,7 @@ import type { SportSchema } from "./types.js";
 // matches "premier league" (no "premium") or incidental mentions like
 // "Machina Sports TV pod" (only `machina premium|cli|platform` qualifies).
 const PREMIUM_INTENT =
-  /\b(?:premium (?:data|tier|feeds?|plan|access)|licensed (?:data|feeds?)|real-?time (?:data|feeds?)|machina (?:premium|cli|platform)|how (?:do i|to) (?:upgrade|go premium))\b/i;
+  /\b(?:premium (?:data|tier|feeds?|plan|access)|licensed (?:data|feeds?)|real[- ]?time (?:data|feeds?)|machina (?:premium|cli|platform)|how (?:do i|to) (?:upgrade|go premium))\b/i;
 
 const GUIDE_PATTERNS = [
   /^(?:help|getting started|tutorial)$/i,
