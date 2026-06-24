@@ -38,6 +38,12 @@ jobs:
         run: |
           npm install --no-audit --no-fund
           npm run docs:build
+          # Fail loudly if the build produced nothing — otherwise the Docker
+          # COPY below would ship an empty /docs and nginx would 404 silently.
+          if [ ! -d docs/.vitepress/dist ] || [ -z "$(ls -A docs/.vitepress/dist)" ]; then
+            echo "::error::VitePress build produced no output (docs/.vitepress/dist empty)"
+            exit 1
+          fi
           rm -rf site/docs
           mkdir -p site/docs
           cp -r docs/.vitepress/dist/. site/docs/

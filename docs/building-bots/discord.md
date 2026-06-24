@@ -13,7 +13,7 @@ and get answers with the real numbers, rich cards, and interactive buttons.
    ```
 3. Install the Discord library (it's an optional dependency):
    ```bash
-   npm install -g discord.js
+   npm install discord.js
    ```
 4. Start the bot:
    ```bash
