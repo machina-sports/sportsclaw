@@ -2,7 +2,7 @@
   <img src="assets/logo.jpg" alt="sportsclaw" width="500">
 </p>
 
-# sportsclaw 🦞
+# sportsclaw
 
 A CLI and bot scaffold that connects any LLM to live sports data via [sports-skills](https://sports-skills.sh).
 

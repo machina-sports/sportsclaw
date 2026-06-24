@@ -1,0 +1,228 @@
+/* sportsclaw docs — editorial broadsheet (NewForm-inspired).
+   Linen canvas, Fraunces display serif, Inter body, neon green used ONLY as
+   punctuation: the CTA fill, active-nav marks, and short section ticks. */
+
+:root {
+  /* Type */
+  --vp-font-family-base: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
+
+  /* Canvas & ink */
+  --vp-c-bg: #fafffa;        /* linen */
+  --vp-c-bg-alt: #f3f6f3;    /* sidebar / footer */
+  --vp-c-bg-soft: #f1f4f1;
+  --vp-c-bg-elv: #fafffa;
+
+  --vp-c-text-1: #121613;    /* obsidian ink */
+  --vp-c-text-2: #516254;    /* sage */
+  --vp-c-text-3: #8a9b8d;
+
+  --vp-c-divider: #d8e2d8;
+  --vp-c-border: #c8d2c8;    /* mist */
+  --vp-c-gutter: #e6ece6;
+
+  /* Brand = ink for links/active text (ghost-link discipline); green is punctuation only */
+  --vp-c-brand-1: #121613;
+  --vp-c-brand-2: #232924;
+  --vp-c-brand-3: #2bee4b;   /* voltage — accents only */
+  --vp-c-brand-soft: rgba(43, 238, 75, 0.14);
+
+  /* The one filled button: voltage green, ink text, green glow */
+  --vp-button-brand-bg: #2bee4b;
+  --vp-button-brand-text: #121613;
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-hover-bg: #4af265;
+  --vp-button-brand-hover-text: #121613;
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-active-bg: #25d544;
+  --vp-button-brand-active-text: #121613;
+  --vp-button-brand-active-border: transparent;
+
+  --vp-code-block-bg: #f1f4f1;
+  --vp-home-hero-name-color: #121613;
+}
+
+/* ---------- Display type: tight heavy grotesque (TWK Lausanne → Inter Tight) ---------- */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPHomeHero .name,
+.VPHomeHero .text,
+.VPHome .VPFeature .title {
+  font-family: 'Inter Tight', 'Inter', ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--vp-c-text-1);
+}
+
+.VPHomeHero .name {
+  font-weight: 700;
+  font-size: clamp(2.6rem, 6.5vw, 4.6rem);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+.VPHomeHero .text {
+  font-weight: 600;
+  font-size: clamp(1.8rem, 4vw, 2.7rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
+}
+.vp-doc h1 {
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+.VPHomeHero .tagline {
+  font-family: var(--vp-font-family-base);
+  font-size: 1.1rem;
+  color: var(--vp-c-text-2);
+  letter-spacing: -0.01em;
+}
+
+/* ---------- Section tick: a short green beat replaces the divider rule ---------- */
+.vp-doc h2 {
+  border-top: 0;
+  margin-top: 3rem;
+  padding-top: 0;
+}
+.vp-doc h2::before {
+  content: '';
+  display: block;
+  width: 48px;
+  height: 2px;
+  background: var(--vp-c-brand-3);
+  margin-bottom: 1.1rem;
+}
+
+/* ---------- Links: ghost style — ink, hairline underline, green on hover ---------- */
+.vp-doc a {
+  color: var(--vp-c-text-1);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--vp-c-border);
+  transition: text-decoration-color 0.15s ease;
+}
+.vp-doc a:hover {
+  text-decoration-color: var(--vp-c-brand-3);
+}
+
+/* ---------- Inline + block code ---------- */
+.vp-doc :not(pre) > code {
+  background: var(--vp-c-brand-soft);
+  color: #1c7a2e; /* readable green, low-frequency */
+  font-size: 0.85em;
+}
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 14px;
+}
+
+/* ---------- The CTA: green glow, never a neutral shadow ---------- */
+.VPButton.brand {
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow:
+    rgba(16, 94, 29, 0.45) 1px 8px 20px 0px,
+    rgba(18, 146, 39, 0.25) 1px 8px 20px 0px;
+}
+
+/* ---------- Active navigation: green is the marker ---------- */
+.VPSidebarItem.is-active > .item .text {
+  color: var(--vp-c-text-1);
+  font-weight: 600;
+}
+.VPSidebarItem.is-active > .item .indicator {
+  background-color: var(--vp-c-brand-3) !important;
+}
+.VPNavBarMenuLink.active {
+  color: var(--vp-c-text-1) !important;
+}
+
+/* ---------- Feature cards: no container — a top hairline + type define them ---------- */
+.VPHome .VPFeature {
+  border: 0 !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  border-top: 1px solid var(--vp-c-border) !important;
+  padding: 24px 24px 12px 0;
+}
+.VPHome .VPFeature .title {
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+.VPHome .VPFeature .details {
+  color: var(--vp-c-text-2);
+  font-size: 0.95rem;
+}
+
+/* ---------- Wordmark ---------- */
+.VPNavBarTitle .title {
+  font-family: var(--vp-font-family-base);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ---------- Home feature grid: ASCII motif + type, no container ---------- */
+.sc-grid {
+  max-width: 1152px;
+  margin: 12px auto 88px;
+  padding: 0 48px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 60px 48px;
+}
+@media (max-width: 960px) {
+  .sc-grid { grid-template-columns: repeat(2, 1fr); gap: 48px 40px; }
+}
+@media (max-width: 640px) {
+  .sc-grid { grid-template-columns: 1fr; padding: 0 24px; }
+}
+
+.sc-card {
+  display: block;
+  border-top: 1px solid var(--vp-c-border);
+  padding-top: 26px;
+  text-decoration: none !important;
+  color: var(--vp-c-text-1);
+  transition: transform 0.25s ease;
+}
+.sc-card:hover { transform: translateY(-3px); }
+
+.sc-card .motif {
+  font-family: var(--vp-font-family-mono);
+  font-size: 15px;
+  line-height: 1.12;
+  color: #2c3a30;
+  background: transparent;
+  border: 0;
+  margin: 0 0 20px;
+  padding: 0;
+  white-space: pre;
+  overflow: visible;
+  min-height: 102px; /* normalize so taller motifs keep titles aligned across the row */
+}
+.sc-card .motif b {
+  color: var(--vp-c-brand-3);
+  font-weight: 400;
+}
+
+.sc-card h3 {
+  font-family: 'Inter Tight', 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0 0 10px;
+  border: 0;
+  padding: 0;
+  transition: color 0.2s ease;
+}
+.sc-card:hover h3 { color: #1c7a2e; }
+
+.sc-card p {
+  color: var(--vp-c-text-2);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  margin: 0;
+}

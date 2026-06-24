@@ -22,3 +22,9 @@ docker/relay/k8s/overlays/*/secrets.env
 !docker/relay/k8s/overlays/example/secrets.env
 .vscode/settings.json
 package-lock.json
+
+# VitePress docs build artifacts + CI staging into the site image
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+site/docs/
+.gstack/

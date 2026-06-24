@@ -15,7 +15,7 @@
   </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>sportsclaw — Self-Evolving Sports AI</title>
+  <title>sportsclaw — Build AI that understands live sports</title>
   <meta name="description" content="Host an autonomous sports AI on Discord and Telegram. Persistent memory, live data, prediction markets. Gets smarter every day.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -215,6 +215,15 @@
       font-size: clamp(1rem, 2vw, 1.2rem);
       max-width: 650px;
       margin: 0 auto 3rem;
+    }
+
+    .hero p.hero-audience {
+      font-size: 0.8rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      opacity: 0.7;
+      margin: -1.5rem auto 3rem;
     }
 
     .terminal-container {
@@ -967,9 +976,11 @@
   <main>
     <!-- Hero -->
     <section class="hero container">
-      <div class="badge">v0.7.2 Released</div>
-      <h1>Self-Evolving Sports AI for Your Chat Apps</h1>
-      <p>Host an autonomous sports AI on Discord and Telegram. It builds persistent memory, adapts to your users, and gets smarter every day.</p>
+      <!-- TODO: build-inject version from package.json instead of hardcoding -->
+      <div class="badge">OPEN SOURCE · MIT · v0.26.2</div>
+      <h1>Build AI that understands live sports.</h1>
+      <p>One open-source engine with keyless live data, market odds, and real-time game events built in. Ship chat bots, broadcast widgets, and odds trackers in minutes — not months of data plumbing.</p>
+      <p class="hero-audience">For fans · broadcasters · sportsbooks · teams &amp; leagues</p>
 
       <div style="position: relative; display: inline-block;">
         <div id="copy-feedback" class="copy-feedback">Copied!</div>
@@ -981,6 +992,7 @@
           </button>
         </div>
       </div>
+      <p style="margin-top: 10px; font-size: 0.85em; color: #888;">macOS / Linux · verify the published SHA-256 before running. Windows: <code>npm install -g sportsclaw-engine-core</code></p>
 
       <div class="terminal-container">
         <div class="terminal">
@@ -1012,6 +1024,8 @@
           <div style="color: #e0e0e0;"><strong>Arsenal leads the Premier League</strong> with 61 points from 28 games (18W-7D-3L). They have a 5-point lead over second-place Manchester City.</div>
           <br>
           <div style="color: #e0e0e0;">On Polymarket, the <strong>Oklahoma City Thunder</strong> are the current favorites to win the 2026 NBA Finals at 34.5%, followed by the Spurs (12.6%) and Nuggets (11.5%).</div>
+          <br>
+          <div style="color: #555; font-size: 0.82em;">// illustrative output — live values vary by query time</div>
         </div>
       </div>
     </section>
