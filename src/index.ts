@@ -127,6 +127,7 @@ import {
   mcpEnvKey,
   isValidMcpServerName,
   envKeyCollision,
+  validateConnectBundle,
   McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
@@ -2658,75 +2659,14 @@ async function cmdMachina(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const bundle = parse(raw.trim());
-  if (!bundle || bundle.error) {
-    console.error(pc.red(`Could not connect: ${String(bundle?.error ?? "unexpected output from machina connect")}`));
-    process.exit(1);
-  }
-
-  // The bundle is untrusted external JSON (Record<string, unknown>) — narrow by
-  // runtime type, never `as`, so a non-string field can't slip through coercion.
-  const name = typeof bundle.name === "string" ? bundle.name : undefined;
-  const url = typeof bundle.url === "string" ? bundle.url : undefined;
-  const token = typeof bundle.token === "string" ? bundle.token : undefined;
-  const header = typeof bundle.auth_header === "string" ? bundle.auth_header : "X-Api-Token";
-  const durable = bundle.durable === true;
-
-  if (!name || !url) {
-    console.error(pc.red("machina connect did not return a usable url/name."));
-    process.exit(1);
-  }
-  // The minted token is sent to `url` as a bearer header, so refuse to persist a
-  // url we can't parse or one that would send the secret in cleartext to a
-  // remote host (http is allowed only for loopback dev pods).
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    console.error(pc.red(`machina connect returned an unparseable url ("${url}").`));
-    process.exit(1);
-  }
-  const isLoopback =
-    parsedUrl.hostname === "localhost" ||
-    parsedUrl.hostname === "127.0.0.1" ||
-    parsedUrl.hostname === "::1";
-  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopback)) {
-    console.error(pc.red(`Refusing to send the token to a non-HTTPS url ("${url}").`));
-    process.exit(1);
-  }
-  if (!token) {
-    console.error(pc.red("machina connect returned no token. Retry, or check `machina connect --reveal`."));
-    process.exit(1);
-  }
-  // `name` becomes the mcp.json key, the env-key segment, AND a tool-cache
-  // filename — validate it the same way `mcp add` does (no path traversal).
-  if (!isValidMcpServerName(name)) {
-    console.error(pc.red(`machina connect returned an invalid pod name ("${name}").`));
-    process.exit(1);
-  }
-  // The token is written verbatim into ~/.sportsclaw/.env — a newline would
-  // inject additional dotenv lines, so refuse one.
-  if (/[\r\n]/.test(token)) {
-    console.error(pc.red("machina connect returned a malformed token (contains a newline)."));
-    process.exit(1);
-  }
-  // We pass --mint, so a durable X-Api-Token is expected. Refuse any other
-  // header rather than writing a secret into mcp.json.
-  if (header.toLowerCase() !== "x-api-token") {
-    console.error(pc.red(`Unexpected auth header from machina connect ("${header}"); expected X-Api-Token.`));
-    console.error(`  Upgrade machina-cli (${pc.cyan("pip install --upgrade machina-cli")}) and retry.`);
-    process.exit(1);
-  }
-
   const configs = loadMcpConfigs();
-  // Reject a name that shares a token slot with a different existing server —
-  // otherwise resolveTokens would inject one pod's token for the other.
-  const collision = envKeyCollision(name, configs);
-  if (collision) {
-    console.error(pc.red(`Pod name "${name}" shares a token slot with existing server "${collision}".`));
-    console.error(`  Remove "${collision}" first (${pc.cyan(`sportsclaw mcp remove ${collision}`)}), or connect under a distinct name.`);
+  const result = validateConnectBundle(parse(raw.trim()), configs);
+  if (!result.ok) {
+    console.error(pc.red(result.error));
+    if (result.hint) console.error(pc.dim(`  ${result.hint}`));
     process.exit(1);
   }
+  const { name, url, token, durable } = result;
   const isUpdate = name in configs;
 
   // Register like `mcp add`: write the secret to ~/.sportsclaw/.env FIRST (so a
@@ -2744,7 +2684,7 @@ async function cmdMachina(args: string[]): Promise<void> {
 
   console.log(pc.green(isUpdate ? `Reconnected Machina pod "${name}"` : `Connected Machina pod "${name}"`));
   console.log(`  URL: ${url}`);
-  console.log(pc.dim(`  Auth: ${header}${durable ? " (durable key)" : " (session token — may expire)"}`));
+  console.log(pc.dim(`  Auth: X-Api-Token${durable ? " (durable key)" : " (session token — may expire)"}`));
   console.log(pc.dim(`  Config: ${getMcpConfigPath()}`));
   if (!durable) {
     console.log(pc.yellow("  Note: not a durable key — re-run this if the connection later returns 401."));

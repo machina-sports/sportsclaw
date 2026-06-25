@@ -66,6 +66,97 @@ export function envKeyCollision(
   return null;
 }
 
+export type ConnectBundleResult =
+  | { ok: true; name: string; url: string; token: string; durable: boolean }
+  | { ok: false; error: string; hint?: string };
+
+/**
+ * Validate the JSON bundle from `machina connect --json --reveal --mint` before
+ * it is persisted. Pure — no IO, no process exit; the caller maps the result to
+ * console output. `bundle` is the parsed stdout (or null if it wasn't JSON);
+ * `configs` is the current mcp.json so a token-slot collision can be rejected.
+ * On success returns the normalized, registration-ready connection.
+ */
+export function validateConnectBundle(
+  bundle: Record<string, unknown> | null,
+  configs: Record<string, McpServerConfig>
+): ConnectBundleResult {
+  if (!bundle || bundle.error) {
+    return {
+      ok: false,
+      error: `Could not connect: ${String(bundle?.error ?? "unexpected output from machina connect")}`,
+    };
+  }
+
+  // Untrusted external JSON — narrow by runtime type, never `as`, so a
+  // non-string field can't slip through coercion.
+  const name = typeof bundle.name === "string" ? bundle.name : undefined;
+  const url = typeof bundle.url === "string" ? bundle.url : undefined;
+  const token = typeof bundle.token === "string" ? bundle.token : undefined;
+  const header = typeof bundle.auth_header === "string" ? bundle.auth_header : "X-Api-Token";
+  const durable = bundle.durable === true;
+
+  if (!name || !url) {
+    return { ok: false, error: "machina connect did not return a usable url/name." };
+  }
+
+  // The minted token is sent to `url` as a bearer header, so refuse a url we
+  // can't parse or one that would send the secret in cleartext to a remote host
+  // (http is allowed only for loopback dev pods).
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return { ok: false, error: `machina connect returned an unparseable url ("${url}").` };
+  }
+  const isLoopback =
+    parsedUrl.hostname === "localhost" ||
+    parsedUrl.hostname === "127.0.0.1" ||
+    parsedUrl.hostname === "::1";
+  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopback)) {
+    return { ok: false, error: `Refusing to send the token to a non-HTTPS url ("${url}").` };
+  }
+
+  if (!token) {
+    return {
+      ok: false,
+      error: "machina connect returned no token.",
+      hint: "Retry, or check `machina connect --reveal`.",
+    };
+  }
+  // `name` becomes the mcp.json key, the env-key segment, AND a tool-cache
+  // filename — validate it the same way `mcp add` does (no path traversal).
+  if (!isValidMcpServerName(name)) {
+    return { ok: false, error: `machina connect returned an invalid pod name ("${name}").` };
+  }
+  // The token is written verbatim into ~/.sportsclaw/.env — a newline would
+  // inject additional dotenv lines, so refuse one.
+  if (/[\r\n]/.test(token)) {
+    return { ok: false, error: "machina connect returned a malformed token (contains a newline)." };
+  }
+  // We pass --mint, so a durable X-Api-Token is expected. Refuse any other
+  // header rather than writing a secret into mcp.json.
+  if (header.toLowerCase() !== "x-api-token") {
+    return {
+      ok: false,
+      error: `Unexpected auth header from machina connect ("${header}"); expected X-Api-Token.`,
+      hint: "Upgrade machina-cli (pip install --upgrade machina-cli) and retry.",
+    };
+  }
+  // A different existing server folding to the same token slot would make
+  // resolveTokens inject one pod's token for the other.
+  const collision = envKeyCollision(name, configs);
+  if (collision) {
+    return {
+      ok: false,
+      error: `Pod name "${name}" shares a token slot with existing server "${collision}".`,
+      hint: `Remove "${collision}" first (sportsclaw mcp remove ${collision}), or connect under a distinct name.`,
+    };
+  }
+
+  return { ok: true, name, url, token, durable };
+}
+
 /** Load the user-managed MCP config from ~/.sportsclaw/mcp.json */
 export function loadMcpConfigs(): Record<string, McpServerConfig> {
   if (!existsSync(MCP_CONFIG_PATH)) return {};
