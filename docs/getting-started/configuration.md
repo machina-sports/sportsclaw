@@ -69,4 +69,8 @@ sportsclaw doctor
 ```
 
 `doctor` verifies your Node and Python versions, the sports data layer, your model
-credentials, and your installed sports — and tells you exactly what to fix if something's off.
+credentials, your installed sports, and any connected Machina premium pods — and tells you
+exactly what to fix if something's off.
+
+To connect premium data feeds, see [Machina — the premium layer](../sports-data/machina) and
+[Connecting MCP Servers](../advanced/mcp).
