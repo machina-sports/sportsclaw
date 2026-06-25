@@ -1,9 +1,9 @@
 # Machina — the premium layer
 
 sportsclaw's built-in coverage comes from **[sports-skills](https://sports-skills.sh)** — the
-open, keyless data layer. It's free and ideal for development and personal use. When you need
+open, keyless data layer. It's free and ideal for development and personal use. For
 **licensed data, real-time and zero-latency feeds, production SLAs, or packaged agent
-workflows**, you step up to the **[Machina Sports](https://machina.gg)** platform.
+workflows**, the **[Machina Sports](https://machina.gg)** platform covers that.
 
 ## Open vs. premium
 
@@ -51,7 +51,7 @@ What it covers:
 ## Connecting Machina to sportsclaw
 
 Premium data is served through a per-project **Machina MCP server** (a "pod"). The quickest way
-to wire one in is the built-in `machina connect` command — it signs you in through `machina-cli`,
+to wire one in is the built-in `sportsclaw machina connect` command — it signs you in through `machina-cli`,
 mints a durable access key, and registers the pod for you. No URLs to copy.
 
 ```bash
@@ -91,10 +91,10 @@ See [Connecting MCP Servers](../advanced/mcp) for the full set of options.
 
 ## Premium signal
 
-You don't have to go looking for the premium path — sportsclaw surfaces it for you. When a data
-tool reports that licensed or real-time data exists beyond what the free skill returned, the
-agent adds a single, optional line pointing to the upgrade (the `sports-skills premium` tier or
-`sportsclaw machina connect`). It's informational only: it never blocks an answer, never repeats
-within a conversation, and stays out of automated alerts and broadcasts.
+When a tool result carries an `upgrade` field — the data layer's signal that licensed or
+real-time data exists beyond what the open skill returned — the agent adds a single, optional
+line pointing to the path (the `sports-skills premium` tier or `sportsclaw machina connect`).
+The data layer decides this, not the agent. It's informational only: it never blocks an answer,
+never repeats within a conversation, and stays out of automated alerts and broadcasts.
 
 Learn more at **[machina.gg](https://machina.gg)**.

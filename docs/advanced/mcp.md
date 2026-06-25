@@ -30,7 +30,7 @@ instead of passing `--token`.
 
 ## What you can connect
 
-Any MCP server — including Machina Core "pods," which surface workflows, agents, and connectors
+Any MCP server — including Machina "pods," which surface workflows, agents, and connectors
 the agent can call as part of answering a question.
 
 ::: tip Connecting a Machina pod? Use `machina connect`

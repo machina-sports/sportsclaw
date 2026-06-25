@@ -10,7 +10,7 @@ Every `sportsclaw` command, grouped by what you'll reach for most.
 | `sportsclaw chat` | Start an interactive conversation |
 | `sportsclaw config` | Configure your provider, model, and integrations |
 | `sportsclaw setup` | Conversational, AI-guided setup |
-| `sportsclaw doctor` | Diagnose your install (incl. Machina pod & machina-cli status) and tell you what to fix |
+| `sportsclaw doctor` | Diagnose your install (incl. Machina status) and tell you what to fix |
 | `sportsclaw health` | Report overall system status |
 | `sportsclaw login claude` | Reuse your existing Claude Code session |
 | `sportsclaw logout claude` | Stop using the Claude Code session |
