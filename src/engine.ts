@@ -46,7 +46,7 @@ import {
   DEFAULT_SKILLS,
 } from "./schema.js";
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
-import { MemoryManager, PodMemoryStorage } from "./memory.js";
+import { MemoryManager, createMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager } from "./mcp.js";
@@ -3006,36 +3006,19 @@ export class sportsclawEngine {
 
     let strategyContent = "";
     if (options?.userId) {
-      const requestedMemoryBackend = (process.env.SPORTSCLAW_MEMORY_BACKEND ?? "auto").toLowerCase();
-      if (!["auto", "file", "pod"].includes(requestedMemoryBackend)) {
-        throw new Error(
-          `Invalid SPORTSCLAW_MEMORY_BACKEND=${process.env.SPORTSCLAW_MEMORY_BACKEND}. Expected "auto", "file", or "pod".`
-        );
+      // Driver selection (file | pod | hindsight) is centralized in the memory
+      // module; throws on an invalid SPORTSCLAW_MEMORY_PROVIDER/_BACKEND value.
+      const selection = createMemoryStorage({
+        mcpManager: this.mcpManager,
+        threadId: options?.sessionId,
+        verbose: this.config.verbose,
+      });
+      if (this._loggedMemoryBackend !== selection.logKey) {
+        console.error(selection.logLine);
+        this._loggedMemoryBackend = selection.logKey;
       }
 
-      const machinaServer = requestedMemoryBackend === "file"
-        ? undefined
-        : this.mcpManager.getMachinaServerName();
-
-      if (requestedMemoryBackend === "pod" && !machinaServer) {
-        throw new Error(
-          "SPORTSCLAW_MEMORY_BACKEND=pod requires a connected Machina MCP server exposing search_documents, create_document, and update_document."
-        );
-      }
-
-      const podStorage = machinaServer
-        ? new PodMemoryStorage(this.mcpManager, machinaServer)
-        : undefined;
-      const selectedMemoryBackend = podStorage ? "pod" : "file";
-      const memoryLogKey = `${requestedMemoryBackend}:${selectedMemoryBackend}:${machinaServer ?? "local"}`;
-      if (this._loggedMemoryBackend !== memoryLogKey) {
-        console.error(
-          `[sportsclaw] memory_backend requested=${requestedMemoryBackend} selected=${selectedMemoryBackend}${machinaServer ? ` server=${machinaServer}` : ""}`
-        );
-        this._loggedMemoryBackend = memoryLogKey;
-      }
-
-      memory = new MemoryManager(options.userId, podStorage);
+      memory = new MemoryManager(options.userId, selection.storage);
       options?.onProgress?.({ type: "phase", label: "Loading memory" });
       [memoryBlock, strategyContent] = await Promise.all([
         memory.buildMemoryBlock(),

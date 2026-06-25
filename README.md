@@ -90,6 +90,16 @@ sportsclaw is built for:
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
+### Optional: Pluggable memory backends
+
+By default, memory is stored in local files (`~/.sportsclaw/memory/`) — zero setup. For multi-tenant relay deployments you can switch to Machina pod documents, and for semantic, long-horizon memory that learns over time you can route memory through a [Vectorize Hindsight](https://github.com/vectorize-io/hindsight) server:
+
+```bash
+export SPORTSCLAW_MEMORY_PROVIDER=hindsight   # file (default) | pod | hindsight
+```
+
+Hindsight works against OpenAI/Anthropic/Gemini or a fully local Ollama/LM Studio backend, and can run as an offline sidecar inside an OpenShell sandbox. See [`docs/hindsight-memory.md`](docs/hindsight-memory.md) for setup and configuration.
+
 ### Optional: Run inside NVIDIA OpenShell
 
 For deployments that want sandboxed execution and policy-enforced LLM routing, SportsClaw operator daemons can run inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox with calls routed through the Privacy Router. **This is opt-in via the job config** — direct LLM calls remain the default for everyone else. See [`openshell/README.md`](openshell/README.md) for the runbook and [`docs/openshell-integration-plan.md`](docs/openshell-integration-plan.md) for the integration design.

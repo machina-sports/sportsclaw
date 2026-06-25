@@ -513,6 +513,413 @@ export class PodMemoryStorage implements MemoryStorage {
 }
 
 // ---------------------------------------------------------------------------
+// HindsightMemoryStorage — Vectorize Hindsight agent-memory server
+// ---------------------------------------------------------------------------
+//
+// Hindsight (https://github.com/vectorize-io/hindsight) is a standalone memory
+// server with a retain / recall / reflect HTTP API. It is selected via
+// SPORTSCLAW_MEMORY_PROVIDER=hindsight and is mutually exclusive with the file
+// and pod drivers — a single MemoryManager run uses exactly one.
+//
+// Mapping strategy (zero-regression round-trips):
+//   - One Hindsight *bank* per user  → bank_id = `${bankPrefix}-${sanitizeId(userId)}`.
+//     Recall is bank-scoped, so memories are isolated by userId by construction.
+//   - Each logical memory file → exactly one *verbatim* memory addressed by a
+//     stable `document_id` (the field/slot key from fileToField), tagged with
+//     its source surface. Bank is created with retain_extraction_mode=verbatim
+//     so recall returns the original bytes — required for SOUL.md header parsing
+//     and thread.json JSON round-trips.
+//   - read()   → recall filtered by the slot's tags (semantic + tag hybrid).
+//   - write()  → retain a single item with update_mode="replace" (upsert).
+//   - append() → read-concat-write, serialized per (userId, slot) to avoid the
+//     concurrent-append race (same approach as PodMemoryStorage.append).
+//
+// All interface methods swallow transport errors and degrade to "stateless"
+// (return ""/[]), never throwing into the engine turn — matching PodMemoryStorage.
+
+export interface HindsightConfig {
+  /** Base URL of the Hindsight instance, e.g. http://localhost:8888 */
+  baseUrl: string;
+  /** API namespace path segment (Hindsight default is "default"). */
+  namespace: string;
+  /** Bank id prefix; bank = `${bankPrefix}-${sanitizeId(userId)}`. */
+  bankPrefix: string;
+  /** Optional bearer token; omit for local/Ollama instances that need no auth. */
+  apiKey?: string;
+  /** Bank retain extraction mode. "verbatim" preserves original text exactly. */
+  extractionMode: string;
+  /** Recall/reflect compute budget. */
+  recallBudget: "low" | "mid" | "high";
+  /** Max tokens returned by recall — must be generous enough to round-trip a slot. */
+  recallMaxTokens: number;
+  /** Per-request timeout (ms). */
+  timeoutMs: number;
+  /** Optional thread/session id, stored in memory metadata for provenance. */
+  threadId?: string;
+  /** Injectable fetch implementation (tests). Defaults to the global fetch. */
+  fetchImpl?: typeof globalThis.fetch;
+  /** Log transport failures to stderr. */
+  verbose?: boolean;
+}
+
+export class HindsightMemoryStorage implements MemoryStorage {
+  private readonly baseUrl: string;
+  private readonly namespace: string;
+  private readonly bankPrefix: string;
+  private readonly apiKey?: string;
+  private readonly extractionMode: string;
+  private readonly recallBudget: string;
+  private readonly recallMaxTokens: number;
+  private readonly timeoutMs: number;
+  private readonly threadId?: string;
+  private readonly verbose: boolean;
+  private readonly fetchImpl: typeof globalThis.fetch;
+
+  /** Banks confirmed-created this process (avoids re-issuing create on every write). */
+  private banksEnsured = new Set<string>();
+
+  /** Per-(userId, slot) serialization chain for read-modify-write appends. */
+  private appendChain = new Map<string, Promise<void>>();
+
+  constructor(config: HindsightConfig) {
+    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.namespace = config.namespace;
+    this.bankPrefix = config.bankPrefix;
+    this.apiKey = config.apiKey;
+    this.extractionMode = config.extractionMode;
+    this.recallBudget = config.recallBudget;
+    this.recallMaxTokens = config.recallMaxTokens;
+    this.timeoutMs = config.timeoutMs;
+    this.threadId = config.threadId;
+    this.verbose = config.verbose ?? false;
+    this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
+  }
+
+  private bankId(userId: string): string {
+    return `${this.bankPrefix}-${sanitizeId(userId)}`;
+  }
+
+  private bankPath(userId: string, suffix = ""): string {
+    return `/v1/${this.namespace}/banks/${encodeURIComponent(this.bankId(userId))}${suffix}`;
+  }
+
+  /**
+   * Resolve a memory filename to a Hindsight slot: a stable document_id used for
+   * upsert/replace, the source surface (for tags/metadata), and the daily date
+   * if applicable. Built on the shared fileToField mapping.
+   */
+  private slotFor(file: string): { slot: string; surface: string; date?: string } {
+    const { field, date } = fileToField(file);
+    if (field === "today" && date) {
+      return { slot: `daily:${date}`, surface: "daily", date };
+    }
+    return { slot: field, surface: field };
+  }
+
+  /** Tag set carried on every memory: source surface + user scope (+ date). */
+  private tagsFor(userId: string, surface: string, date?: string): string[] {
+    const tags = ["sportsclaw", `user:${sanitizeId(userId)}`, `surface:${surface}`];
+    if (date) tags.push(`date:${date}`);
+    return tags;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async request(method: string, path: string, body?: unknown): Promise<any> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.apiKey) headers["authorization"] = `Bearer ${this.apiKey}`;
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!res.ok) {
+        if (this.verbose) {
+          console.error(`[sportsclaw] hindsight ${method} ${path} -> HTTP ${res.status}`);
+        }
+        return { ok: false, status: res.status };
+      }
+      const text = await res.text();
+      if (!text) return { ok: true };
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { ok: true };
+      }
+    } catch (err: unknown) {
+      if (this.verbose) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[sportsclaw] hindsight ${method} ${path} failed: ${msg}`);
+      }
+      return { ok: false };
+    }
+  }
+
+  /**
+   * Create-or-update the per-user bank with verbatim extraction. Best-effort and
+   * cached: once issued for a bank this process, we don't repeat it.
+   */
+  private async ensureBank(userId: string): Promise<void> {
+    const bank = this.bankId(userId);
+    if (this.banksEnsured.has(bank)) return;
+    await this.request("POST", this.bankPath(userId), {
+      retain_extraction_mode: this.extractionMode,
+    });
+    // Mark ensured regardless of outcome: a transient failure shouldn't make
+    // every subsequent write re-attempt creation, and retain is non-fatal anyway.
+    this.banksEnsured.add(bank);
+  }
+
+  async read(userId: string, file: string): Promise<string> {
+    try {
+      const { slot, surface, date } = this.slotFor(file);
+      const tags = this.tagsFor(userId, surface, date);
+      const res = await this.request("POST", this.bankPath(userId, "/memory/recall"), {
+        query: slot,
+        tags,
+        tags_match: "all",
+        budget: this.recallBudget,
+        max_tokens: this.recallMaxTokens,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const results: any[] = Array.isArray(res?.results) ? res.results : [];
+      if (results.length === 0) return "";
+      // Prefer memories addressed by this exact slot's document_id. With
+      // update_mode="replace" there is normally one; if verbatim chunking split
+      // a large slot, concatenate the chunks in returned order.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matching = results.filter((r: any) => r?.document_id === slot);
+      const use = matching.length > 0 ? matching : results;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return use.map((r: any) => (typeof r?.text === "string" ? r.text : "")).join("");
+    } catch {
+      return "";
+    }
+  }
+
+  async write(userId: string, file: string, content: string): Promise<void> {
+    try {
+      await this.ensureBank(userId);
+      const { slot, surface, date } = this.slotFor(file);
+      const tags = this.tagsFor(userId, surface, date);
+      await this.request("POST", this.bankPath(userId, "/memory/retain"), {
+        items: [
+          {
+            content,
+            document_id: slot,
+            tags,
+            metadata: {
+              userId,
+              ...(this.threadId ? { threadId: this.threadId } : {}),
+              surface,
+              file,
+            },
+            update_mode: "replace",
+          },
+        ],
+        async: false,
+      });
+    } catch {
+      // Non-fatal — memory writes never block a turn.
+    }
+  }
+
+  async append(userId: string, file: string, content: string): Promise<void> {
+    // Serialize concurrent appends per (userId, slot). read+write is not atomic,
+    // so two concurrent appends would both read pre-mutation state and the second
+    // replace would overwrite the first, losing an entry. Chain them instead.
+    const { slot } = this.slotFor(file);
+    const key = `${userId}:${slot}`;
+    const previous = this.appendChain.get(key) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(async () => {
+        const existing = await this.read(userId, file);
+        await this.write(userId, file, existing ? `${existing}\n${content}` : content);
+      });
+    this.appendChain.set(key, next);
+    try {
+      await next;
+    } finally {
+      if (this.appendChain.get(key) === next) {
+        this.appendChain.delete(key);
+      }
+    }
+  }
+
+  async list(userId: string, _pattern: string): Promise<string[]> {
+    // Mirror PodMemoryStorage: surface only today's daily log. Hindsight performs
+    // its own long-horizon consolidation, so SportsClaw-side consolidateOldLogs
+    // is inert here (as it already is for the pod backend).
+    try {
+      const today = todayStamp();
+      const content = await this.read(userId, `${today}.md`);
+      return content ? [`${today}.md`] : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async remove(userId: string, file: string): Promise<void> {
+    // Match PodMemoryStorage semantics: clear the slot's content (replace empty).
+    await this.write(userId, file, "");
+  }
+
+  // -------------------------------------------------------------------------
+  // Extra capabilities (not part of MemoryStorage) — Hindsight's semantic
+  // pipelines, exposed for downstream/manual use and covered by tests.
+  // -------------------------------------------------------------------------
+
+  /** Free-form semantic recall across a user's bank (semantic + keyword + graph + temporal). */
+  async recall(
+    userId: string,
+    query: string,
+    opts: { tags?: string[]; budget?: string; maxTokens?: number } = {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any[]> {
+    try {
+      const res = await this.request("POST", this.bankPath(userId, "/memory/recall"), {
+        query,
+        ...(opts.tags ? { tags: opts.tags, tags_match: "any" } : {}),
+        budget: opts.budget ?? this.recallBudget,
+        max_tokens: opts.maxTokens ?? this.recallMaxTokens,
+      });
+      return Array.isArray(res?.results) ? res.results : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Reflect over a user's memories to synthesize an insight (Hindsight reflect pipeline). */
+  async reflect(
+    userId: string,
+    query: string,
+    opts: { budget?: string; maxTokens?: number } = {}
+  ): Promise<string> {
+    try {
+      const res = await this.request("POST", this.bankPath(userId, "/reflect"), {
+        query,
+        budget: opts.budget ?? this.recallBudget,
+        max_tokens: opts.maxTokens ?? this.recallMaxTokens,
+      });
+      return typeof res?.text === "string" ? res.text : "";
+    } catch {
+      return "";
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Provider selection — file | pod | hindsight
+// ---------------------------------------------------------------------------
+
+/** Build a HindsightConfig from environment variables (+ optional overrides). */
+export function hindsightConfigFromEnv(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
+  const budget = (process.env.HINDSIGHT_RECALL_BUDGET ?? "mid").toLowerCase();
+  return {
+    baseUrl: process.env.HINDSIGHT_BASE_URL || "http://localhost:8888",
+    namespace: process.env.HINDSIGHT_NAMESPACE || "default",
+    bankPrefix: process.env.HINDSIGHT_BANK_PREFIX || "sportsclaw",
+    apiKey: process.env.HINDSIGHT_API_KEY || undefined,
+    extractionMode: process.env.HINDSIGHT_RETAIN_EXTRACTION_MODE || "verbatim",
+    recallBudget: (["low", "mid", "high"].includes(budget) ? budget : "mid") as "low" | "mid" | "high",
+    recallMaxTokens: Number(process.env.HINDSIGHT_RECALL_MAX_TOKENS) || 32_768,
+    timeoutMs: Number(process.env.HINDSIGHT_REQUEST_TIMEOUT_MS) || 30_000,
+    ...overrides,
+  };
+}
+
+export interface CreateMemoryStorageOptions {
+  /** Required for pod/auto selection (to discover a Machina MCP server). */
+  mcpManager?: McpManager;
+  /** Optional thread/session id (stored as Hindsight memory metadata). */
+  threadId?: string;
+  verbose?: boolean;
+}
+
+export interface MemoryStorageSelection {
+  /** Undefined → MemoryManager falls back to its FileMemoryStorage default. */
+  storage?: MemoryStorage;
+  /** The driver actually selected. */
+  provider: "file" | "pod" | "hindsight";
+  /** Raw requested value (provider/backend env, lower-cased). */
+  requested: string;
+  /** Pod server name or Hindsight base URL, when applicable. */
+  server?: string;
+  /** Stable key for de-duplicating the one-time selection log line. */
+  logKey: string;
+  /** Pre-formatted one-time log line. */
+  logLine: string;
+}
+
+/**
+ * Select the memory storage driver from the environment.
+ *
+ *   SPORTSCLAW_MEMORY_PROVIDER = file | pod | hindsight   (canonical)
+ *   SPORTSCLAW_MEMORY_BACKEND  = auto | file | pod         (legacy fallback)
+ *
+ * If SPORTSCLAW_MEMORY_PROVIDER is unset we fall back to the legacy
+ * SPORTSCLAW_MEMORY_BACKEND so existing deployments are unaffected. When both
+ * are unset the default is "auto" (pod if a Machina server is connected, else
+ * file) — preserving prior out-of-the-box behavior.
+ */
+export function createMemoryStorage(opts: CreateMemoryStorageOptions = {}): MemoryStorageSelection {
+  const rawProvider = process.env.SPORTSCLAW_MEMORY_PROVIDER;
+  const rawBackend = process.env.SPORTSCLAW_MEMORY_BACKEND;
+  const usingLegacyVar = rawProvider === undefined && rawBackend !== undefined;
+  const requested = (rawProvider ?? rawBackend ?? "auto").toLowerCase();
+
+  if (!["file", "pod", "hindsight", "auto"].includes(requested)) {
+    const varName = usingLegacyVar ? "SPORTSCLAW_MEMORY_BACKEND" : "SPORTSCLAW_MEMORY_PROVIDER";
+    const raw = rawProvider ?? rawBackend;
+    throw new Error(
+      `Invalid ${varName}=${raw}. Expected "file", "pod", or "hindsight"` +
+        (varName === "SPORTSCLAW_MEMORY_BACKEND" ? ' (or legacy "auto").' : ' (or "auto").')
+    );
+  }
+
+  if (requested === "hindsight") {
+    const cfg = hindsightConfigFromEnv({ threadId: opts.threadId, verbose: opts.verbose });
+    return {
+      storage: new HindsightMemoryStorage(cfg),
+      provider: "hindsight",
+      requested,
+      server: cfg.baseUrl,
+      logKey: `${requested}:hindsight:${cfg.baseUrl}`,
+      logLine: `[sportsclaw] memory_backend requested=${requested} selected=hindsight base_url=${cfg.baseUrl}`,
+    };
+  }
+
+  // file | pod | auto — unchanged pod-or-file logic.
+  const machinaServer = requested === "file" ? undefined : opts.mcpManager?.getMachinaServerName();
+
+  if (requested === "pod" && !machinaServer) {
+    throw new Error(
+      'Memory provider "pod" requires a connected Machina MCP server exposing ' +
+        "search_documents, create_document, and update_document."
+    );
+  }
+
+  const storage =
+    machinaServer && opts.mcpManager
+      ? new PodMemoryStorage(opts.mcpManager, machinaServer)
+      : undefined;
+  const selected: "pod" | "file" = storage ? "pod" : "file";
+
+  return {
+    storage,
+    provider: selected,
+    requested,
+    server: machinaServer,
+    logKey: `${requested}:${selected}:${machinaServer ?? "local"}`,
+    logLine:
+      `[sportsclaw] memory_backend requested=${requested} selected=${selected}` +
+      (machinaServer ? ` server=${machinaServer}` : ""),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
