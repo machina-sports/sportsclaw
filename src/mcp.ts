@@ -157,6 +157,36 @@ export function validateConnectBundle(
   return { ok: true, name, url, token, durable };
 }
 
+export interface McpServerSummary {
+  name: string;
+  provider: string;
+  url: string;
+  hasToken: boolean;
+}
+
+/**
+ * Agent-facing, secret-free summary of the configured MCP servers — so the
+ * agent (via get_agent_config) can see which pods are wired without being able
+ * to read or mutate them. Never includes the token itself, only whether one is
+ * resolvable (env var or an inline auth header), mirroring resolveTokens.
+ */
+export function summarizeMcpServers(
+  configs: Record<string, McpServerConfig> = loadMcpConfigs(),
+  env: NodeJS.ProcessEnv = process.env
+): McpServerSummary[] {
+  return Object.entries(configs).map(([name, c]) => ({
+    name,
+    provider: c.provider ?? "custom",
+    url: c.url,
+    hasToken:
+      !!env[mcpEnvKey(name)] ||
+      !!(c.headers &&
+        Object.keys(c.headers).some(
+          (h) => h.toLowerCase() === "authorization" || h.toLowerCase() === "x-api-token"
+        )),
+  }));
+}
+
 /** Load the user-managed MCP config from ~/.sportsclaw/mcp.json */
 export function loadMcpConfigs(): Record<string, McpServerConfig> {
   if (!existsSync(MCP_CONFIG_PATH)) return {};

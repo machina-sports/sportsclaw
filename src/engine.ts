@@ -50,7 +50,7 @@ import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import { MemoryManager, PodMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
 import { loadAgents, type AgentDef } from "./agents.js";
-import { McpManager } from "./mcp.js";
+import { McpManager, summarizeMcpServers } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
 import { readFileSync } from "node:fs";
@@ -1127,7 +1127,8 @@ export class sportsclawEngine {
       description:
         "Return the current agent configuration as JSON. Includes provider, model, " +
         "router settings, routing parameters, Python path, installed sports, " +
-        "available (uninstalled) sports, chat integrations status, and version.",
+        "available (uninstalled) sports, chat integrations status, connected MCP " +
+        "servers (name/provider/url, secret-free), and version.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {},
@@ -1147,6 +1148,7 @@ export class sportsclawEngine {
             pythonPath: config.pythonPath,
             installedSports: installed,
             availableSports: available,
+            mcpServers: summarizeMcpServers(),
             chatIntegrations: {
               discord: {
                 configured: !!discord?.botToken,
