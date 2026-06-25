@@ -124,6 +124,8 @@ import {
   saveMcpConfigs,
   removeMcpConfig,
   getMcpConfigPath,
+  mcpEnvKey,
+  isValidMcpServerName,
   McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
@@ -1084,11 +1086,13 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
   const machinaPods = Object.entries(mcpServers).filter(([, c]) => c.provider === "machina");
   let machinaCli = false;
   try {
-    execFileSync("machina", ["version"], { stdio: "ignore" });
+    execFileSync("machina", ["version"], { stdio: "ignore", timeout: 5_000 });
     machinaCli = true;
   } catch (e) {
-    // ENOENT = not installed; any other error still means the binary is present
-    machinaCli = (e as { code?: string }).code !== "ENOENT";
+    // ENOENT = not installed; EACCES = present but not executable. Any other
+    // error (non-zero exit, timeout) still means the binary is present.
+    const code = (e as { code?: string }).code;
+    machinaCli = code !== "ENOENT" && code !== "EACCES";
   }
   if (machinaPods.length > 0) {
     console.log(
@@ -2418,7 +2422,7 @@ async function cmdMcp(args: string[]): Promise<void> {
     }
 
     // Validate name
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    if (!isValidMcpServerName(name)) {
       console.error(`Invalid server name "${name}". Use only alphanumeric, hyphens, and underscores.`);
       process.exit(1);
     }
@@ -2437,7 +2441,7 @@ async function cmdMcp(args: string[]): Promise<void> {
 
     // Store token in ~/.sportsclaw/.env (not in mcp.json — keep secrets separate)
     if (token) {
-      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      const envKey = mcpEnvKey(name);
       writeEnvVar(ENV_PATH, envKey, token);
       console.log(pc.dim(`Token saved to ${ENV_PATH} as ${envKey}`));
     }
@@ -2453,7 +2457,7 @@ async function cmdMcp(args: string[]): Promise<void> {
     console.log(pc.dim(`Config: ${getMcpConfigPath()}`));
 
     if (!token) {
-      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      const envKey = mcpEnvKey(name);
       console.log("");
       console.log(pc.yellow("No token provided. If the server requires auth, add one:"));
       console.log(`  sportsclaw mcp add ${url} --name ${name} --token <your-token>`);
@@ -2616,12 +2620,18 @@ async function cmdMachina(args: string[]): Promise<void> {
     raw = execFileSync("machina", connectArgs, {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
     });
   } catch (err) {
     const e = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string };
     if (e.code === "ENOENT") {
       console.error(pc.red("machina-cli not found."));
       console.error(`  Install it: ${pc.cyan("pip install machina-cli")}, then ${pc.cyan("machina login")}.`);
+      process.exit(1);
+    }
+    if (e.code === "ETIMEDOUT") {
+      console.error(pc.red("machina connect timed out (30s) — the pod may be unreachable."));
+      console.error(`  Check ${pc.cyan("machina status")} and retry.`);
       process.exit(1);
     }
     const out = (e.stdout ?? "").toString().trim();
@@ -2662,21 +2672,34 @@ async function cmdMachina(args: string[]): Promise<void> {
     console.error(pc.red("machina connect returned no token. Retry, or check `machina connect --reveal`."));
     process.exit(1);
   }
+  // `name` becomes the mcp.json key, the env-key segment, AND a tool-cache
+  // filename — validate it the same way `mcp add` does (no path traversal).
+  if (!isValidMcpServerName(name)) {
+    console.error(pc.red(`machina connect returned an invalid pod name ("${name}").`));
+    process.exit(1);
+  }
+  // The token is written verbatim into ~/.sportsclaw/.env — a newline would
+  // inject additional dotenv lines, so refuse one.
+  if (/[\r\n]/.test(token)) {
+    console.error(pc.red("machina connect returned a malformed token (contains a newline)."));
+    process.exit(1);
+  }
+  // We pass --mint, so a durable X-Api-Token is expected. Refuse any other
+  // header rather than writing a secret into mcp.json.
+  if (header.toLowerCase() !== "x-api-token") {
+    console.error(pc.red(`Unexpected auth header from machina connect ("${header}"); expected X-Api-Token.`));
+    console.error(`  Upgrade machina-cli (${pc.cyan("pip install --upgrade machina-cli")}) and retry.`);
+    process.exit(1);
+  }
 
-  // 3. Register the MCP server, mirroring `mcp add`: config in mcp.json, secret
-  //    in ~/.sportsclaw/.env. The standard X-Api-Token is injected from env by
-  //    the MCP manager; a non-standard header is set inline as a fallback.
+  // Register like `mcp add`: write the secret to ~/.sportsclaw/.env FIRST (so a
+  // failure never leaves a tokenless config), then the config in mcp.json. The
+  // MCP manager injects SPORTSCLAW_MCP_TOKEN_<NAME> as X-Api-Token at connect time.
+  writeEnvVar(ENV_PATH, mcpEnvKey(name), token);
   const configs = loadMcpConfigs();
   const isUpdate = name in configs;
-  if (header.toLowerCase() === "x-api-token") {
-    configs[name] = { url, provider: "machina" };
-    saveMcpConfigs(configs);
-    const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
-    writeEnvVar(ENV_PATH, envKey, token);
-  } else {
-    configs[name] = { url, provider: "machina", headers: { [header]: token } };
-    saveMcpConfigs(configs);
-  }
+  configs[name] = { url, provider: "machina" };
+  saveMcpConfigs(configs);
 
   console.log(pc.green(isUpdate ? `Reconnected Machina pod "${name}"` : `Connected Machina pod "${name}"`));
   console.log(`  URL: ${url}`);
