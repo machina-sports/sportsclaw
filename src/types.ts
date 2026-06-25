@@ -404,6 +404,8 @@ export interface McpServerConfig {
   timeoutMs?: number;
   /** Server description injected into LLM system prompt for tool context */
   description?: string;
+  /** Origin of this server config (e.g. "machina" when added via `sportsclaw machina connect`). */
+  provider?: "machina";
 }
 
 // ---------------------------------------------------------------------------

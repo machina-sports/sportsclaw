@@ -35,6 +35,37 @@ import { join } from "node:path";
 const MCP_CONFIG_DIR = join(homedir(), ".sportsclaw");
 const MCP_CONFIG_PATH = join(MCP_CONFIG_DIR, "mcp.json");
 
+/**
+ * Env-var key holding a server's bearer token. This is the contract between the
+ * writer (`mcp add` / `machina connect`) and the reader (`resolveTokens`) — keep
+ * it single-source so the two can never drift.
+ */
+export function mcpEnvKey(name: string): string {
+  return `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+}
+
+/** A server name is safe to use as a config key, env-key segment, and cache filename. */
+export function isValidMcpServerName(name: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(name);
+}
+
+/**
+ * If a *different* existing server resolves to the same env-key as `name`,
+ * return its name. mcpEnvKey folds case and `-`/`_`, so "my-pod" and "my_pod"
+ * share one token slot — registering both would make resolveTokens inject one
+ * pod's token into requests for the other. Callers reject the collision.
+ */
+export function envKeyCollision(
+  name: string,
+  configs: Record<string, McpServerConfig>
+): string | null {
+  const key = mcpEnvKey(name);
+  for (const existing of Object.keys(configs)) {
+    if (existing !== name && mcpEnvKey(existing) === key) return existing;
+  }
+  return null;
+}
+
 /** Load the user-managed MCP config from ~/.sportsclaw/mcp.json */
 export function loadMcpConfigs(): Record<string, McpServerConfig> {
   if (!existsSync(MCP_CONFIG_PATH)) return {};
@@ -248,7 +279,7 @@ export class McpManager {
         );
 
       if (!hasAuth) {
-        const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+        const envKey = mcpEnvKey(name);
         const token = process.env[envKey];
         if (token) {
           config.headers = { ...config.headers, "X-Api-Token": token };

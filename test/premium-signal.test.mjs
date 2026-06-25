@@ -28,6 +28,10 @@ describe("premium signal prompt section", () => {
     assert.ok(/sports-skills premium/.test(PREMIUM_SIGNAL));
   });
 
+  it("offers the native `sportsclaw machina connect` path", () => {
+    assert.ok(/sportsclaw machina connect/.test(PREMIUM_SIGNAL));
+  });
+
   it("answers with data first and stays non-pushy", () => {
     assert.ok(/answer first/i.test(PREMIUM_SIGNAL));
     assert.ok(/single|one short line/i.test(PREMIUM_SIGNAL));

@@ -45,7 +45,7 @@
 
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
@@ -124,6 +124,9 @@ import {
   saveMcpConfigs,
   removeMcpConfig,
   getMcpConfigPath,
+  mcpEnvKey,
+  isValidMcpServerName,
+  envKeyCollision,
   McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
@@ -1077,6 +1080,35 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
   // 8. Schema directory location
   if (schemas.length > 0) {
     console.log(pc.green("  ✓") + ` Schema dir: ${getSchemaDir()}`);
+  }
+
+  // 8b. Machina premium (optional) — connected pods + machina-cli presence
+  const mcpServers = loadMcpConfigs();
+  const machinaPods = Object.entries(mcpServers).filter(([, c]) => c.provider === "machina");
+  let machinaCli = false;
+  try {
+    execFileSync("machina", ["version"], { stdio: "ignore", timeout: 5_000 });
+    machinaCli = true;
+  } catch (e) {
+    // ENOENT = not installed; EACCES/EPERM = present but not runnable. Any other
+    // error (non-zero exit, timeout) still means the binary is present.
+    const code = (e as { code?: string }).code;
+    machinaCli = code !== "ENOENT" && code !== "EACCES" && code !== "EPERM";
+  }
+  if (machinaPods.length > 0) {
+    console.log(
+      pc.green("  ✓") +
+        ` Machina premium: ${machinaPods.length} pod(s) connected (${machinaPods.map(([n]) => n).join(", ")})`,
+    );
+  } else if (machinaCli) {
+    console.log(
+      pc.dim("  •") + ` Machina premium: machina-cli installed — connect with ${pc.cyan("sportsclaw machina connect")}`,
+    );
+  } else {
+    console.log(
+      pc.dim("  •") +
+        ` Machina premium (optional): ${pc.cyan("pip install machina-cli")} then ${pc.cyan("sportsclaw machina connect")}`,
+    );
   }
 
   // 9. Config drift across env, ~/.sportsclaw/.env, and config.json
@@ -2391,13 +2423,18 @@ async function cmdMcp(args: string[]): Promise<void> {
     }
 
     // Validate name
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    if (!isValidMcpServerName(name)) {
       console.error(`Invalid server name "${name}". Use only alphanumeric, hyphens, and underscores.`);
       process.exit(1);
     }
 
     // Build server config
     const configs = loadMcpConfigs();
+    const collision = envKeyCollision(name, configs);
+    if (collision) {
+      console.error(`Server name "${name}" shares a token slot with existing server "${collision}". Remove it first or use a distinct name.`);
+      process.exit(1);
+    }
     const isUpdate = name in configs;
     const config: McpServerConfig = {
       url,
@@ -2410,7 +2447,7 @@ async function cmdMcp(args: string[]): Promise<void> {
 
     // Store token in ~/.sportsclaw/.env (not in mcp.json — keep secrets separate)
     if (token) {
-      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      const envKey = mcpEnvKey(name);
       writeEnvVar(ENV_PATH, envKey, token);
       console.log(pc.dim(`Token saved to ${ENV_PATH} as ${envKey}`));
     }
@@ -2426,7 +2463,7 @@ async function cmdMcp(args: string[]): Promise<void> {
     console.log(pc.dim(`Config: ${getMcpConfigPath()}`));
 
     if (!token) {
-      const envKey = `SPORTSCLAW_MCP_TOKEN_${name.replace(/-/g, "_").toUpperCase()}`;
+      const envKey = mcpEnvKey(name);
       console.log("");
       console.log(pc.yellow("No token provided. If the server requires auth, add one:"));
       console.log(`  sportsclaw mcp add ${url} --name ${name} --token <your-token>`);
@@ -2541,6 +2578,182 @@ function cmdLogout(args: string[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw machina connect [project]` — wire a Machina premium pod
+// into this agent via the machina-cli `connect` resolver (no pasted URL).
+// ---------------------------------------------------------------------------
+
+async function cmdMachina(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (sub !== "connect") {
+    console.error("Usage: sportsclaw machina connect [project] [--org <org>] [--probe]");
+    console.error("  Connects a Machina premium pod via machina-cli (mints a durable key).");
+    process.exit(1);
+  }
+
+  let project: string | undefined;
+  let org: string | undefined;
+  let probe = false;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--org" && args[i + 1]) org = args[++i];
+    else if (a === "--probe") probe = true;
+    else if (!a.startsWith("-") && !project) project = a;
+  }
+
+  const parse = (s: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(s) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+
+  // Resolve the connection bundle via machina-cli (it owns auth + MCP
+  // resolution). --mint yields a durable X-Api-Token (no expiry); --reveal
+  // returns the real token so we can register it.
+  const connectArgs = [
+    "connect",
+    ...(project ? [project] : []),
+    "--json",
+    "--reveal",
+    "--mint",
+    ...(org ? ["--org", org] : []),
+    ...(probe ? ["--probe"] : []),
+  ];
+
+  let raw: string;
+  try {
+    raw = execFileSync("machina", connectArgs, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    });
+  } catch (err) {
+    const e = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string };
+    if (e.code === "ENOENT") {
+      console.error(pc.red("machina-cli not found."));
+      console.error(`  Install it: ${pc.cyan("pip install machina-cli")}, then ${pc.cyan("machina login")}.`);
+      process.exit(1);
+    }
+    if (e.code === "ETIMEDOUT") {
+      console.error(pc.red("machina connect timed out (30s) — the pod may be unreachable."));
+      console.error(`  Check ${pc.cyan("machina status")} and retry.`);
+      process.exit(1);
+    }
+    const out = (e.stdout ?? "").toString().trim();
+    const errText = (e.stderr ?? "").toString().trim();
+    const combined = `${out}\n${errText}`;
+    if (/no such command|usage: machina/i.test(combined) && !parse(out)?.error) {
+      console.error(pc.red("This machina-cli is too old — it has no `connect` command."));
+      console.error(`  Upgrade it: ${pc.cyan("pip install --upgrade machina-cli")}`);
+      process.exit(1);
+    }
+    const msg = parse(out)?.error || errText || "machina connect failed";
+    console.error(pc.red(`Could not connect: ${String(msg)}`));
+    if (/auth|session|login|not authenticated/i.test(combined)) {
+      console.error(`  Run ${pc.cyan("machina login")} first, then retry.`);
+    } else if (/organization|org/i.test(combined)) {
+      console.error(`  Pass ${pc.cyan("--org <org-id>")} or set a default org in machina-cli.`);
+    }
+    process.exit(1);
+  }
+
+  const bundle = parse(raw.trim());
+  if (!bundle || bundle.error) {
+    console.error(pc.red(`Could not connect: ${String(bundle?.error ?? "unexpected output from machina connect")}`));
+    process.exit(1);
+  }
+
+  // The bundle is untrusted external JSON (Record<string, unknown>) — narrow by
+  // runtime type, never `as`, so a non-string field can't slip through coercion.
+  const name = typeof bundle.name === "string" ? bundle.name : undefined;
+  const url = typeof bundle.url === "string" ? bundle.url : undefined;
+  const token = typeof bundle.token === "string" ? bundle.token : undefined;
+  const header = typeof bundle.auth_header === "string" ? bundle.auth_header : "X-Api-Token";
+  const durable = bundle.durable === true;
+
+  if (!name || !url) {
+    console.error(pc.red("machina connect did not return a usable url/name."));
+    process.exit(1);
+  }
+  // The minted token is sent to `url` as a bearer header, so refuse to persist a
+  // url we can't parse or one that would send the secret in cleartext to a
+  // remote host (http is allowed only for loopback dev pods).
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    console.error(pc.red(`machina connect returned an unparseable url ("${url}").`));
+    process.exit(1);
+  }
+  const isLoopback =
+    parsedUrl.hostname === "localhost" ||
+    parsedUrl.hostname === "127.0.0.1" ||
+    parsedUrl.hostname === "::1";
+  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopback)) {
+    console.error(pc.red(`Refusing to send the token to a non-HTTPS url ("${url}").`));
+    process.exit(1);
+  }
+  if (!token) {
+    console.error(pc.red("machina connect returned no token. Retry, or check `machina connect --reveal`."));
+    process.exit(1);
+  }
+  // `name` becomes the mcp.json key, the env-key segment, AND a tool-cache
+  // filename — validate it the same way `mcp add` does (no path traversal).
+  if (!isValidMcpServerName(name)) {
+    console.error(pc.red(`machina connect returned an invalid pod name ("${name}").`));
+    process.exit(1);
+  }
+  // The token is written verbatim into ~/.sportsclaw/.env — a newline would
+  // inject additional dotenv lines, so refuse one.
+  if (/[\r\n]/.test(token)) {
+    console.error(pc.red("machina connect returned a malformed token (contains a newline)."));
+    process.exit(1);
+  }
+  // We pass --mint, so a durable X-Api-Token is expected. Refuse any other
+  // header rather than writing a secret into mcp.json.
+  if (header.toLowerCase() !== "x-api-token") {
+    console.error(pc.red(`Unexpected auth header from machina connect ("${header}"); expected X-Api-Token.`));
+    console.error(`  Upgrade machina-cli (${pc.cyan("pip install --upgrade machina-cli")}) and retry.`);
+    process.exit(1);
+  }
+
+  const configs = loadMcpConfigs();
+  // Reject a name that shares a token slot with a different existing server —
+  // otherwise resolveTokens would inject one pod's token for the other.
+  const collision = envKeyCollision(name, configs);
+  if (collision) {
+    console.error(pc.red(`Pod name "${name}" shares a token slot with existing server "${collision}".`));
+    console.error(`  Remove "${collision}" first (${pc.cyan(`sportsclaw mcp remove ${collision}`)}), or connect under a distinct name.`);
+    process.exit(1);
+  }
+  const isUpdate = name in configs;
+
+  // Register like `mcp add`: write the secret to ~/.sportsclaw/.env FIRST (so a
+  // failure never leaves a tokenless config), then the config in mcp.json. The
+  // MCP manager injects SPORTSCLAW_MCP_TOKEN_<NAME> as X-Api-Token at connect time.
+  try {
+    writeEnvVar(ENV_PATH, mcpEnvKey(name), token);
+    configs[name] = { url, provider: "machina" };
+    saveMcpConfigs(configs);
+  } catch (e) {
+    console.error(pc.red(`Failed to save the connection: ${(e as Error).message}`));
+    console.error(`  The token may be in ${ENV_PATH} but the pod was not registered — re-run to retry.`);
+    process.exit(1);
+  }
+
+  console.log(pc.green(isUpdate ? `Reconnected Machina pod "${name}"` : `Connected Machina pod "${name}"`));
+  console.log(`  URL: ${url}`);
+  console.log(pc.dim(`  Auth: ${header}${durable ? " (durable key)" : " (session token — may expire)"}`));
+  console.log(pc.dim(`  Config: ${getMcpConfigPath()}`));
+  if (!durable) {
+    console.log(pc.yellow("  Note: not a durable key — re-run this if the connection later returns 401."));
+  }
+  console.log("");
+  console.log(`Verify with ${pc.cyan("sportsclaw mcp list")}. Restart any running listeners to pick it up.`);
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw --help` — usage text
 // ---------------------------------------------------------------------------
 
@@ -2577,6 +2790,7 @@ function printHelp(): void {
   console.log("  sportsclaw mcp add <url>           Connect an MCP server (Machina pod, etc.)");
   console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
   console.log("  sportsclaw mcp list                List configured MCP servers");
+  console.log("  sportsclaw machina connect [proj]  Connect a Machina premium pod (via machina-cli)");
   console.log("  sportsclaw watch <sport> <command>  Watch an endpoint for realtime changes");
   console.log("  sportsclaw watch --config=<path>   Run multiple watchers from config file");
   console.log("  sportsclaw plugin install <name>   Install an optional plugin");
@@ -2804,6 +3018,8 @@ case "plugin":
       return cmdPlugin(subArgs);
     case "mcp":
       return cmdMcp(subArgs);
+    case "machina":
+      return cmdMachina(subArgs);
     case "watch":
       return cmdWatch(subArgs);
     default:
