@@ -123,6 +123,7 @@ describe("summarizeMcpServers", () => {
   const configs = {
     "nba-premium": { url: "https://pod/mcp/sse", provider: "machina" },
     "my-custom": { url: "https://other/mcp", headers: { "X-Api-Token": "inline" } },
+    "bearer-auth": { url: "https://bearer/mcp", headers: { Authorization: "Bearer inline_auth" } },
     "no-auth": { url: "https://bare/mcp" },
   };
 
@@ -142,7 +143,8 @@ describe("summarizeMcpServers", () => {
   it("reports hasToken from an env var or an inline auth header", () => {
     const out = summarizeMcpServers(configs, {});
     assert.equal(out.find((s) => s.name === "nba-premium").hasToken, false); // no env var
-    assert.equal(out.find((s) => s.name === "my-custom").hasToken, true); // inline header
+    assert.equal(out.find((s) => s.name === "my-custom").hasToken, true); // inline X-Api-Token
+    assert.equal(out.find((s) => s.name === "bearer-auth").hasToken, true); // inline Authorization
     assert.equal(out.find((s) => s.name === "no-auth").hasToken, false);
   });
 

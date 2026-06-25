@@ -5,7 +5,7 @@
  * Environment variables always override config file values.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
@@ -245,8 +245,17 @@ export function writeEnvVar(filePath: string, key: string, value: string): void 
   // Atomic write (same-dir temp + rename) so a crash mid-write can't tear the
   // .env and lose other keys. Matches token-ledger.ts / saveMcpConfigs.
   const tmp = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-  writeFileSync(tmp, lines.join("\n") + "\n", "utf-8");
-  renameSync(tmp, filePath);
+  try {
+    writeFileSync(tmp, lines.join("\n") + "\n", "utf-8");
+    renameSync(tmp, filePath);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* tmp may not exist */ }
+    throw e;
+  }
+  // .env holds bearer tokens — restrict to owner like credentials.ts. The
+  // create-temp-then-rename above resets mode to the umask default, so set it
+  // explicitly after the rename. Best-effort (no-op on platforms without chmod).
+  try { chmodSync(filePath, 0o600); } catch { /* chmod best-effort */ }
 }
 
 /**

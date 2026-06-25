@@ -206,8 +206,13 @@ export function saveMcpConfigs(configs: Record<string, McpServerConfig>): void {
   // swallows a parse error as {} — silently dropping every server. Write to a
   // same-dir temp then rename (atomic on one filesystem). Matches token-ledger.ts.
   const tmp = `${MCP_CONFIG_PATH}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-  writeFileSync(tmp, JSON.stringify(configs, null, 2) + "\n", "utf-8");
-  renameSync(tmp, MCP_CONFIG_PATH);
+  try {
+    writeFileSync(tmp, JSON.stringify(configs, null, 2) + "\n", "utf-8");
+    renameSync(tmp, MCP_CONFIG_PATH);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* tmp may not exist */ }
+    throw e;
+  }
   clearToolCache(); // Invalidate cache on config change
 }
 
