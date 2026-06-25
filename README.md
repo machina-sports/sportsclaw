@@ -83,7 +83,7 @@ const engine = new sportsclawEngine();
 const answer = await engine.run("Who leads the Premier League?");
 ```
 
-Select one file-backed native agent explicitly with `sportsclaw --agent analyst "Compare today's odds"`, or pass `agentIds: ["analyst"]` to `engine.run`. Agent definitions can be managed through the exported `createAgent`, `updateAgent`, `inactivateAgent`, and `listAgents` functions. Selected agents keep SOUL and conversation memory isolated under `memory/<userId>/agents/<agentId>/`.
+Select one native agent explicitly with `sportsclaw --user me --agent analyst "Compare today's odds"`, or pass `userId` and `agentIds: ["analyst"]` to `engine.run`. Agent definitions can be managed through the exported `createAgent`, `updateAgent`, `inactivateAgent`, and `listAgents` functions. When a user ID is supplied, selected agents keep SOUL and conversation memory in isolated file, pod, or Hindsight namespaces.
 
 **Docker in one command.** Ship the whole thing — Node.js engine + Python data layer — as a single container:
 
@@ -116,6 +116,16 @@ sportsclaw is built for:
 - **Discord and Telegram communities** — Deploy a bot that your group can ask sports questions. Built-in listeners handle the wiring; you just add your bot token.
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
+
+### Optional: Pluggable memory backends
+
+Without a connected Machina pod, memory is stored in local files (`~/.sportsclaw/memory/`) — zero setup. Existing pod-enabled deployments keep selecting Machina documents automatically, and semantic, long-horizon memory can be explicitly routed through a [Vectorize Hindsight](https://github.com/vectorize-io/hindsight) server:
+
+```bash
+export SPORTSCLAW_MEMORY_PROVIDER=hindsight   # file (default) | pod | hindsight
+```
+
+Hindsight works against OpenAI/Anthropic/Gemini or a fully local Ollama/LM Studio backend, and can run as an offline sidecar inside an OpenShell sandbox. See [`docs/hindsight-memory.md`](docs/hindsight-memory.md) for setup and configuration.
 
 ### Optional: Run inside NVIDIA OpenShell
 
