@@ -976,8 +976,8 @@
   <main>
     <!-- Hero -->
     <section class="hero container">
-      <!-- TODO: build-inject version from package.json instead of hardcoding -->
-      <div class="badge">OPEN SOURCE · MIT · v0.26.2</div>
+      <!-- #version is substituted from the release tag at deploy time (build-site.yml). -->
+      <div class="badge">OPEN SOURCE · MIT · <span id="version">v0.26.2</span></div>
       <h1>Build AI that understands live sports.</h1>
       <p>One open-source engine with keyless live data, market odds, and real-time game events built in. Ship chat bots, broadcast widgets, and odds trackers in minutes — not months of data plumbing.</p>
       <p class="hero-audience">For fans · broadcasters · sportsbooks · teams &amp; leagues</p>
