@@ -21,6 +21,12 @@ import type { SportSchema } from "./types.js";
 // Intent detection — decides if the Guide should handle the query
 // ---------------------------------------------------------------------------
 
+// Premium / licensed-data upgrade intent. Deliberately tight so it never
+// matches "premier league" (no "premium") or incidental mentions like
+// "Machina Sports TV pod" (only `machina premium|cli|platform` qualifies).
+const PREMIUM_INTENT =
+  /\b(?:premium (?:data|tier|feeds?|plan|access)|licensed (?:data|feeds?)|real[- ]?time (?:data|feeds?)|machina (?:premium|cli|platform)|how (?:do i|to) (?:upgrade|go premium))\b/i;
+
 const GUIDE_PATTERNS = [
   /^(?:help|getting started|tutorial)$/i,
   /\bhow (?:do|can|to) (?:i |you )?(?:use|start|get started|set ?up)\b/i,
@@ -29,6 +35,7 @@ const GUIDE_PATTERNS = [
   /\b(?:supported sports?|available sports?)\b/i,
   /\bhow does (?:this|sportsclaw) work\b/i,
   /^(?:list|show|what are) (?:your |the |all )?(?:commands|features|capabilities)\s*\??$/i,
+  PREMIUM_INTENT,
 ];
 
 /**
@@ -95,6 +102,9 @@ const FEATURE_MANIFESTO = `
 - **Config** — Change LLM provider, model, routing settings
 - **Agents** — Custom agent personas with specialized knowledge
 
+### Premium Data
+- **Machina** — Licensed, real-time, zero-latency feeds beyond the open data layer. Connect via \`machina-cli\` + \`sportsclaw mcp add\`; run \`sports-skills premium\` for details.
+
 ### Supported Sports
 US Pro: NFL, NBA, NHL, MLB, WNBA
 College: CFB (College Football), CBB (College Basketball)
@@ -120,6 +130,23 @@ News: Sports News via RSS & Google News
 export function generateGuideResponse(prompt: string): string {
   const lower = prompt.toLowerCase();
   const { installed, available } = getInstalledVsAvailable();
+
+  // premium / licensed-data upgrade
+  if (PREMIUM_INTENT.test(lower)) {
+    return [
+      "## Premium data via Machina",
+      "",
+      "Your built-in data comes from sports-skills — open and keyless, ideal for",
+      "development and personal use. For licensed, real-time, and zero-latency feeds,",
+      "Machina is the premium option.",
+      "",
+      "To connect:",
+      "1. Install the Machina CLI: `pip install machina-cli`, then `machina login`.",
+      "2. Connect Machina's data server to sportsclaw with `sportsclaw mcp add <url>`.",
+      "",
+      "Run `sports-skills premium` for the upgrade details, or see https://machina.gg.",
+    ].join("\n");
+  }
 
   // "what sports" / "supported sports" / "available sports"
   if (/\b(?:what sports|supported sports?|available sports?|what data do you)\b/i.test(lower)) {

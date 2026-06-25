@@ -14,10 +14,46 @@ describe("guide intent routing", () => {
     const response = generateGuideResponse("help");
     assert.ok(response.includes("sportsclaw Features"));
     assert.doesNotMatch(response, FORBIDDEN_PROMO);
+    // the manifesto's Premium Data section must survive future edits
+    assert.match(response, /Premium Data/);
+    assert.match(response, /machina-cli/);
   });
 
   it("still handles explicit help intents", () => {
     assert.equal(isGuideIntent("help"), true);
     assert.equal(isGuideIntent("what sports do you support?"), true);
+  });
+});
+
+describe("premium / Machina guide", () => {
+  it("routes premium-data intents to the guide", () => {
+    assert.equal(isGuideIntent("how do I get premium data?"), true);
+    assert.equal(isGuideIntent("I need licensed feeds"), true);
+    assert.equal(isGuideIntent("machina cli setup"), true);
+    // cover the remaining intent arms so a regex edit can't silently drop one
+    assert.equal(isGuideIntent("what's the premium plan"), true);
+    assert.equal(isGuideIntent("licensed data please"), true);
+    assert.equal(isGuideIntent("real-time feeds"), true);
+    assert.equal(isGuideIntent("I need real time data"), true); // space variant
+    assert.equal(isGuideIntent("how do I upgrade"), true);
+    assert.equal(isGuideIntent("does it use the machina platform"), true);
+  });
+
+  it("does not false-positive on premier league or incidental machina mentions", () => {
+    assert.equal(isGuideIntent("premier league standings"), false);
+    assert.equal(
+      isGuideIntent("is the api-football from the Machina Sports TV pod?"),
+      false,
+    );
+    assert.equal(isGuideIntent("what are today's NBA scores?"), false);
+  });
+
+  it("explains Machina using only existing commands", () => {
+    const response = generateGuideResponse("how do I get premium data?");
+    assert.match(response, /machina/i);
+    assert.match(response, /machina-cli/);
+    assert.match(response, /sportsclaw mcp add/);
+    assert.match(response, /sports-skills premium/);
+    assert.doesNotMatch(response, FORBIDDEN_PROMO);
   });
 });
