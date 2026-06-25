@@ -10,7 +10,7 @@ Every `sportsclaw` command, grouped by what you'll reach for most.
 | `sportsclaw chat` | Start an interactive conversation |
 | `sportsclaw config` | Configure your provider, model, and integrations |
 | `sportsclaw setup` | Conversational, AI-guided setup |
-| `sportsclaw doctor` | Diagnose your install and tell you what to fix |
+| `sportsclaw doctor` | Diagnose your install (incl. Machina pod & machina-cli status) and tell you what to fix |
 | `sportsclaw health` | Report overall system status |
 | `sportsclaw login claude` | Reuse your existing Claude Code session |
 | `sportsclaw logout claude` | Stop using the Claude Code session |
@@ -41,8 +41,10 @@ Every `sportsclaw` command, grouped by what you'll reach for most.
 
 | Command | What it does |
 | --- | --- |
-| `sportsclaw mcp add <url>` | Connect an MCP server |
-| `sportsclaw mcp list` / `remove <name>` | List / disconnect MCP servers |
+| `sportsclaw machina connect [project]` | Connect a Machina premium pod (mints a durable key via machina-cli) |
+| `sportsclaw mcp add <url> [--name <n>] [--token <t>]` | Connect an MCP server (also `--description`, `--timeout <ms>`) |
+| `sportsclaw mcp list` | List connected MCP servers |
+| `sportsclaw mcp remove <name>` | Disconnect an MCP server |
 | `sportsclaw watch <sport> <command>` | Watch a data endpoint for changes |
 | `sportsclaw operate --list` | List configured operator jobs |
 | `sportsclaw operate --job <id>` | Run an operator job |

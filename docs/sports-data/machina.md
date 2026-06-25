@@ -12,7 +12,7 @@ workflows**, you step up to the **[Machina Sports](https://machina.gg)** platfor
 | **Data**       | Public APIs (ESPN, Kalshi, Polymarket…), keyless  | Licensed real-time feeds, betting odds, zero-latency streams |
 | **Best for**   | Personal use, prototyping                         | Commercial / production, with SLAs and support               |
 | **Workflows**  | You build them                                    | Packaged "templates" you install                             |
-| **Access**     | Bundled with sportsclaw                            | `machina-cli` + a per-project Machina MCP server             |
+| **Access**     | Bundled with sportsclaw                            | One command: `sportsclaw machina connect` (uses `machina-cli`) |
 
 ::: tip Licensing
 The open sports-skills rely on third-party public APIs and are intended for **personal,
@@ -21,10 +21,10 @@ non-commercial** use. For commercial or production workloads with licensed data,
 
 ## The Machina skill
 
-The `machina` skill is published in the same **[sports-skills catalog](https://sports-skills.sh)**
-as the open skills — it's the gateway to the premium platform. It's **prompt-only**: it fetches
-no data itself. Instead it tells the agent how to use the separate **`machina-cli`** and how to
-connect to a per-project Machina MCP server.
+The `machina` skill ships in the same **[sports-skills catalog](https://sports-skills.sh)**
+as the open skills. It's **prompt-only**: it fetches no data itself — it points the agent at the
+premium platform and the separate **`machina-cli`**. The data itself flows through a per-project
+Machina MCP server, which you wire up with `sportsclaw machina connect` (below).
 
 ## machina-cli
 
@@ -50,15 +50,51 @@ What it covers:
 
 ## Connecting Machina to sportsclaw
 
-Premium live data is served through a per-project **Machina MCP server** that runs on Machina
-infrastructure (not by `machina-cli`). Because sportsclaw is an
-[MCP client](../advanced/mcp), you connect it directly:
+Premium data is served through a per-project **Machina MCP server** (a "pod"). The quickest way
+to wire one in is the built-in `machina connect` command — it signs you in through `machina-cli`,
+mints a durable access key, and registers the pod for you. No URLs to copy.
 
-1. **Install a template** — `machina template install <name>` provisions the workflow
-   server-side and returns the MCP URL (and any required headers) in its JSON output.
-2. **Add it to sportsclaw** — `sportsclaw mcp add <url>` (see
-   [Connecting MCP Servers](../advanced/mcp)).
-3. **Ask as usual** — the agent now reads Machina's licensed, real-time feeds through that MCP
-   server, right alongside the built-in sports-skills.
+```bash
+pip install machina-cli      # one-time: install the Machina CLI
+machina login                # browser sign-in (or --api-key <key> for CI)
+
+sportsclaw machina connect             # connect your default project's pod
+sportsclaw machina connect <project>   # …or name a specific project
+```
+
+Useful flags:
+
+- `--org <org-id>` — choose the organization when you belong to more than one.
+- `--probe` — verify the pod's endpoint is reachable before registering it.
+
+`machina connect` writes the pod to `~/.sportsclaw/mcp.json` and stores its access token
+separately in `~/.sportsclaw/.env` (never in the config file). From then on the agent reads
+Machina's licensed, real-time feeds right alongside the built-in sports-skills. Check and
+inspect connected pods with:
+
+```bash
+sportsclaw mcp list     # list connected servers
+sportsclaw doctor       # shows Machina pod + machina-cli status
+```
+
+Re-run `sportsclaw machina connect` any time a connection later returns a 401.
+
+### Connect a pod by URL (manual)
+
+Already have an MCP URL and token — or connecting a non-Machina MCP server? Add it directly:
+
+```bash
+sportsclaw mcp add <url> --name <name> --token <token>
+```
+
+See [Connecting MCP Servers](../advanced/mcp) for the full set of options.
+
+## Premium signal
+
+You don't have to go looking for the premium path — sportsclaw surfaces it for you. When a data
+tool reports that licensed or real-time data exists beyond what the free skill returned, the
+agent adds a single, optional line pointing to the upgrade (the `sports-skills premium` tier or
+`sportsclaw machina connect`). It's informational only: it never blocks an answer, never repeats
+within a conversation, and stays out of automated alerts and broadcasts.
 
 Learn more at **[machina.gg](https://machina.gg)**.

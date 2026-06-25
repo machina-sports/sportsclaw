@@ -9,8 +9,9 @@ All of this coverage comes from **[sports-skills](https://sports-skills.sh)** â€
 Python data layer that the installer sets up for you. It's what turns "who won last night?"
 into a real, sourced answer. Browse the full catalog at **[sports-skills.sh](https://sports-skills.sh)**.
 
-Need **licensed data, real-time feeds, or production SLAs**? Step up to the
-[Machina premium layer](./machina).
+Need **licensed data, real-time feeds, or production SLAs**? There's a `sports-skills premium`
+tier, and the [Machina premium layer](./machina) for licensed real-time pods â€” connect one in a
+single command with `sportsclaw machina connect`.
 
 </div>
 
