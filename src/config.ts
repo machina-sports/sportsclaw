@@ -5,7 +5,7 @@
  * Environment variables always override config file values.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
@@ -242,7 +242,11 @@ export function writeEnvVar(filePath: string, key: string, value: string): void 
     lines.push(`${key}=${value}`);
   }
 
-  writeFileSync(filePath, lines.join("\n") + "\n", "utf-8");
+  // Atomic write (same-dir temp + rename) so a crash mid-write can't tear the
+  // .env and lose other keys. Matches token-ledger.ts / saveMcpConfigs.
+  const tmp = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  writeFileSync(tmp, lines.join("\n") + "\n", "utf-8");
+  renameSync(tmp, filePath);
 }
 
 /**

@@ -24,7 +24,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ToolSpec, McpServerConfig } from "./types.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -172,7 +172,12 @@ export function saveMcpConfigs(configs: Record<string, McpServerConfig>): void {
   if (!existsSync(MCP_CONFIG_DIR)) {
     mkdirSync(MCP_CONFIG_DIR, { recursive: true });
   }
-  writeFileSync(MCP_CONFIG_PATH, JSON.stringify(configs, null, 2) + "\n", "utf-8");
+  // Atomic write: a crash/ENOSPC mid-write would tear mcp.json, and loadMcpConfigs
+  // swallows a parse error as {} — silently dropping every server. Write to a
+  // same-dir temp then rename (atomic on one filesystem). Matches token-ledger.ts.
+  const tmp = `${MCP_CONFIG_PATH}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  writeFileSync(tmp, JSON.stringify(configs, null, 2) + "\n", "utf-8");
+  renameSync(tmp, MCP_CONFIG_PATH);
   clearToolCache(); // Invalidate cache on config change
 }
 
