@@ -28,3 +28,7 @@ docs/.vitepress/dist/
 docs/.vitepress/cache/
 site/docs/
 .gstack/
+
+# Staged from scripts/install.sh by build-site.yml at deploy time
+docs/public/install.sh
+site/html/

@@ -9,8 +9,9 @@ export default defineConfig({
     'Build AI that understands live sports. One open-source engine with keyless live data, market odds, and real-time game events built in.',
   lang: 'en-US',
 
-  // Served same-origin under sportsclaw.gg/docs (see site/Dockerfile + build-site.yml).
-  base: '/docs/',
+  // Serves the whole site at sportsclaw.gg/ (see site/Dockerfile + nginx.conf).
+  // Legacy /docs/* URLs are 301'd to /* by nginx.
+  base: '/',
 
   srcExclude: ['superpowers/**', 'openshell-research.md', 'README.md'],
 
@@ -19,7 +20,7 @@ export default defineConfig({
   appearance: false, // light-only — the linen canvas is the design
 
   head: [
-    ['link', { rel: 'icon', href: '/docs/favicon.svg', type: 'image/svg+xml' }],
+    ['link', { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
     ['meta', { name: 'theme-color', content: '#fafffa' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
@@ -124,11 +125,13 @@ export default defineConfig({
     },
   },
 
-  // Machine-readable index for LLM/agent ingestion.
+  // Machine-readable index for LLM/agent ingestion (served at /llms.txt).
+  // Absolute URLs so an agent handed the file can fetch each page directly.
   buildEnd: async (siteConfig) => {
+    const origin = 'https://sportsclaw.gg'
     const pages = siteConfig.pages
       .filter((p) => p !== 'index.md')
-      .map((p) => `- /docs/${p.replace(/\.md$/, '')}`)
+      .map((p) => `- ${origin}/${p.replace(/\.md$/, '')}`)
       .sort()
     const llms = [
       '# sportsclaw',
@@ -136,6 +139,10 @@ export default defineConfig({
       '> Build AI that understands live sports. An open-source engine with keyless live data,',
       '> market odds, and real-time game events built in — for chat bots, broadcast widgets,',
       '> and odds trackers.',
+      '',
+      '## Getting started',
+      `- Install: \`curl -fsSL ${origin}/install.sh | bash\``,
+      `- Quickstart: ${origin}/getting-started/quickstart`,
       '',
       '## Docs',
       ...pages,

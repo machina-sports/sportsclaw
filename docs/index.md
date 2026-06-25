@@ -17,9 +17,19 @@ hero:
       link: https://github.com/machina-sports/sportsclaw
 ---
 
+<div class="sc-install-wrap">
+
+```sh
+curl -fsSL https://sportsclaw.gg/install.sh | bash
+```
+
+<p class="sc-install-note">macOS / Linux — verify the published SHA-256 before running. Windows: <code>npm install -g sportsclaw-engine-core</code></p>
+
+</div>
+
 <div class="sc-grid">
 
-<a class="sc-card" href="/docs/core-concepts/how-it-works">
+<a class="sc-card" href="/core-concepts/how-it-works">
 <pre class="motif">┌───────────┐
 │ LAL · <b>102</b> │
 │ GSW ·  98 │
@@ -28,7 +38,7 @@ hero:
 <p>Ask in plain language and get answers backed by live scores, standings, stats, odds, and news across 14 sports. The agent looks it up — it doesn't guess.</p>
 </a>
 
-<a class="sc-card" href="/docs/building-bots/discord">
+<a class="sc-card" href="/building-bots/discord">
 <pre class="motif">╭─────────╮
 │ score?  │
 ╰─────────╯
@@ -39,7 +49,7 @@ hero:
 <p>Run a sports bot with rich embeds, buttons, polls, and image replies in one command. Your community asks; the bot answers with the real numbers.</p>
 </a>
 
-<a class="sc-card" href="/docs/building-bots/live-game-alerts">
+<a class="sc-card" href="/building-bots/live-game-alerts">
 <pre class="motif">   ▟█▙
   ▟███▙
   ▀▀▀▀▀
@@ -48,7 +58,7 @@ hero:
 <p>Followers say "alert me about the Lakers" and get a message the moment the game starts, the lead changes, or it ends — no polling, no setup.</p>
 </a>
 
-<a class="sc-card" href="/docs/sports-data/odds-and-markets">
+<a class="sc-card" href="/sports-data/odds-and-markets">
 <pre class="motif">┌─────────┐
 │      ▂▅<b>█</b>│
 │   ▂▅    │
@@ -58,7 +68,7 @@ hero:
 <p>Pull real-time odds from ESPN, Kalshi, and Polymarket, and run the betting math. Read-only by default — built to track, not trade.</p>
 </a>
 
-<a class="sc-card" href="/docs/sports-data/images-and-vision">
+<a class="sc-card" href="/sports-data/images-and-vision">
 <pre class="motif">┌────────┐
 │   <b>▁▄</b>   │
 │ ▁▄██▄▁ │
@@ -67,7 +77,7 @@ hero:
 <p>Ask for a matchday graphic and get one back, delivered straight into the chat. Vision works too — send a screenshot and ask about it.</p>
 </a>
 
-<a class="sc-card" href="/docs/getting-started/quickstart">
+<a class="sc-card" href="/getting-started/quickstart">
 <pre class="motif">┌────────┐
 │ <b>></b> help │
 │ <b>></b> _    │
@@ -75,5 +85,110 @@ hero:
 <h3>Open source, runs anywhere</h3>
 <p>MIT-licensed TypeScript. Run it from the CLI, host it as a bot, or deploy in Docker. Bring your own model — Anthropic, OpenAI, or Google.</p>
 </a>
+
+</div>
+
+<div class="sc-section">
+
+## Hand it to your coding agent
+
+Paste this into Claude Code, Cursor, or any coding agent — it reads the machine-readable doc index and builds from there:
+
+```text
+Build a sports AI app with sportsclaw. First read https://sportsclaw.gg/llms.txt
+for the full doc map, then follow https://sportsclaw.gg/getting-started/quickstart
+to install and scaffold. sportsclaw gives you keyless live scores, standings, odds
+(ESPN/Kalshi/Polymarket), and real-time game events, plus one-command Discord and
+Telegram bots. Use the docs at https://sportsclaw.gg for the CLI, data coverage,
+and deployment.
+```
+
+<p class="sc-section-note"><code>llms.txt</code> lists every doc page as a fetchable URL, so the agent can crawl the whole reference on its own.</p>
+
+</div>
+
+<div class="sc-section">
+
+## Day-one capabilities
+
+Your agent ships with three built-in personas. Each learns from your chat — the more your users interact, the sharper it gets.
+
+<div class="sc-caps">
+<div class="sc-cap">
+<h4>The Analyst</h4>
+<span class="sc-tag">Prediction Markets</span>
+<p>Drops odds and value bets into the chat. It learns which sports and markets your audience actually cares about and tailors its alerts.</p>
+</div>
+<div class="sc-cap">
+<h4>The Scoreboard</h4>
+<span class="sc-tag">Multi-Sport</span>
+<p>Pulls live play-by-play and stats for any game. Over time it anticipates the matchups your audience follows and tracks them proactively.</p>
+</div>
+<div class="sc-cap">
+<h4>The News Desk</h4>
+<span class="sc-tag">Scheduled Reports</span>
+<p>Curates morning injury reports and headlines, refining its daily feed based on the teams your chat interacts with most.</p>
+</div>
+</div>
+
+</div>
+
+<div class="sc-section">
+
+## Pricing
+
+Run it yourself for free, or deploy to Machina Clawd and we handle the rest.
+
+<div class="sc-pricing">
+
+<div class="sc-price">
+<div class="sc-price-name">Open Source</div>
+<div class="sc-price-amount">$0<span>/mo</span></div>
+<ul>
+<li>Run it yourself (local / Docker)</li>
+<li>Bring your own API keys</li>
+<li>Open-source data connectors</li>
+<li>Community Discord support</li>
+</ul>
+<a class="sc-price-cta" href="/getting-started/quickstart">Get started</a>
+</div>
+
+<div class="sc-price sc-price-featured">
+<div class="sc-price-badge">Coming soon</div>
+<div class="sc-price-name">Machina Clawd</div>
+<div class="sc-price-amount">Soon</div>
+<ul>
+<li>Always on, running 24/7</li>
+<li>Remembers every conversation</li>
+<li>Talk via your existing chat apps</li>
+<li>Vector database &amp; all Machina skills</li>
+<li>Premium connectors (Sportradar &amp; more)</li>
+<li>Priority support</li>
+</ul>
+<a class="sc-price-cta sc-price-cta-primary" href="https://machina.gg" target="_blank" rel="noopener">Join waitlist</a>
+</div>
+
+<div class="sc-price">
+<div class="sc-price-name">Enterprise</div>
+<div class="sc-price-amount">Custom</div>
+<ul>
+<li class="sc-hl">For teams, leagues, media &amp; sportsbooks</li>
+<li>Everything in Machina Clawd</li>
+<li>Dedicated account manager</li>
+<li>Custom LLM fine-tuning</li>
+<li>Solutions engineering team</li>
+</ul>
+<div class="sc-trusted">
+<span>Trusted by</span>
+<div class="sc-trusted-logos">
+<img src="/logos/dazn-black-sm.png" alt="DAZN">
+<img src="/logos/entain-sm.png" alt="Entain">
+<img src="/logos/r10-sm.png" alt="R10 Score">
+</div>
+</div>
+<a class="sc-price-cta" href="https://machina.gg/schedule" target="_blank" rel="noopener">Contact us</a>
+</div>
+
+</div>
 
 </div>

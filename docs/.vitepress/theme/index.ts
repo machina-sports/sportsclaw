@@ -63,6 +63,13 @@ function setupReveal() {
         ;(el as HTMLElement).style.transitionDelay = `${(i % 3) * 80}ms`
         observer!.observe(el)
       })
+      // The landing sections below the cards (install, agent prompt, capabilities,
+      // pricing) live in the home body (.vp-doc) and are hidden by the reveal CSS
+      // too — observe them so they fade in on scroll. Cards reveal their own children.
+      document.querySelectorAll(DOC_SELECTOR).forEach((el) => {
+        if (el.closest('.sc-grid')) return
+        observer!.observe(el)
+      })
     } else {
       document.querySelectorAll(DOC_SELECTOR).forEach((el) => observer!.observe(el))
     }
