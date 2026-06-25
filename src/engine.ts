@@ -1128,7 +1128,7 @@ export class sportsclawEngine {
         "Return the current agent configuration as JSON. Includes provider, model, " +
         "router settings, routing parameters, Python path, installed sports, " +
         "available (uninstalled) sports, chat integrations status, connected MCP " +
-        "servers (name/provider/url, secret-free), and version.",
+        "servers (name/provider/url/hasToken, secret-free), and version.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {},

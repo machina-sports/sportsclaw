@@ -1,14 +1,16 @@
 /**
  * Atomic config writes — test suite
  *
- * writeEnvVar (and saveMcpConfigs, same idiom) write to a same-dir temp file
- * then rename over the target, so a crash mid-write can't tear the file. These
- * tests pin the round-trip contract and that no .tmp residue is left behind.
+ * writeEnvVar writes to a same-dir temp file then renames over the target, so a
+ * crash mid-write can't tear the file. These tests pin the round-trip contract,
+ * that no .tmp residue is left behind, and that the secrets file is owner-only.
+ * (saveMcpConfigs shares the identical idiom but writes to a fixed ~/.sportsclaw
+ * path, so it is not exercised here — covered by inspection / the shared idiom.)
  */
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,5 +51,9 @@ describe("writeEnvVar (atomic)", () => {
   it("leaves no .tmp residue in the directory", () => {
     const leftover = readdirSync(dir).filter((f) => f.endsWith(".tmp"));
     assert.deepEqual(leftover, [], `unexpected temp files: ${leftover.join(", ")}`);
+  });
+
+  it("restricts the .env to owner-only (0600) since it holds tokens", { skip: process.platform === "win32" }, () => {
+    assert.equal(statSync(envPath).mode & 0o077, 0, "group/other bits must be clear");
   });
 });
