@@ -15,6 +15,7 @@ import {
   isValidMcpServerName,
   envKeyCollision,
   validateConnectBundle,
+  summarizeMcpServers,
 } from "../dist/mcp.js";
 
 describe("mcpEnvKey", () => {
@@ -115,6 +116,38 @@ describe("validateConnectBundle", () => {
     const r = validateConnectBundle({ ...good, name: "nba_premium" }, { "nba-premium": { url: "https://x" } });
     assert.equal(r.ok, false);
     assert.match(r.error, /token slot/);
+  });
+});
+
+describe("summarizeMcpServers", () => {
+  const configs = {
+    "nba-premium": { url: "https://pod/mcp/sse", provider: "machina" },
+    "my-custom": { url: "https://other/mcp", headers: { "X-Api-Token": "inline" } },
+    "no-auth": { url: "https://bare/mcp" },
+  };
+
+  it("summarizes name/provider/url without leaking any token", () => {
+    const env = { SPORTSCLAW_MCP_TOKEN_NBA_PREMIUM: "sk_secret" };
+    const out = summarizeMcpServers(configs, env);
+    const serialized = JSON.stringify(out);
+    assert.doesNotMatch(serialized, /sk_secret|inline/, "must not contain any token value");
+    assert.deepEqual(out.find((s) => s.name === "nba-premium"), {
+      name: "nba-premium",
+      provider: "machina",
+      url: "https://pod/mcp/sse",
+      hasToken: true,
+    });
+  });
+
+  it("reports hasToken from an env var or an inline auth header", () => {
+    const out = summarizeMcpServers(configs, {});
+    assert.equal(out.find((s) => s.name === "nba-premium").hasToken, false); // no env var
+    assert.equal(out.find((s) => s.name === "my-custom").hasToken, true); // inline header
+    assert.equal(out.find((s) => s.name === "no-auth").hasToken, false);
+  });
+
+  it("defaults provider to \"custom\" when absent", () => {
+    assert.equal(summarizeMcpServers(configs, {}).find((s) => s.name === "no-auth").provider, "custom");
   });
 });
 
