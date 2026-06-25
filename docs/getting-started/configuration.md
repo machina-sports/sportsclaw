@@ -1,0 +1,72 @@
+# Configuration
+
+sportsclaw needs one thing to run: a connection to an AI model. The sports data is free and
+keyless — only the reasoning model requires credentials.
+
+## Guided setup
+
+The easiest way to configure everything is the interactive wizard:
+
+```bash
+sportsclaw config
+```
+
+It walks you through choosing a provider, picking a model, and (optionally) setting up Discord
+and Telegram bots. Your settings are saved to `~/.sportsclaw/`. Run it again any time to change
+things.
+
+Want a conversational setup that also validates your bot tokens as you go? Try
+`sportsclaw setup`.
+
+## Choosing a model
+
+sportsclaw works with three providers — bring a key from whichever you prefer:
+
+| Provider | Models | API key |
+| --- | --- | --- |
+| **Anthropic** | Claude (Opus, Sonnet) | `ANTHROPIC_API_KEY` |
+| **OpenAI** | GPT | `OPENAI_API_KEY` |
+| **Google** | Gemini | `GEMINI_API_KEY` |
+
+Set the key in your environment, or let `sportsclaw config` store it for you:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+```
+
+::: tip Image generation
+Generating images (matchday graphics, etc.) requires **OpenAI or Google** — Anthropic models
+can't produce images. Reading images you send the bot works on any vision-capable model.
+:::
+
+## Reuse your Claude Code session
+
+If you already use Claude Code, you can skip the API key entirely and reuse that login:
+
+```bash
+sportsclaw login claude
+```
+
+sportsclaw will use your existing Claude session for reasoning. To stop, run
+`sportsclaw logout claude` — it won't affect Claude Code itself. An `ANTHROPIC_API_KEY` in your
+environment always takes priority over this.
+
+## Connecting chat platforms
+
+To run a Discord or Telegram bot, add your bot tokens:
+
+```bash
+sportsclaw channels
+```
+
+Then start a bot with `sportsclaw listen discord` or `sportsclaw listen telegram`. See
+**[Building Bots](../building-bots/discord)** for the full walkthrough.
+
+## Checking your setup
+
+```bash
+sportsclaw doctor
+```
+
+`doctor` verifies your Node and Python versions, the sports data layer, your model
+credentials, and your installed sports — and tells you exactly what to fix if something's off.

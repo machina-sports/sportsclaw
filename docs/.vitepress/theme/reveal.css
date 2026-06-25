@@ -1,0 +1,50 @@
+/* Scroll-reveal motion (NewForm-inspired): fade-up as elements enter the
+   viewport — home hero + feature cards AND interior doc content, so the page
+   reveals section-by-section as you scroll. Disabled for reduced-motion.
+   The `sc-reveal-ready` root class is set by a head script before first paint,
+   so there's no flash and no-JS users see everything. */
+
+@media (prefers-reduced-motion: no-preference) {
+  html.sc-reveal-ready .VPHomeHero .name,
+  html.sc-reveal-ready .VPHomeHero .text,
+  html.sc-reveal-ready .VPHomeHero .tagline,
+  html.sc-reveal-ready .VPHomeHero .actions,
+  html.sc-reveal-ready .sc-grid .sc-card,
+  html.sc-reveal-ready .vp-doc > h1,
+  html.sc-reveal-ready .vp-doc h2,
+  html.sc-reveal-ready .vp-doc h3,
+  html.sc-reveal-ready .vp-doc p,
+  html.sc-reveal-ready .vp-doc ul,
+  html.sc-reveal-ready .vp-doc ol,
+  html.sc-reveal-ready .vp-doc blockquote,
+  html.sc-reveal-ready .vp-doc table,
+  html.sc-reveal-ready .vp-doc .custom-block,
+  html.sc-reveal-ready .vp-doc div[class*='language-'] {
+    opacity: 0;
+    transform: translateY(20px);
+    transition:
+      opacity 0.65s cubic-bezier(0.16, 1, 0.3, 1),
+      transform 0.65s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  html.sc-reveal-ready .sc-in {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* Green underscore tick drawing in under the hero headline. */
+  html.sc-reveal-ready .VPHomeHero .text::after {
+    content: '';
+    display: block;
+    width: 64px;
+    height: 4px;
+    margin: 28px auto 0;
+    background: var(--vp-c-brand-3);
+    transform: scaleX(0);
+    transform-origin: center;
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.35s;
+  }
+  html.sc-reveal-ready .VPHomeHero .text.sc-in::after {
+    transform: scaleX(1);
+  }
+}
