@@ -126,6 +126,7 @@ import {
   getMcpConfigPath,
   mcpEnvKey,
   isValidMcpServerName,
+  envKeyCollision,
   McpManager,
 } from "./mcp.js";
 import { WatchManager } from "./watch.js";
@@ -1089,10 +1090,10 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
     execFileSync("machina", ["version"], { stdio: "ignore", timeout: 5_000 });
     machinaCli = true;
   } catch (e) {
-    // ENOENT = not installed; EACCES = present but not executable. Any other
+    // ENOENT = not installed; EACCES/EPERM = present but not runnable. Any other
     // error (non-zero exit, timeout) still means the binary is present.
     const code = (e as { code?: string }).code;
-    machinaCli = code !== "ENOENT" && code !== "EACCES";
+    machinaCli = code !== "ENOENT" && code !== "EACCES" && code !== "EPERM";
   }
   if (machinaPods.length > 0) {
     console.log(
@@ -2429,6 +2430,11 @@ async function cmdMcp(args: string[]): Promise<void> {
 
     // Build server config
     const configs = loadMcpConfigs();
+    const collision = envKeyCollision(name, configs);
+    if (collision) {
+      console.error(`Server name "${name}" shares a token slot with existing server "${collision}". Remove it first or use a distinct name.`);
+      process.exit(1);
+    }
     const isUpdate = name in configs;
     const config: McpServerConfig = {
       url,
@@ -2642,7 +2648,7 @@ async function cmdMachina(args: string[]): Promise<void> {
       console.error(`  Upgrade it: ${pc.cyan("pip install --upgrade machina-cli")}`);
       process.exit(1);
     }
-    const msg = parse(out)?.error ?? errText ?? "machina connect failed";
+    const msg = parse(out)?.error || errText || "machina connect failed";
     console.error(pc.red(`Could not connect: ${String(msg)}`));
     if (/auth|session|login|not authenticated/i.test(combined)) {
       console.error(`  Run ${pc.cyan("machina login")} first, then retry.`);
@@ -2658,14 +2664,34 @@ async function cmdMachina(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const name = bundle.name as string | undefined;
-  const url = bundle.url as string | undefined;
-  const token = bundle.token as string | null | undefined;
-  const header = (bundle.auth_header as string | undefined) ?? "X-Api-Token";
+  // The bundle is untrusted external JSON (Record<string, unknown>) — narrow by
+  // runtime type, never `as`, so a non-string field can't slip through coercion.
+  const name = typeof bundle.name === "string" ? bundle.name : undefined;
+  const url = typeof bundle.url === "string" ? bundle.url : undefined;
+  const token = typeof bundle.token === "string" ? bundle.token : undefined;
+  const header = typeof bundle.auth_header === "string" ? bundle.auth_header : "X-Api-Token";
   const durable = bundle.durable === true;
 
   if (!name || !url) {
     console.error(pc.red("machina connect did not return a usable url/name."));
+    process.exit(1);
+  }
+  // The minted token is sent to `url` as a bearer header, so refuse to persist a
+  // url we can't parse or one that would send the secret in cleartext to a
+  // remote host (http is allowed only for loopback dev pods).
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    console.error(pc.red(`machina connect returned an unparseable url ("${url}").`));
+    process.exit(1);
+  }
+  const isLoopback =
+    parsedUrl.hostname === "localhost" ||
+    parsedUrl.hostname === "127.0.0.1" ||
+    parsedUrl.hostname === "::1";
+  if (parsedUrl.protocol !== "https:" && !(parsedUrl.protocol === "http:" && isLoopback)) {
+    console.error(pc.red(`Refusing to send the token to a non-HTTPS url ("${url}").`));
     process.exit(1);
   }
   if (!token) {
@@ -2692,14 +2718,29 @@ async function cmdMachina(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const configs = loadMcpConfigs();
+  // Reject a name that shares a token slot with a different existing server —
+  // otherwise resolveTokens would inject one pod's token for the other.
+  const collision = envKeyCollision(name, configs);
+  if (collision) {
+    console.error(pc.red(`Pod name "${name}" shares a token slot with existing server "${collision}".`));
+    console.error(`  Remove "${collision}" first (${pc.cyan(`sportsclaw mcp remove ${collision}`)}), or connect under a distinct name.`);
+    process.exit(1);
+  }
+  const isUpdate = name in configs;
+
   // Register like `mcp add`: write the secret to ~/.sportsclaw/.env FIRST (so a
   // failure never leaves a tokenless config), then the config in mcp.json. The
   // MCP manager injects SPORTSCLAW_MCP_TOKEN_<NAME> as X-Api-Token at connect time.
-  writeEnvVar(ENV_PATH, mcpEnvKey(name), token);
-  const configs = loadMcpConfigs();
-  const isUpdate = name in configs;
-  configs[name] = { url, provider: "machina" };
-  saveMcpConfigs(configs);
+  try {
+    writeEnvVar(ENV_PATH, mcpEnvKey(name), token);
+    configs[name] = { url, provider: "machina" };
+    saveMcpConfigs(configs);
+  } catch (e) {
+    console.error(pc.red(`Failed to save the connection: ${(e as Error).message}`));
+    console.error(`  The token may be in ${ENV_PATH} but the pod was not registered — re-run to retry.`);
+    process.exit(1);
+  }
 
   console.log(pc.green(isUpdate ? `Reconnected Machina pod "${name}"` : `Connected Machina pod "${name}"`));
   console.log(`  URL: ${url}`);

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { mcpEnvKey, isValidMcpServerName } from "../dist/mcp.js";
+import { mcpEnvKey, isValidMcpServerName, envKeyCollision } from "../dist/mcp.js";
 
 describe("mcpEnvKey", () => {
   it("uppercases and converts hyphens to underscores", () => {
@@ -21,8 +21,26 @@ describe("mcpEnvKey", () => {
     assert.equal(mcpEnvKey("pod_1"), "SPORTSCLAW_MCP_TOKEN_POD_1");
   });
 
-  it("is stable across the two call sites (mcp add / machina connect)", () => {
-    assert.equal(mcpEnvKey("acme-feed"), mcpEnvKey("acme-feed"));
+  it("produces the documented key shape (the resolveTokens contract)", () => {
+    assert.equal(mcpEnvKey("acme-feed"), "SPORTSCLAW_MCP_TOKEN_ACME_FEED");
+  });
+});
+
+describe("envKeyCollision", () => {
+  it("flags a different name that folds to the same env-key", () => {
+    const configs = { "my-pod": { url: "https://a" } };
+    assert.equal(envKeyCollision("my_pod", configs), "my-pod");
+    assert.equal(envKeyCollision("MY-POD", configs), "my-pod");
+  });
+
+  it("does not flag the same name (reconnect is not a collision)", () => {
+    const configs = { "my-pod": { url: "https://a" } };
+    assert.equal(envKeyCollision("my-pod", configs), null);
+  });
+
+  it("returns null when no existing name shares the slot", () => {
+    const configs = { "other-pod": { url: "https://a" } };
+    assert.equal(envKeyCollision("my-pod", configs), null);
   });
 });
 

@@ -49,6 +49,23 @@ export function isValidMcpServerName(name: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(name);
 }
 
+/**
+ * If a *different* existing server resolves to the same env-key as `name`,
+ * return its name. mcpEnvKey folds case and `-`/`_`, so "my-pod" and "my_pod"
+ * share one token slot — registering both would make resolveTokens inject one
+ * pod's token into requests for the other. Callers reject the collision.
+ */
+export function envKeyCollision(
+  name: string,
+  configs: Record<string, McpServerConfig>
+): string | null {
+  const key = mcpEnvKey(name);
+  for (const existing of Object.keys(configs)) {
+    if (existing !== name && mcpEnvKey(existing) === key) return existing;
+  }
+  return null;
+}
+
 /** Load the user-managed MCP config from ~/.sportsclaw/mcp.json */
 export function loadMcpConfigs(): Record<string, McpServerConfig> {
   if (!existsSync(MCP_CONFIG_PATH)) return {};
