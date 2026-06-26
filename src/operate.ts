@@ -514,6 +514,16 @@ async function resolveJobInputs(
   }
   const personaText = await resolvePersona(cfg, mcpManager);
   const extraFragments = resolveExtraFragments(cfg.extraFragments);
+  // The operator prompt builder (prompts.ts) doesn't inject capability hints the
+  // way the interactive engine does, so a connected durable loop would otherwise
+  // be in the tool set but undocumented. Surface it here.
+  if (mcpManager.getMachinaLoopServer()) {
+    extraFragments.push(
+      "A Machina durable loop is connected. For long, multi-step, or resumable work, delegate " +
+        'via `machina_loop` ({action:"start", prompt}) and poll with {action:"read", session_id}. ' +
+        "Use direct tools for quick answers, and do not re-start a task that is already running."
+    );
+  }
   const openshell = resolveOpenShell(provider, cfg.openshell);
   if (openshell?.enabled) {
     applyOpenShellEnv(provider, openshell);

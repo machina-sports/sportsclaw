@@ -298,7 +298,7 @@ export class ToolRegistry {
       toolName === "install_sport" ||
       toolName === "remove_sport" ||
       toolName === "upgrade_sports_skills" ||
-      toolName === "machina_loop"
+      toolName === machinaLoopTool.spec.name
     );
   }
 
