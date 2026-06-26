@@ -106,7 +106,13 @@ export const machinaLoopTool: BuiltinTool = {
       let value: Record<string, unknown> = {};
       try {
         const parsed = JSON.parse(res.content) as Record<string, unknown>;
-        const list = (parsed.data ?? parsed.results ?? parsed) as unknown;
+        let list = (parsed.data ?? parsed.results ?? parsed) as unknown;
+        // Machina's MCP wraps as { data: { data: [...] } } — unwrap the inner envelope.
+        if (list && !Array.isArray(list) && typeof list === "object") {
+          const inner = list as Record<string, unknown>;
+          if (Array.isArray(inner.data)) list = inner.data;
+          else if (Array.isArray(inner.results)) list = inner.results;
+        }
         const doc = Array.isArray(list) ? (list[0] as Record<string, unknown>) : undefined;
         if (doc) value = payloadOf(doc);
       } catch {
@@ -134,7 +140,10 @@ export const machinaLoopTool: BuiltinTool = {
     if (op === "start" && !sessionId) sessionId = `ses_${randomBytes(12).toString("hex")}`;
 
     const res = await mgr.callToolDirect(server, "execute_agent", {
-      name: RUNNER_AGENT,
+      // The pod's execute_agent requires `agent_id`; a non-ObjectId string is
+      // treated as an agent name (documented backward-compat), so this resolves
+      // `loop-runner` by name without a separate id lookup.
+      agent_id: RUNNER_AGENT,
       messages: [{ role: "user", content: prompt }],
       context: {
         "context-agent": {

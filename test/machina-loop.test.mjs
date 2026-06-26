@@ -1,9 +1,29 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findLoopServer, LOOP_RUNNER_AGENT } from "../dist/mcp.js";
+import { findLoopServer, LOOP_RUNNER_AGENT, parseEntityList } from "../dist/mcp.js";
 import { machinaLoopTool } from "../dist/tools/machina_loop.js";
 
 const caps = (agents) => ({ workflows: [], agents, connectors: [], discoveredAt: 0 });
+
+describe("parseEntityList — pod inventory parsing", () => {
+  it("unwraps Machina's double envelope { data: { data: [...] } }", () => {
+    const content = JSON.stringify({
+      status: "success",
+      data: { data: [{ name: "loop-runner" }, { name: "loop-beat" }], total_documents: 2 },
+    });
+    assert.deepEqual(parseEntityList(content).map((e) => e.name), ["loop-runner", "loop-beat"]);
+  });
+
+  it("handles the single-envelope shape { data: [...] }", () => {
+    const content = JSON.stringify({ data: [{ name: "a", description: "x" }] });
+    assert.deepEqual(parseEntityList(content), [{ name: "a", description: "x" }]);
+  });
+
+  it("returns [] for malformed or empty content", () => {
+    assert.deepEqual(parseEntityList("not json"), []);
+    assert.deepEqual(parseEntityList(JSON.stringify({ data: { data: [] } })), []);
+  });
+});
 
 describe("findLoopServer — durable loop detection", () => {
   it("detects the server exposing the loop-runner agent", () => {
