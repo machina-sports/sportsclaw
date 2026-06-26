@@ -101,7 +101,7 @@ never repeats within a conversation, and stays out of automated alerts and broad
 
 A connected Machina pod can also run a **durable agentic loop**. When it does, sportsclaw can
 hand long, multi-step, or resumable tasks to it — the loop persists every turn and resumes after
-interruptions, while sportsclaw stays responsive. See
+interruptions. sportsclaw dispatches the work and reads the result back. See
 [Durable Task Delegation](../advanced/durable-loop).
 
 Learn more at **[machina.gg](https://machina.gg)**.
