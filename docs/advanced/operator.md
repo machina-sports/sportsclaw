@@ -64,3 +64,31 @@ Requirements: a connected Machina pod running the `loop-runner` agent (the same 
 `machina_loop` tool — `sportsclaw mcp add <pod>/mcp/sse --token <key>`). When no loop pod is
 connected, operator-sync is inert and the tick proceeds normally. The verdict directive appears on
 the tick *after* a publish, so it needs at least two ticks to close the loop.
+
+### Testing it
+
+Operator-sync needs ≥2 ticks (start-now / read-next-tick) and its cross-tick state is in-memory,
+so use the **foreground** runner — not `--once`, which is one tick per process:
+
+```bash
+# 1) connect the loop pod and enable operatorSync in the job config (above)
+sportsclaw mcp add https://<org>-<project>.org.machina.gg/mcp/sse --name machina --token <token>
+
+# 2) run the job in the foreground and watch ≥2 ticks
+sportsclaw operate --job <jobId>
+#   tick 1 → tick_published …            (operator-sync starts a loop verification session)
+#   tick 2 → the composed context now carries the loop's assessment:
+#            [loop-review] An independent reviewer assessed the previous broadcast: …
+```
+
+Look for a `[loop-review]` line (or a `[loop-verification] … double-check` caution when the loop's
+own review was unreliable) entering the **next** tick after a publish. To exercise the wiring
+without a pod: `npm run test:operator-sync`.
+
+::: warning Dispatch needs the MCP redeploy
+operator-sync starts the loop via MCP `execute_agent` **by name** (`loop-runner`) — the same path
+as `machina_loop`. The deployed pod MCP must support agent-by-name
+([machina-client-api#287](https://github.com/machina-sports/machina-client-api/issues/287)); on a
+stale MCP the dispatch returns `status:error` and operator-sync stays inert (it never silently
+passes). The read path (`search_documents`) is unaffected.
+:::
