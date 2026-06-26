@@ -97,4 +97,11 @@ line pointing to the path (the `sports-skills premium` tier or `sportsclaw machi
 The data layer decides this, not the agent. It's informational only: it never blocks an answer,
 never repeats within a conversation, and stays out of automated alerts and broadcasts.
 
+## Durable task delegation
+
+A connected Machina pod can also run a **durable agentic loop**. When it does, sportsclaw can
+hand long, multi-step, or resumable tasks to it — the loop persists every turn and resumes after
+interruptions, while sportsclaw stays responsive. See
+[Durable Task Delegation](../advanced/durable-loop).
+
 Learn more at **[machina.gg](https://machina.gg)**.
