@@ -614,7 +614,7 @@ export class sportsclawEngine {
           n === "get_agent_config" || n === "install_sport" || n === "remove_sport" ||
           n === "upgrade_sports_skills" || n === "spawn_subagent" || n === "list_subagents" ||
           n === "schedule_task" || n === "list_scheduled_tasks" || n === "cancel_scheduled_task" ||
-          n === "consolidate_memory"
+          n === "consolidate_memory" || n === "machina_loop"
         );
         return {
           activeTools: [...internalNames, ...mcpToolNames],
@@ -737,7 +737,7 @@ export class sportsclawEngine {
       name === "upgrade_sports_skills" || name === "spawn_subagent" ||
       name === "list_subagents" || name === "schedule_task" ||
       name === "list_scheduled_tasks" || name === "cancel_scheduled_task" ||
-      name === "consolidate_memory";
+      name === "consolidate_memory" || name === "machina_loop";
     return allToolNames.filter((name) => {
       if (isInternalTool(name) || name.startsWith("mcp__")) return true;
       const skill = this.registry.getSkillName(name);

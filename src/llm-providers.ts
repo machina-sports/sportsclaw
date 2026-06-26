@@ -240,13 +240,21 @@ export function resolveModel(
       // and 404 on /v1/responses. Real OpenAI keeps the default factory so
       // o1/o3/gpt-5 reasoning features (reasoningEffort, web_search, etc.)
       // continue to work via /v1/responses.
+      //
+      // Exception: reasoning models (gpt-5*, o1*, o3*) reject function tools +
+      // reasoning_effort on /chat/completions ("Please use /v1/responses
+      // instead") — true for OpenAI-compatible gateways like Azure AI Foundry
+      // (`…/openai/v1/responses`). For those, use the Responses API even with a
+      // custom base; self-hosted (NIM/vLLM) chat targets keep `.chat()`.
       const customBase = process.env.OPENAI_BASE_URL;
       if (customBase) {
-        return createOpenAI({
+        const provider = createOpenAI({
           baseURL: customBase,
           apiKey: process.env.OPENAI_API_KEY ?? undefined,
           fetch: nimNemotronFetch(),
-        }).chat(modelId);
+        });
+        const isReasoningModel = /^(gpt-5|o1|o3)/i.test(modelId);
+        return isReasoningModel ? provider.responses(modelId) : provider.chat(modelId);
       }
       return openai(modelId);
     }
