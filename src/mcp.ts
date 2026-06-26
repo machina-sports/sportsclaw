@@ -274,6 +274,37 @@ export function findLoopServer(
   return undefined;
 }
 
+/**
+ * Parse a Machina search-tool result (search_workflows / search_agents /
+ * connector_search) into `{name, description?}` entries.
+ *
+ * Machina's MCP wraps results as `{ data: { data: [...] } }` (an envelope inside
+ * the tool's own `data`), so a single `.data` unwrap leaves an object, not an
+ * array — which silently yielded an empty pod inventory. This unwraps the inner
+ * envelope as well. Pure + exported so it is unit-testable without a connection.
+ */
+export function parseEntityList(content: string): Array<{ name: string; description?: string }> {
+  try {
+    const data = JSON.parse(content);
+    let items: unknown = data?.data ?? data?.results ?? (Array.isArray(data) ? data : []);
+    // Unwrap the inner `{ data: [...] }` / `{ results: [...] }` envelope.
+    if (items && !Array.isArray(items) && typeof items === "object") {
+      const inner = items as Record<string, unknown>;
+      items = Array.isArray(inner.data) ? inner.data : Array.isArray(inner.results) ? inner.results : items;
+    }
+    if (!Array.isArray(items)) return [];
+    return items
+      .filter((item: Record<string, unknown>) => item && item.name)
+      .map((item: Record<string, unknown>) => ({
+        name: item.name as string,
+        ...(item.description ? { description: item.description as string } : {}),
+      }))
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
 interface ToolCacheEntry {
   tools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
   capabilities?: PodCapabilities;
@@ -645,15 +676,18 @@ export class McpManager {
     }
 
     try {
+      // Fetch a full page so detection (e.g. of the loop-runner agent) doesn't
+      // miss entries beyond the API's small default page size.
+      const args = { page_size: 100 };
       const [wfResult, agResult, cnResult] = await Promise.allSettled([
         hasSearch("search_workflows")
-          ? this.callTool(`mcp__${serverName}__search_workflows`, {})
+          ? this.callTool(`mcp__${serverName}__search_workflows`, args)
           : Promise.resolve(null),
         hasSearch("search_agents")
-          ? this.callTool(`mcp__${serverName}__search_agents`, {})
+          ? this.callTool(`mcp__${serverName}__search_agents`, args)
           : Promise.resolve(null),
         hasSearch("connector_search")
-          ? this.callTool(`mcp__${serverName}__connector_search`, {})
+          ? this.callTool(`mcp__${serverName}__connector_search`, args)
           : Promise.resolve(null),
       ]);
 
@@ -681,20 +715,7 @@ export class McpManager {
     result: PromiseSettledResult<{ content: string; isError: boolean; errorCode?: McpErrorCode } | null>
   ): Array<{ name: string; description?: string }> {
     if (result.status !== "fulfilled" || !result.value || result.value.isError) return [];
-    try {
-      const data = JSON.parse(result.value.content);
-      const items = data?.data ?? data?.results ?? (Array.isArray(data) ? data : []);
-      if (!Array.isArray(items)) return [];
-      return items
-        .filter((item: Record<string, unknown>) => item.name)
-        .map((item: Record<string, unknown>) => ({
-          name: item.name as string,
-          ...(item.description ? { description: item.description as string } : {}),
-        }))
-        .slice(0, 30);
-    } catch {
-      return [];
-    }
+    return parseEntityList(result.value.content);
   }
 
   // -------------------------------------------------------------------------
