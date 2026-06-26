@@ -114,11 +114,6 @@ export default defineConfig({
 
     search: { provider: 'local' },
 
-    editLink: {
-      pattern: 'https://github.com/machina-sports/sportsclaw/edit/main/docs/:path',
-      text: 'Edit this page on GitHub',
-    },
-
     footer: {
       message: 'Open source under the MIT License.',
       copyright: 'sportsclaw',
