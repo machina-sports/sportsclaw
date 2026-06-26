@@ -44,9 +44,11 @@ generator/evaluator (the loop's `loop-evaluate`, a separate model + "assume brok
 
 Because the operator tick is synchronous but the loop is asynchronous and durable, the check is
 **start-now / read-next-tick**: the tick that publishes *starts* a loop verification session, and
-the *next* tick reads that session's verdict and injects it as a directive — e.g. *"the durable
-loop flagged the previous broadcast for review: &lt;reason&gt;; correct course."* The loop persists
-and resumes on its own, so a verdict is never lost.
+the *next* tick reads that session's result and injects the reviewer's **actual assessment** as a
+directive — e.g. *"[loop-review] an independent reviewer assessed the previous broadcast: the
+broadcast claims a fixture not present in the data."* (When the loop's own review is itself
+unreliable it injects a "double-check" caution instead of trusting it.) The loop persists and
+resumes on its own, so a verdict is never lost.
 
 Enable it per job (`~/.sportsclaw/operator/<jobId>.json`):
 

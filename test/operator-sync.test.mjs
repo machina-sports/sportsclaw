@@ -105,18 +105,20 @@ describe("readLoopVerdict", () => {
 });
 
 describe("formatVerdictDirective", () => {
-  it("pass → a 'verified' directive", () => {
+  it("pass WITH a reply → surfaces the loop's actual assessment (not a bare 'verified' stamp)", () => {
+    const d = formatVerdictDirective({ sessionId: SID, status: "idle", verdict: "pass", repaired: false, reason: "", reply: "The broadcast claims a fixture not in the data." });
+    assert.match(d, /loop-review/);
+    assert.match(d, /fixture not in the data/);
+  });
+  it("pass WITHOUT a reply → falls back to a passed-review note", () => {
     const d = formatVerdictDirective({ sessionId: SID, status: "idle", verdict: "pass", repaired: false, reason: "", reply: null });
-    assert.match(d, /verified/i);
+    assert.match(d, /passed independent review/i);
   });
-  it("pass + repaired → notes the self-repair", () => {
-    const d = formatVerdictDirective({ sessionId: SID, status: "idle", verdict: "pass", repaired: true, reason: "", reply: null });
-    assert.match(d, /self-repair/i);
-  });
-  it("needs_review → a review directive carrying the reason", () => {
-    const d = formatVerdictDirective({ sessionId: SID, status: "needs_review", verdict: "fail", repaired: false, reason: "off-topic", reply: null });
-    assert.match(d, /review/i);
+  it("needs_review → an inconclusive caution carrying the reason, and does NOT trust the reply", () => {
+    const d = formatVerdictDirective({ sessionId: SID, status: "needs_review", verdict: "fail", repaired: false, reason: "off-topic", reply: "junk review" });
+    assert.match(d, /inconclusive/i);
     assert.match(d, /off-topic/);
+    assert.doesNotMatch(d, /loop-review/);
   });
   it("pending → null (nothing to inject yet)", () => {
     assert.equal(formatVerdictDirective({ sessionId: SID, status: "pending", verdict: null, repaired: false, reason: "", reply: null }), null);
@@ -149,7 +151,12 @@ describe("withOperatorSync — sink decorator", () => {
       composeTickContext: () => "BASE-DIRECTIVE",
       onTickEvent: (evt) => { log.push(`base:${evt.type}`); },
     };
-    const value = { session_id: SID, status: "idle", verification: { verdict: "pass", repaired: false, reason: "" }, entries: [] };
+    const value = {
+      session_id: SID,
+      status: "idle",
+      verification: { verdict: "pass", repaired: false, reason: "" },
+      entries: [{ role: "assistant", type: "message", content: "Broadcast looks sound." }],
+    };
     const mgr = fakeMgr({ tools: { execute_agent: ok({ status: true }), search_documents: docEnvelope(value) } });
     const ctx = { jobId: "j", mcpManager: mgr, cfg: {} };
 
@@ -164,8 +171,8 @@ describe("withOperatorSync — sink decorator", () => {
     // Tick N+1 composes → base directive AND the loop verdict are both injected.
     const directive = await wrapped.composeTickContext({ jobId: "j", tickId: "t2", timestamp: "now", cfg: {}, mcpManager: mgr });
     assert.match(directive, /BASE-DIRECTIVE/);
-    assert.match(directive, /loop-verification/);
-    assert.match(directive, /verified/i);
+    assert.match(directive, /loop-review/);
+    assert.match(directive, /Broadcast looks sound/);
     assert.ok(mgr._calls.some((c) => c.tool === "search_documents"));
   });
 

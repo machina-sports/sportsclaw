@@ -136,22 +136,27 @@ export async function readLoopVerdict(mgr: McpManager, sessionId: string): Promi
 /**
  * Render a loop verdict as a deterministic directive to prepend to the next tick.
  * Returns null when there's nothing actionable yet (e.g. still pending).
+ *
+ * The verdict (`pass`/`needs_review`) judges whether the loop's *review* is sound —
+ * NOT whether the decision is safe. So when the review is trustworthy (`pass`) we
+ * surface the loop's actual ASSESSMENT (`reply`), which may itself flag a problem
+ * with the broadcast; a bare "verified" stamp would hide that. When the review is
+ * unreliable (`needs_review`) we caution rather than trust its content.
  */
 export function formatVerdictDirective(v: LoopVerdict): string | null {
   if (v.status === "pending") return null;
   if (v.status === "needs_review") {
     return (
-      "[loop-verification] The durable loop flagged the PREVIOUS broadcast for review" +
-      (v.reason ? `: ${v.reason}` : "") +
-      ". Treat that decision as suspect and correct course this tick."
+      "[loop-verification] The independent review of the previous broadcast was inconclusive" +
+      (v.reason ? ` (${v.reason})` : "") +
+      " — double-check that decision before continuing."
     );
   }
   if (v.verdict === "pass") {
-    return (
-      "[loop-verification] The durable loop independently verified the previous broadcast (pass" +
-      (v.repaired ? ", after self-repair" : "") +
-      "). No correction required."
-    );
+    const reply = v.reply?.trim();
+    return reply
+      ? `[loop-review] An independent reviewer assessed the previous broadcast: ${reply}`
+      : "[loop-verification] The previous broadcast passed independent review; no concerns raised.";
   }
   return null;
 }
