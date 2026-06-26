@@ -155,6 +155,20 @@ export const machinaLoopTool: BuiltinTool = {
       },
     });
     if (res.isError) return { content: res.content, isError: true };
+    // The pod proxies execute_agent to the REST API; an upstream failure can come
+    // back as a status:error envelope WITHOUT the MCP layer flagging isError.
+    // Surface it honestly instead of claiming the loop is "running".
+    try {
+      const parsed = JSON.parse(res.content) as Record<string, unknown>;
+      if (parsed && parsed.status === "error") {
+        return err(
+          `loop dispatch failed: ${String(parsed.message ?? "execute_agent error")}`,
+          "the pod's execute_agent returned an error — its MCP server may be outdated (agent-by-name unsupported). See machina-client-api#287."
+        );
+      }
+    } catch {
+      /* non-JSON content — treat as a successful dispatch */
+    }
 
     return {
       content: JSON.stringify({
