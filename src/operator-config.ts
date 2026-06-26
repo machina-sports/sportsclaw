@@ -169,6 +169,20 @@ export interface OperatorJobConfig {
     };
     fallbackManifest?: unknown;
   };
+
+  /**
+   * operator-sync — route each PUBLISHED decision through the durable Machina
+   * harness loop for independent verification. The loop's own generator/evaluator
+   * (Cap 8 / 8.2) is a SECOND safety lens on top of `broadcastSafety`. Async and
+   * durable: the verdict is read on the NEXT tick and injected as a directive.
+   * Requires a connected Machina pod running the `loop-runner` agent. Off unless
+   * `enabled`.
+   */
+  operatorSync?: {
+    enabled: boolean;
+    /** Reasoning persona the loop uses (default: "loop-reasoning"). */
+    persona?: string;
+  };
 }
 
 export interface ValidationIssue {
@@ -483,6 +497,21 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // operatorSync
+  if (raw.operatorSync !== undefined) {
+    if (typeof raw.operatorSync !== "object" || raw.operatorSync === null || Array.isArray(raw.operatorSync)) {
+      push("operatorSync", "must be an object");
+    } else {
+      const os = raw.operatorSync as Record<string, unknown>;
+      if (os.enabled !== undefined && typeof os.enabled !== "boolean") {
+        push("operatorSync.enabled", "must be a boolean");
+      }
+      if (os.persona !== undefined && typeof os.persona !== "string") {
+        push("operatorSync.persona", "must be a string");
+      }
+    }
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -512,6 +541,7 @@ export function validateOperatorJobConfig(
       openshell: parsedOpenShell,
       inference: raw.inference as ModelRoleRouterConfig | undefined,
       broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],
+      operatorSync: raw.operatorSync as OperatorJobConfig["operatorSync"],
     },
   };
 }

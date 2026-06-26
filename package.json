@@ -1,6 +1,6 @@
 {
   "name": "sportsclaw-engine-core",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "A CLI and bot scaffold that connects any LLM to live sports data via sports-skills. Supports Anthropic, OpenAI, and Google.",
   "type": "module",
   "main": "dist/index.js",
@@ -42,6 +42,7 @@
     "test:heartbeat": "npm run build && node --test test/heartbeat.test.mjs",
     "test:heartbeat-wake-gate": "npm run build && node --test test/heartbeat-wake-gate.test.mjs",
     "test:operator-daemon": "npm run build && node --test test/operator-daemon.test.mjs",
+    "test:operator-sync": "npm run build && node --test test/operator-sync.test.mjs",
     "test:operator-config": "npm run build && node --test test/operator-config.test.mjs",
     "test:operate": "npm run build && node --test test/operate.test.mjs",
     "test:daemon-operator": "npm run build && node --test test/daemon-operator.test.mjs",

@@ -47,6 +47,7 @@ import {
   type OperatorSinkPlugin,
   type SinkContext,
 } from "./operator-sink.js";
+import { withOperatorSync } from "./operator-sync.js";
 import {
   BROADCAST_DIRECTIVE_FRAGMENT,
   buildSystemPrompt,
@@ -652,7 +653,7 @@ async function runDryRun(jobId: string): Promise<void> {
 
 async function runOnce(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
-  const sink = await resolveSink(cfg);
+  const sink = withOperatorSync(await resolveSink(cfg), cfg);
   const tools = await buildOperatorTools(cfg, false, sink);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
@@ -734,7 +735,7 @@ function exitCodeFor(event: TickEvent): number {
 
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
-  const sink = await resolveSink(cfg);
+  const sink = withOperatorSync(await resolveSink(cfg), cfg);
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
   if (inputs.openshell?.enabled) {
