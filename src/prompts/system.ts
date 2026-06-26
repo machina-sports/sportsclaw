@@ -330,6 +330,17 @@ function capabilitiesSection(ctx: SystemPromptContext): string | null {
         );
       }
     }
+
+    if (ctx.mcpManager.getMachinaLoopServer()) {
+      parts.push(
+        "",
+        "### Durable loop available",
+        "This pod runs the Machina durable agentic loop. For a long, multi-step, or resumable task — " +
+          "especially autonomous/background work that should survive interruptions — delegate it with the " +
+          "`machina_loop` tool (action: start → returns a session_id; read → fetch the result; continue → follow up). " +
+          "It persists every turn server-side, unlike a one-shot tool call. Prefer direct tools for quick answers."
+      );
+    }
   }
 
   return parts.join("\n");

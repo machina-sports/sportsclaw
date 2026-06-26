@@ -250,6 +250,30 @@ export interface PodCapabilities {
   discoveredAt: number;
 }
 
+/**
+ * The Machina "harness" durable agentic turn loop is provisioned on a pod as an
+ * agent named `loop-runner` (driven via `execute_agent`, state in `harness_session`
+ * documents). Its presence is how we know a connected pod can run durable,
+ * resumable, multi-turn tasks on our behalf.
+ */
+export const LOOP_RUNNER_AGENT = "loop-runner";
+
+/**
+ * Find the first server whose discovered pod inventory exposes the Machina
+ * durable loop (the `loop-runner` agent). Pure over already-discovered
+ * capabilities so it is unit-testable without a live connection.
+ */
+export function findLoopServer(
+  podCaps: Map<string, PodCapabilities>
+): string | undefined {
+  for (const [server, caps] of podCaps) {
+    if (caps.agents.some((a) => a.name === LOOP_RUNNER_AGENT)) {
+      return server;
+    }
+  }
+  return undefined;
+}
+
 interface ToolCacheEntry {
   tools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
   capabilities?: PodCapabilities;
@@ -856,6 +880,15 @@ export class McpManager {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Find a connected Machina pod that exposes the durable agentic loop
+   * (the `loop-runner` agent, discovered in the pod inventory). Returns
+   * undefined if no such pod is connected.
+   */
+  getMachinaLoopServer(): string | undefined {
+    return findLoopServer(this.podCaps);
   }
 
   /** Disconnect all MCP clients */
