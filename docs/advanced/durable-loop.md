@@ -3,7 +3,8 @@
 A normal tool call is one-shot: sportsclaw asks, the tool answers, the turn ends. Some work is
 bigger than that — research that spans many steps, jobs that wait on async data or human input,
 tasks that should survive a restart. For those, sportsclaw can hand the work to the **Machina
-durable loop** running on a connected pod, and stay responsive while the loop grinds on.
+durable loop** running on a connected pod — it dispatches the long-running work and reads the
+result back when it's ready.
 
 ## How it works
 
@@ -25,7 +26,7 @@ You don't call these yourself — the agent does, when it decides a task is bett
 just ask:
 
 ```bash
-sportsclaw "Delegate a durable task: track the next match and give me the pre-game analysis"
+sportsclaw "Track this week's match series and compile a pre-game analysis for each game"
 ```
 
 Starting or continuing a durable session is gated by the same approval prompt as other

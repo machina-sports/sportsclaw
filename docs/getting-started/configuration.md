@@ -41,8 +41,8 @@ can't produce images. Reading images you send the bot works on any vision-capabl
 
 ### Reasoning models & custom endpoints
 
-Point sportsclaw at any OpenAI-compatible endpoint with `OPENAI_BASE_URL`, and it routes each
-request the way that endpoint expects:
+Point sportsclaw at any OpenAI-compatible endpoint with `OPENAI_BASE_URL`, and it selects the
+API path based on the model name:
 
 - **Reasoning models** (`gpt-5*`, `o1*`, `o3*`) go over the **Responses API** — what hosted
   gateways like **Azure AI Foundry** (`…/openai/v1`) require for function tools + reasoning effort.
