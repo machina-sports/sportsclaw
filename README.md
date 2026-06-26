@@ -90,6 +90,22 @@ docker build -t sportsclaw .
 docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"  # or pass OPENAI_API_KEY / GEMINI_API_KEY
 ```
 
+### Models & endpoints
+
+sportsclaw works with **Anthropic**, **OpenAI**, and **Google** out of the box. Set `OPENAI_BASE_URL` to point at any OpenAI-compatible endpoint and it routes correctly: reasoning models (`gpt-5*` / `o1*` / `o3*`) use the **Responses API** — required by hosted gateways like **Azure AI Foundry** — while self-hosted chat models (**NVIDIA NIM**, **vLLM**) use `/chat/completions`. For sandboxed, policy-routed inference, run inside [NVIDIA OpenShell](openshell/README.md).
+
+### Connect a Machina pod (licensed data & durable loops)
+
+A connected [Machina](https://machina.gg) pod adds licensed, real-time feeds and production SLAs alongside the built-in keyless data. Connect one in a command:
+
+```bash
+sportsclaw machina connect             # mints a durable key via machina-cli and wires the pod
+# or bring your own MCP URL:
+sportsclaw mcp add <url> --name machina --token <key>
+```
+
+A connected pod can also run a **durable agentic loop** — sportsclaw delegates long, multi-step, resumable tasks to it (they survive interruptions, async waits, and restarts) and reads the result back. See [Durable Task Delegation](https://sportsclaw.gg/advanced/durable-loop) for details.
+
 ### When should you use it?
 
 sportsclaw is built for:

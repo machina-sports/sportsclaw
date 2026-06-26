@@ -39,6 +39,28 @@ Generating images (matchday graphics, etc.) requires **OpenAI or Google** — An
 can't produce images. Reading images you send the bot works on any vision-capable model.
 :::
 
+### Reasoning models & custom endpoints
+
+Point sportsclaw at any OpenAI-compatible endpoint with `OPENAI_BASE_URL`, and it selects the
+API path based on the model name:
+
+- **Reasoning models** (`gpt-5*`, `o1*`, `o3*`) go over the **Responses API** — what hosted
+  gateways like **Azure AI Foundry** (`…/openai/v1`) require for function tools + reasoning effort.
+- **Self-hosted chat models** (NVIDIA NIM, vLLM) go over `/chat/completions`.
+- With no `OPENAI_BASE_URL`, real OpenAI keeps its defaults.
+
+```bash
+# Azure AI Foundry — a gpt-5.5 reasoning deployment
+export OPENAI_BASE_URL=https://<resource>.openai.azure.com/openai/v1
+export OPENAI_API_KEY=<key>
+# then pick the OpenAI provider + your model id in `sportsclaw config`
+
+# Self-hosted (NIM / vLLM)
+export OPENAI_BASE_URL=https://inference.local/v1
+```
+
+For sandboxed, policy-routed inference, see [NVIDIA OpenShell](../deployment/openshell).
+
 ## Reuse your Claude Code session
 
 If you already use Claude Code, you can skip the API key entirely and reuse that login:

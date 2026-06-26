@@ -98,6 +98,7 @@ export default defineConfig({
         text: 'Advanced',
         items: [
           { text: 'Connecting MCP Servers', link: '/advanced/mcp' },
+          { text: 'Durable Task Delegation', link: '/advanced/durable-loop' },
           { text: 'Watchers & Schedules', link: '/advanced/watchers' },
           { text: 'Operator Mode', link: '/advanced/operator' },
         ],

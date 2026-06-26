@@ -83,7 +83,16 @@ curl -fsSL https://sportsclaw.gg/install.sh | bash
 │ <b>></b> _    │
 └────────┘</pre>
 <h3>Open source, runs anywhere</h3>
-<p>MIT-licensed TypeScript. Run it from the CLI, host it as a bot, or deploy in Docker. Bring your own model — Anthropic, OpenAI, or Google.</p>
+<p>MIT-licensed TypeScript. Run it from the CLI, host it as a bot, or deploy in Docker. Bring your own model — Anthropic, OpenAI, Google, or any OpenAI-compatible endpoint (Azure AI Foundry, self-hosted NIM/vLLM).</p>
+</a>
+
+<a class="sc-card" href="/advanced/durable-loop">
+<pre class="motif">┌─────────┐
+│ turn <b>3</b>  │
+│ resumes │
+└─────────┘</pre>
+<h3>Delegate durable, resumable work</h3>
+<p>Connect a Machina pod and hand off long, multi-step tasks to its durable loop — it persists every turn and resumes after interruptions, async waits, or restarts. sportsclaw dispatches the work and reads the result back.</p>
 </a>
 
 </div>
