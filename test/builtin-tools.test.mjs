@@ -2,7 +2,7 @@
  * Builtin Tools Modular Structure — Test Suite
  *
  * Verifies that:
- *  1. BUILTIN_TOOLS array correctly registers and exposes sports_query and sports_intelligence_snapshot.
+ *  1. BUILTIN_TOOLS array correctly registers and exposes sports_query, sports_intelligence_snapshot, and machina_loop.
  *  2. Each tool conforms to the BuiltinTool interface and carries a valid ToolSpec.
  */
 
@@ -13,11 +13,12 @@ import { BUILTIN_TOOLS } from "../dist/tools/index.js";
 
 describe("Builtin Tools Modular Registry", () => {
   it("should have correct builtin tools registered", () => {
-    assert.strictEqual(BUILTIN_TOOLS.length, 2, "Should have exactly two builtin tools registered");
+    assert.strictEqual(BUILTIN_TOOLS.length, 3, "Should have exactly three builtin tools registered");
 
     const names = BUILTIN_TOOLS.map(t => t.spec.name);
     assert.ok(names.includes("sports_query"), "Should register sports_query");
     assert.ok(names.includes("sports_intelligence_snapshot"), "Should register sports_intelligence_snapshot");
+    assert.ok(names.includes("machina_loop"), "Should register machina_loop");
   });
 
   it("should carry valid specifications and executable handlers", () => {

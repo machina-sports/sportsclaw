@@ -17,7 +17,7 @@ import type {
 import type { McpManager } from "./mcp.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
-import { BUILTIN_TOOLS } from "./tools/index.js";
+import { BUILTIN_TOOLS, machinaLoopTool } from "./tools/index.js";
 
 export {
   ToolCallInput,
@@ -253,6 +253,11 @@ export class ToolRegistry {
     this.mcpRouteMap = manager.getRouteMap();
   }
 
+  /** The connected MCP manager, if any. Used by built-in tools that bridge to MCP. */
+  getMcpManager(): McpManager | null {
+    return this.mcpManager;
+  }
+
   /**
    * Get cache statistics for debugging.
    */
@@ -292,7 +297,8 @@ export class ToolRegistry {
       toolName === "get_agent_config" ||
       toolName === "install_sport" ||
       toolName === "remove_sport" ||
-      toolName === "upgrade_sports_skills"
+      toolName === "upgrade_sports_skills" ||
+      toolName === "machina_loop"
     );
   }
 
@@ -385,8 +391,15 @@ export class ToolRegistry {
    * hide the legacy generic `sports_query` tool to reduce ambiguous routing.
    */
   getAllToolSpecs(): ToolSpec[] {
-    const base =
+    let base =
       this.dynamicSpecs.length > 0 ? [...this.dynamicSpecs] : [...TOOL_SPECS];
+    // `machina_loop` is a conditional capability: expose it only when a Machina
+    // pod running the durable loop (`loop-runner`) is connected — regardless of
+    // whether sport schemas are loaded. Strip any default copy, then re-add.
+    base = base.filter((s) => s.name !== machinaLoopTool.spec.name);
+    if (this.mcpManager?.getMachinaLoopServer()) {
+      base.push(machinaLoopTool.spec);
+    }
     // Append MCP tools after Python bridge tools
     if (this.mcpSpecs.length > 0) {
       base.push(...this.mcpSpecs);
