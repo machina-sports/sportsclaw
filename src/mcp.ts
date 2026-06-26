@@ -909,7 +909,17 @@ export class McpManager {
    * undefined if no such pod is connected.
    */
   getMachinaLoopServer(): string | undefined {
-    return findLoopServer(this.podCaps);
+    // findLoopServer is pure over discovered capabilities; podCaps can outlive a
+    // connection, so additionally require a LIVE connection that actually exposes
+    // the two tools machina_loop calls. Otherwise the tool would be advertised for
+    // a dropped/route-filtered pod and every call would fail opaquely.
+    for (const [server, caps] of this.podCaps) {
+      if (!caps.agents.some((a) => a.name === LOOP_RUNNER_AGENT)) continue;
+      if (!this.connections.has(server)) continue;
+      const has = (tool: string) => this.routeMap.has(`mcp__${server}__${tool}`);
+      if (has("execute_agent") && has("search_documents")) return server;
+    }
+    return undefined;
   }
 
   /** Disconnect all MCP clients */

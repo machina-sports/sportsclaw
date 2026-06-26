@@ -18,10 +18,15 @@ import type { sportsclawConfig } from "../types.js";
 import type { ToolRegistry } from "../tools.js";
 import type { ToolCallInput, ToolCallResult } from "../bridge.js";
 import type { BuiltinTool } from "./builtin-tool.js";
+import { LOOP_RUNNER_AGENT } from "../mcp.js";
+import { sanitizeInput } from "../security.js";
 
-const RUNNER_AGENT = "loop-runner";
 const SESSION_DOC = "harness_session";
 const DEFAULT_PERSONA = "loop-reasoning";
+const ACTIONS = ["start", "continue", "read"] as const;
+// Minted ids are `ses_` + 24 lowercase hex (randomBytes(12)). continue/read
+// echo a caller-supplied id straight into the pod filter, so enforce the shape.
+const SESSION_ID_RE = /^ses_[0-9a-f]{24}$/;
 
 function err(error: string, hint?: string): ToolCallResult {
   return {
@@ -51,7 +56,12 @@ export const machinaLoopTool: BuiltinTool = {
       "",
       "The loop runs asynchronously: after start/continue, call read with the session_id to",
       "get the result. Use this for autonomous/background work; use direct tools for a quick answer.",
+      "Do not call start again for a task you already started — reuse its session_id with read,",
+      "or continue it. A fresh start mints a new session and leaves the prior loop running.",
     ].join("\n"),
+    // start/continue dispatch the pod's mutating execute_agent — gate them like
+    // any other mutating tool. read is a side-effect-free document fetch.
+    needsApproval: (input) => String(input?.action ?? "start").toLowerCase() !== "read",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -92,9 +102,17 @@ export const machinaLoopTool: BuiltinTool = {
     }
 
     const action = String(input.action ?? "start").toLowerCase();
+    if (!(ACTIONS as readonly string[]).includes(action)) {
+      return err(`Unknown action "${action}". Use one of: ${ACTIONS.join(", ")}.`);
+    }
     const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
     const persona = typeof input.persona === "string" && input.persona.trim() ? input.persona.trim() : DEFAULT_PERSONA;
     let sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
+    // A caller-supplied id (continue/read) goes verbatim into the pod's document
+    // filter — reject anything that isn't a well-formed minted id.
+    if (sessionId && !SESSION_ID_RE.test(sessionId)) {
+      return err(`Invalid session_id "${sessionId}".`, "Use the session_id returned by a previous `start`.");
+    }
 
     if (action === "read") {
       if (!sessionId) return err("read requires session_id.");
@@ -118,15 +136,33 @@ export const machinaLoopTool: BuiltinTool = {
       } catch {
         return err("Could not parse the loop session.", "The pod returned a non-JSON document payload.");
       }
-      if (!value.session_id) return err(`No loop session found for "${sessionId}".`);
+      if (!value.session_id) {
+        // Distinguish "still spinning up" from a hard failure: a just-started
+        // loop hasn't written its document yet. Return a non-error pending state
+        // so the model polls again instead of treating it as a dead session.
+        return {
+          content: JSON.stringify({
+            session_id: sessionId,
+            status: "pending",
+            latest_reply: null,
+            entries: 0,
+            note: "No session document yet — the loop may still be starting. Retry read shortly.",
+          }),
+          isError: false,
+        };
+      }
       const entries = Array.isArray(value.entries) ? (value.entries as Array<Record<string, unknown>>) : [];
       const lastAssistant = [...entries].reverse().find((e) => e.role === "assistant" && e.type === "message");
+      // The reply is authored by the pod's own LLM — treat it as untrusted external
+      // data and strip injection patterns before it re-enters this agent's context.
+      const rawReply = lastAssistant?.content;
+      const latestReply = typeof rawReply === "string" ? sanitizeInput(rawReply).sanitized : (rawReply ?? null);
       return {
         content: JSON.stringify({
           session_id: value.session_id,
           status: value.status ?? "unknown",
           turn: value.turn ?? entries.length,
-          latest_reply: lastAssistant?.content ?? null,
+          latest_reply: latestReply,
           entries: entries.length,
         }),
         isError: false,
@@ -143,7 +179,7 @@ export const machinaLoopTool: BuiltinTool = {
       // The pod's execute_agent requires `agent_id`; a non-ObjectId string is
       // treated as an agent name (documented backward-compat), so this resolves
       // `loop-runner` by name without a separate id lookup.
-      agent_id: RUNNER_AGENT,
+      agent_id: LOOP_RUNNER_AGENT,
       messages: [{ role: "user", content: prompt }],
       context: {
         "context-agent": {
@@ -154,7 +190,19 @@ export const machinaLoopTool: BuiltinTool = {
         },
       },
     });
-    if (res.isError) return { content: res.content, isError: true };
+    if (res.isError) {
+      // Surface the session_id even on failure: the dispatch may have started the
+      // loop server-side (e.g. on a response timeout), so the caller can still poll.
+      return {
+        content: JSON.stringify({
+          error: "Loop dispatch failed; the session may still have started server-side.",
+          error_code: "machina_loop",
+          session_id: sessionId,
+          pod_error: res.content,
+        }),
+        isError: true,
+      };
+    }
 
     return {
       content: JSON.stringify({
