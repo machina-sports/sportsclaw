@@ -98,9 +98,8 @@ Paste this into Claude Code, Cursor, or any coding agent — it reads the machin
 Build a sports AI app with sportsclaw. First read https://sportsclaw.gg/llms.txt
 for the full doc map, then follow https://sportsclaw.gg/getting-started/quickstart
 to install and scaffold. sportsclaw gives you keyless live scores, standings, odds
-(ESPN/Kalshi/Polymarket), and real-time game events, plus one-command Discord and
-Telegram bots. Use the docs at https://sportsclaw.gg for the CLI, data coverage,
-and deployment.
+and markets via sports-skills, plus one-command Discord and Telegram bots. Use the
+docs at https://sportsclaw.gg for the CLI, data coverage, and deployment.
 ```
 
 <p class="sc-section-note"><code>llms.txt</code> lists every doc page as a fetchable URL, so the agent can crawl the whole reference on its own.</p>
