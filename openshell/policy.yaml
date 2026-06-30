@@ -39,6 +39,11 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+      - host: machina-drops-world-cup-2.org.machina.gg
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
     binaries:
       - path: /usr/local/bin/node
 
