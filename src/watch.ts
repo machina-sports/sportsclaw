@@ -295,6 +295,12 @@ export class Watcher {
           process.stdout.write(JSON.stringify(event) + "\n");
           break;
 
+        case "callback":
+          // In-process sink — hand the event straight to a same-process
+          // listener with no external broker. Used by the Momentum Explainer.
+          await this.config.onEvent?.(event);
+          break;
+
         case "file": {
           const filePath = this.resolveFilePath();
           const dir = dirname(filePath);
