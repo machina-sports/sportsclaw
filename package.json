@@ -68,6 +68,7 @@
     "test:model-role-router": "npm run build && node --test test/model-role-router.test.mjs",
     "test:bridge-retry-plan": "npm run build && node --test test/bridge-retry-plan.test.mjs",
     "test:circuit-breaker": "npm run build && node --test test/circuit-breaker.test.mjs",
+    "test:entity-store": "npm run build && node --test test/entity-store.test.mjs",
     "test:bridge-resilience": "npm run build && node --test test/bridge-resilience.test.mjs",
     "test:failure-classifier": "npm run build && node --test test/failure-classifier.test.mjs",
     "test:tool-failure-classification": "npm run build && node --test test/tool-failure-classification.test.mjs",

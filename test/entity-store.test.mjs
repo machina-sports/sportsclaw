@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { EntityStore, entityIsStale } from "../dist/cache/entity-store.js";
+
+function nowISO() { return new Date().toISOString(); }
+function daysAgoISO(d) { return new Date(Date.now() - d * 86400000).toISOString(); }
+
+describe("EntityStore", () => {
+  it("upserts and gets an entity by alias", async () => {
+    const store = new EntityStore(join(tmpdir(), `ec-${process.pid}-${Math.floor(process.hrtime()[1])}.json`));
+    await store.load();
+    await store.upsert({
+      id: "nba:team:lakers", entityType: "team", sport: "nba", league: "NBA",
+      canonicalName: "Los Angeles Lakers", aliases: ["Lakers", "LA Lakers"],
+      providerIds: { espn: "13" }, metadata: {}, confidence: 1.0,
+      firstSeenAt: nowISO(), lastVerifiedAt: nowISO(), mentionCount: 1,
+    });
+    const found = store.get("Lakers", "team", "nba");
+    assert.equal(found?.providerIds.espn, "13");
+  });
+
+  it("treats a 2-day-old market entity as stale (1-day TTL)", () => {
+    const market = {
+      id: "kalshi:KX", entityType: "market", sport: null, league: null,
+      canonicalName: "KX", aliases: [], providerIds: {}, metadata: {},
+      confidence: 1.0, firstSeenAt: daysAgoISO(2), lastVerifiedAt: daysAgoISO(2), mentionCount: 1,
+    };
+    assert.equal(entityIsStale(market), true);
+  });
+
+  it("treats a 2-day-old team entity as fresh (180-day TTL)", () => {
+    const team = {
+      id: "nba:team:lakers", entityType: "team", sport: "nba", league: "NBA",
+      canonicalName: "Los Angeles Lakers", aliases: [], providerIds: {}, metadata: {},
+      confidence: 1.0, firstSeenAt: daysAgoISO(2), lastVerifiedAt: daysAgoISO(2), mentionCount: 1,
+    };
+    assert.equal(entityIsStale(team), false);
+  });
+});
