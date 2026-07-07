@@ -46,6 +46,7 @@
     "test:operator-daemon": "npm run build && node --test test/operator-daemon.test.mjs",
     "test:operator-sync": "npm run build && node --test test/operator-sync.test.mjs",
     "test:routing-complexity": "npm run build && node --test test/routing-complexity.test.mjs",
+    "test:router-complexity-integration": "npm run build && node --test test/router-complexity-integration.test.mjs",
     "test:operator-config": "npm run build && node --test test/operator-config.test.mjs",
     "test:llm-providers": "npm run build && node --test test/llm-providers.test.mjs",
     "test:operate": "npm run build && node --test test/operate.test.mjs",

@@ -8,6 +8,7 @@ import type {
 } from "./types.js";
 import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
 import type { AgentDef } from "./agents.js";
+import { planSkillCaps } from "./routing/complexity.js";
 
 type ModelType = Parameters<typeof generateText>[0]["model"];
 
@@ -323,6 +324,13 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
 
   const promptNorm = normalizeText(input.prompt);
 
+  const capPlan = planSkillCaps(input.prompt, {
+    routingMaxSkills: input.config.routingMaxSkills,
+    routingAllowSpillover: input.config.routingAllowSpillover,
+  });
+  const effectiveMaxSkills = Math.max(input.config.routingMaxSkills, capPlan.maxSkills);
+  const seededSkills = capPlan.addSkills.filter((s) => input.installedSkills.includes(s));
+
   // --- MCP intent early exit ---
   // If the prompt targets pod/MCP entities and MCP tools are present in the
   // tool specs, return immediately with high confidence and zero sport skills.
@@ -395,10 +403,14 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
     .sort((a, b) => b[1] - a[1])
     .map(([skill]) => skill);
 
+  const deterministicCandidates = Array.from(
+    new Set([...rankedDeterministic.slice(0, 4), ...seededSkills])
+  ).slice(0, effectiveMaxSkills);
+
   const primaryAttempt = await runLlmRouter(
     input,
     input.model,
-    rankedDeterministic.slice(0, 4),
+    deterministicCandidates,
     rankedMemory.slice(0, 4)
   );
   const llmDecision = primaryAttempt.decision;
@@ -455,7 +467,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       confidence = Math.max(confidence, 0.65);
       reason = `Deterministic fallback selected: ${fallback}`;
     } else {
-      for (const skill of rankedMemory.slice(0, input.config.routingMaxSkills)) {
+      for (const skill of rankedMemory.slice(0, effectiveMaxSkills)) {
         selected.add(skill);
       }
       if (selected.size > 0) {
@@ -479,7 +491,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
     const limit = Math.max(1, 1 + spillover);
     routedPrimary = primarySkills.slice(0, limit);
   } else {
-    const limit = Math.max(1, input.config.routingMaxSkills);
+    const limit = Math.max(1, effectiveMaxSkills);
     routedPrimary = primarySkills.slice(0, limit);
   }
 
