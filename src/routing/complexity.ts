@@ -13,8 +13,15 @@ const NEWS_KW = ["injury", "injuries", "out", "questionable", "news", "report"];
 const MULTISPORT_KW = ["across sports", "what's happening", "whats happening", "everything", "all sports", "tonight across"];
 const RESEARCH_KW = ["audit", "deep dive", "analyze", "research", "compare", "breakdown"];
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function hasAny(h: string, kws: string[]): boolean {
-  return kws.some((k) => h.includes(k));
+  return kws.some((k) => {
+    if (k.includes(" ")) return h.includes(k);
+    return new RegExp(`\\b${escapeRegex(k)}\\b`).test(h);
+  });
 }
 
 export function classifyQueryComplexity(query: string): QueryComplexity {
@@ -32,7 +39,6 @@ export function planSkillCaps(
   base: { routingMaxSkills: number; routingAllowSpillover: number },
 ): SkillCapPlan {
   const complexity = classifyQueryComplexity(query);
-  const h = query.toLowerCase();
   const addSkills: string[] = [];
   let maxSkills = base.routingMaxSkills;
   let reason = "simple query — default caps";
@@ -49,7 +55,7 @@ export function planSkillCaps(
       break;
     case "compound":
       maxSkills = Math.max(maxSkills, 3);
-      if (hasAny(h, NEWS_KW)) addSkills.push("news");
+      addSkills.push("news");
       reason = "compound (injury/news) — added news";
       break;
     case "live_game":

@@ -25,4 +25,17 @@ describe("query complexity planning", () => {
   it("classifies an injury/news query as compound", () => {
     assert.equal(classifyQueryComplexity("any injury news for the lakers?"), "compound");
   });
+
+  it("does not misclassify 'about' as the 'out' news keyword", () => {
+    assert.equal(classifyQueryComplexity("let's talk about the lakers"), "simple");
+  });
+
+  it("does not misclassify 'understand' as the 'under' betting keyword", () => {
+    const plan = planSkillCaps("help me understand the nba season", base);
+    assert.ok(!plan.addSkills.some((s) => ["betting", "markets", "kalshi", "polymarket"].includes(s)));
+  });
+
+  it("still classifies a real standalone 'out' as compound", () => {
+    assert.equal(classifyQueryComplexity("who is out injured"), "compound");
+  });
 });
