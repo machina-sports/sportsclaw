@@ -105,6 +105,45 @@ export function generateSessionId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Tool Execution Logging (credential redaction)
+// ---------------------------------------------------------------------------
+
+const REDACT_KEYS = ["api_key", "apikey", "token", "authorization", "auth", "password", "secret", "private_key", "wallet", "credential"];
+
+/**
+ * Strip credential-like keys from a tool args object before it is logged.
+ */
+export function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (REDACT_KEYS.some((r) => k.toLowerCase().includes(r))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Build a structured tool_execution log event from a ToolExecutionResult.
+ * Args are redacted before hashing, so no secret value is ever hashed or leaked.
+ */
+export function buildToolExecutionEvent(
+  result: import("./tools/executor.js").ToolExecutionResult,
+  timestamp: string,
+): Record<string, unknown> {
+  const argsHash = "sha256:" + createHash("sha256").update(JSON.stringify(redactArgs(result.args))).digest("hex");
+  return {
+    event: "tool_execution",
+    tool_name: result.toolName,
+    ok: result.ok,
+    latency_ms: result.latencyMs ?? null,
+    failure_category: result.failure?.category ?? null,
+    normalized: result.normalized,
+    args_hash: argsHash,
+    timestamp,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Query Logging
 // ---------------------------------------------------------------------------
 
