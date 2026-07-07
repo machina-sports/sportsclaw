@@ -69,6 +69,7 @@
     "test:bridge-retry-plan": "npm run build && node --test test/bridge-retry-plan.test.mjs",
     "test:circuit-breaker": "npm run build && node --test test/circuit-breaker.test.mjs",
     "test:bridge-resilience": "npm run build && node --test test/bridge-resilience.test.mjs",
+    "test:failure-classifier": "npm run build && node --test test/failure-classifier.test.mjs",
     "test:session-store": "npm run build && node --test test/session-store.test.mjs",
     "test:file-memory-atomic": "npm run build && node --test test/file-memory-atomic.test.mjs",
     "test:analytics-tokens": "npm run build && node --test test/analytics-tokens.test.mjs",
