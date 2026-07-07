@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -24,7 +25,9 @@ const TTL_DAYS: Record<EntityType, number> = {
 };
 
 export function entityIsStale(entity: CachedEntity, now: number = Date.now()): boolean {
-  const ttlMs = TTL_DAYS[entity.entityType] * 86_400_000;
+  const ttlDays = TTL_DAYS[entity.entityType];
+  if (ttlDays === undefined) return true;
+  const ttlMs = ttlDays * 86_400_000;
   const verified = Date.parse(entity.lastVerifiedAt);
   if (Number.isNaN(verified)) return true;
   return now - verified > ttlMs;
@@ -74,7 +77,7 @@ export class EntityStore {
 
   private async persist(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tmp = `${this.filePath}.tmp`;
+    const tmp = `${this.filePath}.${randomUUID()}.tmp`;
     await writeFile(tmp, JSON.stringify([...this.byId.values()], null, 2), "utf8");
     await rename(tmp, this.filePath); // atomic replace
   }

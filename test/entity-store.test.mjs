@@ -31,6 +31,28 @@ describe("EntityStore", () => {
     assert.equal(entityIsStale(market), true);
   });
 
+  it("preserves firstSeenAt and bumps mentionCount on repeated upsert", async () => {
+    const store = new EntityStore(join(tmpdir(), `ec-${process.pid}-${Math.floor(process.hrtime()[1])}-b.json`));
+    await store.load();
+    const firstSeen = daysAgoISO(5);
+    await store.upsert({
+      id: "nba:team:celtics", entityType: "team", sport: "nba", league: "NBA",
+      canonicalName: "Boston Celtics", aliases: ["Celtics"],
+      providerIds: { espn: "2" }, metadata: {}, confidence: 1.0,
+      firstSeenAt: firstSeen, lastVerifiedAt: firstSeen, mentionCount: 1,
+    });
+    await store.upsert({
+      id: "nba:team:celtics", entityType: "team", sport: "nba", league: "NBA",
+      canonicalName: "Boston Celtics", aliases: ["Celtics"],
+      providerIds: { espn: "2", nba: "1610612738" }, metadata: {}, confidence: 1.0,
+      firstSeenAt: nowISO(), lastVerifiedAt: nowISO(), mentionCount: 1,
+    });
+    const found = store.get("Celtics", "team", "nba");
+    assert.equal(found?.mentionCount, 2);
+    assert.equal(found?.firstSeenAt, firstSeen);
+    assert.equal(found?.providerIds.nba, "1610612738");
+  });
+
   it("treats a 2-day-old team entity as fresh (180-day TTL)", () => {
     const team = {
       id: "nba:team:lakers", entityType: "team", sport: "nba", league: "NBA",
