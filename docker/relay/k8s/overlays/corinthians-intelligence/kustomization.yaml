@@ -1,0 +1,55 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namePrefix: corinthians-intel-
+
+commonLabels:
+  sportsclaw-user: corinthians-intel
+
+configMapGenerator:
+  - name: sportsclaw-config
+    namespace: sportsclaw
+    envs:
+      - config.env
+  # Custom Corinthians personas → mounted into the relay's agents dir.
+  - name: sportsclaw-agents
+    namespace: sportsclaw
+    files:
+      - agents/olheiro.md
+      - agents/analista-adversario.md
+      - agents/diretor.md
+
+secretGenerator:
+  - name: sportsclaw-secrets
+    namespace: sportsclaw
+    envs:
+      - secrets.env
+    type: Opaque
+
+patches:
+  - target:
+      kind: Deployment
+      name: sportsclaw-relay
+    patch: |-
+      # Pin image
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: machinasports/sportsclaw-relay:v0.9.4
+      # Mount the Corinthians personas at the relay's AGENTS_DIR (~/.sportsclaw/agents;
+      # container runs as root → /root/.sportsclaw/agents). Kustomize rewrites the
+      # configMap name to the hashed "sportsclaw-agents" automatically.
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: corinthians-agents
+          configMap:
+            name: sportsclaw-agents
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: corinthians-agents
+          mountPath: /root/.sportsclaw/agents
+          readOnly: true
