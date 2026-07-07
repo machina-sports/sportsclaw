@@ -18,6 +18,7 @@ import type { McpManager } from "./mcp.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 import { BUILTIN_TOOLS, machinaLoopTool } from "./tools/index.js";
+import { classifyFailure } from "./failures/classifier.js";
 
 export {
   ToolCallInput,
@@ -550,7 +551,9 @@ export class ToolRegistry {
           ? `F1 support is unavailable. Repair with: ${repairCmd}`
           : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
       } else {
-        hint = classified.hint;
+        const toolName = `${sport}_${command}`;
+        const failure = classifyFailure(result.error, toolName);
+        hint = failure.userMessage || result.error || classified.hint;
       }
       return {
         content: JSON.stringify({
