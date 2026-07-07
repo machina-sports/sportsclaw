@@ -493,7 +493,7 @@ export class ToolRegistry {
       if (route) {
         const spec = this.dynamicSpecs.find((s) => s.name === toolName);
         const connectionName = spec?.connection || route.sport;
-        result = await this.handleDynamicTool(route.sport, route.command, input, config, connectionName);
+        result = await this.handleDynamicTool(route.sport, route.command, input, config, connectionName, toolName);
       } else {
         result = {
           content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
@@ -521,7 +521,8 @@ export class ToolRegistry {
     command: string,
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>,
-    connectionName?: string
+    connectionName?: string,
+    dispatchedToolName?: string
 ): Promise<ToolCallResult> {
     const pythonPath = config?.pythonPath ?? "python3";
     const repairCmd = buildSportsSkillsRepairCommand(pythonPath);
@@ -551,8 +552,9 @@ export class ToolRegistry {
           ? `F1 support is unavailable. Repair with: ${repairCmd}`
           : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
       } else {
-        const toolName = `${sport}_${command}`;
-        const failure = classifyFailure(result.error, toolName);
+        const toolName = dispatchedToolName ?? `${sport}_${command}`;
+        const combined = `${result.error ?? ""}\n${result.stderr ?? ""}`.trim();
+        const failure = classifyFailure(combined, toolName);
         hint = failure.userMessage || result.error || classified.hint;
       }
       return {
