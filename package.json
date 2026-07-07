@@ -76,6 +76,7 @@
     "test:failure-classifier": "npm run build && node --test test/failure-classifier.test.mjs",
     "test:tool-failure-classification": "npm run build && node --test test/tool-failure-classification.test.mjs",
     "test:tool-failure-wiring": "npm run build && node --test test/tool-failure-wiring.test.mjs",
+    "test:safe-executor": "npm run build && node --test test/safe-executor.test.mjs",
     "test:session-store": "npm run build && node --test test/session-store.test.mjs",
     "test:file-memory-atomic": "npm run build && node --test test/file-memory-atomic.test.mjs",
     "test:analytics-tokens": "npm run build && node --test test/analytics-tokens.test.mjs",
