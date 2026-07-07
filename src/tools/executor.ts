@@ -20,7 +20,7 @@ export async function executeToolSafely(
   nowFn: () => number = Date.now,
 ): Promise<ToolExecutionResult> {
   const started = nowFn();
-  const normalizedArgs = { ...args };
+  const normalizedArgs = structuredClone(args);
   const before = JSON.stringify(normalizedArgs);
   sanitizeToolInput(toolName, normalizedArgs);
   const normalized = JSON.stringify(normalizedArgs) !== before;

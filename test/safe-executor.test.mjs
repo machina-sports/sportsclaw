@@ -25,4 +25,29 @@ describe("executeToolSafely", () => {
     assert.equal(res.failure?.category, "rate_limited");
     assert.equal(res.failure?.retryable, true);
   });
+
+  it("does not mutate caller's original args (deep copy isolation)", async () => {
+    const original = { sport: "nba", args: { season: "2026" } };
+    const res = await executeToolSafely(
+      "sports_query",
+      original,
+      async (_n, a) => ({ content: JSON.stringify(a) }),
+    );
+    // Verify the caller's original is NOT mutated
+    assert.equal(original.args.season, "2026");
+    // Verify the copy WAS normalized
+    assert.equal(res.normalized, true);
+    assert.ok(String(res.data).includes("espn.nba.2026"));
+  });
+
+  it("catches thrown exceptions and classifies them", async () => {
+    const res = await executeToolSafely(
+      "weather_get_forecast",
+      { location: "NYC" },
+      async () => { throw new Error("boom network fail"); },
+    );
+    assert.equal(res.ok, false);
+    assert.ok(res.failure);
+    assert.equal(typeof res.failure.category, "string");
+  });
 });
