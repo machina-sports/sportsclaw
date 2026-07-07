@@ -11,6 +11,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  CUSTOM_MODEL_VALUE,
+  DEFAULT_MODELS,
+  PROVIDER_MODEL_PROFILES,
   azureFoundryApiStyle,
   azureFoundryOpenAISubmode,
 } from "../dist/types.js";
@@ -19,6 +22,27 @@ import {
   resolveAzureFoundryConfig,
   stripTrailingV1,
 } from "../dist/llm-providers.js";
+
+// ---------------------------------------------------------------------------
+// provider model profiles
+// ---------------------------------------------------------------------------
+
+describe("PROVIDER_MODEL_PROFILES", () => {
+  it("ships curated current defaults for every provider", () => {
+    for (const provider of ["anthropic", "openai", "google", "azure-foundry"]) {
+      assert.ok(DEFAULT_MODELS[provider], `missing default for ${provider}`);
+      assert.ok(PROVIDER_MODEL_PROFILES[provider].selectableModels.length >= 2, provider);
+    }
+    assert.ok(PROVIDER_MODEL_PROFILES.anthropic.selectableModels.some((m) => m.value === "claude-sonnet-4-6"));
+    assert.ok(PROVIDER_MODEL_PROFILES.openai.selectableModels.some((m) => m.value === "gpt-5.4-mini"));
+    assert.ok(PROVIDER_MODEL_PROFILES.google.selectableModels.some((m) => m.value === "gemini-3.5-flash"));
+    assert.ok(PROVIDER_MODEL_PROFILES["azure-foundry"].selectableModels.some((m) => m.value === "gpt-5.4"));
+  });
+
+  it("reserves a custom model sentinel for the config wizard", () => {
+    assert.strictEqual(CUSTOM_MODEL_VALUE, "__custom_model__");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // azureFoundryApiStyle

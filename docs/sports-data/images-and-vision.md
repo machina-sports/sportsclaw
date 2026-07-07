@@ -14,8 +14,9 @@ sportsclaw "Make a hype graphic for tonight's Lakers game"
 In a Discord or Telegram bot, the image is posted straight into the conversation.
 
 ::: tip Provider requirement
-Image generation needs **OpenAI or Google** as your model provider — Anthropic models can't
-produce images. See [Configuration](../getting-started/configuration).
+Image generation needs **OpenAI, Google, or Azure Foundry** as your model provider — Anthropic
+models can't produce images. Azure Foundry uses the OpenAI-compatible Images API and defaults to
+`gpt-image-2`. See [Configuration](../getting-started/configuration).
 :::
 
 ## Reading images (vision)
