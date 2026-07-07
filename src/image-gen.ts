@@ -202,7 +202,6 @@ export async function generateImageAzureFoundry(
       n: 1,
       size: resolvedSize,
       quality,
-      response_format: "b64_json",
     }),
   });
 

@@ -64,7 +64,7 @@ describe("generateImageAzureFoundry", () => {
     assert.strictEqual(body.prompt, "World Cup poster");
     assert.strictEqual(body.size, "1536x1024");
     assert.strictEqual(body.quality, "medium");
-    assert.strictEqual(body.response_format, "b64_json");
+    assert.ok(!Object.hasOwn(body, "response_format"));
     assert.strictEqual(image.provider, "azure-foundry");
     assert.strictEqual(image.model, "gpt-image-2");
     assert.strictEqual(Buffer.from(image.data, "base64").toString("utf8"), "fake-image");
