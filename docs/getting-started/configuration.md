@@ -36,9 +36,14 @@ export ANTHROPIC_API_KEY=sk-...
 ```
 
 ::: tip Image generation
-Generating images (matchday graphics, etc.) requires **OpenAI or Google** — Anthropic models
-can't produce images. Reading images you send the bot works on any vision-capable model.
+Generating images (matchday graphics, etc.) requires **OpenAI, Google, or Azure Foundry** —
+Anthropic models can't produce images. Reading images you send the bot works on any
+vision-capable model.
 :::
+
+The setup wizard ships with a curated list of common current models for each provider and always
+includes **Custom model / deployment name**. Use the custom option for newly deployed Foundry
+models or provider releases before the curated list catches up.
 
 ### Reasoning models & custom endpoints
 
@@ -93,6 +98,9 @@ export sportsclaw_MODEL=claude-sonnet-4-6
 | `AZURE_FOUNDRY_AUTH_MODE` | `api_key` (default) or `entra_id`. |
 | `AZURE_FOUNDRY_SCOPE` | Entra ID token scope (default `https://ai.azure.com/.default`). |
 | `AZURE_FOUNDRY_API_VERSION` | Optional `api-version` query appended to every call. |
+| `AZURE_FOUNDRY_IMAGE_BASE_URL` | Optional OpenAI-style `/openai/v1` endpoint used only for image generation. Use when your text model uses an Anthropic-style endpoint. |
+| `AZURE_FOUNDRY_IMAGE_MODEL` | Optional image model override. Defaults to `gpt-image-2`. |
+| `AZURE_FOUNDRY_IMAGE_QUALITY` | Optional image quality. Defaults to `medium`. |
 
 In `auto` mode the wire protocol is inferred from the base URL (`/anthropic` → Anthropic-style),
 and OpenAI-style deployments route reasoning families (`gpt-5*`, `o1*`, `o3*`, `o4*`, `codex*`)
@@ -103,6 +111,12 @@ over the Responses API while other models use Chat Completions.
 the optional `@azure/identity` package (`npm install @azure/identity`) and an environment that
 `DefaultAzureCredential` can resolve (`az login`, a managed identity, or service-principal env
 vars). API-key users never need `@azure/identity`.
+
+**Image generation.** When `sportsclaw_PROVIDER=azure-foundry`, the `generate_image` tool can use
+Foundry's OpenAI-compatible Images API with `gpt-image-2`. Point `AZURE_FOUNDRY_BASE_URL` (or the
+image-specific `AZURE_FOUNDRY_IMAGE_BASE_URL`) at an OpenAI-style `/openai/v1` endpoint. If your
+chat model uses an Anthropic-style `/anthropic` endpoint, keep that as `AZURE_FOUNDRY_BASE_URL` and
+set `AZURE_FOUNDRY_IMAGE_BASE_URL` separately.
 
 ## Reuse your Claude Code session
 

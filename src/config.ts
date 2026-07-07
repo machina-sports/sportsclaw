@@ -11,6 +11,7 @@ import { join } from "node:path";
 import pc from "picocolors";
 import * as p from "@clack/prompts";
 import {
+  CUSTOM_MODEL_VALUE,
   DEFAULT_MODELS,
   PROVIDER_MODEL_PROFILES,
   type LLMProvider,
@@ -853,6 +854,48 @@ function hasApiKey(savedConfig: CLIConfig, prov: LLMProvider): boolean {
   return false;
 }
 
+async function promptModelSelection(
+  provider: LLMProvider,
+  savedConfig: CLIConfig,
+  opts: { message?: string; placeholder?: string } = {},
+): Promise<string> {
+  const profile = PROVIDER_MODEL_PROFILES[provider];
+  const customOption = {
+    value: CUSTOM_MODEL_VALUE,
+    label: "Custom model / deployment name",
+    hint: "type a provider-specific model id",
+  };
+
+  const choice = await p.select({
+    message: opts.message ?? "Which model?",
+    options: [...(profile?.selectableModels ?? []), customOption],
+    initialValue: savedConfig.model || profile?.defaultModel || undefined,
+  });
+
+  if (p.isCancel(choice)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  if (choice !== CUSTOM_MODEL_VALUE) {
+    return choice as string;
+  }
+
+  const customModel = await p.text({
+    message: "Model / deployment name:",
+    placeholder: opts.placeholder || profile?.defaultModel || "model-id",
+    defaultValue: savedConfig.model || profile?.defaultModel || "",
+    validate: (val) => (!val?.trim() ? "Model ID is required." : undefined),
+  });
+
+  if (p.isCancel(customModel)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  return (customModel as string).trim();
+}
+
 async function configureProvider(savedConfig: CLIConfig): Promise<{
   provider: LLMProvider;
   model: string;
@@ -880,16 +923,7 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
     return configureAzureFoundry(savedConfig);
   }
 
-  const model = await p.select({
-    message: "Which model?",
-    options: PROVIDER_MODEL_PROFILES[provider as LLMProvider]?.selectableModels ?? [],
-    initialValue: savedConfig.model || undefined,
-  });
-
-  if (p.isCancel(model)) {
-    p.cancel("Cancelled.");
-    process.exit(0);
-  }
+  const model = await promptModelSelection(provider as LLMProvider, savedConfig);
 
   const selectedProvider = provider as LLMProvider;
   const envName = PROVIDER_ENV[selectedProvider];
@@ -1026,13 +1060,10 @@ async function configureAzureFoundry(savedConfig: CLIConfig): Promise<{
   });
   if (p.isCancel(authMode)) { p.cancel("Cancelled."); process.exit(0); }
 
-  const modelInput = await p.text({
+  const model = await promptModelSelection("azure-foundry", savedConfig, {
     message: "Deployment / model name:",
     placeholder: "gpt-5.2",
-    defaultValue: savedConfig.model || DEFAULT_MODELS["azure-foundry"],
   });
-  if (p.isCancel(modelInput)) { p.cancel("Cancelled."); process.exit(0); }
-  const model = (modelInput as string).trim() || DEFAULT_MODELS["azure-foundry"];
 
   const apiVersionInput = await p.text({
     message: "API version (optional — blank to omit):",

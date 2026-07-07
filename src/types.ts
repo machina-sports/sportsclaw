@@ -122,6 +122,9 @@ export interface ProviderModelProfile {
   selectableModels: ProviderModelOption[];
 }
 
+/** Sentinel value used by the interactive config wizard to collect a free-form model ID. */
+export const CUSTOM_MODEL_VALUE = "__custom_model__";
+
 export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> = {
   anthropic: {
     defaultModel: "claude-opus-4-6",
@@ -132,19 +135,39 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
         hint: "recommended",
       },
       {
+        value: "claude-sonnet-4-6",
+        label: "Claude Sonnet 4.6",
+        hint: "faster, cheaper",
+      },
+      {
         value: "claude-sonnet-4-5-20250514",
         label: "Claude Sonnet 4.5",
-        hint: "faster, cheaper",
+        hint: "legacy stable",
       },
     ],
   },
   openai: {
-    defaultModel: "gpt-5.3-codex",
+    defaultModel: "gpt-5.4-mini",
     selectableModels: [
+      {
+        value: "gpt-5.4-mini",
+        label: "GPT-5.4 Mini",
+        hint: "recommended",
+      },
+      {
+        value: "gpt-5.4",
+        label: "GPT-5.4",
+        hint: "most capable",
+      },
       {
         value: "gpt-5.3-codex",
         label: "GPT-5.3 Codex",
-        hint: "recommended",
+        hint: "coding",
+      },
+      {
+        value: "gpt-4o",
+        label: "GPT-4o",
+        hint: "legacy multimodal",
       },
     ],
   },
@@ -157,18 +180,24 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
         hint: "recommended",
       },
       {
+        value: "gemini-3.5-pro",
+        label: "Gemini 3.5 Pro",
+        hint: "advanced reasoning",
+      },
+      {
         value: "gemini-3-flash-preview",
         label: "Gemini 3 Flash",
+        hint: "preview",
       },
       {
         value: "gemini-3-pro-preview",
         label: "Gemini 3 Pro",
-        hint: "advanced reasoning",
+        hint: "preview reasoning",
       },
       {
         value: "gemini-3.1-pro-preview",
         label: "Gemini 3.1 Pro",
-        hint: "most capable",
+        hint: "legacy preview",
       },
     ],
   },
@@ -181,6 +210,16 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
         value: "gpt-5.2",
         label: "GPT-5.2 (Azure OpenAI)",
         hint: "responses API",
+      },
+      {
+        value: "gpt-5.4-mini",
+        label: "GPT-5.4 Mini (Azure OpenAI)",
+        hint: "if deployed",
+      },
+      {
+        value: "gpt-5.4",
+        label: "GPT-5.4 (Azure OpenAI)",
+        hint: "if deployed",
       },
       {
         value: "gpt-4o",
@@ -446,7 +485,9 @@ export interface GeneratedImage {
   /** The prompt used to generate the image */
   prompt: string;
   /** The provider that generated the image */
-  provider: "openai" | "google";
+  provider: "openai" | "google" | "azure-foundry";
+  /** The model that generated the image, when known. */
+  model?: string;
 }
 
 /** A video produced by the generate_video tool (outbound). */
