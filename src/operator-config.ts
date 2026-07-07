@@ -224,6 +224,7 @@ const VALID_PROVIDERS: ReadonlySet<LLMProvider> = new Set<LLMProvider>([
   "anthropic",
   "openai",
   "google",
+  "azure-foundry",
 ]);
 
 const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -443,6 +444,14 @@ export function validateOperatorJobConfig(
         push(
           "openshell",
           "provider \"google\" is not supported under openshell — the Privacy Router doesn't speak Google's protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
+        );
+      }
+      // azure-foundry targets Azure endpoints directly, not the Privacy
+      // Router's inference.local — the two are mutually exclusive.
+      if (openShellEnabled && raw.provider === "azure-foundry") {
+        push(
+          "openshell",
+          "provider \"azure-foundry\" is not supported under openshell — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
         );
       }
       parsedOpenShell = {

@@ -50,5 +50,5 @@ The same engine powers every surface:
 
 ## Bring your own model
 
-sportsclaw is model-agnostic. Point it at Anthropic, OpenAI, or Google and the loop works the
+sportsclaw is model-agnostic. Point it at Anthropic, OpenAI, Google, or Azure Foundry and the loop works the
 same way — see **[Configuration](../getting-started/configuration)**.

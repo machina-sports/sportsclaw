@@ -10,7 +10,72 @@ import type { ModelMessage } from "ai";
 // Supported LLM providers
 // ---------------------------------------------------------------------------
 
-export type LLMProvider = "anthropic" | "openai" | "google";
+export type LLMProvider = "anthropic" | "openai" | "google" | "azure-foundry";
+
+// ---------------------------------------------------------------------------
+// Azure Foundry (Microsoft Foundry / Azure OpenAI) — provider modes
+// ---------------------------------------------------------------------------
+
+/**
+ * Which wire protocol the Foundry deployment speaks.
+ *   - `auto`             — infer from the base URL + model id (default)
+ *   - `chat_completions` — OpenAI `/chat/completions`
+ *   - `responses`        — OpenAI `/responses`
+ *   - `codex_responses`  — OpenAI `/responses` for codex-family deployments
+ *   - `anthropic_messages` — Anthropic `/v1/messages` (Azure "services.ai" host)
+ */
+export type AzureFoundryApiMode =
+  | "auto"
+  | "chat_completions"
+  | "responses"
+  | "codex_responses"
+  | "anthropic_messages";
+
+/** How to authenticate against Foundry. `api_key` (default) or Entra ID. */
+export type AzureFoundryAuthMode = "api_key" | "entra_id";
+
+/**
+ * Model families that must use the OpenAI Responses API on Azure Foundry —
+ * they reject function tools + reasoning_effort on `/chat/completions`.
+ * Mirrors the reasoning-model detection used for a custom `OPENAI_BASE_URL`.
+ */
+export const AZURE_FOUNDRY_REASONING_FAMILY = /^(gpt-5|o1|o3|o4|codex)/i;
+
+/**
+ * Decide whether a Foundry deployment is OpenAI-style or Anthropic-style.
+ * Pure: `api_mode` wins when explicit; otherwise infer from the base URL
+ * (Azure serves Anthropic models under a `/anthropic` path on the
+ * `services.ai.azure.com` host).
+ */
+export function azureFoundryApiStyle(opts: {
+  baseUrl?: string;
+  apiMode?: AzureFoundryApiMode;
+}): "openai" | "anthropic" {
+  const mode = opts.apiMode ?? "auto";
+  if (mode === "anthropic_messages") return "anthropic";
+  if (mode === "chat_completions" || mode === "responses" || mode === "codex_responses") {
+    return "openai";
+  }
+  // auto — infer from the endpoint shape.
+  const url = (opts.baseUrl ?? "").toLowerCase();
+  if (url.includes("/anthropic")) return "anthropic";
+  return "openai";
+}
+
+/**
+ * For an OpenAI-style Foundry deployment, pick `responses` vs `chat`.
+ * Pure: `api_mode` wins when explicit; otherwise reasoning families use the
+ * Responses API and everything else uses Chat Completions.
+ */
+export function azureFoundryOpenAISubmode(opts: {
+  modelId: string;
+  apiMode?: AzureFoundryApiMode;
+}): "responses" | "chat" {
+  const mode = opts.apiMode ?? "auto";
+  if (mode === "responses" || mode === "codex_responses") return "responses";
+  if (mode === "chat_completions") return "chat";
+  return AZURE_FOUNDRY_REASONING_FAMILY.test(opts.modelId) ? "responses" : "chat";
+}
 
 // ---------------------------------------------------------------------------
 // OpenShell — optional opt-in routing through NVIDIA OpenShell's Privacy
@@ -107,12 +172,35 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
       },
     ],
   },
+  "azure-foundry": {
+    // Azure deployment names are user-defined; these are common defaults. The
+    // config wizard also lets you type your own deployment name.
+    defaultModel: "gpt-5.2",
+    selectableModels: [
+      {
+        value: "gpt-5.2",
+        label: "GPT-5.2 (Azure OpenAI)",
+        hint: "responses API",
+      },
+      {
+        value: "gpt-4o",
+        label: "GPT-4o (Azure OpenAI)",
+        hint: "chat completions",
+      },
+      {
+        value: "claude-sonnet-4-6",
+        label: "Claude Sonnet 4.6 (Azure)",
+        hint: "anthropic messages",
+      },
+    ],
+  },
 };
 
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   anthropic: PROVIDER_MODEL_PROFILES.anthropic.defaultModel,
   openai: PROVIDER_MODEL_PROFILES.openai.defaultModel,
   google: PROVIDER_MODEL_PROFILES.google.defaultModel,
+  "azure-foundry": PROVIDER_MODEL_PROFILES["azure-foundry"].defaultModel,
 };
 
 // ---------------------------------------------------------------------------
@@ -253,6 +341,20 @@ export function buildProviderOptions(
     }
     case "google":
       return { google: { thinkingConfig: { thinkingBudget: budget } } };
+    case "azure-foundry": {
+      // Azure Foundry resolves to either an OpenAI-style or Anthropic-style
+      // model under the hood; the providerOptions key must match that
+      // underlying provider's namespace ("openai" / "anthropic").
+      const style = azureFoundryApiStyle({
+        baseUrl: process.env.AZURE_FOUNDRY_BASE_URL,
+        apiMode: process.env.AZURE_FOUNDRY_API_MODE as AzureFoundryApiMode | undefined,
+      });
+      if (style === "anthropic") {
+        return { anthropic: { thinking: { type: "enabled", budgetTokens: budget } } };
+      }
+      const effort = budget <= 4096 ? "low" : budget <= 16384 ? "medium" : "high";
+      return { openai: { reasoningEffort: effort } };
+    }
     default:
       return undefined;
   }

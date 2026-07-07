@@ -31,7 +31,13 @@ import {
   type ClaudeCodeOAuthTokens,
 } from "./anthropic-oauth.js";
 import { resolveAnthropicAuth } from "./credentials.js";
-import type { LLMProvider } from "./types.js";
+import {
+  azureFoundryApiStyle,
+  azureFoundryOpenAISubmode,
+  type AzureFoundryApiMode,
+  type AzureFoundryAuthMode,
+  type LLMProvider,
+} from "./types.js";
 
 /**
  * Fetch wrapper that suppresses Nemotron's chain-of-thought output.
@@ -146,6 +152,208 @@ export interface ResolvedModelAuth {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Azure Foundry (Microsoft Foundry / Azure OpenAI) helpers
+// ---------------------------------------------------------------------------
+
+/** Default Entra ID token scope for Azure AI / Foundry. */
+export const AZURE_FOUNDRY_DEFAULT_SCOPE = "https://ai.azure.com/.default";
+
+const AZURE_API_MODES: ReadonlySet<AzureFoundryApiMode> = new Set<AzureFoundryApiMode>([
+  "auto",
+  "chat_completions",
+  "responses",
+  "codex_responses",
+  "anthropic_messages",
+]);
+
+const AZURE_AUTH_MODES: ReadonlySet<AzureFoundryAuthMode> = new Set<AzureFoundryAuthMode>([
+  "api_key",
+  "entra_id",
+]);
+
+/** Fully-resolved Azure Foundry configuration, derived from `AZURE_FOUNDRY_*`. */
+export interface AzureFoundryResolved {
+  apiKey?: string;
+  baseUrl: string;
+  apiMode: AzureFoundryApiMode;
+  authMode: AzureFoundryAuthMode;
+  scope: string;
+  apiVersion?: string;
+  /** Derived wire protocol: OpenAI-style or Anthropic-style. */
+  style: "openai" | "anthropic";
+}
+
+/**
+ * Resolve the Azure Foundry config from environment variables. Pure w.r.t. the
+ * passed `env` object (defaults to `process.env`) so it is unit-testable
+ * without touching the real environment. Throws with actionable messages on
+ * missing base URL / invalid modes / missing api-key.
+ */
+export function resolveAzureFoundryConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): AzureFoundryResolved {
+  const baseUrl = (env.AZURE_FOUNDRY_BASE_URL ?? "").trim();
+  if (!baseUrl) {
+    throw new Error(
+      "AZURE_FOUNDRY_BASE_URL is not set. Set it to your Foundry endpoint, e.g. " +
+        "https://<resource>.openai.azure.com/openai/v1 (OpenAI-style) or " +
+        "https://<resource>.services.ai.azure.com/anthropic (Anthropic-style).",
+    );
+  }
+
+  const rawApiMode = (env.AZURE_FOUNDRY_API_MODE ?? "").trim();
+  if (rawApiMode && !AZURE_API_MODES.has(rawApiMode as AzureFoundryApiMode)) {
+    throw new Error(
+      `AZURE_FOUNDRY_API_MODE "${rawApiMode}" is invalid. Use one of: ${[...AZURE_API_MODES].join(", ")}.`,
+    );
+  }
+  const apiMode = (rawApiMode || "auto") as AzureFoundryApiMode;
+
+  const rawAuthMode = (env.AZURE_FOUNDRY_AUTH_MODE ?? "").trim();
+  if (rawAuthMode && !AZURE_AUTH_MODES.has(rawAuthMode as AzureFoundryAuthMode)) {
+    throw new Error(
+      `AZURE_FOUNDRY_AUTH_MODE "${rawAuthMode}" is invalid. Use one of: ${[...AZURE_AUTH_MODES].join(", ")}.`,
+    );
+  }
+  const authMode = (rawAuthMode || "api_key") as AzureFoundryAuthMode;
+
+  const scope = (env.AZURE_FOUNDRY_SCOPE ?? "").trim() || AZURE_FOUNDRY_DEFAULT_SCOPE;
+  const apiVersion = (env.AZURE_FOUNDRY_API_VERSION ?? "").trim() || undefined;
+  const apiKey = (env.AZURE_FOUNDRY_API_KEY ?? "").trim() || undefined;
+
+  if (authMode === "api_key" && !apiKey) {
+    throw new Error(
+      "AZURE_FOUNDRY_API_KEY is not set (auth mode: api_key). Set the key, or set " +
+        "AZURE_FOUNDRY_AUTH_MODE=entra_id to authenticate with DefaultAzureCredential.",
+    );
+  }
+
+  const style = azureFoundryApiStyle({ baseUrl, apiMode });
+  return { apiKey, baseUrl, apiMode, authMode, scope, apiVersion, style };
+}
+
+/**
+ * Strip a trailing `/v1` (and any trailing slashes) from an Azure Anthropic
+ * base URL. The AI SDK's Anthropic client appends `/v1/messages` itself, so a
+ * base of `.../anthropic/v1` would double the `/v1`.
+ */
+export function stripTrailingV1(url: string): string {
+  return url.replace(/\/+$/, "").replace(/\/v1$/i, "");
+}
+
+/** Append `api-version=<v>` to a URL if not already present. */
+function withApiVersion(rawUrl: string, apiVersion: string): string {
+  try {
+    const u = new URL(rawUrl);
+    if (!u.searchParams.has("api-version")) {
+      u.searchParams.set("api-version", apiVersion);
+    }
+    return u.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+/**
+ * Build a token getter backed by `@azure/identity`'s DefaultAzureCredential.
+ * The package is imported dynamically so API-key users never need it installed.
+ * Tokens are cached until ~1 min before expiry.
+ */
+function makeEntraTokenGetter(scope: string): () => Promise<string> {
+  let cached: { token: string; expiresAt: number } | undefined;
+  let credentialPromise: Promise<{ getToken(scope: string): Promise<{ token: string; expiresOnTimestamp?: number } | null> }> | undefined;
+
+  return async () => {
+    const now = Date.now();
+    if (cached && cached.expiresAt - now > 60_000) return cached.token;
+
+    if (!credentialPromise) {
+      credentialPromise = import("@azure/identity")
+        .then((m) => new m.DefaultAzureCredential())
+        .catch(() => {
+          throw new Error(
+            "Azure Entra ID auth (AZURE_FOUNDRY_AUTH_MODE=entra_id) requires the " +
+              "'@azure/identity' package. Install it with `npm install @azure/identity`, " +
+              "or switch to AZURE_FOUNDRY_AUTH_MODE=api_key.",
+          );
+        });
+    }
+    const credential = await credentialPromise;
+    const tok = await credential.getToken(scope);
+    if (!tok?.token) {
+      throw new Error(`DefaultAzureCredential returned no token for scope "${scope}".`);
+    }
+    cached = {
+      token: tok.token,
+      expiresAt: tok.expiresOnTimestamp ?? now + 300_000,
+    };
+    return cached.token;
+  };
+}
+
+/**
+ * Fetch wrapper for Azure Foundry. Optionally (a) appends the `api-version`
+ * query param and (b) overrides the Authorization header with a freshly-minted
+ * Entra bearer token. Returns `undefined` when neither is needed so the SDK
+ * uses its own fetch.
+ */
+function makeAzureFetch(opts: {
+  apiVersion?: string;
+  getToken?: () => Promise<string>;
+}): typeof fetch | undefined {
+  if (!opts.apiVersion && !opts.getToken) return undefined;
+  const base = globalThis.fetch;
+  return async (input, init) => {
+    const headers = new Headers(init?.headers);
+    if (opts.getToken) {
+      headers.set("Authorization", `Bearer ${await opts.getToken()}`);
+    }
+    if (opts.apiVersion) {
+      if (input instanceof Request) {
+        const rewritten = new Request(withApiVersion(input.url, opts.apiVersion), input);
+        return base(rewritten, { ...init, headers });
+      }
+      const urlStr = input instanceof URL ? input.toString() : String(input);
+      return base(withApiVersion(urlStr, opts.apiVersion), { ...init, headers });
+    }
+    return base(input, { ...init, headers });
+  };
+}
+
+/**
+ * Build an AI SDK model for an Azure Foundry deployment. Routes to the
+ * OpenAI-style (`createOpenAI`) or Anthropic-style (`createAnthropic`) provider
+ * based on the resolved wire protocol. Bearer auth throughout — Azure Anthropic
+ * wants `Authorization: Bearer`, not `x-api-key`.
+ */
+function resolveAzureFoundryModel(modelId: string) {
+  const az = resolveAzureFoundryConfig();
+  const useEntra = az.authMode === "entra_id";
+  const getToken = useEntra ? makeEntraTokenGetter(az.scope) : undefined;
+  const fetchImpl = makeAzureFetch({ apiVersion: az.apiVersion, getToken });
+
+  if (az.style === "anthropic") {
+    // The AI SDK appends `/v1/messages`; strip a trailing `/v1` so it isn't
+    // doubled. Preserve `api-version` via the fetch wrapper, not the base URL.
+    return createAnthropic({
+      baseURL: stripTrailingV1(az.baseUrl),
+      // Placeholder token under Entra — the fetch wrapper overrides the header.
+      authToken: useEntra ? "entra-managed" : az.apiKey,
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    })(modelId);
+  }
+
+  const provider = createOpenAI({
+    baseURL: az.baseUrl,
+    // Placeholder key under Entra — the fetch wrapper overrides the header.
+    apiKey: useEntra ? "entra-managed" : az.apiKey,
+    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+  });
+  const submode = azureFoundryOpenAISubmode({ modelId, apiMode: az.apiMode });
+  return submode === "responses" ? provider.responses(modelId) : provider.chat(modelId);
+}
+
 /**
  * Provider-specific default base URL for OpenShell's `inference.local`.
  * Each SDK has its own path convention — Anthropic appends
@@ -161,6 +369,10 @@ export function defaultOpenShellBaseUrl(provider: LLMProvider): string {
     case "google":
       throw new Error(
         "OpenShell does not support Google's API protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
+      );
+    case "azure-foundry":
+      throw new Error(
+        "OpenShell does not support the \"azure-foundry\" provider — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
       );
   }
 }
@@ -219,6 +431,7 @@ export function resolveModel(
           fetch: nimNemotronFetch(),
         }).chat(modelId);
       case "google":
+      case "azure-foundry":
         throw new Error(
           `OpenShell mode does not support provider "${provider}".`,
         );
@@ -260,9 +473,11 @@ export function resolveModel(
     }
     case "google":
       return google(modelId);
+    case "azure-foundry":
+      return resolveAzureFoundryModel(modelId);
     default:
       throw new Error(
-        `Unsupported provider: "${provider}". Use "anthropic", "openai", or "google".`,
+        `Unsupported provider: "${provider}". Use "anthropic", "openai", "google", or "azure-foundry".`,
       );
   }
 }

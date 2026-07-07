@@ -25,7 +25,7 @@ sportsclaw uses your AI model to do the reasoning — the sports data itself is 
 no key. Pick one:
 
 ```bash
-# Use an API key from Anthropic, OpenAI, or Google:
+# Use an API key from Anthropic, OpenAI, Google, or Azure Foundry:
 export ANTHROPIC_API_KEY=sk-...
 
 # …or, if you already use Claude Code, reuse that session:

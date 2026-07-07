@@ -12,7 +12,7 @@ A CLI and bot scaffold that connects any LLM to live sports data via [sports-ski
 
 ### What is sportsclaw?
 
-sportsclaw is a TypeScript CLI and bot scaffold that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), and OpenAI models via the [Vercel AI SDK](https://sdk.vercel.ai). ~5,200 lines of TypeScript total, with the core agent loop at ~80 lines.
+sportsclaw is a TypeScript CLI and bot scaffold that connects any LLM to deterministic Python sports data — scores, odds, standings, play-by-play, player stats — through the [`sports-skills`](https://sports-skills.sh) package. It works with Anthropic, Google (Gemini), OpenAI, and Azure Foundry models via the [Vercel AI SDK](https://sdk.vercel.ai). ~5,200 lines of TypeScript total, with the core agent loop at ~80 lines.
 
 ### What can you build with it?
 
@@ -33,13 +33,13 @@ sportsclaw gives you a working sports AI agent in minutes. Here's what people bu
 
 **Failure-aware tool loop.** If the same tool call (same tool + same args) fails in a turn, sportsclaw skips repeated retries for that exact call and moves on to other data paths.
 
-**Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY`) for the reasoning model, but every sports data skill works completely out of the box with zero API keys required for the data layer — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
+**Zero API keys for the data layer.** You need an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY` / `AZURE_FOUNDRY_API_KEY`) for the reasoning model, but every sports data skill works completely out of the box with zero API keys required for the data layer — no ESPN API key, no paid data subscriptions, no OAuth setup. Install `sports-skills` via pip and you're done.
 
 **Working agent in 5 minutes.** Install, set one env var, run a query:
 
 ```bash
 curl -fsSL https://sportsclaw.gg/install.sh | bash
-export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
+export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY / AZURE_FOUNDRY_API_KEY
 
 sportsclaw "What are today's NFL scores?"
 ```
@@ -87,12 +87,12 @@ const answer = await engine.run("Who leads the Premier League?");
 
 ```bash
 docker build -t sportsclaw .
-docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"  # or pass OPENAI_API_KEY / GEMINI_API_KEY
+docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"  # or pass OPENAI_API_KEY / GEMINI_API_KEY / AZURE_FOUNDRY_API_KEY
 ```
 
 ### Models & endpoints
 
-sportsclaw works with **Anthropic**, **OpenAI**, and **Google** out of the box. Set `OPENAI_BASE_URL` to point at any OpenAI-compatible endpoint and it routes correctly: reasoning models (`gpt-5*` / `o1*` / `o3*`) use the **Responses API** — required by hosted gateways like **Azure AI Foundry** — while self-hosted chat models (**NVIDIA NIM**, **vLLM**) use `/chat/completions`. For sandboxed, policy-routed inference, run inside [NVIDIA OpenShell](openshell/README.md).
+sportsclaw works with **Anthropic**, **OpenAI**, **Google**, and **Azure Foundry** out of the box. Set `OPENAI_BASE_URL` to point at any OpenAI-compatible endpoint and it routes correctly: reasoning models (`gpt-5*` / `o1*` / `o3*`) use the **Responses API** — required by hosted gateways like **Azure AI Foundry** — while self-hosted chat models (**NVIDIA NIM**, **vLLM**) use `/chat/completions`. For a first-class **Microsoft Foundry / Azure OpenAI** integration (OpenAI- *and* Anthropic-style endpoints, Entra ID auth), pick the `azure-foundry` provider — see [Configuration](docs/getting-started/configuration.md). For sandboxed, policy-routed inference, run inside [NVIDIA OpenShell](openshell/README.md).
 
 ### Connect a Machina pod (licensed data & durable loops)
 
