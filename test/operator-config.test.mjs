@@ -137,7 +137,7 @@ describe("validateOperatorJobConfig — optional fields", () => {
   });
 
   it("accepts known providers", () => {
-    for (const provider of ["anthropic", "openai", "google"]) {
+    for (const provider of ["anthropic", "openai", "google", "azure-foundry"]) {
       const r = validateOperatorJobConfig({ ...base, provider });
       assert.strictEqual(r.valid, true, `provider=${provider}`);
     }
@@ -556,6 +556,17 @@ describe("validateOperatorJobConfig — openshell block", () => {
       openshell: { enabled: true },
     });
     assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell"));
+  });
+
+  it("rejects openshell + provider=azure-foundry", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "azure-foundry",
+      openshell: {},
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell"));
   });
 });
 

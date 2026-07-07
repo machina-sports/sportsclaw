@@ -10,8 +10,8 @@
  *
  * Environment:
  *   TELEGRAM_BOT_TOKEN   — Your Telegram bot token (from @BotFather)
- *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
- *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
+ *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google, azure-foundry)
+ *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY / AZURE_FOUNDRY_API_KEY
  *   ALLOWED_USERS        — Comma-separated Telegram user IDs (optional whitelist)
  */
 

@@ -448,6 +448,7 @@ function applyOpenShellEnv(
       process.env.OPENAI_BASE_URL = openshell.baseUrl;
       break;
     case "google":
+    case "azure-foundry":
       // Never reached — config validator + resolveOpenShell both reject.
       break;
   }
@@ -597,6 +598,8 @@ function defaultModelFor(provider: LLMProvider): string {
       return "gpt-4.1";
     case "google":
       return "gemini-2.5-flash";
+    case "azure-foundry":
+      return "gpt-5.2";
   }
 }
 

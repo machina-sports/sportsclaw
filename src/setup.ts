@@ -62,6 +62,7 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
     { provider: "anthropic", envVar: "ANTHROPIC_API_KEY" },
     { provider: "openai", envVar: "OPENAI_API_KEY" },
     { provider: "google", envVar: "GOOGLE_GENERATIVE_AI_API_KEY" },
+    { provider: "azure-foundry", envVar: "AZURE_FOUNDRY_API_KEY" },
   ];
 
   for (const { provider, envVar } of checks) {
@@ -70,6 +71,14 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
       console.log(pc.dim(`Using existing ${envVar} from environment.`));
       return { provider, apiKey: val.trim() };
     }
+  }
+
+  if (
+    process.env.AZURE_FOUNDRY_BASE_URL &&
+    (process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key") === "entra_id"
+  ) {
+    console.log(pc.dim("Using Azure Foundry Entra ID auth (DefaultAzureCredential)."));
+    return { provider: "azure-foundry", apiKey: "<entra-id>" };
   }
 
   // Claude Code OAuth — only if the user opted in via `sportsclaw login claude`.
@@ -88,7 +97,7 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
   try {
     console.log(
       pc.dim(
-        "No API key detected. Paste an Anthropic, OpenAI, or Gemini key to get started."
+        "No API key detected. Paste an Anthropic, OpenAI, Gemini, or Azure Foundry key to get started."
       )
     );
     const raw = await rl.question(pc.bold("API Key: "));
@@ -98,9 +107,13 @@ async function bootstrapApiKey(): Promise<BootstrapResult> {
       process.exit(1);
     }
 
-    // Detect provider from key prefix
+    // Detect provider from key prefix. Azure Foundry keys do not have a stable
+    // public prefix, so only infer Azure when the endpoint is already set; the
+    // full `sportsclaw config` wizard is the preferred Azure setup path.
     let provider: LLMProvider;
-    if (key.startsWith("sk-")) {
+    if (process.env.AZURE_FOUNDRY_BASE_URL) {
+      provider = "azure-foundry";
+    } else if (key.startsWith("sk-")) {
       provider = "openai";
     } else if (key.startsWith("AIza")) {
       provider = "google";
@@ -235,6 +248,9 @@ function buildSetupTools(): ToolSet {
           google: !!(
             process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
             envState.GOOGLE_GENERATIVE_AI_API_KEY
+          ),
+          "azure-foundry": !!(
+            process.env.AZURE_FOUNDRY_API_KEY || envState.AZURE_FOUNDRY_API_KEY
           ),
         },
         platforms: {
