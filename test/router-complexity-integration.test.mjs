@@ -96,4 +96,50 @@ describe("router complexity integration contract", () => {
       `expected more than the base cap of 2 skills, got: ${result.decision.selectedSkills.join(", ")}`
     );
   });
+
+  it("routePromptToSkills actually attaches seeded market skills to the routed/selected skills for a betting prompt", async () => {
+    const mockModel = makeMockModel();
+    // "bets" (plural) triggers planSkillCaps' betting classification (BETTING_KW
+    // includes "bets"), but inferHelperSkills' regex only matches the exact word
+    // "bet" — not "bets" — so the pre-existing helper inference misses it. The
+    // only path a market skill can reach `selectedSkills` through is the
+    // capPlan.addSkills seeding at router.ts:332 actually being unioned into
+    // helperSkills before the final skill set is built.
+    const result = await routePromptToSkills({
+      prompt: "best lakers bets tonight",
+      installedSkills: ["nba", "betting", "markets", "kalshi", "polymarket"],
+      toolSpecs: [],
+      memoryBlock: "### Fan Profile (FAN_PROFILE.md)\nBig fan of nba.",
+      model: mockModel,
+      modelId: "mock-model",
+      provider: "anthropic",
+      config: baseConfig,
+    });
+
+    const marketSkills = ["betting", "markets", "kalshi", "polymarket"];
+    assert.ok(
+      result.decision.selectedSkills.some((s) => marketSkills.includes(s)),
+      `expected a seeded market skill in selectedSkills, got: ${result.decision.selectedSkills.join(", ")}`
+    );
+  });
+
+  it("a simple query with no betting/news intent does not gain market skills", async () => {
+    const mockModel = makeMockModel();
+    const result = await routePromptToSkills({
+      prompt: "lakers score",
+      installedSkills: ["nba", "betting", "markets", "kalshi", "polymarket"],
+      toolSpecs: [],
+      memoryBlock: "### Fan Profile (FAN_PROFILE.md)\nBig fan of nba.",
+      model: mockModel,
+      modelId: "mock-model",
+      provider: "anthropic",
+      config: baseConfig,
+    });
+
+    const marketSkills = ["betting", "markets", "kalshi", "polymarket"];
+    assert.ok(
+      result.decision.selectedSkills.every((s) => !marketSkills.includes(s)),
+      `expected no market skills for a simple query, got: ${result.decision.selectedSkills.join(", ")}`
+    );
+  });
 });

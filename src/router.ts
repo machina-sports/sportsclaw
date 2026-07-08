@@ -354,7 +354,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
     };
   }
 
-  const helperSkills = inferHelperSkills(promptNorm, installedSet);
+  const helperSkills = new Set([...inferHelperSkills(promptNorm, installedSet), ...seededSkills]);
   const fanProfile = extractFanProfileSection(input.memoryBlock);
   const toolTokens = buildToolTokensBySkill(input.installedSkills, input.toolSpecs);
 
