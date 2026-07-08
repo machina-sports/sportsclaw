@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -25,6 +25,7 @@ const QUERY_LOG = join(ANALYTICS_DIR, "queries.jsonl");
 const TOOL_METRICS = join(ANALYTICS_DIR, "tool_metrics.json");
 const AGGREGATE_STATS = join(ANALYTICS_DIR, "aggregate.json");
 const SESSION_LOG = join(ANALYTICS_DIR, "sessions.jsonl");
+const TOOL_EXEC_LOG = join(ANALYTICS_DIR, "tool_executions.jsonl");
 
 function ensureDir(): void {
   if (!existsSync(ANALYTICS_DIR)) {
@@ -161,6 +162,31 @@ export function buildToolExecutionEvent(
     args_hash: argsHash,
     timestamp,
   };
+}
+
+/**
+ * Log a redacted tool_execution event to disk. Called from the tool dispatch
+ * path so credential redaction is enforced at runtime, not just in tests.
+ * A logging failure must never break a tool call, so all errors are swallowed.
+ */
+export function logToolExecution(
+  result: import("./tools/executor.js").ToolExecutionResult,
+  logPath: string = TOOL_EXEC_LOG,
+): void {
+  try {
+    if (logPath === TOOL_EXEC_LOG) {
+      ensureDir();
+    } else {
+      const dir = dirname(logPath);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+    }
+    const event = buildToolExecutionEvent(result, new Date().toISOString());
+    appendFileSync(logPath, JSON.stringify(event) + "\n", "utf-8");
+  } catch {
+    // Analytics failures must never break a tool call.
+  }
 }
 
 // ---------------------------------------------------------------------------

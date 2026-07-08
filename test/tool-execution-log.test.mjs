@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { redactArgs, buildToolExecutionEvent } from "../dist/analytics.js";
+import { redactArgs, buildToolExecutionEvent, logToolExecution } from "../dist/analytics.js";
 
 describe("tool_execution logging", () => {
   it("redacts credential-like keys and never leaks their values", () => {
@@ -40,5 +43,32 @@ describe("tool_execution logging", () => {
     assert.equal(event.event, "tool_execution");
     assert.equal(event.failure_category, "user_input");
     assert.ok(String(event.args_hash).startsWith("sha256:"));
+  });
+
+  it("logToolExecution appends a single redacted JSON line to disk", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sportsclaw-tool-exec-"));
+    const logPath = join(dir, "tool_executions.jsonl");
+    try {
+      logToolExecution({
+        ok: true,
+        toolName: "nfl_scores",
+        args: { api_key: "secret", team: "Lakers" },
+        warnings: [],
+        normalized: false,
+        latencyMs: 42,
+      }, logPath);
+
+      const raw = readFileSync(logPath, "utf-8");
+      const lines = raw.trim().split("\n");
+      assert.equal(lines.length, 1);
+
+      const parsed = JSON.parse(lines[0]);
+      assert.equal(parsed.event, "tool_execution");
+      assert.equal(parsed.tool_name, "nfl_scores");
+      assert.ok(String(parsed.args_hash).startsWith("sha256:"));
+      assert.ok(!raw.includes("secret"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

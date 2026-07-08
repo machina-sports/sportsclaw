@@ -19,6 +19,8 @@ import { buildSportsSkillsRepairCommand } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
 import { BUILTIN_TOOLS, machinaLoopTool } from "./tools/index.js";
 import { classifyFailure } from "./failures/classifier.js";
+import { logToolExecution } from "./analytics.js";
+import type { ToolExecutionResult } from "./tools/executor.js";
 
 export {
   ToolCallInput,
@@ -431,6 +433,30 @@ export class ToolRegistry {
   }
 
   /**
+   * Emit a redacted `tool_execution` analytics event for a dispatch result.
+   * Skips internal (non-sport) tools and MCP tools, which are not part of
+   * the sports-skills reliability surface this event tracks.
+   */
+  private logDispatchResult(
+    toolName: string,
+    input: ToolCallInput,
+    result: ToolCallResult,
+    started: number
+  ): void {
+    if (this.isInternalTool(toolName) || toolName.startsWith("mcp__")) return;
+    const execResult: ToolExecutionResult = {
+      ok: !result.isError,
+      toolName,
+      args: input as Record<string, unknown>,
+      warnings: [],
+      normalized: false,
+      failure: result.isError ? classifyFailure(result.content, toolName) : undefined,
+      latencyMs: Date.now() - started,
+    };
+    logToolExecution(execResult);
+  }
+
+  /**
    * Dispatch a tool call by name and return the structured result for the LLM.
    *
    * Handles both the built-in `sports_query` tool and any dynamically injected
@@ -441,6 +467,8 @@ export class ToolRegistry {
     input: ToolCallInput,
     config?: Partial<sportsclawConfig>
   ): Promise<ToolCallResult> {
+    const started = Date.now();
+
     // Sanitize input bare years
     sanitizeToolInput(toolName, input);
 
@@ -448,7 +476,7 @@ export class ToolRegistry {
     const blockReason = isBlockedTool(toolName, config?.allowTrading);
     if (blockReason) {
       logSecurityEvent("blocked_tool", { toolName, input });
-      return {
+      const blockedResult: ToolCallResult = {
         content: JSON.stringify({
           error: blockReason,
           error_code: "blocked_tool",
@@ -456,6 +484,8 @@ export class ToolRegistry {
         }),
         isError: true,
       };
+      this.logDispatchResult(toolName, input, blockedResult, started);
+      return blockedResult;
     }
 
 
@@ -473,6 +503,7 @@ export class ToolRegistry {
               `[sportsclaw] cache hit for ${toolName} (age: ${Math.round(age / 1000)}s)`
             );
           }
+          this.logDispatchResult(toolName, input, cached.result, started);
           return cached.result;
         }
         // Expired entry — remove it
@@ -512,6 +543,7 @@ export class ToolRegistry {
       });
     }
 
+    this.logDispatchResult(toolName, input, result, started);
     return result;
   }
 
