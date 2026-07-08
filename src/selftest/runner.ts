@@ -5,7 +5,9 @@ interface RunOptions {
   sports?: string[];
   live?: boolean;
   version?: string;
-  execute?: (c: SmokeTestCase) => Promise<{ ok: boolean; note?: string; latencyMs: number }>;
+  execute?: (
+    c: SmokeTestCase
+  ) => Promise<{ ok: boolean; note?: string; latencyMs: number; skip?: boolean }>;
 }
 
 export async function runSelftest(opts: RunOptions): Promise<SelfTestReport> {
@@ -28,7 +30,7 @@ export async function runSelftest(opts: RunOptions): Promise<SelfTestReport> {
       results.push({
         sport: c.sport,
         check: c.name,
-        status: r.ok ? "pass" : "fail",
+        status: r.skip ? "skip" : r.ok ? "pass" : "fail",
         latencyMs: r.latencyMs,
         notes: r.note ?? "",
       });

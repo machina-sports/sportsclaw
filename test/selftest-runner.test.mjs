@@ -46,6 +46,17 @@ describe("runSelftest", () => {
     assert.equal(report.results.every((r) => r.status === "fail"), true);
   });
 
+  it("marks an executor-signaled skip as skip, not pass", async () => {
+    const report = await runSelftest({
+      sports: ["metadata"],
+      live: true,
+      execute: async () => ({ ok: true, skip: true, latencyMs: 0, note: "skipped (quick)" }),
+    });
+    assert.equal(report.passed, 0);
+    assert.equal(report.skipped >= 1, true);
+    assert.equal(report.results.every((r) => r.status === "skip"), true);
+  });
+
   it("renders a markdown table with a header row", () => {
     const md = renderMarkdown({
       version: "0.29.1", passed: 1, failed: 0, skipped: 0,

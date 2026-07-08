@@ -1415,7 +1415,7 @@ async function cmdSelftest(args: string[]): Promise<void> {
   const seen = new Set<string>();
   const executor = async (c: { sport: string; toolName: string; args: Record<string, unknown> }) => {
     if (quick) {
-      if (seen.has(c.sport)) return { ok: true, latencyMs: 0, note: "skipped (quick)" };
+      if (seen.has(c.sport)) return { ok: true, skip: true, latencyMs: 0, note: "skipped (quick)" };
       seen.add(c.sport);
     }
     const started = Date.now();
@@ -1423,8 +1423,17 @@ async function cmdSelftest(args: string[]): Promise<void> {
       const result = await registry.dispatchToolCall(c.toolName, c.args, { pythonPath });
       const latencyMs = Date.now() - started;
       if (result.isError) {
-        const classified = classifyFailure(result.content, c.toolName);
-        return { ok: false, latencyMs, note: classified.userMessage || result.content.slice(0, 200) };
+        // result.content is already-classified JSON (handleDynamicTool embeds a
+        // `hint` via classifyFailure) — parse it instead of re-classifying the
+        // rendered JSON string as if it were raw error text.
+        let note = result.content.slice(0, 200);
+        try {
+          const parsed = JSON.parse(result.content) as { hint?: string };
+          if (parsed.hint) note = parsed.hint;
+        } catch {
+          // not JSON — fall back to the raw (truncated) content above
+        }
+        return { ok: false, latencyMs, note };
       }
       return { ok: true, latencyMs };
     } catch (err) {

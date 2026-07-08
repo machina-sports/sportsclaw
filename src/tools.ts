@@ -296,6 +296,7 @@ export class ToolRegistry {
       toolName === "reflect" ||
       toolName === "evolve_strategy" ||
       toolName === "get_agent_config" ||
+      toolName === "run_selftest" ||
       toolName === "install_sport" ||
       toolName === "remove_sport" ||
       toolName === "upgrade_sports_skills" ||
