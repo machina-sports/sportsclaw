@@ -77,6 +77,30 @@ function baseConfig(overrides = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// persistence opt-out (single-replica mode)
+// ---------------------------------------------------------------------------
+
+describe("persistence opt-out", () => {
+  it("default configures heartbeat persistence (+ per-job lock)", () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    assert.strictEqual(daemon.heartbeat.hasPersistence, true);
+  });
+
+  it("persistence:false runs the heartbeat in-memory (no lock path)", () => {
+    const daemon = createOperatorDaemon(baseConfig({ persistence: false }));
+    assert.strictEqual(daemon.heartbeat.hasPersistence, false);
+  });
+
+  it("persistence:false still ticks (no lock to stall on)", async () => {
+    const daemon = createOperatorDaemon(baseConfig({ persistence: false }));
+    const first = await daemon.tickOnce();
+    const second = await daemon.tickOnce();
+    assert.strictEqual(first.type, "tick_published");
+    assert.strictEqual(second.type, "tick_published");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // tickOnce — published path
 // ---------------------------------------------------------------------------
 

@@ -122,6 +122,18 @@ export interface OperatorJobConfig {
    */
   enableMemoryTools?: boolean;
   /**
+   * Enable heartbeat state persistence + the cross-process per-job tick lock.
+   * The lock exists to coordinate MULTIPLE daemon replicas of the same job so
+   * they don't double-fire a tick. A single-replica operator (the common case,
+   * e.g. one daemon in a sandbox) does not need it, and the lockfile lives on
+   * whatever `stateDir` resolves to — on a restricted/overlay filesystem a
+   * lock that fails to release cleanly stalls every subsequent tick (fires
+   * once, then silently ELOCKED-skips). Set `false` to run the heartbeat fully
+   * in-memory (overlapping ticks are still guarded by an in-process flag).
+   * Default: true (unchanged behaviour for existing single/multi-replica jobs).
+   */
+  persistence?: boolean;
+  /**
    * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
    * Absent block = default direct LLM calls; nothing changes. When present
    * and enabled, the launcher constructs the AI SDK provider with a
@@ -412,6 +424,11 @@ export function validateOperatorJobConfig(
     push("enableMemoryTools", "must be a boolean");
   }
 
+  // persistence
+  if (raw.persistence !== undefined && typeof raw.persistence !== "boolean") {
+    push("persistence", "must be a boolean");
+  }
+
   // openshell — optional opt-in routing block
   let parsedOpenShell: OpenShellConfig | undefined;
   if (raw.openshell !== undefined) {
@@ -547,6 +564,7 @@ export function validateOperatorJobConfig(
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
+      persistence: raw.persistence as boolean | undefined,
       openshell: parsedOpenShell,
       inference: raw.inference as ModelRoleRouterConfig | undefined,
       broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],
