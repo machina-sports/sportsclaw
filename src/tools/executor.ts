@@ -20,12 +20,15 @@ export async function executeToolSafely(
   nowFn: () => number = Date.now,
 ): Promise<ToolExecutionResult> {
   const started = nowFn();
-  const normalizedArgs = structuredClone(args);
-  const before = JSON.stringify(normalizedArgs);
-  sanitizeToolInput(toolName, normalizedArgs);
-  const normalized = JSON.stringify(normalizedArgs) !== before;
+  let normalizedArgs = args;
+  let normalized = false;
 
   try {
+    normalizedArgs = structuredClone(args);
+    const before = JSON.stringify(normalizedArgs);
+    sanitizeToolInput(toolName, normalizedArgs);
+    normalized = JSON.stringify(normalizedArgs) !== before;
+
     const result = await run(toolName, normalizedArgs);
     if (result.isError) {
       return {

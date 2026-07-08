@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 
 import { EntityStore, entityIsStale } from "../dist/cache/entity-store.js";
 
@@ -51,6 +52,23 @@ describe("EntityStore", () => {
     assert.equal(found?.mentionCount, 2);
     assert.equal(found?.firstSeenAt, firstSeen);
     assert.equal(found?.providerIds.nba, "1610612738");
+  });
+
+  it("survives a malformed cache row and still loads/gets a valid entity", async () => {
+    const filePath = join(tmpdir(), `ec-${process.pid}-${Math.floor(process.hrtime()[1])}-c.json`);
+    const rows = [
+      {
+        id: "nba:team:x", entityType: "team", sport: "nba", league: "NBA",
+        canonicalName: "X", aliases: undefined, providerIds: {}, metadata: {},
+        confidence: 1.0, firstSeenAt: nowISO(), lastVerifiedAt: nowISO(), mentionCount: 1,
+      },
+      "totally bogus row",
+    ];
+    await writeFile(filePath, JSON.stringify(rows), "utf8");
+    const store = new EntityStore(filePath);
+    await store.load();
+    const found = store.get("X", "team", "nba");
+    assert.equal(found?.canonicalName, "X");
   });
 
   it("treats a 2-day-old team entity as fresh (180-day TTL)", () => {

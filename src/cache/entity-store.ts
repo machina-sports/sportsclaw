@@ -45,7 +45,11 @@ export class EntityStore {
     try {
       const raw = await readFile(this.filePath, "utf8");
       const arr = JSON.parse(raw) as CachedEntity[];
-      for (const e of arr) this.byId.set(e.id, e);
+      for (const e of arr) {
+        if (e && typeof e === "object" && typeof e.canonicalName === "string") {
+          this.byId.set(e.id, e);
+        }
+      }
     } catch {
       // Missing/corrupt file → start empty.
     }
@@ -58,7 +62,8 @@ export class EntityStore {
       if (entityType && e.entityType !== entityType) continue;
       if (sport && (e.sport ?? "").toLowerCase() !== sport.toLowerCase()) continue;
       if (entityIsStale(e)) continue;
-      const names = [e.canonicalName, ...e.aliases].map((n) => n.toLowerCase());
+      const aliases = Array.isArray(e.aliases) ? e.aliases : [];
+      const names = [e.canonicalName, ...aliases].map((n) => n.toLowerCase());
       if (names.includes(q)) return e;
     }
     return undefined;

@@ -36,6 +36,16 @@ describe("runSelftest", () => {
     assert.equal(report.results.some((r) => r.status === "fail"), true);
   });
 
+  it("marks a throwing execute case as fail and continues without rejecting", async () => {
+    const report = await runSelftest({
+      sports: ["metadata"],
+      live: true,
+      execute: async () => { throw new Error("boom"); },
+    });
+    assert.equal(report.results.length >= 1, true);
+    assert.equal(report.results.every((r) => r.status === "fail"), true);
+  });
+
   it("renders a markdown table with a header row", () => {
     const md = renderMarkdown({
       version: "0.29.1", passed: 1, failed: 0, skipped: 0,

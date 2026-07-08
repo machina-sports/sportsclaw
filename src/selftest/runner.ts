@@ -23,14 +23,25 @@ export async function runSelftest(opts: RunOptions): Promise<SelfTestReport> {
       results.push({ sport: c.sport, check: c.name, status: "skip", latencyMs: 0, notes: "no executor" });
       continue;
     }
-    const r = await opts.execute(c);
-    results.push({
-      sport: c.sport,
-      check: c.name,
-      status: r.ok ? "pass" : "fail",
-      latencyMs: r.latencyMs,
-      notes: r.note ?? "",
-    });
+    try {
+      const r = await opts.execute(c);
+      results.push({
+        sport: c.sport,
+        check: c.name,
+        status: r.ok ? "pass" : "fail",
+        latencyMs: r.latencyMs,
+        notes: r.note ?? "",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({
+        sport: c.sport,
+        check: c.name,
+        status: "fail",
+        latencyMs: 0,
+        notes: message.slice(0, 200),
+      });
+    }
   }
 
   const passed = results.filter((r) => r.status === "pass").length;

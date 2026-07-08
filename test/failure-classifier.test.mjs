@@ -38,6 +38,13 @@ describe("classifyFailure", () => {
   it("accepts an object with a message field", () => {
     const f = classifyFailure({ message: "circuit breaker open" });
     assert.equal(f.category, "provider_error");
-    assert.equal(f.retryable, true);
+    assert.equal(f.retryable, false);
+  });
+
+  it("does not misclassify HTTP-code digits embedded in larger tokens/numbers", () => {
+    const a = classifyFailure("athlete 40123 not found");
+    assert.equal(a.category, "unknown");
+    const b = classifyFailure("market KX401ABC unavailable");
+    assert.equal(b.category, "unknown");
   });
 });

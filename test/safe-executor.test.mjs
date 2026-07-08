@@ -50,4 +50,14 @@ describe("executeToolSafely", () => {
     assert.ok(res.failure);
     assert.equal(typeof res.failure.category, "string");
   });
+
+  it("does not throw on non-cloneable args and returns a classified failure", async () => {
+    const res = await executeToolSafely(
+      "weird_tool",
+      { fn: () => {} },
+      async (_n, a) => ({ content: JSON.stringify(a) }),
+    );
+    assert.equal(res.ok, false);
+    assert.ok(res.failure);
+  });
 });

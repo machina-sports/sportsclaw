@@ -10,13 +10,15 @@ interface Rule {
   suggestedFix?: string;
 }
 
+const hasCode = (h: string, code: string) => new RegExp(`\\b${code}\\b`).test(h);
+
 // Generic, non-proprietary pattern rules. Order matters: first match wins.
 const RULES: Rule[] = [
   {
     category: "rate_limited",
     severity: "low",
     retryable: true,
-    match: (h) => h.includes("429") || h.includes("rate limit") || h.includes("too many requests"),
+    match: (h) => hasCode(h, "429") || h.includes("rate limit") || h.includes("too many requests"),
     userMessage: "The data provider rate-limited the request. Retrying shortly should work.",
     suggestedFix: "Honor retry_after if present; otherwise back off and retry.",
   },
@@ -26,7 +28,7 @@ const RULES: Rule[] = [
     retryable: false,
     match: (h) =>
       h.includes("storage.objects.create denied") ||
-      (h.includes("403") && h.includes("storage")) ||
+      (hasCode(h, "403") && h.includes("storage")) ||
       h.includes("permission denied"),
     userMessage: "The action ran but a storage/permission check rejected it (403). Retrying won't help.",
     suggestedFix: "Grant the missing permission to the service account or use a writable target.",
@@ -35,7 +37,7 @@ const RULES: Rule[] = [
     category: "auth_error",
     severity: "high",
     retryable: false,
-    match: (h) => h.includes("401") || h.includes("unauthorized") || h.includes("invalid api key"),
+    match: (h) => hasCode(h, "401") || h.includes("unauthorized") || h.includes("invalid api key"),
     userMessage: "Authentication failed for this provider. Retrying won't help until credentials are fixed.",
     suggestedFix: "Check the provider API key / auth configuration.",
   },
@@ -105,7 +107,7 @@ export function classifyFailure(
     network_dns: { category: "provider_error", retryable: true, severity: "medium" },
     rate_limited: { category: "rate_limited", retryable: true, severity: "low" },
     python_version_incompatible: { category: "permission_config", retryable: false, severity: "high" },
-    circuit_open: { category: "provider_error", retryable: true, severity: "medium" },
+    circuit_open: { category: "provider_error", retryable: false, severity: "medium" },
     tool_execution_failed: { category: "unknown", retryable: false, severity: "medium" },
   };
   const m = mapping[errorCode] ?? { category: "unknown" as FailureCategory, retryable: false, severity: "medium" as const };
