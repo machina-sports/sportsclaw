@@ -1,11 +1,12 @@
 import type { sportsclawConfig } from "../types.js";
-import { 
-  executePythonBridge, 
-  validateIdentifier, 
+import {
+  executePythonBridge,
+  validateIdentifier,
   classifyBridgeError,
-  type ToolCallInput, 
-  type ToolCallResult 
+  type ToolCallInput,
+  type ToolCallResult
 } from "../bridge.js";
+import { classifyFailure } from "../failures/classifier.js";
 import { buildSportsSkillsRepairCommand } from "../python.js";
 import type { BuiltinTool } from "./builtin-tool.js";
 
@@ -21,7 +22,9 @@ function buildBridgeErrorResult(
       ? `F1 support is unavailable. Repair with: ${repairCmd}`
       : `The sports-skills Python package may be missing. Install/repair with: ${repairCmd}`;
   } else {
-    hint = classified.hint;
+    const combined = `${result.error ?? ""}\n${result.stderr ?? ""}`.trim();
+    const failure = classifyFailure(combined, "sports_query");
+    hint = failure.userMessage || result.error || classified.hint;
   }
   return {
     content: JSON.stringify({

@@ -13,6 +13,21 @@ describe("tool_execution logging", () => {
     assert.ok(!("api_key" in out));
   });
 
+  it("recursively redacts credential-like keys nested in objects", () => {
+    const out = redactArgs({ config: { api_key: "secret", region: "us" }, team: "Lakers" });
+    assert.ok(!("api_key" in out.config));
+    assert.equal(out.config.region, "us");
+    assert.equal(out.team, "Lakers");
+    assert.ok(!JSON.stringify(out).includes("secret"));
+  });
+
+  it("recursively redacts credential-like keys nested in arrays", () => {
+    const out = redactArgs({ items: [{ token: "t1", name: "a" }] });
+    assert.ok(!("token" in out.items[0]));
+    assert.equal(out.items[0].name, "a");
+    assert.ok(!JSON.stringify(out).includes("t1"));
+  });
+
   it("builds an event with a hashed args field and no raw secrets", () => {
     const event = buildToolExecutionEvent({
       ok: false, toolName: "worldcup-get-market-state",

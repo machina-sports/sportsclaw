@@ -111,15 +111,35 @@ export function generateSessionId(): string {
 const REDACT_KEYS = ["api_key", "apikey", "token", "authorization", "auth", "password", "secret", "private_key", "wallet", "credential"];
 
 /**
+ * Recursively redact credential-like keys (at any depth) from a value before
+ * it is logged. Walks plain objects and arrays; other values pass through
+ * unchanged. A seen-set guards against cycles.
+ */
+function redactValue(value: unknown, seen: WeakSet<object>): unknown {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return value;
+    seen.add(value);
+    return value.map((v) => redactValue(v, seen));
+  }
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (seen.has(obj)) return obj;
+    seen.add(obj);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (REDACT_KEYS.some((r) => k.toLowerCase().includes(r))) continue;
+      out[k] = redactValue(v, seen);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
  * Strip credential-like keys from a tool args object before it is logged.
  */
 export function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(args)) {
-    if (REDACT_KEYS.some((r) => k.toLowerCase().includes(r))) continue;
-    out[k] = v;
-  }
-  return out;
+  return redactValue(args, new WeakSet<object>()) as Record<string, unknown>;
 }
 
 /**
