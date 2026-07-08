@@ -23,4 +23,22 @@ describe("EntityResolver persistence", () => {
     await store2.load();
     assert.equal(store2.get("Lakers", "team", "nba")?.providerIds.espn, "13");
   });
+
+  it("hydrates persisted team entities into the in-memory registry", async () => {
+    const path = join(tmpdir(), `er-hydrate-${process.pid}.json`);
+    const seedStore = new EntityStore(path);
+    await seedStore.upsert({
+      id: "nba:team:celtics", entityType: "team", sport: "nba", league: "NBA",
+      canonicalName: "Boston Celtics", aliases: ["Celtics"],
+      providerIds: { espn: "2" }, metadata: {}, confidence: 1,
+      firstSeenAt: new Date().toISOString(), lastVerifiedAt: new Date().toISOString(), mentionCount: 1,
+    });
+
+    const store = new EntityStore(path);
+    const r = EntityResolver.getInstance();
+    await r.hydrate(store);
+
+    assert.equal(r.mapToProviderId("nba", "team", "nba:team:celtics", "espn"), "2");
+    assert.equal(r.resolveTeam("nba", "Celtics"), "nba:team:celtics");
+  });
 });

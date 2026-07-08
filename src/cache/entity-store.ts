@@ -56,6 +56,10 @@ export class EntityStore {
     this.loaded = true;
   }
 
+  all(): CachedEntity[] {
+    return [...this.byId.values()];
+  }
+
   get(query: string, entityType?: EntityType, sport?: string): CachedEntity | undefined {
     const q = query.trim().toLowerCase();
     for (const e of this.byId.values()) {
