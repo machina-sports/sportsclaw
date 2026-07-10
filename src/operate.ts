@@ -685,6 +685,7 @@ async function runOnce(jobId: string): Promise<void> {
       maxSteps: cfg.maxSteps,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
+      persistence: cfg.persistence,
       inferenceRoute: inputs.inferenceRoute,
       broadcastSafety: cfg.broadcastSafety,
       mcpManager: tools.mcpManager,
@@ -767,6 +768,7 @@ async function runForeground(jobId: string): Promise<void> {
     maxSteps: cfg.maxSteps,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
+    persistence: cfg.persistence,
     inferenceRoute: inputs.inferenceRoute,
     broadcastSafety: cfg.broadcastSafety,
     mcpManager: tools.mcpManager,
@@ -813,8 +815,21 @@ async function runForeground(jobId: string): Promise<void> {
     `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}`,
   );
   daemon.start();
-  // Keep the process alive without unref'd heartbeat timers exiting early.
-  await new Promise<void>(() => {});
+  // Keep the event loop alive with a REF'd handle so the (unref'd) heartbeat +
+  // cron timers keep firing. A bare pending promise does not hold libuv open;
+  // without any ref'd handle, a daemon that connects no MCP servers (e.g. a
+  // single-purpose operator like the Athlete Vault) goes idle after the first
+  // tick's inference settles and the unref'd recurring cron stops advancing —
+  // the daemon "fires once, then silently never ticks again". A daemon that
+  // happens to hold ref'd handles (MCP stdio/SSE sockets, like the broadcast
+  // operator) masks the bug. This ref'd keep-alive makes foreground `operate`
+  // tick reliably regardless of whether any MCP server is connected.
+  const keepAlive = setInterval(() => {}, 1 << 30); // ref'd; ~12.4 days, no-op
+  try {
+    await new Promise<void>(() => {});
+  } finally {
+    clearInterval(keepAlive);
+  }
 }
 
 // ---------------------------------------------------------------------------

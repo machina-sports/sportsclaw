@@ -212,6 +212,14 @@ export interface OperatorDaemonConfig {
   briefDir?: string;
   /** State + lock dir for heartbeat persistence. Default `<rootDir>`. */
   stateDir?: string;
+  /**
+   * Enable heartbeat persistence + the cross-process per-job tick lock (for
+   * coordinating multiple replicas of the same job). Set `false` for a
+   * single-replica daemon to run the heartbeat in-memory and avoid the
+   * lockfile — which, on a restricted/overlay filesystem, can fail to release
+   * and stall every tick after the first. Default: true (unchanged).
+   */
+  persistence?: boolean;
 
   /** Optional wake gate. Forwarded to heartbeat unchanged. */
   wakeGate?: WakeGateFn;
@@ -366,8 +374,17 @@ export function createOperatorDaemon(
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
   const generateImpl = cfg.generateTextImpl ?? generateText;
 
-  const heartbeat = cfg.heartbeat ?? new HeartbeatService();
-  if (!heartbeat.hasPersistence) {
+  const heartbeat =
+    cfg.heartbeat ??
+    new HeartbeatService({
+      verbose: process.env.SPORTSCLAW_HEARTBEAT_VERBOSE === "1",
+    });
+  // Persistence (+ the cross-process per-job tick lock) is opt-out. It exists
+  // to coordinate multiple replicas of one job; a single-replica daemon does
+  // not need it, and the lockfile on a restricted/overlay filesystem can fail
+  // to release and stall every tick after the first. `persistence: false`
+  // keeps the heartbeat in-memory (overlapping ticks still guarded in-process).
+  if (cfg.persistence !== false && !heartbeat.hasPersistence) {
     heartbeat.configurePersistence({ stateDir });
   }
 

@@ -299,6 +299,22 @@ describe("validateOperatorJobConfig — optional fields", () => {
     }
   });
 
+  it("accepts persistence as boolean (true and false)", () => {
+    for (const v of [true, false]) {
+      const r = validateOperatorJobConfig({ ...base, persistence: v });
+      assert.strictEqual(r.valid, true, `persistence=${v}`);
+      assert.strictEqual(r.config.persistence, v);
+    }
+  });
+
+  it("rejects a non-boolean persistence", () => {
+    for (const bad of ["false", 1, 0, null, [], {}]) {
+      const r = validateOperatorJobConfig({ ...base, persistence: bad });
+      assert.strictEqual(r.valid, false, `persistence=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "persistence"));
+    }
+  });
+
   it("accepts known sink values (noop, broadcast)", () => {
     for (const s of ["noop", "broadcast"]) {
       const r = validateOperatorJobConfig({ ...base, sink: s });
