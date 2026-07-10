@@ -1381,6 +1381,80 @@ async function cmdHealth(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// CLI: `sportsclaw selftest` — schema smoke tests (Task 3's runner/report,
+// wired to the real Python-bridge tool dispatch used by the engine).
+// ---------------------------------------------------------------------------
+
+async function cmdSelftest(args: string[]): Promise<void> {
+  const json = args.includes("--json");
+  const live = args.includes("--live");
+  const quick = args.includes("--quick");
+  const sportIdx = args.indexOf("--sport");
+  const sports = sportIdx >= 0 && args[sportIdx + 1] ? [args[sportIdx + 1]] : undefined;
+
+  const { runSelftest } = await import("./selftest/runner.js");
+  const { renderMarkdown } = await import("./selftest/report.js");
+  const { classifyFailure } = await import("./failures/classifier.js");
+  const { ToolRegistry } = await import("./tools.js");
+
+  let { pythonPath } = resolveConfig();
+  const registry = new ToolRegistry();
+
+  // Only need the real Python bridge (venv + sport schemas) when actually
+  // executing tool calls; offline runs skip every case before this matters.
+  if (live) {
+    const venvResult = ensureVenv(pythonPath);
+    if (venvResult.ok) pythonPath = venvResult.pythonPath;
+    await ensureDefaultSchemas();
+    const { loadAllSchemas } = await import("./schema.js");
+    for (const schema of loadAllSchemas()) {
+      registry.injectSchema(schema);
+    }
+  }
+
+  const seen = new Set<string>();
+  const executor = async (c: { sport: string; toolName: string; args: Record<string, unknown> }) => {
+    if (quick) {
+      if (seen.has(c.sport)) return { ok: true, skip: true, latencyMs: 0, note: "skipped (quick)" };
+      seen.add(c.sport);
+    }
+    const started = Date.now();
+    try {
+      const result = await registry.dispatchToolCall(c.toolName, c.args, { pythonPath });
+      const latencyMs = Date.now() - started;
+      if (result.isError) {
+        // result.content is already-classified JSON (handleDynamicTool embeds a
+        // `hint` via classifyFailure) — parse it instead of re-classifying the
+        // rendered JSON string as if it were raw error text.
+        let note = result.content.slice(0, 200);
+        try {
+          const parsed = JSON.parse(result.content) as { hint?: string };
+          if (parsed.hint) note = parsed.hint;
+        } catch {
+          // not JSON — fall back to the raw (truncated) content above
+        }
+        return { ok: false, latencyMs, note };
+      }
+      return { ok: true, latencyMs };
+    } catch (err) {
+      const latencyMs = Date.now() - started;
+      const raw = err instanceof Error ? err.message : String(err);
+      const classified = classifyFailure(raw, c.toolName);
+      return { ok: false, latencyMs, note: classified.userMessage || raw.slice(0, 200) };
+    }
+  };
+
+  const report = await runSelftest({ sports, live, version: PKG_VERSION, execute: executor });
+
+  if (json) {
+    console.log(JSON.stringify(report.toJSON(), null, 2));
+  } else {
+    console.log(renderMarkdown(report));
+  }
+  process.exit(report.failed > 0 ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------------
 // CLI: `sportsclaw init`
 // ---------------------------------------------------------------------------
 
@@ -2628,6 +2702,7 @@ function printHelp(): void {
   console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
   console.log("  sportsclaw health [--json]         Check system health and status");
+  console.log("  sportsclaw selftest [--quick] [--sport <s>] [--json] [--live]  Run schema smoke tests");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
   console.log("  sportsclaw login claude            Sign in via existing Claude Code session");
@@ -2850,6 +2925,8 @@ async function main(): Promise<void> {
       return cmdDoctor();
     case "health":
       return cmdHealth(subArgs);
+    case "selftest":
+      return cmdSelftest(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":

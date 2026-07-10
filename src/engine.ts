@@ -614,7 +614,7 @@ export class sportsclawEngine {
           n === "get_agent_config" || n === "install_sport" || n === "remove_sport" ||
           n === "upgrade_sports_skills" || n === "spawn_subagent" || n === "list_subagents" ||
           n === "schedule_task" || n === "list_scheduled_tasks" || n === "cancel_scheduled_task" ||
-          n === "consolidate_memory" || n === "machina_loop"
+          n === "consolidate_memory" || n === "machina_loop" || n === "run_selftest"
         );
         return {
           activeTools: [...internalNames, ...mcpToolNames],
@@ -673,7 +673,8 @@ export class sportsclawEngine {
       name === "schedule_task" ||
       name === "list_scheduled_tasks" ||
       name === "cancel_scheduled_task" ||
-      name === "consolidate_memory";
+      name === "consolidate_memory" ||
+      name === "run_selftest";
     const active = toolNames.filter((name) => {
       if (isInternalTool(name)) return true;
       if (name.startsWith("mcp__")) return true; // MCP tools always active
@@ -737,7 +738,7 @@ export class sportsclawEngine {
       name === "upgrade_sports_skills" || name === "spawn_subagent" ||
       name === "list_subagents" || name === "schedule_task" ||
       name === "list_scheduled_tasks" || name === "cancel_scheduled_task" ||
-      name === "consolidate_memory" || name === "machina_loop";
+      name === "consolidate_memory" || name === "machina_loop" || name === "run_selftest";
     return allToolNames.filter((name) => {
       if (isInternalTool(name) || name.startsWith("mcp__")) return true;
       const skill = this.registry.getSkillName(name);
@@ -1161,6 +1162,73 @@ export class sportsclawEngine {
           null,
           2
         );
+      },
+    });
+
+    toolMap["run_selftest"] = defineTool({
+      description:
+        "Run sportsclaw's built-in self-test suite: live smoke-checks against installed " +
+        "sport data feeds (scoreboards, standings, market status, etc). Use this to answer " +
+        "questions like 'are the feeds working?' or to diagnose a suspected outage. " +
+        "Checks are live by default.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          sport: {
+            type: "string",
+            description: "Restrict the check to a single installed sport (e.g. \"nba\"). Omit to check all installed sports.",
+          },
+          quick: {
+            type: "boolean",
+            description: "Run only one check per sport instead of the full suite. Defaults to false.",
+          },
+        },
+      }),
+      execute: async (args: Record<string, unknown>) => {
+        const { runSelftest } = await import("./selftest/runner.js");
+        const { classifyFailure } = await import("./failures/classifier.js");
+        const sport = typeof args.sport === "string" ? args.sport : undefined;
+        const quick = args.quick === true;
+
+        const seen = new Set<string>();
+        const executor = async (c: { sport: string; toolName: string; args: Record<string, unknown> }) => {
+          if (quick) {
+            if (seen.has(c.sport)) return { ok: true, skip: true, latencyMs: 0, note: "skipped (quick)" };
+            seen.add(c.sport);
+          }
+          const started = Date.now();
+          try {
+            const result = await registry.dispatchToolCall(c.toolName, c.args as ToolCallInput, config);
+            const latencyMs = Date.now() - started;
+            if (result.isError) {
+              // result.content is already-classified JSON (handleDynamicTool embeds a
+              // `hint` via classifyFailure) — parse it instead of re-classifying the
+              // rendered JSON string as if it were raw error text.
+              let note = result.content.slice(0, 200);
+              try {
+                const parsed = JSON.parse(result.content) as { hint?: string };
+                if (parsed.hint) note = parsed.hint;
+              } catch {
+                // not JSON — fall back to the raw (truncated) content above
+              }
+              return { ok: false, latencyMs, note };
+            }
+            return { ok: true, latencyMs };
+          } catch (err) {
+            const latencyMs = Date.now() - started;
+            const raw = err instanceof Error ? err.message : String(err);
+            const classified = classifyFailure(raw, c.toolName);
+            return { ok: false, latencyMs, note: classified.userMessage || raw.slice(0, 200) };
+          }
+        };
+
+        const report = await runSelftest({
+          sports: sport ? [sport] : undefined,
+          live: true,
+          version: _packageVersion,
+          execute: executor,
+        });
+        return JSON.stringify(report.toJSON());
       },
     });
 

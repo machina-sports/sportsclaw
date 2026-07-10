@@ -5,6 +5,8 @@
  * (e.g. mapping ESPN IDs, bookmakers, and prediction markets to the same graph node).
  */
 
+import { EntityStore, type CachedEntity } from "../cache/entity-store.js";
+
 export interface EntityMapping {
   canonicalId: string;
   aliases: Set<string>;
@@ -26,6 +28,33 @@ export class EntityResolver {
       EntityResolver.instance = new EntityResolver();
     }
     return EntityResolver.instance;
+  }
+
+  private store: EntityStore | null = null;
+
+  public async hydrate(store?: EntityStore): Promise<void> {
+    this.store = store ?? new EntityStore();
+    await this.store.load();
+    for (const entity of this.store.all()) {
+      if (entity.sport && (entity.entityType === "team" || entity.entityType === "player")) {
+        this.register(entity.sport, entity.entityType, {
+          canonicalId: entity.id,
+          aliases: [entity.canonicalName, ...entity.aliases],
+          providerIds: entity.providerIds,
+        });
+      }
+    }
+  }
+
+  public async remember(entity: CachedEntity): Promise<void> {
+    if (this.store) await this.store.upsert(entity);
+    if (entity.sport && (entity.entityType === "team" || entity.entityType === "player")) {
+      this.register(entity.sport, entity.entityType, {
+        canonicalId: entity.id,
+        aliases: [entity.canonicalName, ...entity.aliases],
+        providerIds: entity.providerIds,
+      });
+    }
   }
 
   /**
