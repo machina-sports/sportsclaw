@@ -437,6 +437,43 @@ export function isToolCallPart(part: unknown): part is ToolCallPart {
 }
 
 // ---------------------------------------------------------------------------
+// User-facing text hygiene
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministically strip internal evidence-gate artifacts from final,
+ * user-facing text. These artifacts (self-correction banners, `[Tool N]`
+ * citations, raw `mcp__server__tool` identifiers) are internal bookkeeping
+ * from the answer-synthesis/validation pipeline and must never reach users.
+ *
+ * Exported so the cleanup can be regression-tested independently.
+ */
+export function stripInternalEvidenceArtifacts(text: string): string {
+  if (!text) return text;
+  let out = text;
+
+  // Self-correction / evidence-gate status banners (whole line, any leading
+  // emoji or symbol). e.g. "⚠️ Self-correction pass completed: ...".
+  out = out.replace(/^[^\n]*self[-\s]?correction[^\n]*\n?/gim, "");
+
+  // Raw internal MCP / tool identifiers (mcp__server__tool).
+  out = out.replace(/\bmcp__[a-z0-9_-]+__[a-z0-9_-]+\b/gi, "");
+
+  // Internal source labels from validation prompts: [Internal source 1 — ...].
+  out = out.replace(/\[\s*internal\s+source\s+\d+[^\]]*\]/gi, "");
+
+  // Internal tool citations: [Tool 1], [Tool 1, Tool 6], [Tool 10: name].
+  out = out.replace(/\[\s*tool\s+\d+[^\]]*\]/gi, "");
+
+  // Tidy whitespace/punctuation left behind by inline removals.
+  out = out.replace(/[^\S\r\n]+([.,;:!?])/g, "$1");
+  out = out.replace(/[^\S\r\n]{2,}/g, " ");
+  out = out.replace(/\n{3,}/g, "\n\n");
+
+  return out.trim();
+}
+
+// ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
 
@@ -910,15 +947,21 @@ export class sportsclawEngine {
    * trigger self-correction or return a corrected version.
    */
   private async validateResponseEvidence(params: {
+    userPrompt: string;
     draft: string;
     toolOutputs: Array<{ toolName: string; output: string }>;
   }): Promise<string> {
-    const { draft, toolOutputs } = params;
+    const { userPrompt, draft, toolOutputs } = params;
     if (toolOutputs.length === 0) return draft;
 
+    // Label sources as internal-only. Tool names are deliberately withheld so
+    // the model can never echo them, and the label says so explicitly.
     const serializedToolOutputs = toolOutputs
       .slice(0, 10)
-      .map((item, idx) => `[Tool ${idx + 1}: ${item.toolName}]\n${item.output}`)
+      .map(
+        (item, idx) =>
+          `[Internal source ${idx + 1} — private, never cite, name, or reference this source in your answer]\n${item.output}`
+      )
       .join("\n\n");
 
     try {
@@ -926,18 +969,21 @@ export class sportsclawEngine {
       const validationRes = await generateText({
         model: this.mainModel,
         system:
-          "You are a strict sports fact-checker. Compare the draft response against the raw tool outputs.\n" +
+          "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
+          "Only consider claims that are relevant to the user's request; ignore source data that is " +
+          "unrelated to what the user asked.\n" +
           "Identify any numerical values (scores, player statistics, dates, or standings) in the draft " +
-          "that DO NOT match or are completely unsupported by the raw tool outputs.\n" +
+          "that DO NOT match or are completely unsupported by the source data.\n" +
           "Respond in strict JSON with the following format:\n" +
           "{\n" +
           "  \"isValid\": boolean,\n" +
           "  \"discrepancies\": [\n" +
-          "    { \"claim\": \"what draft says\", \"evidence\": \"what raw tools say\", \"severity\": \"high\" | \"medium\" }\n" +
+          "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\" }\n" +
           "  ]\n" +
           "}",
         prompt: [
-          `Raw tool outputs (Source of Truth):`,
+          `User request: ${userPrompt}`,
+          `Raw source data (Source of Truth):`,
           serializedToolOutputs,
           `Draft response to check:`,
           draft,
@@ -971,12 +1017,17 @@ export class sportsclawEngine {
       const correctionRes = await generateText({
         model: this.mainModel,
         system:
-          "You are an expert sports editor. You MUST rewrite the draft response to completely correct " +
-          "any factual inaccuracies, mismatched scores, or unsupported claims. " +
-          "Make sure EVERY score, number, and team record matches the raw tool outputs exactly. " +
-          "Do not introduce any conversational fluff. Keep citations.",
+          "You are an expert sports editor. Rewrite the draft response so it stays focused on the " +
+          "user's request and correct any factual inaccuracies, mismatched scores, or unsupported claims. " +
+          "Make sure EVERY score, number, and team record matches the source data exactly. " +
+          "Do not introduce any conversational fluff. " +
+          "Do not mention that a correction or verification happened. " +
+          "Never expose internal source labels, tool names, or citation markers such as [Internal source N] " +
+          "or [Tool N]. Only use human-readable source names (e.g. a league or outlet) if they appear in " +
+          "the data itself.",
         prompt: [
-          `Raw tool outputs (Source of Truth):`,
+          `User request: ${userPrompt}`,
+          `Raw source data (Source of Truth):`,
           serializedToolOutputs,
           `Original draft response with errors:`,
           draft,
@@ -988,8 +1039,7 @@ export class sportsclawEngine {
 
       const corrected = correctionRes.text?.trim();
       if (corrected) {
-        const warning = "⚠️ Self-correction pass completed: verified and aligned response with raw data.";
-        return `${warning}\n\n${corrected}`;
+        return stripInternalEvidenceArtifacts(corrected);
       }
     } catch (e) {
       if (this.config.verbose) {
@@ -4088,6 +4138,7 @@ export class sportsclawEngine {
         successIds
       );
       responseText = await this.validateResponseEvidence({
+        userPrompt: sanitizedPrompt,
         draft: responseText,
         toolOutputs,
       });
@@ -4150,6 +4201,10 @@ export class sportsclawEngine {
       /\n*\[(?:CONTEXT UPDATED|FAN PROFILE UPDATED|SOUL UPDATED|MEMORY UPDATED)[^\]]*\][^\n]*(?:\n[^\[]*?)*/gi,
       ""
     ).trim();
+
+    // Deterministic final safety net: never leak evidence-gate artifacts
+    // (self-correction banners, [Tool N] citations, mcp__ tool identifiers).
+    responseText = stripInternalEvidenceArtifacts(responseText);
 
     return responseText;
   }
