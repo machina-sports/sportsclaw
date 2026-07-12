@@ -124,6 +124,7 @@ network_policies:
   retrieval:
     name: retrieval
     endpoints:
+      # client-api REST (retrieval + writeback)
       - host: 172.17.0.1
         port: 5003
         protocol: rest
@@ -131,6 +132,17 @@ network_policies:
         access: full
       - host: host.docker.internal
         port: 5003
+        protocol: rest
+        enforcement: enforce
+        access: full
+      # local pod MCP server (document/memory tools)
+      - host: 172.17.0.1
+        port: 8000
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: host.docker.internal
+        port: 8000
         protocol: rest
         enforcement: enforce
         access: full
