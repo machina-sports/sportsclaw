@@ -151,7 +151,21 @@ export interface OperatorSinkPlugin {
    * Use them; they materially improve adherence on smaller models.
    */
   getOutputSchema?(args: { cfg: OperatorJobConfig }):
-    | { schema: unknown; name?: string; description?: string }
+    | {
+        schema: unknown;
+        /** Schema name hint (legacy meaning; not the tool name). */
+        name?: string;
+        /** Forced output tool name. Default "submit_broadcast" (back-compat);
+         * generic sinks set "submit_result", the Vault "submit_vault_answer". */
+        toolName?: string;
+        description?: string;
+        /** Domain guidance appended to the neutral output instruction. */
+        guidance?: string;
+        /** Classify the submitted output (default: `silent===true` → idle). */
+        classify?: (output: unknown) => "idle" | "answer";
+        /** Extract the human-facing text (default: `.narrative`). */
+        extractText?: (output: unknown) => string | undefined;
+      }
     | undefined;
 
   /**

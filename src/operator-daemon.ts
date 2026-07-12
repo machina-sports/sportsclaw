@@ -275,8 +275,19 @@ export interface OperatorDaemonConfig {
    */
   outputSchema?: {
     schema: unknown;
+    /** Schema name hint forwarded to the model (unchanged legacy meaning). */
     name?: string;
+    /** Forced output tool name. Default "submit_broadcast" (back-compat). A
+     * generic sink should set "submit_result"; the Vault sets "submit_vault_answer". */
+    toolName?: string;
     description?: string;
+    /** Domain guidance appended to the generic output instruction (e.g. TV's
+     * "prefer broadcasting"). Keeps the engine default domain-neutral. */
+    guidance?: string;
+    /** Classify the submitted output object. Default: `silent===true` → idle. */
+    classify?: (output: unknown) => "idle" | "answer";
+    /** Pull the human-facing text from the output object. Default: `.narrative`. */
+    extractText?: (output: unknown) => string | undefined;
   };
 
   /** Inject a HeartbeatService (tests). Default: a fresh instance. */
@@ -324,10 +335,9 @@ export interface OperatorDaemon {
 const DEFAULT_TICK_PROMPT = [
   "Tick {tickId} at {timestamp}.",
   "",
-  "Decide the next on-air action for this job. Inspect the editorial memory",
-  "and previous tick brief above; call tools to fetch live data; produce a",
-  "short broadcast/telemetry summary OR return [SILENT] if nothing new is",
-  "worth surfacing.",
+  "Decide the next action for this job. Inspect the memory and previous tick",
+  "brief above; call tools to fetch data as needed; produce a short result OR",
+  "skip if nothing new is worth surfacing.",
 ].join("\n");
 
 // Bumped 2048 → 4096 after observing repeated NoOutputGeneratedError stalls on
@@ -453,7 +463,8 @@ export function createOperatorDaemon(
     // schema — suppress the prompt fragment so the model doesn't get two
     // conflicting instructions for the same "skip this tick" intent.
     const useStructuredOutput = !!cfg.outputSchema;
-    const OUTPUT_TOOL_NAME = "submit_broadcast";
+    // Domain-neutral by default; back-compat tool name is submit_broadcast.
+    const OUTPUT_TOOL_NAME = cfg.outputSchema?.toolName ?? "submit_broadcast";
     const baseSystem = buildSystemPrompt({
       role: cfg.role,
       isCron: true,
@@ -465,9 +476,14 @@ export function createOperatorDaemon(
     });
     // Structured output travels via a forced tool call (the OpenShell Privacy
     // Router forwards `tools` but strips `response_format`/json-schema, so the
-    // SDK's experimental_output yields empty objects through the router).
+    // SDK's experimental_output yields empty objects through the router). The
+    // instruction is domain-NEUTRAL — any "prefer X" bias comes from the sink's
+    // optional `guidance` (e.g. TV supplies its broadcast bias), never here.
+    const outputGuidance = cfg.outputSchema?.guidance
+      ? ` ${cfg.outputSchema.guidance.trim()}`
+      : "";
     const system = useStructuredOutput
-      ? `${baseSystem}\n\n## Final output (MANDATORY — this overrides ALL earlier output instructions)\nYou MUST deliver your output by calling the \`${OUTPUT_TOOL_NAME}\` tool. NEVER write the literal text \`[SILENT]\`, narrative prose, JSON, or a code block in your message — any such message text is discarded and the tick is lost. Call \`${OUTPUT_TOOL_NAME}\` exactly once as your final action. Strongly prefer broadcasting: set silent=false with a full narrative whenever you have ANY World Cup buildup, fixture, market, or storyline to cover (you almost always do). Only set silent=true if every data source this tick was empty or errored. Any earlier instruction to emit \`[SILENT]\` as text is OBSOLETE — express silence by calling the tool with silent=true, never as text.`
+      ? `${baseSystem}\n\n## Final output (MANDATORY — this overrides ALL earlier output instructions)\nYou MUST deliver your output by calling the \`${OUTPUT_TOOL_NAME}\` tool exactly once, as your final action. NEVER write the literal text \`[SILENT]\`, narrative prose, JSON, or a code block in your message — any such message text is discarded and the tick is lost. Express "nothing to do this tick" ONLY via the schema's skip field (e.g. silent/idle), never as message text.${outputGuidance}`
       : baseSystem;
 
     // 4. Wrap tools with the guardrail.
@@ -523,6 +539,7 @@ export function createOperatorDaemon(
     //     present) for backwards-compat with text-consuming sinks.
     let text = "";
     let structuredOutput: unknown;
+    let structuredKind: "idle" | "answer" | undefined;
     let failureReason: string | undefined;
     // Output tool: a declarative (execute-less) tool whose inputSchema is the
     // broadcast schema. Added *after* the guard wrap so it bypasses the
@@ -534,7 +551,7 @@ export function createOperatorDaemon(
           [OUTPUT_TOOL_NAME]: {
             description:
               cfg.outputSchema!.description ??
-              "Submit the final broadcast for this tick. Call exactly once, as your last action, with all required fields. Set silent=true to skip airing.",
+              "Submit your result for this tick. Call exactly once, as your last action, with all required fields. Use the schema's skip field (e.g. silent/idle) to do nothing this tick.",
             inputSchema: jsonSchema(cfg.outputSchema!.schema as object),
           } as Tool,
         }
@@ -583,11 +600,10 @@ export function createOperatorDaemon(
           : stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
       });
       if (useStructuredOutput) {
-        // Structured output arrives as the input of the forced
-        // `submit_broadcast` tool call (the Privacy Router strips
-        // `response_format`, so `experimental_output` would come back empty).
-        // If the model never called the tool, treat the tick as silent rather
-        // than failing it.
+        // Structured output arrives as the input of the forced output tool call
+        // (the Privacy Router strips `response_format`, so `experimental_output`
+        // would come back empty). A structured tick that never called the tool
+        // is a FAILURE, not a silent success — surface it.
         const toolCalls = (result.toolCalls ?? []) as Array<{
           toolName: string;
           input?: unknown;
@@ -595,17 +611,32 @@ export function createOperatorDaemon(
         const outCall = [...toolCalls]
           .reverse()
           .find((c) => c.toolName === OUTPUT_TOOL_NAME);
-        structuredOutput = outCall ? outCall.input : undefined;
-        const narrative =
-          structuredOutput &&
-          typeof structuredOutput === "object" &&
-          typeof (structuredOutput as { narrative?: unknown }).narrative ===
-            "string"
-            ? ((structuredOutput as { narrative: string }).narrative).trim()
-            : "";
-        // text is the synthesised narrative (for back-compat) when the
-        // object has one; otherwise empty.
-        text = narrative;
+        if (!outCall) {
+          failureReason = `model did not call the ${OUTPUT_TOOL_NAME} output tool`;
+        } else {
+          structuredOutput = outCall.input;
+          // Classify (idle vs answer) + extract text via the sink's contract,
+          // falling back to the legacy `silent` boolean / `narrative` field.
+          try {
+            structuredKind = cfg.outputSchema?.classify
+              ? cfg.outputSchema.classify(structuredOutput)
+              : (structuredOutput as { silent?: unknown })?.silent === true
+                ? "idle"
+                : "answer";
+          } catch (e) {
+            failureReason = `output classifier threw: ${e instanceof Error ? e.message : e}`;
+          }
+          try {
+            const extracted = cfg.outputSchema?.extractText
+              ? cfg.outputSchema.extractText(structuredOutput)
+              : typeof (structuredOutput as { narrative?: unknown })?.narrative === "string"
+                ? (structuredOutput as { narrative: string }).narrative
+                : undefined;
+            text = (extracted ?? "").trim();
+          } catch (e) {
+            failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
+          }
+        }
       } else {
         text = (result.text ?? "").trim();
       }
@@ -805,7 +836,7 @@ export function createOperatorDaemon(
           id: `decision-${tickId}-publish`,
           timestamp: endedAt,
           action: "publish",
-          reason: text || "Published broadcast block",
+          reason: text || "Published result",
           agentId: jobId,
         });
       }
@@ -938,8 +969,9 @@ export function createOperatorDaemon(
     //   - free-text mode: keep the [SILENT] sentinel match on text.
     let silent: boolean;
     if (useStructuredOutput) {
-      const obj = structuredOutput as { silent?: unknown } | undefined;
-      silent = !obj || obj.silent === true;
+      // structuredKind is set by the classifier above (idle → silent). A
+      // missing output tool already routed to tick_failed before this point.
+      silent = structuredKind !== "answer";
     } else {
       silent = LastTickBrief.isSilent(text);
     }

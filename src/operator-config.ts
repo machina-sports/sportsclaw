@@ -82,6 +82,12 @@ export interface OperatorJobConfig {
    */
   maxSteps?: number;
   /**
+   * Per-tick prompt template ({tickId} / {timestamp} substituted). Overrides
+   * the daemon's domain-neutral default. Lets a job own its tick instruction
+   * instead of inheriting a generic one.
+   */
+  tickPrompt?: string;
+  /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
    * is invoked — only the named skills' tools become available to the LLM.
@@ -538,6 +544,10 @@ export function validateOperatorJobConfig(
     }
   }
 
+  if (raw.tickPrompt !== undefined && typeof raw.tickPrompt !== "string") {
+    push("tickPrompt", "must be a string");
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -549,6 +559,7 @@ export function validateOperatorJobConfig(
       jobId: raw.jobId as string,
       label: raw.label as string | undefined,
       intervalMs: raw.intervalMs as number,
+      tickPrompt: raw.tickPrompt as string | undefined,
       persona: raw.persona as string | undefined,
       personaText: raw.personaText as string | undefined,
       model: raw.model as string | undefined,
