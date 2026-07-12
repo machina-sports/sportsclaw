@@ -1,0 +1,88 @@
+# OpenShell policy — PRIVATE runtime profile (Athlete Vault posture).
+#
+# One policy per workload: policy.yaml stays the CONNECTED profile (Sports
+# TV — external MCP drops, ESPN/Kalshi/Polymarket egress, ports :8000/:8001/
+# :8005/:8090 reserved on the shared box). This file is the private profile:
+# the operator reaches ONLY the local Machina runtime on the host bridge —
+# memory, retrieval and events never leave the box. Inference goes through
+# inference.local (Privacy Router), which is handled by the gateway, not by
+# network_policies.
+#
+# Port family deliberately offset from the TV reservations (see the vault
+# bundle: nvidia-athlete-vault-sportsclaw box/runtime/compose.yml):
+#   5103  client-api REST (retrieval + writeback)
+#   8103  pod MCP (document/memory tools; SSE transport)
+#   8193  vault tail bus (events)
+#
+# No public sports-data egress in this profile: the pod's ingestion
+# workflows own external data, inside the trusted plane.
+
+version: 1
+
+filesystem_policy:
+  read_only:
+    - /opt/venv
+    - /app/dist
+    - /app/node_modules
+    - /app/skills-lock.json
+  read_write:
+    - /sandbox
+    - /tmp
+    - /app/.sportsclaw
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+
+  vault_tail_bus:
+    name: vault-tail-bus
+    endpoints:
+      - host: 172.17.0.1
+        port: 8193
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: host.docker.internal
+        port: 8193
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/node
+
+  vault_runtime_rest:
+    name: vault-runtime-rest
+    endpoints:
+      - host: 172.17.0.1
+        port: 5103
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: host.docker.internal
+        port: 5103
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/node
+
+  vault_pod_mcp:
+    name: vault-pod-mcp
+    endpoints:
+      - host: 172.17.0.1
+        port: 8103
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: host.docker.internal
+        port: 8103
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/local/bin/node
