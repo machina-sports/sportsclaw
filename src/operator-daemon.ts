@@ -361,6 +361,15 @@ const DEFAULT_MAX_STEPS = 10;
 const DEFAULT_INFERENCE_TIMEOUT_MS = 240_000;
 const DEFAULT_RECENT_BRIEF_LIMIT = 1;
 
+/** Strip model reasoning (`<think>…</think>`, closed or dangling) so it never
+ *  leaks into published text, traces, receipts, or logs. */
+function stripThink(s: string): string {
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -632,13 +641,13 @@ export function createOperatorDaemon(
               : typeof (structuredOutput as { narrative?: unknown })?.narrative === "string"
                 ? (structuredOutput as { narrative: string }).narrative
                 : undefined;
-            text = (extracted ?? "").trim();
+            text = stripThink(extracted ?? "");
           } catch (e) {
             failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
           }
         }
       } else {
-        text = (result.text ?? "").trim();
+        text = stripThink(result.text ?? "");
       }
     } catch (err) {
       // AI_APICallError shapes its message as "Unknown" when the upstream

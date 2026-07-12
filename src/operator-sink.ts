@@ -63,6 +63,26 @@ export interface SinkContext {
   mcpManager?: McpManager;
   /** Full operator job config, for sinks reading domain-specific fields. */
   cfg: OperatorJobConfig;
+  /**
+   * Governed model-role inference (PR4). A bounded wrapper around the engine's
+   * `invokeModelRole`, provided so sinks (e.g. the Vault skeptic evaluator) run
+   * a second governed inference WITHOUT importing `/app/dist/...` internals.
+   * Only `status:"completed"` may be parsed as a result; `timed_out` / `failed`
+   * / `cancelled` MUST fail closed (never approve). The caller supplies the same
+   * role/config it would pass to invokeModelRole.
+   */
+  runModelRole?: (args: {
+    role?: string;
+    input: unknown;
+    source?: string;
+    config?: unknown;
+    timeoutMs?: number;
+  }) => Promise<{
+    status: "completed" | "timed_out" | "failed" | "cancelled";
+    output?: unknown;
+    error?: string;
+    latencyMs?: number;
+  }>;
 }
 
 /**

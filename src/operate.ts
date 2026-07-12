@@ -59,10 +59,40 @@ import {
   TOOL_DISCIPLINE_FRAGMENT,
 } from "./prompts.js";
 import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
+import { invokeModelRole } from "./inference/model-role-router.js";
 
 // Cheap-wake probe budget: a sink's pollWake must be fast I/O. If it hangs or
 // throws we fail closed (skip the tick — never fall through to inference).
 const WAKE_POLL_TIMEOUT_MS = 5_000;
+// Governed second-inference budget (e.g. the Vault skeptic evaluator).
+const MODEL_ROLE_TIMEOUT_MS = 25_000;
+
+/** Governed wrapper around invokeModelRole exposed via SinkContext, so sinks run
+ *  a second inference WITHOUT importing /app/dist internals. Bounded + fail-closed:
+ *  only `completed` carries an output; timeout → timed_out, throw → failed. */
+function makeRunModelRole(): NonNullable<SinkContext["runModelRole"]> {
+  const invoke = invokeModelRole as (a: {
+    role: string;
+    input: unknown;
+    source: string;
+    config?: unknown;
+  }) => Promise<{ output?: unknown }>;
+  return async ({ role = "brain", input, source, config, timeoutMs }) => {
+    const started = Date.now();
+    try {
+      const res = await Promise.race([
+        invoke({ role, input, source: source ?? "sink", config }),
+        new Promise<never>((_r, rej) =>
+          setTimeout(() => rej(new Error("model role timeout")), timeoutMs ?? MODEL_ROLE_TIMEOUT_MS),
+        ),
+      ]);
+      return { status: "completed", output: res.output, latencyMs: Date.now() - started };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { status: /timeout/i.test(msg) ? "timed_out" : "failed", error: msg, latencyMs: Date.now() - started };
+    }
+  };
+}
 
 /** Adapt a sink's optional pollWake into the daemon's wake gate, with a bounded
  *  timeout + fail-closed behaviour. Returns undefined when the sink has none. */
@@ -693,6 +723,7 @@ async function runOnce(jobId: string): Promise<void> {
       intervalMs: cfg.intervalMs,
       mcpManager: tools.mcpManager,
       cfg,
+      runModelRole: makeRunModelRole(),
     };
     const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
@@ -777,6 +808,7 @@ async function runForeground(jobId: string): Promise<void> {
     intervalMs: cfg.intervalMs,
     mcpManager: tools.mcpManager,
     cfg,
+    runModelRole: makeRunModelRole(),
   };
   const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
