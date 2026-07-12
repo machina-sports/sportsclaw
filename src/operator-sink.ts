@@ -150,6 +150,18 @@ export interface OperatorSinkPlugin {
    * that some providers expose to the model (e.g. via the tool/schema name).
    * Use them; they materially improve adherence on smaller models.
    */
+  /**
+   * Cheap wake probe (PR3): runs BEFORE any model call to decide whether this
+   * tick has work. Return `{ wake: false }` to skip the tick entirely — zero
+   * model calls. MUST be cheap I/O only (no inference). Wired to the daemon's
+   * wake gate; a throw or timeout fails closed (skip). The actual claim /
+   * preparation happens in `composeTickContext` inside tick single-flight, so a
+   * `pollWake` that only peeks (non-mutating) is safe even when the daemon is busy.
+   */
+  pollWake?(args: { cfg: OperatorJobConfig }):
+    | Promise<{ wake: boolean; context?: string; reason?: string }>
+    | { wake: boolean; context?: string; reason?: string };
+
   getOutputSchema?(args: { cfg: OperatorJobConfig }):
     | {
         schema: unknown;

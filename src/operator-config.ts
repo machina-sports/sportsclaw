@@ -379,17 +379,10 @@ export function validateOperatorJobConfig(
     }
   }
 
-  // Cross-field validation: inferenceTimeoutMs < intervalMs
-  if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
-    const timeout = raw.inferenceTimeoutMs;
-    const interval = raw.intervalMs;
-    if (typeof timeout === "number" && typeof interval === "number" && timeout >= interval) {
-      push(
-        "inferenceTimeoutMs",
-        `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
-      );
-    }
-  }
+  // NOTE: the old `inferenceTimeoutMs < intervalMs` cross-field check was
+  // removed. Tick single-flight (the daemon serializes all ticks and skips a
+  // cron fire while one is active) prevents overlap regardless of the ratio, so
+  // a fast poll interval (e.g. 1s) can coexist with a long inference timeout.
 
   // extraFragments
   if (raw.extraFragments !== undefined) {

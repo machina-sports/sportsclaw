@@ -79,6 +79,19 @@ describe("tick single-flight + drain (PR1)", () => {
     assert.equal(gen.stats.max, 1, "cron fires never overlapped the running tick");
   });
 
+  it("wakeGate denial skips ticks with zero model calls (cheap wake)", async () => {
+    const gen = makeConcurrencyGen(30);
+    const d = createOperatorDaemon(baseConfig({
+      intervalMs: 40,
+      generateTextImpl: gen,
+      wakeGate: () => ({ wake: false, reason: "no pending work" }),
+    }));
+    d.start();
+    await wait(220); // several cron fires, all wake-denied
+    await d.drain();
+    assert.equal(gen.stats.calls, 0, "wake gate denied every fire → no inference");
+  });
+
   it("drain() waits for the active tick and starts no new inference", async () => {
     const gen = makeConcurrencyGen(120);
     const d = createOperatorDaemon(baseConfig({ generateTextImpl: gen }));
