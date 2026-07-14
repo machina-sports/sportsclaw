@@ -11,12 +11,65 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  applyOperatorSkillFilter,
   exitCodeFor,
   FRAGMENT_ALIASES,
   parseFlags,
+  requireSinkPollForWork,
   resolveExtraFragments,
   resolvePersona,
+  runSinkPolledLoop,
 } from "../dist/operate.js";
+
+// ---------------------------------------------------------------------------
+// per-job sport schema filter
+// ---------------------------------------------------------------------------
+
+describe("operator skill filter", () => {
+  function withCleanEnv(fn) {
+    const upper = process.env.SPORTSCLAW_SKILLS;
+    const lower = process.env.sportsclaw_SKILLS;
+    delete process.env.SPORTSCLAW_SKILLS;
+    delete process.env.sportsclaw_SKILLS;
+    try {
+      fn();
+    } finally {
+      if (upper === undefined) delete process.env.SPORTSCLAW_SKILLS;
+      else process.env.SPORTSCLAW_SKILLS = upper;
+      if (lower === undefined) delete process.env.sportsclaw_SKILLS;
+      else process.env.sportsclaw_SKILLS = lower;
+    }
+  }
+
+  it("keeps legacy all-skills behavior when skills is omitted", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter(undefined);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, undefined);
+    });
+  });
+
+  it("maps an explicit empty list to no sports schemas", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter([]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "");
+    });
+  });
+
+  it("maps a non-empty list to the existing comma-separated contract", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter(["cfb", "nfl"]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "cfb,nfl");
+    });
+  });
+
+  it("does not overwrite an explicit caller filter", () => {
+    withCleanEnv(() => {
+      process.env.SPORTSCLAW_SKILLS = "";
+      applyOperatorSkillFilter(["cfb"]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "");
+    });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // parseFlags
@@ -273,3 +326,132 @@ describe("resolvePersona", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// sink-polled scheduling — interactive pickup without overlapping inference
+// ---------------------------------------------------------------------------
+
+describe("sink-polled scheduling", () => {
+  it("awaits each accepted tick before polling for another", async () => {
+    const abort = new AbortController();
+    let pollCalls = 0;
+    let ticks = 0;
+    let activeTicks = 0;
+    let maxActiveTicks = 0;
+    let releaseFirst;
+    let markFirstStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const firstBlocked = new Promise((resolve) => { releaseFirst = resolve; });
+
+    const loop = runSinkPolledLoop({
+      intervalMs: 5_000,
+      signal: abort.signal,
+      wait: async () => {},
+      pollForWork: () => {
+        pollCalls += 1;
+        return true;
+      },
+      tickOnce: async () => {
+        ticks += 1;
+        activeTicks += 1;
+        maxActiveTicks = Math.max(maxActiveTicks, activeTicks);
+        if (ticks === 1) {
+          markFirstStarted();
+          await firstBlocked;
+        }
+        activeTicks -= 1;
+        if (ticks === 2) abort.abort();
+      },
+    });
+
+    await firstStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(pollCalls, 1, "must not poll while the first tick is in flight");
+    releaseFirst();
+    await loop;
+
+    assert.strictEqual(ticks, 2);
+    assert.strictEqual(maxActiveTicks, 1);
+  });
+
+  it("does not invoke the model tick while the sink reports idle", async () => {
+    const abort = new AbortController();
+    let polls = 0;
+    let ticks = 0;
+    await runSinkPolledLoop({
+      intervalMs: 5_000,
+      signal: abort.signal,
+      wait: async () => {},
+      pollForWork: () => {
+        polls += 1;
+        if (polls === 3) abort.abort();
+        return false;
+      },
+      tickOnce: async () => { ticks += 1; },
+    });
+    assert.strictEqual(polls, 3);
+    assert.strictEqual(ticks, 0);
+  });
+
+  it("records poll/tick errors and keeps servicing the queue", async () => {
+    const abort = new AbortController();
+    const errors = [];
+    let polls = 0;
+    let ticks = 0;
+    await runSinkPolledLoop({
+      intervalMs: 5_000,
+      signal: abort.signal,
+      wait: async () => {},
+      onError: (phase, error) => errors.push([phase, error.message]),
+      pollForWork: () => {
+        polls += 1;
+        if (polls === 1) throw new Error("tail unavailable");
+        if (polls === 2) return true;
+        abort.abort();
+        return false;
+      },
+      tickOnce: async () => {
+        ticks += 1;
+        throw new Error("inference failed");
+      },
+    });
+    assert.strictEqual(ticks, 1);
+    assert.deepStrictEqual(errors, [
+      ["poll", "tail unavailable"],
+      ["tick", "inference failed"],
+    ]);
+  });
+
+  it("fails startup when a sink-polled job has no pollForWork hook", () => {
+    const cfg = {
+      jobId: "vault-ask",
+      intervalMs: 5_000,
+      scheduleMode: "sink-polled",
+      personaText: "vault",
+      sink: "/sandbox/vault-sink.mjs",
+    };
+    const ctx = { jobId: cfg.jobId, intervalMs: cfg.intervalMs, cfg };
+    assert.throws(
+      () => requireSinkPollForWork(cfg, { name: "vault-sink" }, ctx),
+      /does not implement pollForWork/,
+    );
+  });
+
+  it("binds the sink polling hook to the resolved job context", async () => {
+    const cfg = {
+      jobId: "vault-ask",
+      intervalMs: 5_000,
+      scheduleMode: "sink-polled",
+      personaText: "vault",
+      sink: "/sandbox/vault-sink.mjs",
+    };
+    const ctx = { jobId: cfg.jobId, intervalMs: cfg.intervalMs, cfg };
+    let received;
+    const poll = requireSinkPollForWork(
+      cfg,
+      { name: "vault-sink", pollForWork: (value) => { received = value; return true; } },
+      ctx,
+    );
+    assert.strictEqual(await poll(), true);
+    assert.strictEqual(received, ctx);
+  });
+});

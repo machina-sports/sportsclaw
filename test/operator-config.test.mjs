@@ -185,16 +185,61 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "maxSteps"));
   });
 
-  it("allows inferenceTimeoutMs >= intervalMs (single-flight prevents overlap)", () => {
-    // The old cross-field rejection was removed: a fast poll (1s) can coexist
-    // with a long inference timeout because the daemon serializes ticks.
+  it("rejects inferenceTimeoutMs >= intervalMs in default (fixed) mode", () => {
+    // Reconciled semantics: fixed cadence keeps the conservative invariant (a
+    // longer watchdog just skips every other fire under single-flight — a
+    // config smell). Use scheduleMode:"sink-polled" for fast-poll queues where
+    // inference legitimately outlasts the poll cadence.
     const r = validateOperatorJobConfig({
       ...base,
       intervalMs: 1_000,
       inferenceTimeoutMs: 60_000,
     });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
+  it("accepts a fast sink-polled cadence with a longer inference budget", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 5_000,
+      inferenceTimeoutMs: 70_000,
+      scheduleMode: "sink-polled",
+      sink: "/sandbox/vault-sink.mjs",
+    });
     assert.strictEqual(r.valid, true);
-    assert.ok(!r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+    assert.strictEqual(r.config.scheduleMode, "sink-polled");
+    assert.strictEqual(r.config.intervalMs, 5_000);
+    assert.strictEqual(r.config.inferenceTimeoutMs, 70_000);
+  });
+
+  it("keeps the timeout-before-interval invariant for explicit fixed mode", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 5_000,
+      inferenceTimeoutMs: 70_000,
+      scheduleMode: "fixed",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
+  it("rejects sink-polled mode without a configured sink", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      scheduleMode: "sink-polled",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "scheduleMode"));
+  });
+
+  it("rejects an unknown schedule mode", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      scheduleMode: "overlap-everything",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "scheduleMode"));
   });
 
   it("rejects a non-array extraFragments", () => {
@@ -220,7 +265,7 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.deepStrictEqual(r.config.skills, ["football", "kalshi", "polymarket"]);
   });
 
-  it("accepts an empty skills array (caller's choice — launcher won't set the env var)", () => {
+  it("accepts an empty skills array (explicitly no sports schemas)", () => {
     const r = validateOperatorJobConfig({ ...base, skills: [] });
     assert.strictEqual(r.valid, true);
     assert.deepStrictEqual(r.config.skills, []);

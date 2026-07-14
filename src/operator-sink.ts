@@ -97,6 +97,18 @@ export interface OperatorSinkPlugin {
   name: string;
 
   /**
+   * Cheap work-availability check used only by jobs configured with
+   * `scheduleMode: "sink-polled"`. Return true only after reserving one unit
+   * of work for the next tick; return false when idle. The foreground runner
+   * never starts another tick until the current `tickOnce()` has returned.
+   *
+   * Keep this hook free of model calls. Queue-backed sinks should retain their
+   * reservation while asynchronous sink post-processing is still underway so
+   * a later poll cannot claim the same work twice.
+   */
+  pollForWork?(ctx: SinkContext): Promise<boolean> | boolean;
+
+  /**
    * Register domain-specific tools on the daemon's toolset. Called once
    * during `buildOperatorTools` after sport-skills + MCP tools are
    * already populated. Mutate `toolSet` in place.

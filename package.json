@@ -63,6 +63,7 @@
     "test:operator-ledger-pod": "npm run build && node --test test/operator-ledger-pod.test.mjs",
     "test:operator-context-chaining": "npm run build && node --test test/operator-context-chaining.test.mjs",
     "test:openshell-cli": "npm run build && node --test test/openshell-cli.test.mjs",
+    "test:openshell-policies": "node --test test/openshell-policies.test.mjs",
     "test:formatters-telegram": "npm run build && node --test test/formatters-telegram.test.mjs",
     "test:formatters-discord": "npm run build && node --test test/formatters-discord.test.mjs",
     "test:anthropic-oauth": "npm run build && node --test test/anthropic-oauth.test.mjs",
@@ -119,7 +120,8 @@
     "@types/node": "^22.0.0",
     "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.7.0",
-    "vitepress": "^1.6.3"
+    "vitepress": "^1.6.3",
+    "yaml": "^2.8.2"
   },
   "dependencies": {
     "@agent-relay/sdk": "^2.4.7",

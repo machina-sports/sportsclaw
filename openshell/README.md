@@ -80,13 +80,29 @@ The wizard shells out to `openshell` and `docker` for each step and asks before 
    ```
    An empty `openshell: {}` block enables the feature with provider-appropriate defaults (`baseUrl: "https://inference.local"` for Anthropic).
 
-5. **Launch the sandbox with the SportsClaw image and policy:**
+5. **Launch the sandbox with the SportsClaw image and the policy for that workload:**
+
+   Connected Sports TV keeps the existing external MCP and sports-data policy:
+
    ```bash
    openshell sandbox create \
        --from sportsclaw-openshell:latest \
        --policy openshell/policy.yaml \
        --name sportsclaw-tv
    ```
+
+   Athlete Vault is an explicit, separate opt-in. Its policy permits only the
+   local client-api, pod MCP, and Vault tail routes on the offset port family:
+
+   ```bash
+   openshell sandbox create \
+       --from sportsclaw-openshell:latest \
+       --policy openshell/policy.vault.yaml \
+       --name sportsclaw-vault
+   ```
+
+   Do not replace the TV sandbox policy with the Vault policy. They are two
+   isolated workloads and share only the configured inference layer.
 
 6. **Run a single tick to verify routing:**
    ```bash
@@ -105,7 +121,13 @@ The wizard shells out to `openshell` and `docker` for each step and asks before 
 
 ## Policy customization
 
-`policy.yaml` in this directory is a starting point. It allows:
+`policy.yaml` is the connected Sports TV profile. It keeps the existing cloud
+Machina MCP endpoints plus ESPN, Kalshi, Polymarket, and the TV overlay/tail
+routes. `policy.vault.yaml` is a separate opt-in private profile; it permits
+only the exact local REST, MCP SSE, and tail-bus routes required by the Vault
+operator. Neither policy is automatically selected by SportsClaw.
+
+The connected profile allows:
 - Read-only access to standard system paths.
 - Read/write to `/sandbox` and `/tmp`.
 - Outbound HTTPS to the configured tail-server, image-generation endpoints, and YouTube Live (commented placeholders — uncomment and edit).
@@ -166,7 +188,8 @@ Related upstream issue: [NVIDIA/OpenShell#1372](https://github.com/NVIDIA/OpenSh
 |---|---|
 | `README.md` | This runbook. |
 | `Dockerfile` | Sandbox image, layered on the root `Dockerfile`. |
-| `policy.yaml` | Reference OpenShell policy (network + filesystem + process). |
+| `policy.yaml` | Connected Sports TV policy; existing external MCP and sports-data egress. |
+| `policy.vault.yaml` | Opt-in Athlete Vault policy; exact local runtime, MCP SSE, and tail routes only. |
 | `models.md` | Suggested provider/model pairings + Nemotron variant table. |
 
 Per [D4](../docs/openshell-integration-plan.md), this directory lives in the engine repo as static recipe files. It ships in the npm release but contributes nothing to the install path and is inert unless a job config opts in.

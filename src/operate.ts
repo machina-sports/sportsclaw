@@ -128,6 +128,82 @@ interface ParsedFlags {
   unknown: string[];
 }
 
+export interface SinkPolledLoopOptions {
+  intervalMs: number;
+  pollForWork: () => Promise<boolean> | boolean;
+  tickOnce: () => Promise<unknown>;
+  signal?: AbortSignal;
+  /** Test seam; production uses an abort-aware timer. */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  onError?: (phase: "poll" | "tick", error: unknown) => void;
+}
+
+function waitFor(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Close the small race between the initial aborted check and listener
+    // registration; an abort in that window should not wait a full cadence.
+    if (signal?.aborted) done();
+  });
+}
+
+/**
+ * Serial work-driven scheduler. Polling is cheap and frequent; model ticks are
+ * awaited, so a 70-second inference can never overlap another tick even when
+ * the queue is checked every five seconds.
+ */
+export async function runSinkPolledLoop(opts: SinkPolledLoopOptions): Promise<void> {
+  if (!Number.isFinite(opts.intervalMs) || opts.intervalMs <= 0) {
+    throw new Error("sink-polled intervalMs must be > 0");
+  }
+  const wait = opts.wait ?? waitFor;
+  while (!opts.signal?.aborted) {
+    let hasWork = false;
+    try {
+      hasWork = await opts.pollForWork();
+    } catch (err) {
+      opts.onError?.("poll", err);
+    }
+
+    if (opts.signal?.aborted) break;
+    if (hasWork) {
+      try {
+        await opts.tickOnce();
+      } catch (err) {
+        opts.onError?.("tick", err);
+      }
+    }
+
+    if (opts.signal?.aborted) break;
+    await wait(opts.intervalMs, opts.signal);
+  }
+}
+
+export function requireSinkPollForWork(
+  cfg: OperatorJobConfig,
+  sink: OperatorSinkPlugin,
+  ctx: SinkContext,
+): () => Promise<boolean> {
+  if (cfg.scheduleMode !== "sink-polled") {
+    throw new Error("requireSinkPollForWork called for a non sink-polled job");
+  }
+  if (typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
+  return async () => (await sink.pollForWork!(ctx)) === true;
+}
+
 function parseFlags(args: string[]): ParsedFlags {
   const flags: ParsedFlags = {
     list: false,
@@ -305,6 +381,19 @@ interface OperatorTools {
 }
 
 /**
+ * Apply an operator job's schema filter exactly once, before schemas load.
+ * `undefined` preserves the legacy all-skills behavior; an explicit empty
+ * array intentionally exposes no sports schemas (MCP/sink tools still load).
+ */
+export function applyOperatorSkillFilter(skills: string[] | undefined): void {
+  const callerConfigured =
+    process.env.SPORTSCLAW_SKILLS !== undefined ||
+    process.env.sportsclaw_SKILLS !== undefined;
+  if (skills === undefined || callerConfigured) return;
+  process.env.SPORTSCLAW_SKILLS = skills.join(",");
+}
+
+/**
  * Build the same ToolSet `sportsclaw chat` would expose, minus engine-state-
  * specific internal tools (memory ops, sport install, etc.). v1: no per-job
  * filtering. The registry + mcpManager are returned so callers can use them
@@ -322,9 +411,7 @@ async function buildOperatorTools(
   // ticks, and the toolset fits within Gemini's responseSchema +
   // function-calling complexity envelope. If the env var is already set
   // by the caller (e.g. integration tests), respect that — don't override.
-  if (cfg.skills && cfg.skills.length > 0 && !process.env.SPORTSCLAW_SKILLS) {
-    process.env.SPORTSCLAW_SKILLS = cfg.skills.join(",");
-  }
+  applyOperatorSkillFilter(cfg.skills);
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);
@@ -796,6 +883,12 @@ function exitCodeFor(event: TickEvent): number {
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
   const sink = withOperatorSync(await resolveSink(cfg), cfg);
+  if (cfg.scheduleMode === "sink-polled" && typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
   if (inputs.openshell?.enabled) {
@@ -848,10 +941,23 @@ async function runForeground(jobId: string): Promise<void> {
       : undefined,
   });
 
+  const stopController = new AbortController();
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+<<<<<<< HEAD
+    console.error(`[operate] received ${signal}, shutting down`);
+    stopController.abort();
+    daemon.stop();
+    if (cfg.scheduleMode !== "sink-polled") {
+      // Best-effort final brief so the next start sees an explicit handoff.
+      try {
+        await daemon.tickOnce();
+      } catch {
+        // Don't block exit on a final-brief failure.
+      }
+=======
     console.error(`[operate] received ${signal}, draining`);
     // Graceful drain: stop admitting ticks and wait for the active one to finish
     // (incl. awaited sink delivery). No handoff tickOnce() — that would start a
@@ -860,6 +966,7 @@ async function runForeground(jobId: string): Promise<void> {
       await daemon.drain();
     } catch {
       // Don't block exit on a drain failure.
+>>>>>>> main
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);
@@ -871,9 +978,28 @@ async function runForeground(jobId: string): Promise<void> {
   const inferenceTag = inputs.openshell?.enabled
     ? ` inference=openshell(${inputs.openshell.baseUrl})`
     : "";
+  const schedulingTag = cfg.scheduleMode === "sink-polled" ? " schedule=sink-polled" : "";
   console.error(
-    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}`,
+    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}${schedulingTag}`,
   );
+  if (cfg.scheduleMode === "sink-polled") {
+    const pollForWork = requireSinkPollForWork(cfg, sink, ctx);
+    await runSinkPolledLoop({
+      intervalMs: cfg.intervalMs,
+      pollForWork,
+      tickOnce: () => daemon.tickOnce(),
+      signal: stopController.signal,
+      onError: (phase, err) => {
+        console.error(
+          `[operate] sink-polled ${phase} failed for ${cfg.jobId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      },
+    });
+    return;
+  }
+
   daemon.start();
   // Keep the event loop alive with a REF'd handle so the (unref'd) heartbeat +
   // cron timers keep firing. A bare pending promise does not hold libuv open;

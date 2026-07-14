@@ -32,6 +32,20 @@ export interface OperatorJobConfig {
   label?: string;
   /** Tick interval in ms. Must be > 0. */
   intervalMs: number;
+  /**
+   * Scheduling strategy for the foreground operator.
+   *
+   * - `fixed` (default): heartbeat starts a tick every `intervalMs`; the
+   *   inference watchdog must remain shorter than the interval.
+   * - `sink-polled`: the resolved sink polls for work every `intervalMs` and
+   *   each accepted tick is awaited to completion before polling again. This
+   *   is intended for interactive queues where pickup must be fast while an
+   *   individual inference may take longer than the poll cadence.
+   *
+   * `sink-polled` requires the sink to implement `pollForWork`; the launcher
+   * validates that runtime contract before starting the loop.
+   */
+  scheduleMode?: "fixed" | "sink-polled";
   /** EITHER an MCP-resolvable prompt name (resolved at runtime via get_prompt_by_name)... */
   persona?: string;
   /** ...OR inline persona text. One of these two is required. */
@@ -105,7 +119,8 @@ export interface OperatorJobConfig {
    * (without the `.json` suffix), e.g.
    * `["football","kalshi","polymarket","news","markets","metadata","betting"]`.
    *
-   * Omit to keep the legacy "load everything" behaviour.
+   * Omit to keep the legacy "load everything" behaviour. Set `[]` to expose
+   * no sports schemas while retaining MCP, sink, and daemon-owned tools.
    */
   skills?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
@@ -379,10 +394,38 @@ export function validateOperatorJobConfig(
     }
   }
 
-  // NOTE: the old `inferenceTimeoutMs < intervalMs` cross-field check was
-  // removed. Tick single-flight (the daemon serializes all ticks and skips a
-  // cron fire while one is active) prevents overlap regardless of the ratio, so
-  // a fast poll interval (e.g. 1s) can coexist with a long inference timeout.
+  // scheduleMode
+  const scheduleMode = raw.scheduleMode ?? "fixed";
+  if (scheduleMode !== "fixed" && scheduleMode !== "sink-polled") {
+    push(
+      "scheduleMode",
+      `must be one of fixed, sink-polled (got ${JSON.stringify(raw.scheduleMode)})`,
+    );
+  }
+  if (scheduleMode === "sink-polled" && !raw.sink) {
+    push("scheduleMode", "sink-polled mode requires a configured sink");
+  }
+
+  // Fixed cadence keeps the conservative timeout<interval invariant (a longer
+  // watchdog would just skip every other fire under tick single-flight — a
+  // config smell worth rejecting). Sink-polled mode is serialized by the
+  // foreground loop, so its inference budget may legitimately exceed the
+  // (idle) poll cadence.
+  if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
+    const timeout = raw.inferenceTimeoutMs;
+    const interval = raw.intervalMs;
+    if (
+      scheduleMode === "fixed" &&
+      typeof timeout === "number" &&
+      typeof interval === "number" &&
+      timeout >= interval
+    ) {
+      push(
+        "inferenceTimeoutMs",
+        `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
+      );
+    }
+  }
 
   // extraFragments
   if (raw.extraFragments !== undefined) {
@@ -552,6 +595,7 @@ export function validateOperatorJobConfig(
       jobId: raw.jobId as string,
       label: raw.label as string | undefined,
       intervalMs: raw.intervalMs as number,
+      scheduleMode: scheduleMode as OperatorJobConfig["scheduleMode"],
       tickPrompt: raw.tickPrompt as string | undefined,
       persona: raw.persona as string | undefined,
       personaText: raw.personaText as string | undefined,
