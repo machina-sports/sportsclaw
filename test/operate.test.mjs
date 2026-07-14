@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  applyOperatorSkillFilter,
   exitCodeFor,
   FRAGMENT_ALIASES,
   parseFlags,
@@ -19,6 +20,56 @@ import {
   resolvePersona,
   runSinkPolledLoop,
 } from "../dist/operate.js";
+
+// ---------------------------------------------------------------------------
+// per-job sport schema filter
+// ---------------------------------------------------------------------------
+
+describe("operator skill filter", () => {
+  function withCleanEnv(fn) {
+    const upper = process.env.SPORTSCLAW_SKILLS;
+    const lower = process.env.sportsclaw_SKILLS;
+    delete process.env.SPORTSCLAW_SKILLS;
+    delete process.env.sportsclaw_SKILLS;
+    try {
+      fn();
+    } finally {
+      if (upper === undefined) delete process.env.SPORTSCLAW_SKILLS;
+      else process.env.SPORTSCLAW_SKILLS = upper;
+      if (lower === undefined) delete process.env.sportsclaw_SKILLS;
+      else process.env.sportsclaw_SKILLS = lower;
+    }
+  }
+
+  it("keeps legacy all-skills behavior when skills is omitted", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter(undefined);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, undefined);
+    });
+  });
+
+  it("maps an explicit empty list to no sports schemas", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter([]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "");
+    });
+  });
+
+  it("maps a non-empty list to the existing comma-separated contract", () => {
+    withCleanEnv(() => {
+      applyOperatorSkillFilter(["cfb", "nfl"]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "cfb,nfl");
+    });
+  });
+
+  it("does not overwrite an explicit caller filter", () => {
+    withCleanEnv(() => {
+      process.env.SPORTSCLAW_SKILLS = "";
+      applyOperatorSkillFilter(["cfb"]);
+      assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "");
+    });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // parseFlags

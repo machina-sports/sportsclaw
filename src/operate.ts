@@ -327,6 +327,19 @@ interface OperatorTools {
 }
 
 /**
+ * Apply an operator job's schema filter exactly once, before schemas load.
+ * `undefined` preserves the legacy all-skills behavior; an explicit empty
+ * array intentionally exposes no sports schemas (MCP/sink tools still load).
+ */
+export function applyOperatorSkillFilter(skills: string[] | undefined): void {
+  const callerConfigured =
+    process.env.SPORTSCLAW_SKILLS !== undefined ||
+    process.env.sportsclaw_SKILLS !== undefined;
+  if (skills === undefined || callerConfigured) return;
+  process.env.SPORTSCLAW_SKILLS = skills.join(",");
+}
+
+/**
  * Build the same ToolSet `sportsclaw chat` would expose, minus engine-state-
  * specific internal tools (memory ops, sport install, etc.). v1: no per-job
  * filtering. The registry + mcpManager are returned so callers can use them
@@ -344,9 +357,7 @@ async function buildOperatorTools(
   // ticks, and the toolset fits within Gemini's responseSchema +
   // function-calling complexity envelope. If the env var is already set
   // by the caller (e.g. integration tests), respect that — don't override.
-  if (cfg.skills && cfg.skills.length > 0 && !process.env.SPORTSCLAW_SKILLS) {
-    process.env.SPORTSCLAW_SKILLS = cfg.skills.join(",");
-  }
+  applyOperatorSkillFilter(cfg.skills);
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);

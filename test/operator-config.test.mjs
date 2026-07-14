@@ -271,7 +271,7 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.deepStrictEqual(r.config.skills, ["football", "kalshi", "polymarket"]);
   });
 
-  it("accepts an empty skills array (caller's choice — launcher won't set the env var)", () => {
+  it("accepts an empty skills array (explicitly no sports schemas)", () => {
     const r = validateOperatorJobConfig({ ...base, skills: [] });
     assert.strictEqual(r.valid, true);
     assert.deepStrictEqual(r.config.skills, []);

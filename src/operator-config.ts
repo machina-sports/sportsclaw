@@ -113,7 +113,8 @@ export interface OperatorJobConfig {
    * (without the `.json` suffix), e.g.
    * `["football","kalshi","polymarket","news","markets","metadata","betting"]`.
    *
-   * Omit to keep the legacy "load everything" behaviour.
+   * Omit to keep the legacy "load everything" behaviour. Set `[]` to expose
+   * no sports schemas while retaining MCP, sink, and daemon-owned tools.
    */
   skills?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
