@@ -838,7 +838,9 @@ async function runOnce(jobId: string): Promise<void> {
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
       onToolCall: sink.onToolCall
-        ? (evt) => { void sink.onToolCall!(evt, ctx); }
+        // Return (don't discard) the sink promise: the daemon's bounded awaitHook
+      // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
+      ? async (evt) => { await sink.onToolCall!(evt, ctx); }
         : undefined,
       onComposeTickContext: sink.composeTickContext
         ? async (args) =>
@@ -929,7 +931,9 @@ async function runForeground(jobId: string): Promise<void> {
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
     onToolCall: sink.onToolCall
-      ? (evt) => { void sink.onToolCall!(evt, ctx); }
+      // Return (don't discard) the sink promise: the daemon's bounded awaitHook
+      // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
+      ? async (evt) => { await sink.onToolCall!(evt, ctx); }
       : undefined,
     onComposeTickContext: sink.composeTickContext
       ? async (args) =>

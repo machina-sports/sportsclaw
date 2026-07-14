@@ -79,6 +79,38 @@ describe("tick single-flight + drain (PR1)", () => {
     assert.equal(gen.stats.max, 1, "cron fires never overlapped the running tick");
   });
 
+  it("a rejecting async onToolCall never escapes as an unhandledRejection", async () => {
+    // Regression (operate.ts once wrapped the sink with `void sink.onToolCall(...)`,
+    // discarding the promise): a momentary Tail failure while posting a trace must
+    // be contained by the daemon's bounded hook await — tick completes normally.
+    const rejections = [];
+    const onUnhandled = (err) => rejections.push(String(err));
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const tool = {
+        description: "t",
+        inputSchema: { jsonSchema: { type: "object" } },
+        execute: async () => "ok",
+      };
+      const gen = async (args) => {
+        // call the tool once, then finish
+        if (args.tools?.probe?.execute) await args.tools.probe.execute({}, {});
+        return { text: "done" };
+      };
+      const d = createOperatorDaemon(baseConfig({
+        generateTextImpl: gen,
+        tools: { probe: tool },
+        onToolCall: async () => { throw new Error("sink rejected"); },
+      }));
+      const ev = await d.tickOnce();
+      assert.ok(ev.type === "tick_published" || ev.type === "tick_silent", "tick completed");
+      await wait(50); // give any stray rejection a beat to surface
+      assert.deepEqual(rejections, [], "no unhandledRejection escaped");
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("wakeGate denial skips ticks with zero model calls (cheap wake)", async () => {
     const gen = makeConcurrencyGen(30);
     const d = createOperatorDaemon(baseConfig({
