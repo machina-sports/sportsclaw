@@ -946,27 +946,16 @@ async function runForeground(jobId: string): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-<<<<<<< HEAD
-    console.error(`[operate] received ${signal}, shutting down`);
-    stopController.abort();
-    daemon.stop();
-    if (cfg.scheduleMode !== "sink-polled") {
-      // Best-effort final brief so the next start sees an explicit handoff.
-      try {
-        await daemon.tickOnce();
-      } catch {
-        // Don't block exit on a final-brief failure.
-      }
-=======
     console.error(`[operate] received ${signal}, draining`);
-    // Graceful drain: stop admitting ticks and wait for the active one to finish
-    // (incl. awaited sink delivery). No handoff tickOnce() — that would start a
-    // NEW inference at shutdown and could overlap the in-flight tick.
+    // Stop the sink-polled loop's poll timer first, then drain gracefully:
+    // stop admitting ticks and wait for the active one to finish (incl. awaited
+    // sink delivery). No handoff tickOnce() — that would start a NEW inference
+    // at shutdown and could overlap the in-flight tick (PR1 semantics).
+    stopController.abort();
     try {
       await daemon.drain();
     } catch {
       // Don't block exit on a drain failure.
->>>>>>> main
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);
