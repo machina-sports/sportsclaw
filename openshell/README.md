@@ -98,7 +98,7 @@ The wizard shells out to `openshell` and `docker` for each step and asks before 
    openshell sandbox create \
        --from sportsclaw-openshell:latest \
        --policy openshell/policy.vault.yaml \
-       --name sportsclaw-vault
+       --name athlete-vault
    ```
 
    Do not replace the TV sandbox policy with the Vault policy. They are two
