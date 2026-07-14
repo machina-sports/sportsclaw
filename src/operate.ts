@@ -707,13 +707,12 @@ async function runOnce(jobId: string): Promise<void> {
     });
     const event = await daemon.tickOnce();
     console.log(JSON.stringify(event, null, 2));
-    // Drain: onTickEvent / onToolCall handlers may have fire-and-forget POSTs
-    // (e.g. broadcast sink's tail-server). Give them a short window to flush
-    // before process.exit kills any pending fetches.
-    if (sink.onTickEvent || sink.onToolCall) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-    }
-    process.exit(exitCodeFor(event));
+    // onTickEvent is awaited inside the tick now, so the sink has finished
+    // delivering by the time tickOnce() resolves — no fixed 1.5s flush needed.
+    // Drain any queued work, set the exit code, and let the finally disconnect
+    // MCP so the process exits cleanly when the loop empties (no abrupt exit).
+    await daemon.drain();
+    process.exitCode = exitCodeFor(event);
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
   }
@@ -793,13 +792,14 @@ async function runForeground(jobId: string): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error(`[operate] received ${signal}, shutting down`);
-    daemon.stop();
-    // Best-effort final brief so the next start sees an explicit handoff.
+    console.error(`[operate] received ${signal}, draining`);
+    // Graceful drain: stop admitting ticks and wait for the active one to finish
+    // (incl. awaited sink delivery). No handoff tickOnce() — that would start a
+    // NEW inference at shutdown and could overlap the in-flight tick.
     try {
-      await daemon.tickOnce();
+      await daemon.drain();
     } catch {
-      // Don't block exit on a final-brief failure.
+      // Don't block exit on a drain failure.
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);

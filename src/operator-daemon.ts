@@ -300,8 +300,14 @@ export interface OperatorDaemon {
   readonly cronJob: CronJob | null;
   /** Start scheduling. Idempotent. */
   start(): void;
-  /** Stop scheduling and clear timers. */
+  /** Stop scheduling and clear timers (synchronous; does not await in-flight work). */
   stop(): void;
+  /**
+   * Graceful async shutdown: stop admitting new ticks, then await the active +
+   * queued tick(s) to finish (including awaited sink delivery). Starts no new
+   * inference. Prefer this over stop() on SIGINT/SIGTERM and after --once.
+   */
+  drain(): Promise<void>;
   /**
    * Run a single tick body synchronously, bypassing heartbeat scheduling.
    * Intended for tests and `sportsclaw operate --once` style commands.
@@ -393,18 +399,45 @@ export function createOperatorDaemon(
 
   let cronJob: CronJob | null = null;
   let started = false;
+  let draining = false;
+  let pending = 0; // ticks queued or executing (in-process single-flight counter)
+  let runChain: Promise<unknown> = Promise.resolve();
+
+  // Bounded, awaited hook invocation — a sink hook must never crash the tick nor
+  // leak an unhandled rejection. Awaiting it means the tick isn't "done" until
+  // the sink has handled the event (e.g. delivered the answer), so single-flight
+  // covers delivery, not just inference.
+  async function awaitHook<T>(name: string, fn: ((e: T) => unknown) | undefined, event: T): Promise<void> {
+    if (!fn) return;
+    try {
+      await fn(event);
+    } catch (err) {
+      console.error(`[operator-daemon] ${name} hook failed for ${jobId}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Full-tick single-flight: cron + manual ticks serialize through one chain, so
+  // only ONE tick (inference + tools + awaited hooks + ledger + delivery) runs at
+  // a time. Manual ticks (tickOnce) always enqueue FIFO; cron fires SKIP when a
+  // tick is already pending (no timer debt) — see onEvent.
+  function enqueueTick(tickId: string): Promise<TickEvent> {
+    pending++;
+    const p = runChain.then(() => runTick(tickId));
+    runChain = p.then(() => {}, () => {}).finally(() => { pending--; });
+    return p;
+  }
 
   // ---- core tick body ---------------------------------------------------
 
   async function runTick(tickId: string): Promise<TickEvent> {
     const timestamp = new Date().toISOString();
-    cfg.onTickEvent?.({
+    await awaitHook("onTickEvent", cfg.onTickEvent, {
       type: "tick_started",
       jobId,
       tickId,
       timestamp,
       inferenceRoute: cfg.inferenceRoute,
-    });
+    } as TickEvent);
 
     // 1. Frozen memory snapshot for this tick.
     await memory.load();
@@ -441,7 +474,10 @@ export function createOperatorDaemon(
     const guard = new ToolGuardController(cfg.guardOptions);
     const counts = { calls: 0, warnings: 0, blocks: 0 };
     const toolCallSink = (event: ToolCallEvent): void => {
-      try { cfg.onToolCall?.(event); } catch { /* swallow */ }
+      // Bounded + caught so a slow/throwing sink can't crash tool execution or
+      // leak an unhandled rejection. Not awaited here (would serialize tool
+      // execution behind telemetry); the tick's onTickEvent is the awaited seam.
+      void awaitHook("onToolCall", cfg.onToolCall, event);
     };
     // Daemon-owned tools: memory writeback (add/replace/remove_lesson)
     // tied to THIS tick's live EditorialMemory instance. Writes hit disk
@@ -883,7 +919,7 @@ export function createOperatorDaemon(
         // safetyValidation carries the original output and validator error.
         ...(safetyValidation !== undefined ? { safetyValidation } : {}),
       };
-      cfg.onTickEvent?.(event);
+      await awaitHook("onTickEvent", cfg.onTickEvent, event);
       const ledgerSync = await recordLedger(failureReason).catch(() => undefined);
       if (ledgerSync) event.ledgerSync = ledgerSync;
       return event;
@@ -922,7 +958,7 @@ export function createOperatorDaemon(
       inferenceRoute: cfg.inferenceRoute,
       ...(safetyValidation !== undefined ? { safetyValidation } : {}),
     };
-    cfg.onTickEvent?.(event);
+    await awaitHook("onTickEvent", cfg.onTickEvent, event);
     const ledgerSync = await recordLedger(undefined, silent).catch(() => undefined);
     if (ledgerSync) event.ledgerSync = ledgerSync;
     return event;
@@ -931,30 +967,42 @@ export function createOperatorDaemon(
   // ---- heartbeat event routing -----------------------------------------
 
   const onEvent = (event: HeartbeatEvent): void => {
-    cfg.onHeartbeatEvent?.(event);
+    // Heartbeat dispatch is synchronous; bound the hook so it can't leak an
+    // unhandled rejection, but don't block the heartbeat on it.
+    void awaitHook("onHeartbeatEvent", cfg.onHeartbeatEvent, event);
     if (event.cronJobId !== jobId) return;
 
     if (event.type === "cron_skipped") {
       const tickId = newTickId();
-      const skip: TickEvent = {
+      void awaitHook("onTickEvent", cfg.onTickEvent, {
         type: "tick_skipped",
         jobId,
         tickId,
         reason: event.result ?? "wake gate denied",
         timestamp: event.timestamp,
         inferenceRoute: cfg.inferenceRoute,
-      };
-      cfg.onTickEvent?.(skip);
+      } as TickEvent);
       return;
     }
 
     if (event.type === "cron_fired") {
-      const tickId = newTickId();
-      runTick(tickId).catch((err) => {
+      if (draining) return; // stop admission during shutdown
+      if (pending > 0) {
+        // A tick is still running — SKIP this fire (no timer debt / no overlap).
+        const tickId = newTickId();
+        void awaitHook("onTickEvent", cfg.onTickEvent, {
+          type: "tick_skipped",
+          jobId,
+          tickId,
+          reason: "previous tick still running",
+          timestamp: event.timestamp,
+          inferenceRoute: cfg.inferenceRoute,
+        } as TickEvent);
+        return;
+      }
+      enqueueTick(newTickId()).catch((err) => {
         console.error(
-          `[operator-daemon] tick crashed for ${jobId}: ${
-            err instanceof Error ? err.message : err
-          }`,
+          `[operator-daemon] tick crashed for ${jobId}: ${err instanceof Error ? err.message : err}`,
         );
       });
     }
@@ -1006,7 +1054,18 @@ export function createOperatorDaemon(
       if (heartbeat.hasPersistence) {
         await heartbeat.markJobStart(jobId, { intervalMs }).catch(() => {});
       }
-      return runTick(newTickId());
+      // Serialize through the same single-flight chain as cron ticks, so
+      // concurrent manual ticks run FIFO and never overlap a cron tick.
+      return enqueueTick(newTickId());
+    },
+    async drain(): Promise<void> {
+      // Graceful shutdown: stop admitting new work, then wait for the active +
+      // queued ticks (incl. awaited sink delivery) to finish. Starts no new
+      // inference. MCP disconnect is the caller's responsibility (operate.ts).
+      draining = true;
+      heartbeat.stop();
+      started = false;
+      await runChain.catch(() => {});
     },
   };
 }
