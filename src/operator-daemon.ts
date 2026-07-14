@@ -212,6 +212,14 @@ export interface OperatorDaemonConfig {
   briefDir?: string;
   /** State + lock dir for heartbeat persistence. Default `<rootDir>`. */
   stateDir?: string;
+  /**
+   * Enable heartbeat persistence + the cross-process per-job tick lock (for
+   * coordinating multiple replicas of the same job). Set `false` for a
+   * single-replica daemon to run the heartbeat in-memory and avoid the
+   * lockfile — which, on a restricted/overlay filesystem, can fail to release
+   * and stall every tick after the first. Default: true (unchanged).
+   */
+  persistence?: boolean;
 
   /** Optional wake gate. Forwarded to heartbeat unchanged. */
   wakeGate?: WakeGateFn;
@@ -267,8 +275,19 @@ export interface OperatorDaemonConfig {
    */
   outputSchema?: {
     schema: unknown;
+    /** Schema name hint forwarded to the model (unchanged legacy meaning). */
     name?: string;
+    /** Forced output tool name. Default "submit_broadcast" (back-compat). A
+     * generic sink should set "submit_result"; the Vault sets "submit_vault_answer". */
+    toolName?: string;
     description?: string;
+    /** Domain guidance appended to the generic output instruction (e.g. TV's
+     * "prefer broadcasting"). Keeps the engine default domain-neutral. */
+    guidance?: string;
+    /** Classify the submitted output object. Default: `silent===true` → idle. */
+    classify?: (output: unknown) => "idle" | "answer";
+    /** Pull the human-facing text from the output object. Default: `.narrative`. */
+    extractText?: (output: unknown) => string | undefined;
   };
 
   /** Inject a HeartbeatService (tests). Default: a fresh instance. */
@@ -292,8 +311,14 @@ export interface OperatorDaemon {
   readonly cronJob: CronJob | null;
   /** Start scheduling. Idempotent. */
   start(): void;
-  /** Stop scheduling and clear timers. */
+  /** Stop scheduling and clear timers (synchronous; does not await in-flight work). */
   stop(): void;
+  /**
+   * Graceful async shutdown: stop admitting new ticks, then await the active +
+   * queued tick(s) to finish (including awaited sink delivery). Starts no new
+   * inference. Prefer this over stop() on SIGINT/SIGTERM and after --once.
+   */
+  drain(): Promise<void>;
   /**
    * Run a single tick body synchronously, bypassing heartbeat scheduling.
    * Intended for tests and `sportsclaw operate --once` style commands.
@@ -310,10 +335,9 @@ export interface OperatorDaemon {
 const DEFAULT_TICK_PROMPT = [
   "Tick {tickId} at {timestamp}.",
   "",
-  "Decide the next on-air action for this job. Inspect the editorial memory",
-  "and previous tick brief above; call tools to fetch live data; produce a",
-  "short broadcast/telemetry summary OR return [SILENT] if nothing new is",
-  "worth surfacing.",
+  "Decide the next action for this job. Inspect the memory and previous tick",
+  "brief above; call tools to fetch data as needed; produce a short result OR",
+  "skip if nothing new is worth surfacing.",
 ].join("\n");
 
 // Bumped 2048 → 4096 after observing repeated NoOutputGeneratedError stalls on
@@ -336,6 +360,15 @@ const DEFAULT_MAX_STEPS = 10;
 // ticks complete; pair with a longer intervalMs so ticks don't overlap.
 const DEFAULT_INFERENCE_TIMEOUT_MS = 240_000;
 const DEFAULT_RECENT_BRIEF_LIMIT = 1;
+
+/** Strip model reasoning (`<think>…</think>`, closed or dangling) so it never
+ *  leaks into published text, traces, receipts, or logs. */
+function stripThink(s: string): string {
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .trim();
+}
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -366,8 +399,17 @@ export function createOperatorDaemon(
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
   const generateImpl = cfg.generateTextImpl ?? generateText;
 
-  const heartbeat = cfg.heartbeat ?? new HeartbeatService();
-  if (!heartbeat.hasPersistence) {
+  const heartbeat =
+    cfg.heartbeat ??
+    new HeartbeatService({
+      verbose: process.env.SPORTSCLAW_HEARTBEAT_VERBOSE === "1",
+    });
+  // Persistence (+ the cross-process per-job tick lock) is opt-out. It exists
+  // to coordinate multiple replicas of one job; a single-replica daemon does
+  // not need it, and the lockfile on a restricted/overlay filesystem can fail
+  // to release and stall every tick after the first. `persistence: false`
+  // keeps the heartbeat in-memory (overlapping ticks still guarded in-process).
+  if (cfg.persistence !== false && !heartbeat.hasPersistence) {
     heartbeat.configurePersistence({ stateDir });
   }
 
@@ -376,18 +418,45 @@ export function createOperatorDaemon(
 
   let cronJob: CronJob | null = null;
   let started = false;
+  let draining = false;
+  let pending = 0; // ticks queued or executing (in-process single-flight counter)
+  let runChain: Promise<unknown> = Promise.resolve();
+
+  // Bounded, awaited hook invocation — a sink hook must never crash the tick nor
+  // leak an unhandled rejection. Awaiting it means the tick isn't "done" until
+  // the sink has handled the event (e.g. delivered the answer), so single-flight
+  // covers delivery, not just inference.
+  async function awaitHook<T>(name: string, fn: ((e: T) => unknown) | undefined, event: T): Promise<void> {
+    if (!fn) return;
+    try {
+      await fn(event);
+    } catch (err) {
+      console.error(`[operator-daemon] ${name} hook failed for ${jobId}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Full-tick single-flight: cron + manual ticks serialize through one chain, so
+  // only ONE tick (inference + tools + awaited hooks + ledger + delivery) runs at
+  // a time. Manual ticks (tickOnce) always enqueue FIFO; cron fires SKIP when a
+  // tick is already pending (no timer debt) — see onEvent.
+  function enqueueTick(tickId: string): Promise<TickEvent> {
+    pending++;
+    const p = runChain.then(() => runTick(tickId));
+    runChain = p.then(() => {}, () => {}).finally(() => { pending--; });
+    return p;
+  }
 
   // ---- core tick body ---------------------------------------------------
 
   async function runTick(tickId: string): Promise<TickEvent> {
     const timestamp = new Date().toISOString();
-    cfg.onTickEvent?.({
+    await awaitHook("onTickEvent", cfg.onTickEvent, {
       type: "tick_started",
       jobId,
       tickId,
       timestamp,
       inferenceRoute: cfg.inferenceRoute,
-    });
+    } as TickEvent);
 
     // 1. Frozen memory snapshot for this tick.
     await memory.load();
@@ -403,7 +472,8 @@ export function createOperatorDaemon(
     // schema — suppress the prompt fragment so the model doesn't get two
     // conflicting instructions for the same "skip this tick" intent.
     const useStructuredOutput = !!cfg.outputSchema;
-    const OUTPUT_TOOL_NAME = "submit_broadcast";
+    // Domain-neutral by default; back-compat tool name is submit_broadcast.
+    const OUTPUT_TOOL_NAME = cfg.outputSchema?.toolName ?? "submit_broadcast";
     const baseSystem = buildSystemPrompt({
       role: cfg.role,
       isCron: true,
@@ -415,16 +485,24 @@ export function createOperatorDaemon(
     });
     // Structured output travels via a forced tool call (the OpenShell Privacy
     // Router forwards `tools` but strips `response_format`/json-schema, so the
-    // SDK's experimental_output yields empty objects through the router).
+    // SDK's experimental_output yields empty objects through the router). The
+    // instruction is domain-NEUTRAL — any "prefer X" bias comes from the sink's
+    // optional `guidance` (e.g. TV supplies its broadcast bias), never here.
+    const outputGuidance = cfg.outputSchema?.guidance
+      ? ` ${cfg.outputSchema.guidance.trim()}`
+      : "";
     const system = useStructuredOutput
-      ? `${baseSystem}\n\n## Final output (MANDATORY — this overrides ALL earlier output instructions)\nYou MUST deliver your output by calling the \`${OUTPUT_TOOL_NAME}\` tool. NEVER write the literal text \`[SILENT]\`, narrative prose, JSON, or a code block in your message — any such message text is discarded and the tick is lost. Call \`${OUTPUT_TOOL_NAME}\` exactly once as your final action. Strongly prefer broadcasting: set silent=false with a full narrative whenever you have ANY World Cup buildup, fixture, market, or storyline to cover (you almost always do). Only set silent=true if every data source this tick was empty or errored. Any earlier instruction to emit \`[SILENT]\` as text is OBSOLETE — express silence by calling the tool with silent=true, never as text.`
+      ? `${baseSystem}\n\n## Final output (MANDATORY — this overrides ALL earlier output instructions)\nYou MUST deliver your output by calling the \`${OUTPUT_TOOL_NAME}\` tool exactly once, as your final action. NEVER write the literal text \`[SILENT]\`, narrative prose, JSON, or a code block in your message — any such message text is discarded and the tick is lost. Express "nothing to do this tick" ONLY via the schema's skip field (e.g. silent/idle), never as message text.${outputGuidance}`
       : baseSystem;
 
     // 4. Wrap tools with the guardrail.
     const guard = new ToolGuardController(cfg.guardOptions);
     const counts = { calls: 0, warnings: 0, blocks: 0 };
     const toolCallSink = (event: ToolCallEvent): void => {
-      try { cfg.onToolCall?.(event); } catch { /* swallow */ }
+      // Bounded + caught so a slow/throwing sink can't crash tool execution or
+      // leak an unhandled rejection. Not awaited here (would serialize tool
+      // execution behind telemetry); the tick's onTickEvent is the awaited seam.
+      void awaitHook("onToolCall", cfg.onToolCall, event);
     };
     // Daemon-owned tools: memory writeback (add/replace/remove_lesson)
     // tied to THIS tick's live EditorialMemory instance. Writes hit disk
@@ -470,6 +548,7 @@ export function createOperatorDaemon(
     //     present) for backwards-compat with text-consuming sinks.
     let text = "";
     let structuredOutput: unknown;
+    let structuredKind: "idle" | "answer" | undefined;
     let failureReason: string | undefined;
     // Output tool: a declarative (execute-less) tool whose inputSchema is the
     // broadcast schema. Added *after* the guard wrap so it bypasses the
@@ -481,7 +560,7 @@ export function createOperatorDaemon(
           [OUTPUT_TOOL_NAME]: {
             description:
               cfg.outputSchema!.description ??
-              "Submit the final broadcast for this tick. Call exactly once, as your last action, with all required fields. Set silent=true to skip airing.",
+              "Submit your result for this tick. Call exactly once, as your last action, with all required fields. Use the schema's skip field (e.g. silent/idle) to do nothing this tick.",
             inputSchema: jsonSchema(cfg.outputSchema!.schema as object),
           } as Tool,
         }
@@ -530,11 +609,10 @@ export function createOperatorDaemon(
           : stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
       });
       if (useStructuredOutput) {
-        // Structured output arrives as the input of the forced
-        // `submit_broadcast` tool call (the Privacy Router strips
-        // `response_format`, so `experimental_output` would come back empty).
-        // If the model never called the tool, treat the tick as silent rather
-        // than failing it.
+        // Structured output arrives as the input of the forced output tool call
+        // (the Privacy Router strips `response_format`, so `experimental_output`
+        // would come back empty). A structured tick that never called the tool
+        // is a FAILURE, not a silent success — surface it.
         const toolCalls = (result.toolCalls ?? []) as Array<{
           toolName: string;
           input?: unknown;
@@ -542,19 +620,34 @@ export function createOperatorDaemon(
         const outCall = [...toolCalls]
           .reverse()
           .find((c) => c.toolName === OUTPUT_TOOL_NAME);
-        structuredOutput = outCall ? outCall.input : undefined;
-        const narrative =
-          structuredOutput &&
-          typeof structuredOutput === "object" &&
-          typeof (structuredOutput as { narrative?: unknown }).narrative ===
-            "string"
-            ? ((structuredOutput as { narrative: string }).narrative).trim()
-            : "";
-        // text is the synthesised narrative (for back-compat) when the
-        // object has one; otherwise empty.
-        text = narrative;
+        if (!outCall) {
+          failureReason = `model did not call the ${OUTPUT_TOOL_NAME} output tool`;
+        } else {
+          structuredOutput = outCall.input;
+          // Classify (idle vs answer) + extract text via the sink's contract,
+          // falling back to the legacy `silent` boolean / `narrative` field.
+          try {
+            structuredKind = cfg.outputSchema?.classify
+              ? cfg.outputSchema.classify(structuredOutput)
+              : (structuredOutput as { silent?: unknown })?.silent === true
+                ? "idle"
+                : "answer";
+          } catch (e) {
+            failureReason = `output classifier threw: ${e instanceof Error ? e.message : e}`;
+          }
+          try {
+            const extracted = cfg.outputSchema?.extractText
+              ? cfg.outputSchema.extractText(structuredOutput)
+              : typeof (structuredOutput as { narrative?: unknown })?.narrative === "string"
+                ? (structuredOutput as { narrative: string }).narrative
+                : undefined;
+            text = stripThink(extracted ?? "");
+          } catch (e) {
+            failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
+          }
+        }
       } else {
-        text = (result.text ?? "").trim();
+        text = stripThink(result.text ?? "");
       }
     } catch (err) {
       // AI_APICallError shapes its message as "Unknown" when the upstream
@@ -752,7 +845,7 @@ export function createOperatorDaemon(
           id: `decision-${tickId}-publish`,
           timestamp: endedAt,
           action: "publish",
-          reason: text || "Published broadcast block",
+          reason: text || "Published result",
           agentId: jobId,
         });
       }
@@ -866,7 +959,7 @@ export function createOperatorDaemon(
         // safetyValidation carries the original output and validator error.
         ...(safetyValidation !== undefined ? { safetyValidation } : {}),
       };
-      cfg.onTickEvent?.(event);
+      await awaitHook("onTickEvent", cfg.onTickEvent, event);
       const ledgerSync = await recordLedger(failureReason).catch(() => undefined);
       if (ledgerSync) event.ledgerSync = ledgerSync;
       return event;
@@ -885,8 +978,9 @@ export function createOperatorDaemon(
     //   - free-text mode: keep the [SILENT] sentinel match on text.
     let silent: boolean;
     if (useStructuredOutput) {
-      const obj = structuredOutput as { silent?: unknown } | undefined;
-      silent = !obj || obj.silent === true;
+      // structuredKind is set by the classifier above (idle → silent). A
+      // missing output tool already routed to tick_failed before this point.
+      silent = structuredKind !== "answer";
     } else {
       silent = LastTickBrief.isSilent(text);
     }
@@ -905,7 +999,7 @@ export function createOperatorDaemon(
       inferenceRoute: cfg.inferenceRoute,
       ...(safetyValidation !== undefined ? { safetyValidation } : {}),
     };
-    cfg.onTickEvent?.(event);
+    await awaitHook("onTickEvent", cfg.onTickEvent, event);
     const ledgerSync = await recordLedger(undefined, silent).catch(() => undefined);
     if (ledgerSync) event.ledgerSync = ledgerSync;
     return event;
@@ -914,30 +1008,42 @@ export function createOperatorDaemon(
   // ---- heartbeat event routing -----------------------------------------
 
   const onEvent = (event: HeartbeatEvent): void => {
-    cfg.onHeartbeatEvent?.(event);
+    // Heartbeat dispatch is synchronous; bound the hook so it can't leak an
+    // unhandled rejection, but don't block the heartbeat on it.
+    void awaitHook("onHeartbeatEvent", cfg.onHeartbeatEvent, event);
     if (event.cronJobId !== jobId) return;
 
     if (event.type === "cron_skipped") {
       const tickId = newTickId();
-      const skip: TickEvent = {
+      void awaitHook("onTickEvent", cfg.onTickEvent, {
         type: "tick_skipped",
         jobId,
         tickId,
         reason: event.result ?? "wake gate denied",
         timestamp: event.timestamp,
         inferenceRoute: cfg.inferenceRoute,
-      };
-      cfg.onTickEvent?.(skip);
+      } as TickEvent);
       return;
     }
 
     if (event.type === "cron_fired") {
-      const tickId = newTickId();
-      runTick(tickId).catch((err) => {
+      if (draining) return; // stop admission during shutdown
+      if (pending > 0) {
+        // A tick is still running — SKIP this fire (no timer debt / no overlap).
+        const tickId = newTickId();
+        void awaitHook("onTickEvent", cfg.onTickEvent, {
+          type: "tick_skipped",
+          jobId,
+          tickId,
+          reason: "previous tick still running",
+          timestamp: event.timestamp,
+          inferenceRoute: cfg.inferenceRoute,
+        } as TickEvent);
+        return;
+      }
+      enqueueTick(newTickId()).catch((err) => {
         console.error(
-          `[operator-daemon] tick crashed for ${jobId}: ${
-            err instanceof Error ? err.message : err
-          }`,
+          `[operator-daemon] tick crashed for ${jobId}: ${err instanceof Error ? err.message : err}`,
         );
       });
     }
@@ -989,7 +1095,18 @@ export function createOperatorDaemon(
       if (heartbeat.hasPersistence) {
         await heartbeat.markJobStart(jobId, { intervalMs }).catch(() => {});
       }
-      return runTick(newTickId());
+      // Serialize through the same single-flight chain as cron ticks, so
+      // concurrent manual ticks run FIFO and never overlap a cron tick.
+      return enqueueTick(newTickId());
+    },
+    async drain(): Promise<void> {
+      // Graceful shutdown: stop admitting new work, then wait for the active +
+      // queued ticks (incl. awaited sink delivery) to finish. Starts no new
+      // inference. MCP disconnect is the caller's responsibility (operate.ts).
+      draining = true;
+      heartbeat.stop();
+      started = false;
+      await runChain.catch(() => {});
     },
   };
 }

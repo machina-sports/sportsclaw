@@ -59,6 +59,60 @@ import {
   TOOL_DISCIPLINE_FRAGMENT,
 } from "./prompts.js";
 import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
+import { invokeModelRole } from "./inference/model-role-router.js";
+
+// Cheap-wake probe budget: a sink's pollWake must be fast I/O. If it hangs or
+// throws we fail closed (skip the tick — never fall through to inference).
+const WAKE_POLL_TIMEOUT_MS = 5_000;
+// Governed second-inference budget (e.g. the Vault skeptic evaluator).
+const MODEL_ROLE_TIMEOUT_MS = 25_000;
+
+/** Governed wrapper around invokeModelRole exposed via SinkContext, so sinks run
+ *  a second inference WITHOUT importing /app/dist internals. Bounded + fail-closed:
+ *  only `completed` carries an output; timeout → timed_out, throw → failed. */
+function makeRunModelRole(): NonNullable<SinkContext["runModelRole"]> {
+  const invoke = invokeModelRole as (a: {
+    role: string;
+    input: unknown;
+    source: string;
+    config?: unknown;
+  }) => Promise<{ output?: unknown }>;
+  return async ({ role = "brain", input, source, config, timeoutMs }) => {
+    const started = Date.now();
+    try {
+      const res = await Promise.race([
+        invoke({ role, input, source: source ?? "sink", config }),
+        new Promise<never>((_r, rej) =>
+          setTimeout(() => rej(new Error("model role timeout")), timeoutMs ?? MODEL_ROLE_TIMEOUT_MS),
+        ),
+      ]);
+      return { status: "completed", output: res.output, latencyMs: Date.now() - started };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { status: /timeout/i.test(msg) ? "timed_out" : "failed", error: msg, latencyMs: Date.now() - started };
+    }
+  };
+}
+
+/** Adapt a sink's optional pollWake into the daemon's wake gate, with a bounded
+ *  timeout + fail-closed behaviour. Returns undefined when the sink has none. */
+function makeWakeGate(
+  sink: { pollWake?: (args: { cfg: OperatorJobConfig }) => unknown },
+  cfg: OperatorJobConfig,
+): (() => Promise<{ wake: boolean; context?: string; reason?: string }>) | undefined {
+  if (!sink.pollWake) return undefined;
+  return async () => {
+    try {
+      const result = (await Promise.race([
+        Promise.resolve(sink.pollWake!({ cfg })),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error("pollWake timeout")), WAKE_POLL_TIMEOUT_MS)),
+      ])) as { wake: boolean; context?: string; reason?: string };
+      return result && typeof result.wake === "boolean" ? result : { wake: false, reason: "pollWake returned no verdict" };
+    } catch (err) {
+      return { wake: false, reason: err instanceof Error ? err.message : "pollWake error" };
+    }
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public entry — wired into src/index.ts main dispatcher
@@ -756,6 +810,7 @@ async function runOnce(jobId: string): Promise<void> {
       intervalMs: cfg.intervalMs,
       mcpManager: tools.mcpManager,
       cfg,
+      runModelRole: makeRunModelRole(),
     };
     const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
@@ -770,12 +825,15 @@ async function runOnce(jobId: string): Promise<void> {
       maxOutputTokens: cfg.maxOutputTokens,
       inferenceTimeoutMs: cfg.inferenceTimeoutMs,
       maxSteps: cfg.maxSteps,
+      tickPrompt: cfg.tickPrompt,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
+      persistence: cfg.persistence,
       inferenceRoute: inputs.inferenceRoute,
       broadcastSafety: cfg.broadcastSafety,
       mcpManager: tools.mcpManager,
       ...(outputSchema ? { outputSchema } : {}),
+      ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -793,13 +851,12 @@ async function runOnce(jobId: string): Promise<void> {
     });
     const event = await daemon.tickOnce();
     console.log(JSON.stringify(event, null, 2));
-    // Drain: onTickEvent / onToolCall handlers may have fire-and-forget POSTs
-    // (e.g. broadcast sink's tail-server). Give them a short window to flush
-    // before process.exit kills any pending fetches.
-    if (sink.onTickEvent || sink.onToolCall) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-    }
-    process.exit(exitCodeFor(event));
+    // onTickEvent is awaited inside the tick now, so the sink has finished
+    // delivering by the time tickOnce() resolves — no fixed 1.5s flush needed.
+    // Drain any queued work, set the exit code, and let the finally disconnect
+    // MCP so the process exits cleanly when the loop empties (no abrupt exit).
+    await daemon.drain();
+    process.exitCode = exitCodeFor(event);
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
   }
@@ -844,6 +901,7 @@ async function runForeground(jobId: string): Promise<void> {
     intervalMs: cfg.intervalMs,
     mcpManager: tools.mcpManager,
     cfg,
+    runModelRole: makeRunModelRole(),
   };
   const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
@@ -858,12 +916,15 @@ async function runForeground(jobId: string): Promise<void> {
     maxOutputTokens: cfg.maxOutputTokens,
     inferenceTimeoutMs: cfg.inferenceTimeoutMs,
     maxSteps: cfg.maxSteps,
+    tickPrompt: cfg.tickPrompt,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
+    persistence: cfg.persistence,
     inferenceRoute: inputs.inferenceRoute,
     broadcastSafety: cfg.broadcastSafety,
     mcpManager: tools.mcpManager,
     ...(outputSchema ? { outputSchema } : {}),
+    ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
@@ -885,6 +946,7 @@ async function runForeground(jobId: string): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+<<<<<<< HEAD
     console.error(`[operate] received ${signal}, shutting down`);
     stopController.abort();
     daemon.stop();
@@ -895,6 +957,16 @@ async function runForeground(jobId: string): Promise<void> {
       } catch {
         // Don't block exit on a final-brief failure.
       }
+=======
+    console.error(`[operate] received ${signal}, draining`);
+    // Graceful drain: stop admitting ticks and wait for the active one to finish
+    // (incl. awaited sink delivery). No handoff tickOnce() — that would start a
+    // NEW inference at shutdown and could overlap the in-flight tick.
+    try {
+      await daemon.drain();
+    } catch {
+      // Don't block exit on a drain failure.
+>>>>>>> main
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);
@@ -929,8 +1001,21 @@ async function runForeground(jobId: string): Promise<void> {
   }
 
   daemon.start();
-  // Keep the process alive without unref'd heartbeat timers exiting early.
-  await new Promise<void>(() => {});
+  // Keep the event loop alive with a REF'd handle so the (unref'd) heartbeat +
+  // cron timers keep firing. A bare pending promise does not hold libuv open;
+  // without any ref'd handle, a daemon that connects no MCP servers (e.g. a
+  // single-purpose operator like the Athlete Vault) goes idle after the first
+  // tick's inference settles and the unref'd recurring cron stops advancing —
+  // the daemon "fires once, then silently never ticks again". A daemon that
+  // happens to hold ref'd handles (MCP stdio/SSE sockets, like the broadcast
+  // operator) masks the bug. This ref'd keep-alive makes foreground `operate`
+  // tick reliably regardless of whether any MCP server is connected.
+  const keepAlive = setInterval(() => {}, 1 << 30); // ref'd; ~12.4 days, no-op
+  try {
+    await new Promise<void>(() => {});
+  } finally {
+    clearInterval(keepAlive);
+  }
 }
 
 // ---------------------------------------------------------------------------

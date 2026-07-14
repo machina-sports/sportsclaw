@@ -185,21 +185,15 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "maxSteps"));
   });
 
-  it("rejects inferenceTimeoutMs >= intervalMs", () => {
+  it("rejects inferenceTimeoutMs >= intervalMs in default (fixed) mode", () => {
+    // Reconciled semantics: fixed cadence keeps the conservative invariant (a
+    // longer watchdog just skips every other fire under single-flight — a
+    // config smell). Use scheduleMode:"sink-polled" for fast-poll queues where
+    // inference legitimately outlasts the poll cadence.
     const r = validateOperatorJobConfig({
       ...base,
-      intervalMs: 100_000,
-      inferenceTimeoutMs: 120_000,
-    });
-    assert.strictEqual(r.valid, false);
-    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
-  });
-
-  it("rejects inferenceTimeoutMs equal to intervalMs", () => {
-    const r = validateOperatorJobConfig({
-      ...base,
-      intervalMs: 100_000,
-      inferenceTimeoutMs: 100_000,
+      intervalMs: 1_000,
+      inferenceTimeoutMs: 60_000,
     });
     assert.strictEqual(r.valid, false);
     assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
@@ -339,6 +333,22 @@ describe("validateOperatorJobConfig — optional fields", () => {
       const r = validateOperatorJobConfig({ ...base, enableMemoryTools: bad });
       assert.strictEqual(r.valid, false, `enableMemoryTools=${JSON.stringify(bad)}`);
       assert.ok(r.issues.find((i) => i.field === "enableMemoryTools"));
+    }
+  });
+
+  it("accepts persistence as boolean (true and false)", () => {
+    for (const v of [true, false]) {
+      const r = validateOperatorJobConfig({ ...base, persistence: v });
+      assert.strictEqual(r.valid, true, `persistence=${v}`);
+      assert.strictEqual(r.config.persistence, v);
+    }
+  });
+
+  it("rejects a non-boolean persistence", () => {
+    for (const bad of ["false", 1, 0, null, [], {}]) {
+      const r = validateOperatorJobConfig({ ...base, persistence: bad });
+      assert.strictEqual(r.valid, false, `persistence=${JSON.stringify(bad)}`);
+      assert.ok(r.issues.find((i) => i.field === "persistence"));
     }
   });
 

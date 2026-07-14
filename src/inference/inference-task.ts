@@ -54,7 +54,9 @@ export interface InferenceTrace {
   endedAt: string;
   latencyMs: number;
   route: InferenceRoute;
-  status: "completed" | "failed";
+  /** Governed statuses: only `completed` may be parsed as a usable result;
+   * `timed_out` / `cancelled` / `failed` must fail closed (never a verdict). */
+  status: "completed" | "failed" | "timed_out" | "cancelled";
   error?: string;
 }
 
@@ -141,8 +143,8 @@ export function validateInferenceTrace(trace: unknown): ValidationResult {
     return { ok: false, error: "Trace route must be openshell, nim, or mock." };
   }
 
-  if (t.status !== "completed" && t.status !== "failed") {
-    return { ok: false, error: "Trace status must be completed or failed." };
+  if (!["completed", "failed", "timed_out", "cancelled"].includes(t.status as string)) {
+    return { ok: false, error: "Trace status must be completed, failed, timed_out, or cancelled." };
   }
 
   return { ok: true };

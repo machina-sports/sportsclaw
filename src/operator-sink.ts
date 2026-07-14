@@ -63,6 +63,26 @@ export interface SinkContext {
   mcpManager?: McpManager;
   /** Full operator job config, for sinks reading domain-specific fields. */
   cfg: OperatorJobConfig;
+  /**
+   * Governed model-role inference (PR4). A bounded wrapper around the engine's
+   * `invokeModelRole`, provided so sinks (e.g. the Vault skeptic evaluator) run
+   * a second governed inference WITHOUT importing `/app/dist/...` internals.
+   * Only `status:"completed"` may be parsed as a result; `timed_out` / `failed`
+   * / `cancelled` MUST fail closed (never approve). The caller supplies the same
+   * role/config it would pass to invokeModelRole.
+   */
+  runModelRole?: (args: {
+    role?: string;
+    input: unknown;
+    source?: string;
+    config?: unknown;
+    timeoutMs?: number;
+  }) => Promise<{
+    status: "completed" | "timed_out" | "failed" | "cancelled";
+    output?: unknown;
+    error?: string;
+    latencyMs?: number;
+  }>;
 }
 
 /**
@@ -162,8 +182,34 @@ export interface OperatorSinkPlugin {
    * that some providers expose to the model (e.g. via the tool/schema name).
    * Use them; they materially improve adherence on smaller models.
    */
+  /**
+   * Cheap wake probe (PR3): runs BEFORE any model call to decide whether this
+   * tick has work. Return `{ wake: false }` to skip the tick entirely — zero
+   * model calls. MUST be cheap I/O only (no inference). Wired to the daemon's
+   * wake gate; a throw or timeout fails closed (skip). The actual claim /
+   * preparation happens in `composeTickContext` inside tick single-flight, so a
+   * `pollWake` that only peeks (non-mutating) is safe even when the daemon is busy.
+   */
+  pollWake?(args: { cfg: OperatorJobConfig }):
+    | Promise<{ wake: boolean; context?: string; reason?: string }>
+    | { wake: boolean; context?: string; reason?: string };
+
   getOutputSchema?(args: { cfg: OperatorJobConfig }):
-    | { schema: unknown; name?: string; description?: string }
+    | {
+        schema: unknown;
+        /** Schema name hint (legacy meaning; not the tool name). */
+        name?: string;
+        /** Forced output tool name. Default "submit_broadcast" (back-compat);
+         * generic sinks set "submit_result", the Vault "submit_vault_answer". */
+        toolName?: string;
+        description?: string;
+        /** Domain guidance appended to the neutral output instruction. */
+        guidance?: string;
+        /** Classify the submitted output (default: `silent===true` → idle). */
+        classify?: (output: unknown) => "idle" | "answer";
+        /** Extract the human-facing text (default: `.narrative`). */
+        extractText?: (output: unknown) => string | undefined;
+      }
     | undefined;
 
   /**
