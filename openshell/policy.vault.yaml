@@ -14,6 +14,12 @@
 #   8103  pod MCP (document/memory tools; SSE transport)
 #   8193  vault tail bus (events)
 #
+# This policy is deliberately L7-scoped to the routes SportsClaw calls:
+#   POST /document/retrieve and /document on client-api
+#   GET /sse + POST /messages/ for FastMCP's SSE transport
+#   GET /events + POST /ingest on the tail bus
+# Any other method or path on those local ports remains denied.
+#
 # No public sports-data egress in this profile: the pod's ingestion
 # workflows own external data, inside the trusted plane.
 
@@ -46,12 +52,24 @@ network_policies:
         port: 8193
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: GET
+              path: /events
+          - allow:
+              method: POST
+              path: /ingest
       - host: host.docker.internal
         port: 8193
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: GET
+              path: /events
+          - allow:
+              method: POST
+              path: /ingest
     binaries:
       - path: /usr/local/bin/node
 
@@ -62,12 +80,24 @@ network_policies:
         port: 5103
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: POST
+              path: /document/retrieve
+          - allow:
+              method: POST
+              path: /document
       - host: host.docker.internal
         port: 5103
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: POST
+              path: /document/retrieve
+          - allow:
+              method: POST
+              path: /document
     binaries:
       - path: /usr/local/bin/node
 
@@ -76,13 +106,39 @@ network_policies:
     endpoints:
       - host: 172.17.0.1
         port: 8103
+        path: /sse
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: GET
+              path: /sse
+      - host: 172.17.0.1
+        port: 8103
+        path: /messages/
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: POST
+              path: /messages/
       - host: host.docker.internal
         port: 8103
+        path: /sse
         protocol: rest
         enforcement: enforce
-        access: full
+        rules:
+          - allow:
+              method: GET
+              path: /sse
+      - host: host.docker.internal
+        port: 8103
+        path: /messages/
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: POST
+              path: /messages/
     binaries:
       - path: /usr/local/bin/node
