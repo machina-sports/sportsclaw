@@ -60,6 +60,30 @@ import {
 } from "./prompts.js";
 import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
 
+// Cheap-wake probe budget: a sink's pollWake must be fast I/O. If it hangs or
+// throws we fail closed (skip the tick — never fall through to inference).
+const WAKE_POLL_TIMEOUT_MS = 5_000;
+
+/** Adapt a sink's optional pollWake into the daemon's wake gate, with a bounded
+ *  timeout + fail-closed behaviour. Returns undefined when the sink has none. */
+function makeWakeGate(
+  sink: { pollWake?: (args: { cfg: OperatorJobConfig }) => unknown },
+  cfg: OperatorJobConfig,
+): (() => Promise<{ wake: boolean; context?: string; reason?: string }>) | undefined {
+  if (!sink.pollWake) return undefined;
+  return async () => {
+    try {
+      const result = (await Promise.race([
+        Promise.resolve(sink.pollWake!({ cfg })),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error("pollWake timeout")), WAKE_POLL_TIMEOUT_MS)),
+      ])) as { wake: boolean; context?: string; reason?: string };
+      return result && typeof result.wake === "boolean" ? result : { wake: false, reason: "pollWake returned no verdict" };
+    } catch (err) {
+      return { wake: false, reason: err instanceof Error ? err.message : "pollWake error" };
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public entry — wired into src/index.ts main dispatcher
 // ---------------------------------------------------------------------------
@@ -683,6 +707,7 @@ async function runOnce(jobId: string): Promise<void> {
       maxOutputTokens: cfg.maxOutputTokens,
       inferenceTimeoutMs: cfg.inferenceTimeoutMs,
       maxSteps: cfg.maxSteps,
+      tickPrompt: cfg.tickPrompt,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
       persistence: cfg.persistence,
@@ -690,6 +715,7 @@ async function runOnce(jobId: string): Promise<void> {
       broadcastSafety: cfg.broadcastSafety,
       mcpManager: tools.mcpManager,
       ...(outputSchema ? { outputSchema } : {}),
+      ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
@@ -765,6 +791,7 @@ async function runForeground(jobId: string): Promise<void> {
     maxOutputTokens: cfg.maxOutputTokens,
     inferenceTimeoutMs: cfg.inferenceTimeoutMs,
     maxSteps: cfg.maxSteps,
+    tickPrompt: cfg.tickPrompt,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
     persistence: cfg.persistence,
@@ -772,6 +799,7 @@ async function runForeground(jobId: string): Promise<void> {
     broadcastSafety: cfg.broadcastSafety,
     mcpManager: tools.mcpManager,
     ...(outputSchema ? { outputSchema } : {}),
+    ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),

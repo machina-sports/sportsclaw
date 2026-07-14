@@ -185,24 +185,16 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "maxSteps"));
   });
 
-  it("rejects inferenceTimeoutMs >= intervalMs", () => {
+  it("allows inferenceTimeoutMs >= intervalMs (single-flight prevents overlap)", () => {
+    // The old cross-field rejection was removed: a fast poll (1s) can coexist
+    // with a long inference timeout because the daemon serializes ticks.
     const r = validateOperatorJobConfig({
       ...base,
-      intervalMs: 100_000,
-      inferenceTimeoutMs: 120_000,
+      intervalMs: 1_000,
+      inferenceTimeoutMs: 60_000,
     });
-    assert.strictEqual(r.valid, false);
-    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
-  });
-
-  it("rejects inferenceTimeoutMs equal to intervalMs", () => {
-    const r = validateOperatorJobConfig({
-      ...base,
-      intervalMs: 100_000,
-      inferenceTimeoutMs: 100_000,
-    });
-    assert.strictEqual(r.valid, false);
-    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+    assert.strictEqual(r.valid, true);
+    assert.ok(!r.issues.find((i) => i.field === "inferenceTimeoutMs"));
   });
 
   it("rejects a non-array extraFragments", () => {

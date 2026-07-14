@@ -82,6 +82,12 @@ export interface OperatorJobConfig {
    */
   maxSteps?: number;
   /**
+   * Per-tick prompt template ({tickId} / {timestamp} substituted). Overrides
+   * the daemon's domain-neutral default. Lets a job own its tick instruction
+   * instead of inheriting a generic one.
+   */
+  tickPrompt?: string;
+  /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
    * is invoked — only the named skills' tools become available to the LLM.
@@ -373,17 +379,10 @@ export function validateOperatorJobConfig(
     }
   }
 
-  // Cross-field validation: inferenceTimeoutMs < intervalMs
-  if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
-    const timeout = raw.inferenceTimeoutMs;
-    const interval = raw.intervalMs;
-    if (typeof timeout === "number" && typeof interval === "number" && timeout >= interval) {
-      push(
-        "inferenceTimeoutMs",
-        `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
-      );
-    }
-  }
+  // NOTE: the old `inferenceTimeoutMs < intervalMs` cross-field check was
+  // removed. Tick single-flight (the daemon serializes all ticks and skips a
+  // cron fire while one is active) prevents overlap regardless of the ratio, so
+  // a fast poll interval (e.g. 1s) can coexist with a long inference timeout.
 
   // extraFragments
   if (raw.extraFragments !== undefined) {
@@ -538,6 +537,10 @@ export function validateOperatorJobConfig(
     }
   }
 
+  if (raw.tickPrompt !== undefined && typeof raw.tickPrompt !== "string") {
+    push("tickPrompt", "must be a string");
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -549,6 +552,7 @@ export function validateOperatorJobConfig(
       jobId: raw.jobId as string,
       label: raw.label as string | undefined,
       intervalMs: raw.intervalMs as number,
+      tickPrompt: raw.tickPrompt as string | undefined,
       persona: raw.persona as string | undefined,
       personaText: raw.personaText as string | undefined,
       model: raw.model as string | undefined,
