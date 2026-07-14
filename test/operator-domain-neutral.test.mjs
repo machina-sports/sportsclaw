@@ -83,6 +83,18 @@ describe("domain-neutral output contract (PR2)", () => {
     assert.match(gen.calls[0].system, /submit_result/);
   });
 
+  it("strips <think> reasoning from the published text (never leaks)", async () => {
+    const gen = genToolCall("submit_broadcast", {
+      silent: false,
+      narrative: "<think>secret chain of thought</think>Cleared for full contact.",
+    });
+    const d = createOperatorDaemon(base({ generateTextImpl: gen, outputSchema: { schema: minimalSchema } }));
+    const ev = await d.tickOnce();
+    assert.equal(ev.type, "tick_published");
+    assert.doesNotMatch(ev.text, /<think>|secret chain of thought/i);
+    assert.match(ev.text, /Cleared for full contact\./);
+  });
+
   it("forwards a custom tickPrompt template", async () => {
     const gen = genToolCall("submit_broadcast", { silent: false, narrative: "x" });
     const d = createOperatorDaemon(base({
