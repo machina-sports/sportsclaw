@@ -32,6 +32,20 @@ export interface OperatorJobConfig {
   label?: string;
   /** Tick interval in ms. Must be > 0. */
   intervalMs: number;
+  /**
+   * Scheduling strategy for the foreground operator.
+   *
+   * - `fixed` (default): heartbeat starts a tick every `intervalMs`; the
+   *   inference watchdog must remain shorter than the interval.
+   * - `sink-polled`: the resolved sink polls for work every `intervalMs` and
+   *   each accepted tick is awaited to completion before polling again. This
+   *   is intended for interactive queues where pickup must be fast while an
+   *   individual inference may take longer than the poll cadence.
+   *
+   * `sink-polled` requires the sink to implement `pollForWork`; the launcher
+   * validates that runtime contract before starting the loop.
+   */
+  scheduleMode?: "fixed" | "sink-polled";
   /** EITHER an MCP-resolvable prompt name (resolved at runtime via get_prompt_by_name)... */
   persona?: string;
   /** ...OR inline persona text. One of these two is required. */
@@ -361,11 +375,30 @@ export function validateOperatorJobConfig(
     }
   }
 
-  // Cross-field validation: inferenceTimeoutMs < intervalMs
+  // scheduleMode
+  const scheduleMode = raw.scheduleMode ?? "fixed";
+  if (scheduleMode !== "fixed" && scheduleMode !== "sink-polled") {
+    push(
+      "scheduleMode",
+      `must be one of fixed, sink-polled (got ${JSON.stringify(raw.scheduleMode)})`,
+    );
+  }
+  if (scheduleMode === "sink-polled" && !raw.sink) {
+    push("scheduleMode", "sink-polled mode requires a configured sink");
+  }
+
+  // Fixed cadence relies on the watchdog finishing before the next timer fire.
+  // Sink-polled mode is serialized by the foreground loop instead, so its
+  // inference budget may legitimately exceed the (idle) poll cadence.
   if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
     const timeout = raw.inferenceTimeoutMs;
     const interval = raw.intervalMs;
-    if (typeof timeout === "number" && typeof interval === "number" && timeout >= interval) {
+    if (
+      scheduleMode === "fixed" &&
+      typeof timeout === "number" &&
+      typeof interval === "number" &&
+      timeout >= interval
+    ) {
       push(
         "inferenceTimeoutMs",
         `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
@@ -532,6 +565,7 @@ export function validateOperatorJobConfig(
       jobId: raw.jobId as string,
       label: raw.label as string | undefined,
       intervalMs: raw.intervalMs as number,
+      scheduleMode: scheduleMode as OperatorJobConfig["scheduleMode"],
       persona: raw.persona as string | undefined,
       personaText: raw.personaText as string | undefined,
       model: raw.model as string | undefined,

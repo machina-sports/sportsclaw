@@ -74,6 +74,82 @@ interface ParsedFlags {
   unknown: string[];
 }
 
+export interface SinkPolledLoopOptions {
+  intervalMs: number;
+  pollForWork: () => Promise<boolean> | boolean;
+  tickOnce: () => Promise<unknown>;
+  signal?: AbortSignal;
+  /** Test seam; production uses an abort-aware timer. */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  onError?: (phase: "poll" | "tick", error: unknown) => void;
+}
+
+function waitFor(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Close the small race between the initial aborted check and listener
+    // registration; an abort in that window should not wait a full cadence.
+    if (signal?.aborted) done();
+  });
+}
+
+/**
+ * Serial work-driven scheduler. Polling is cheap and frequent; model ticks are
+ * awaited, so a 70-second inference can never overlap another tick even when
+ * the queue is checked every five seconds.
+ */
+export async function runSinkPolledLoop(opts: SinkPolledLoopOptions): Promise<void> {
+  if (!Number.isFinite(opts.intervalMs) || opts.intervalMs <= 0) {
+    throw new Error("sink-polled intervalMs must be > 0");
+  }
+  const wait = opts.wait ?? waitFor;
+  while (!opts.signal?.aborted) {
+    let hasWork = false;
+    try {
+      hasWork = await opts.pollForWork();
+    } catch (err) {
+      opts.onError?.("poll", err);
+    }
+
+    if (opts.signal?.aborted) break;
+    if (hasWork) {
+      try {
+        await opts.tickOnce();
+      } catch (err) {
+        opts.onError?.("tick", err);
+      }
+    }
+
+    if (opts.signal?.aborted) break;
+    await wait(opts.intervalMs, opts.signal);
+  }
+}
+
+export function requireSinkPollForWork(
+  cfg: OperatorJobConfig,
+  sink: OperatorSinkPlugin,
+  ctx: SinkContext,
+): () => Promise<boolean> {
+  if (cfg.scheduleMode !== "sink-polled") {
+    throw new Error("requireSinkPollForWork called for a non sink-polled job");
+  }
+  if (typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
+  return async () => (await sink.pollForWork!(ctx)) === true;
+}
+
 function parseFlags(args: string[]): ParsedFlags {
   const flags: ParsedFlags = {
     list: false,
@@ -739,6 +815,12 @@ function exitCodeFor(event: TickEvent): number {
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
   const sink = withOperatorSync(await resolveSink(cfg), cfg);
+  if (cfg.scheduleMode === "sink-polled" && typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
   if (inputs.openshell?.enabled) {
@@ -787,17 +869,21 @@ async function runForeground(jobId: string): Promise<void> {
       : undefined,
   });
 
+  const stopController = new AbortController();
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error(`[operate] received ${signal}, shutting down`);
+    stopController.abort();
     daemon.stop();
-    // Best-effort final brief so the next start sees an explicit handoff.
-    try {
-      await daemon.tickOnce();
-    } catch {
-      // Don't block exit on a final-brief failure.
+    if (cfg.scheduleMode !== "sink-polled") {
+      // Best-effort final brief so the next start sees an explicit handoff.
+      try {
+        await daemon.tickOnce();
+      } catch {
+        // Don't block exit on a final-brief failure.
+      }
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);
@@ -809,9 +895,28 @@ async function runForeground(jobId: string): Promise<void> {
   const inferenceTag = inputs.openshell?.enabled
     ? ` inference=openshell(${inputs.openshell.baseUrl})`
     : "";
+  const schedulingTag = cfg.scheduleMode === "sink-polled" ? " schedule=sink-polled" : "";
   console.error(
-    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}`,
+    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}${schedulingTag}`,
   );
+  if (cfg.scheduleMode === "sink-polled") {
+    const pollForWork = requireSinkPollForWork(cfg, sink, ctx);
+    await runSinkPolledLoop({
+      intervalMs: cfg.intervalMs,
+      pollForWork,
+      tickOnce: () => daemon.tickOnce(),
+      signal: stopController.signal,
+      onError: (phase, err) => {
+        console.error(
+          `[operate] sink-polled ${phase} failed for ${cfg.jobId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      },
+    });
+    return;
+  }
+
   daemon.start();
   // Keep the process alive without unref'd heartbeat timers exiting early.
   await new Promise<void>(() => {});

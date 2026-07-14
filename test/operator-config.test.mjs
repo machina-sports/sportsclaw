@@ -205,6 +205,49 @@ describe("validateOperatorJobConfig — optional fields", () => {
     assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
   });
 
+  it("accepts a fast sink-polled cadence with a longer inference budget", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 5_000,
+      inferenceTimeoutMs: 70_000,
+      scheduleMode: "sink-polled",
+      sink: "/sandbox/vault-sink.mjs",
+    });
+    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.config.scheduleMode, "sink-polled");
+    assert.strictEqual(r.config.intervalMs, 5_000);
+    assert.strictEqual(r.config.inferenceTimeoutMs, 70_000);
+  });
+
+  it("keeps the timeout-before-interval invariant for explicit fixed mode", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      intervalMs: 5_000,
+      inferenceTimeoutMs: 70_000,
+      scheduleMode: "fixed",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "inferenceTimeoutMs"));
+  });
+
+  it("rejects sink-polled mode without a configured sink", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      scheduleMode: "sink-polled",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "scheduleMode"));
+  });
+
+  it("rejects an unknown schedule mode", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      scheduleMode: "overlap-everything",
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "scheduleMode"));
+  });
+
   it("rejects a non-array extraFragments", () => {
     const r = validateOperatorJobConfig({ ...base, extraFragments: "broadcast" });
     assert.strictEqual(r.valid, false);
