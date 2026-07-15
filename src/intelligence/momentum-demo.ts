@@ -65,6 +65,10 @@ async function main(): Promise<void> {
       `(threshold ${thresholdCents}c)`,
   );
 
+  // Phase 5 — evaluator on by default; MOMENTUM_EVALUATE=0 falls back to Phase 3.
+  const evaluate = process.env.MOMENTUM_EVALUATE !== "0";
+  const maxAttempts = envInt("MOMENTUM_MAX_ATTEMPTS", 2);
+
   const explainer = new MomentumExplainer({
     provider,
     model: process.env.SPORTSCLAW_MODEL,
@@ -73,6 +77,9 @@ async function main(): Promise<void> {
     pythonPath: process.env.PYTHON_PATH ?? "python3",
     env: { PYTHONPATH: sportsSkillsSrc },
     verbose: true,
+    evaluate,
+    evaluatorModel: process.env.SPORTSCLAW_EVALUATOR_MODEL,
+    maxAttempts,
   });
 
   explainer.start({
@@ -87,7 +94,8 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     console.log(
-      `\n[momentum-demo] stopping — ${explainer.cardsEmitted} card(s) emitted.`,
+      `\n[momentum-demo] stopping — ${explainer.cardsEmitted} card(s) passed, ` +
+        `${explainer.cardsRejected} held for review.`,
     );
     await explainer.stop();
     process.exit(0);

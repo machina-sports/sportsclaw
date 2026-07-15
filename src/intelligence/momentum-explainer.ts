@@ -45,6 +45,11 @@ import type {
   LLMProvider,
 } from "../types.js";
 import { DEFAULT_MODELS } from "../types.js";
+import {
+  resolveEvaluator,
+  evaluateCard,
+  type ResolvedEvaluator,
+} from "./momentum-evaluator.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -92,10 +97,38 @@ export interface MomentumExplainerOptions {
   pythonPath?: string;
   /** Extra env for subprocesses (e.g. PYTHONPATH=<sports-skills>/src). */
   env?: Record<string, string>;
-  /** Sink for finished cards. Default: pretty-print to stdout. */
+  /** Sink for finished (PASSED) cards. Default: pretty-print to stdout. */
   onCard?: (card: MomentumCard) => void;
   /** Verbose diagnostics (ticks seen, sub-threshold moves). Default: false. */
   verbose?: boolean;
+
+  // -- Phase 5: generator/evaluator split ----------------------------------
+  /**
+   * Run the independent evaluator on every card (default: true). Set false to
+   * fall back to the Phase 3 generate-only behavior — useful for A/B, but a
+   * loop without a real check is the "Nodding Loop" and should not ship.
+   */
+  evaluate?: boolean;
+  /** Provider for the checker model (default: anthropic). */
+  evaluatorProvider?: LLMProvider;
+  /**
+   * Checker model id. Default is the provider's skeptic and deliberately NOT
+   * the generator model (maker != checker). e.g. Claude Sonnet 4.5.
+   */
+  evaluatorModel?: string;
+  /**
+   * Max generation attempts per swing before giving up (default: 2). This is
+   * the loop-engineering "cap before you ship": a circuit breaker so one bad
+   * swing cannot spin the generator forever. On exhaustion the last rejected
+   * card is routed to `onRejected`, never emitted as good.
+   */
+  maxAttempts?: number;
+  /**
+   * Sink for cards the evaluator REJECTED after all attempts — the human
+   * checkpoint / inbox. Default: pretty-print the rejection to stderr. Keeping
+   * one door open here is what stops silent cognitive surrender.
+   */
+  onRejected?: (card: MomentumCard) => void;
 }
 
 /** A single field-level price move that cleared the threshold. */
@@ -132,18 +165,54 @@ export interface MomentumCard {
   gameLabel: string;
   gameClock: string;
   timestamp: string;
+  /**
+   * Phase 5 — the independent evaluator's verdict on this card. `null` only
+   * when evaluation is disabled (`evaluate: false`). When present, `verdict`
+   * is the fresh-model maker/checker judgment described in the loop-engineering
+   * write-up: the generator never grades its own output.
+   */
+  verdict: CardVerdict | null;
+}
+
+/**
+ * The evaluator's judgment on one card (Phase 5). Two tiers, mirroring the
+ * Stripe-Minions pattern from the loop-engineering note: deterministic gates
+ * that rule-solvable checks own, and an LLM skeptic for the semantic call.
+ */
+export interface CardVerdict {
+  /** Final decision. A card ships only on "pass". */
+  verdict: "pass" | "reject";
+  /** Human-readable reasons — always populated on "reject". */
+  reasons: string[];
+  checks: {
+    /** Deterministic: the card's cited cause play is actually in the window. */
+    playInWindow: boolean;
+    /** Deterministic: the card names a play at all (non-null cause). */
+    hasCause: boolean;
+    /** LLM skeptic: the sentence's causal claim is supported by the plays. */
+    claimSupported: boolean;
+    /** LLM skeptic: the sentence invents no facts absent from the window. */
+    noHallucination: boolean;
+    /** LLM skeptic: the stated price direction matches the play's effect. */
+    directionCoherent: boolean;
+  };
+  /** Which model rendered the semantic verdict (proves maker != checker). */
+  evaluatorModel: string;
+  /** Generation attempts spent before this verdict (1 == first try). */
+  attempts: number;
 }
 
 // ---------------------------------------------------------------------------
-// Detector — >10% swing on polymarket_home_price_cents
+// Detector — >10% swing on *home_price_cents
 // ---------------------------------------------------------------------------
 
-const PRICE_PATH_SUFFIX = "polymarket_home_price_cents";
+const PRICE_PATH_SUFFIX = "home_price_cents";
 
 /**
  * Scan a WatchEvent's structural changes for home-price moves at/above the
- * threshold. `endsWith` (not `===`) so it matches the bridge-wrapped path
- * `data.polymarket_home_price_cents` regardless of envelope nesting.
+ * threshold. `endsWith` (not `===`) so one detector serves both feeds: it
+ * matches the mock's `polymarket_home_price_cents` AND the live Kalshi feed's
+ * source-neutral `home_price_cents`, regardless of envelope nesting.
  *
  * `direction` gates the sign: "up" (default) keeps only increases; "both"
  * also emits down-swings (deliberate — real for live data, off for the mock
@@ -289,7 +358,7 @@ async function resolvePlays(
  * generator must not silently assume auth it doesn't have. The OAuth provider
  * auto-injects the required Claude Code system prefix.
  */
-function resolveExplainerModel(provider: LLMProvider, modelId: string) {
+export function resolveExplainerModel(provider: LLMProvider, modelId: string) {
   if (provider === "anthropic") {
     const auth = resolveAnthropicAuth();
     if (auth?.kind === "api_key") {
@@ -350,6 +419,8 @@ async function generateCard(
     "You are a live sports betting-market analyst writing a 'Momentum Explainer' card.",
     "Write exactly ONE sentence (max 30 words) explaining why the home team's",
     "win-probability price just moved, attributing it to the given play.",
+    "Refer to players and details exactly as they appear in the play text — do",
+    "not add first names, nicknames, or facts not present in the provided data.",
     "No preamble, no quotes, no markdown — output only the sentence.",
   ].join("\n");
 
@@ -379,6 +450,7 @@ async function generateCard(
     gameLabel: `${away} @ ${home}`,
     gameClock,
     timestamp: event.timestamp,
+    verdict: null, // stamped by the evaluator downstream
   };
 }
 
@@ -389,6 +461,10 @@ async function generateCard(
 export function printCard(card: MomentumCard): void {
   const arrow = card.swing.delta > 0 ? "▲" : "▼";
   const pts = Math.abs(card.swing.delta);
+  const v = card.verdict;
+  const stamp = v
+    ? `✅ PASS · checker ${v.evaluatorModel} · attempt ${v.attempts}`
+    : "(evaluation disabled)";
   const lines = [
     "",
     "┏━━ 📈 MOMENTUM EXPLAINER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -396,12 +472,36 @@ export function printCard(card: MomentumCard): void {
     `┃ Home win-prob ${arrow} ${card.swing.before}c → ${card.swing.after}c  (${arrow}${pts} pts)`,
     card.causePlay ? `┃ Play: ${card.causePlay.text}` : "┃ Play: (none)",
     `┃ Source: ${card.source}`,
+    `┃ Verdict: ${stamp}`,
     "┃",
     `┃ 💬 ${card.text}`,
     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     "",
   ];
   console.log(lines.join("\n"));
+}
+
+/**
+ * Default sink for cards the evaluator rejected after all attempts. Goes to
+ * stderr (the "inbox" / human checkpoint) with the reasons, so a bad card is
+ * visibly held back rather than silently shipped.
+ */
+export function printRejected(card: MomentumCard): void {
+  const v = card.verdict;
+  const reasons = v && v.reasons.length ? v.reasons : ["(no reason recorded)"];
+  const lines = [
+    "",
+    "┏━━ 🚫 MOMENTUM CARD REJECTED (held for review) ━━━━━━━━━━━━",
+    `┃ ${card.gameLabel}  ·  ${card.gameClock}`,
+    `┃ Home win-prob ${card.swing.before}c → ${card.swing.after}c`,
+    `┃ Rejected by ${v ? v.evaluatorModel : "evaluator"} after ${v ? v.attempts : "?"} attempt(s)`,
+    `┃ Draft card: ${card.text}`,
+    "┃ Reasons:",
+    ...reasons.map((r) => `┃   • ${r}`),
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "",
+  ];
+  console.error(lines.join("\n"));
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +522,13 @@ export class MomentumExplainer {
   private readonly verbose: boolean;
   private cardCount = 0;
 
+  // -- Phase 5 --
+  private readonly evaluatorEnabled: boolean;
+  private readonly evaluator: ResolvedEvaluator | null;
+  private readonly maxAttempts: number;
+  private readonly onRejected: (card: MomentumCard) => void;
+  private rejectCount = 0;
+
   constructor(opts: MomentumExplainerOptions = {}) {
     this.provider = opts.provider ?? "anthropic";
     this.modelId = opts.model ?? DEFAULT_EXPLAINER_MODELS[this.provider];
@@ -433,11 +540,26 @@ export class MomentumExplainer {
     this.onCard = opts.onCard ?? printCard;
     this.verbose = opts.verbose ?? false;
     this.model = resolveExplainerModel(this.provider, this.modelId);
+
+    this.evaluatorEnabled = opts.evaluate ?? true;
+    this.maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
+    this.onRejected = opts.onRejected ?? printRejected;
+    this.evaluator = this.evaluatorEnabled
+      ? resolveEvaluator({
+          provider: opts.evaluatorProvider ?? this.provider,
+          model: opts.evaluatorModel,
+        })
+      : null;
   }
 
-  /** Cards emitted so far (useful for time-boxed demo runs). */
+  /** PASSED cards emitted so far (useful for time-boxed demo runs). */
   get cardsEmitted(): number {
     return this.cardCount;
+  }
+
+  /** Cards rejected by the evaluator and held for review. */
+  get cardsRejected(): number {
+    return this.rejectCount;
   }
 
   /**
@@ -445,9 +567,12 @@ export class MomentumExplainer {
    * sink is forced to the in-process callback regardless of what's passed.
    */
   start(watcher: Omit<WatcherConfig, "output" | "onEvent">): string {
+    const evalNote = this.evaluator
+      ? `evaluator=${this.evaluator.provider}:${this.evaluator.modelId} maxAttempts=${this.maxAttempts}`
+      : "evaluator=OFF";
     console.log(
       `[momentum] listening — provider=${this.provider} model=${this.modelId} ` +
-        `mode=${this.mode} threshold=${this.thresholdCents}c direction=${this.direction}`,
+        `mode=${this.mode} threshold=${this.thresholdCents}c direction=${this.direction} ${evalNote}`,
     );
     return this.manager.addWatcher(
       {
@@ -491,15 +616,67 @@ export class MomentumExplainer {
           pythonPath: this.pythonPath,
           env: this.env,
         });
-        const card = await generateCard(this.model, event, swing, resolved);
-        this.cardCount++;
-        this.onCard(card);
+        await this.produceCard(event, swing, resolved);
       } catch (err) {
         console.error(
           "[momentum] failed to generate card:",
           err instanceof Error ? err.message : err,
         );
       }
+    }
+  }
+
+  /**
+   * Generate → evaluate → maybe regenerate, up to `maxAttempts`. This is the
+   * one turn of the loop that the evaluator makes trustworthy: the generator
+   * proposes, the fresh checker disposes, and only a PASS reaches `onCard`. A
+   * card rejected on every attempt is routed to `onRejected` (the inbox), never
+   * emitted as good.
+   */
+  private async produceCard(
+    event: WatchEvent,
+    swing: PriceSwing,
+    resolved: { plays: NormalizedPlay[]; causePlay: NormalizedPlay | null; source: "mock-snapshot" | "espn-live" },
+  ): Promise<void> {
+    // Evaluation disabled — Phase 3 behavior. Emit the first card as-is.
+    if (!this.evaluator) {
+      const card = await generateCard(this.model, event, swing, resolved);
+      this.cardCount++;
+      this.onCard(card);
+      return;
+    }
+
+    let lastCard: MomentumCard | null = null;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      const card = await generateCard(this.model, event, swing, resolved);
+      const verdict = await evaluateCard(
+        this.evaluator,
+        card,
+        resolved.plays,
+        swing,
+        attempt,
+      );
+      card.verdict = verdict;
+      lastCard = card;
+
+      if (verdict.verdict === "pass") {
+        this.cardCount++;
+        this.onCard(card);
+        return;
+      }
+
+      if (this.verbose) {
+        console.log(
+          `[momentum] card rejected (attempt ${attempt}/${this.maxAttempts}): ` +
+            verdict.reasons.join("; "),
+        );
+      }
+    }
+
+    // Budget exhausted — hold the last draft for a human. Never ship it.
+    if (lastCard) {
+      this.rejectCount++;
+      this.onRejected(lastCard);
     }
   }
 }
