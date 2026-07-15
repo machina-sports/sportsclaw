@@ -142,3 +142,30 @@ network_policies:
               path: /messages/
     binaries:
       - path: /usr/local/bin/node
+  espn:
+    name: espn
+    endpoints:
+      - host: site.api.espn.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: site.web.api.espn.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: sports.core.api.espn.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: www.espn.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /opt/venv/bin/python3
+      - path: /usr/bin/python3.11
+
