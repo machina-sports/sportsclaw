@@ -87,6 +87,12 @@ network_policies:
           - allow:
               method: POST
               path: /document
+          - allow:
+              method: POST
+              path: /document/search
+          - allow:
+              method: PUT
+              path: /document/*
       - host: host.docker.internal
         port: 5103
         protocol: rest
@@ -98,6 +104,12 @@ network_policies:
           - allow:
               method: POST
               path: /document
+          - allow:
+              method: POST
+              path: /document/search
+          - allow:
+              method: PUT
+              path: /document/*
     binaries:
       - path: /usr/local/bin/node
 
