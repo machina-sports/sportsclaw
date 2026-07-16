@@ -225,6 +225,17 @@ export interface OperatorSinkPlugin {
    * outcome inside a tick. Same awaiting + error contract as onTickEvent.
    */
   onToolCall?(evt: ToolCallEvent, ctx: SinkContext): Promise<void> | void;
+
+  /**
+   * Streaming partial of the forced output tool's extracted answer text.
+   * Fired throttled while the model generates (jobs with streamOutput: true).
+   * NEVER awaited by the daemon — keep it cheap and non-blocking; a slow
+   * consumer must not stall token streaming.
+   */
+  onPartialOutput?(
+    evt: { jobId: string; tickId: string; toolName: string; partialText: string },
+    ctx: SinkContext,
+  ): void;
 }
 
 // ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@
 import path from "node:path";
 import {
   generateText,
+  streamText,
   jsonSchema,
   hasToolCall,
   stepCountIs,
@@ -241,6 +242,22 @@ export interface OperatorDaemonConfig {
   onHeartbeatEvent?: (event: HeartbeatEvent) => void;
   /** Per-tool-call hook — fires once per tool execution with timing + result. */
   onToolCall?: (event: ToolCallEvent) => void;
+  /**
+   * Stream the forced output tool's arguments as they generate (structured
+   * mode only). Opt-in per job; requires onPartialOutput to be useful.
+   */
+  streamOutput?: boolean;
+  /**
+   * Fired (throttled, fire-and-forget) with the growing extracted answer text
+   * while the output tool call streams. Never awaited — a slow consumer must
+   * not stall token streaming.
+   */
+  onPartialOutput?: (event: {
+    jobId: string;
+    tickId: string;
+    toolName: string;
+    partialText: string;
+  }) => void;
 
   /**
    * Pre-tick context composer. Called once per tick BEFORE generateText.
@@ -582,7 +599,8 @@ export function createOperatorDaemon(
     }, inferenceTimeoutMs);
 
     try {
-      const result = await generateImpl({
+      // Shared params for both paths (generate vs stream).
+      const callParams = {
         model: cfg.model,
         system,
         prompt: tickPrompt,
@@ -607,7 +625,68 @@ export function createOperatorDaemon(
               hasToolCall(OUTPUT_TOOL_NAME),
             ]
           : stepCountIs(cfg.maxSteps ?? DEFAULT_MAX_STEPS),
-      });
+      };
+
+      let result: { toolCalls?: unknown[]; text?: string };
+      const wantStream =
+        cfg.streamOutput === true &&
+        useStructuredOutput &&
+        !cfg.generateTextImpl; // test impls keep the legacy path
+      if (wantStream) {
+        // Stream the output tool call's arguments and surface the growing
+        // "answer"/"narrative" field via onPartialOutput. The Privacy Router
+        // strips response_format, so the structured payload only exists as
+        // tool-call input — streamed here as tool-input-delta chunks.
+        const stream = streamText(callParams as Parameters<typeof streamText>[0]);
+        let outCallId: string | null = null;
+        let argsBuf = "";
+        let lastEmit = 0;
+        const emitPartial = (final = false) => {
+          if (!cfg.onPartialOutput) return;
+          const now = Date.now();
+          if (!final && now - lastEmit < 600) return;
+          const m = argsBuf.match(/"(?:answer|narrative)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+          if (!m) return;
+          lastEmit = now;
+          let textSoFar: string;
+          try {
+            textSoFar = JSON.parse(`"${m[1]}"`);
+          } catch {
+            return; // dangling escape at the cut point — next delta fixes it
+          }
+          try {
+            cfg.onPartialOutput({
+              jobId: cfg.jobId,
+              tickId,
+              toolName: OUTPUT_TOOL_NAME,
+              partialText: textSoFar,
+            });
+          } catch {
+            /* streaming must never kill the tick */
+          }
+        };
+        for await (const chunk of stream.fullStream) {
+          if (chunk.type === "tool-input-start" && chunk.toolName === OUTPUT_TOOL_NAME) {
+            outCallId = chunk.id;
+            argsBuf = "";
+          } else if (chunk.type === "tool-input-delta" && chunk.id === outCallId) {
+            argsBuf += chunk.delta;
+            emitPartial();
+          } else if (chunk.type === "error") {
+            throw chunk.error;
+          }
+        }
+        emitPartial(true);
+        const steps = await stream.steps;
+        result = {
+          toolCalls: steps.flatMap((st) => st.toolCalls ?? []),
+          text: await stream.text,
+        };
+      } else {
+        result = await generateImpl(
+          callParams as Parameters<typeof generateImpl>[0],
+        );
+      }
       if (useStructuredOutput) {
         // Structured output arrives as the input of the forced output tool call
         // (the Privacy Router strips `response_format`, so `experimental_output`

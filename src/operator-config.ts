@@ -91,6 +91,8 @@ export interface OperatorJobConfig {
    * ticks don't overlap.
    */
   inferenceTimeoutMs?: number;
+  /** Stream the forced output tool's args (structured mode) — opt-in. */
+  streamOutput?: boolean;
   /**
    * Max LLM steps (tool-call rounds) per tick. Overrides the daemon default.
    */
@@ -384,6 +386,11 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // streamOutput
+  if (raw.streamOutput !== undefined && typeof raw.streamOutput !== "boolean") {
+    push("streamOutput", `must be a boolean (got ${JSON.stringify(raw.streamOutput)})`);
+  }
+
   // inferenceTimeoutMs / maxSteps
   for (const field of ["inferenceTimeoutMs", "maxSteps"] as const) {
     if (raw[field] !== undefined) {
@@ -613,6 +620,7 @@ export function validateOperatorJobConfig(
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
       persistence: raw.persistence as boolean | undefined,
+      streamOutput: raw.streamOutput as boolean | undefined,
       openshell: parsedOpenShell,
       inference: raw.inference as ModelRoleRouterConfig | undefined,
       broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],

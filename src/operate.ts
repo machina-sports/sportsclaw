@@ -842,6 +842,10 @@ async function runOnce(jobId: string): Promise<void> {
       // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
       ? async (evt) => { await sink.onToolCall!(evt, ctx); }
         : undefined,
+      streamOutput: cfg.streamOutput,
+      onPartialOutput: sink.onPartialOutput
+        ? (evt) => { try { sink.onPartialOutput!(evt, ctx); } catch { /* never stall streaming */ } }
+        : undefined,
       onComposeTickContext: sink.composeTickContext
         ? async (args) =>
             sink.composeTickContext!({
@@ -934,6 +938,10 @@ async function runForeground(jobId: string): Promise<void> {
       // Return (don't discard) the sink promise: the daemon's bounded awaitHook
       // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
       ? async (evt) => { await sink.onToolCall!(evt, ctx); }
+      : undefined,
+    streamOutput: cfg.streamOutput,
+    onPartialOutput: sink.onPartialOutput
+      ? (evt) => { try { sink.onPartialOutput!(evt, ctx); } catch { /* never stall streaming */ } }
       : undefined,
     onComposeTickContext: sink.composeTickContext
       ? async (args) =>
