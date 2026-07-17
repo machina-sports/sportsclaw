@@ -482,30 +482,52 @@ export function stripInternalEvidenceArtifacts(text: string): string {
  * incorrectly dropped the final venue from oversized worldcup-get-schedule
  * payloads (pretty JSON >4000 chars, compact <2500).
  */
-export function summarizeToolOutputForEvidence(output: unknown): string {
-  const MAX_CHARS = 4_000;
-  let raw = "";
+/**
+ * extractEvidenceString — pull a string out of an arbitrary tool output without
+ * ever throwing. Direct strings and legacy {content:string} envelopes are
+ * returned verbatim; anything else is JSON-stringified. When JSON.stringify
+ * returns undefined (top-level undefined/function/symbol) or throws
+ * (BigInt/cyclic), it falls back to a deterministic String() coercion.
+ */
+function extractEvidenceString(output: unknown): string {
+  if (typeof output === "string") return output;
 
-  if (typeof output === "string") {
-    raw = output;
-    try {
-      raw = JSON.stringify(JSON.parse(output));
-    } catch {
-      // Not JSON — keep the raw string.
-    }
-  } else if (
+  if (
     output &&
     typeof output === "object" &&
     "content" in output &&
     typeof (output as { content?: unknown }).content === "string"
   ) {
-    raw = (output as { content: string }).content;
-  } else {
-    try {
-      raw = JSON.stringify(output);
-    } catch {
-      raw = String(output ?? "");
-    }
+    return (output as { content: string }).content;
+  }
+
+  try {
+    const json = JSON.stringify(output);
+    if (typeof json === "string") return json;
+  } catch {
+    // BigInt / cyclic structures — fall through to deterministic coercion.
+  }
+
+  return String(output ?? "");
+}
+
+export function summarizeToolOutputForEvidence(output: unknown): string {
+  const MAX_CHARS = 4_000;
+
+  // Centralized safe extraction: always yields a string, never throws — even
+  // for top-level undefined/function/symbol (JSON.stringify returns undefined)
+  // or BigInt/cyclic values (JSON.stringify throws).
+  let raw = extractEvidenceString(output);
+
+  // Shared compaction: any extracted string that is valid JSON is compacted so
+  // the whole payload can survive within budget. This applies uniformly to bare
+  // strings and to strings pulled from legacy {content:string} envelopes; a
+  // head-only slice of pretty JSON incorrectly dropped the final venue from
+  // oversized worldcup-get-schedule payloads (pretty >4000 chars, compact <2500).
+  try {
+    raw = JSON.stringify(JSON.parse(raw));
+  } catch {
+    // Not JSON — keep the raw string.
   }
 
   const trimmed = raw.trim();
