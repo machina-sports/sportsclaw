@@ -207,6 +207,29 @@ describe("summarizeToolOutputForEvidence", () => {
     assert.equal(typeof out, "string", "must return a string fallback");
   });
 
+  it("reads legacy envelope content exactly once", () => {
+    let contentReads = 0;
+    const stateful = new Proxy(
+      {},
+      {
+        has(_target, property) {
+          return property === "content";
+        },
+        get(_target, property) {
+          if (property !== "content") return undefined;
+          contentReads += 1;
+          return contentReads === 1 ? "legacy evidence" : Symbol("changed");
+        },
+      }
+    );
+    let out;
+    assert.doesNotThrow(() => {
+      out = summarizeToolOutputForEvidence(stateful);
+    }, "stateful content getter must not throw");
+    assert.equal(typeof out, "string", "must return a string");
+    assert.equal(contentReads, 1, "content must be read exactly once");
+  });
+
   it("never throws when toJSON and toString both throw", () => {
     // JSON.stringify trips toJSON; the String() coercion fallback then trips
     // Symbol.toPrimitive/toString. Both paths must be caught, yielding the

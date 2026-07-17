@@ -504,13 +504,9 @@ function extractEvidenceString(output: unknown): string {
   // Legacy {content:string} envelope. Both the `in` check and the property
   // read can trip hostile Proxy traps, so guard the whole inspection.
   try {
-    if (
-      output &&
-      typeof output === "object" &&
-      "content" in output &&
-      typeof (output as { content?: unknown }).content === "string"
-    ) {
-      return (output as { content: string }).content;
+    if (output && typeof output === "object" && "content" in output) {
+      const content: unknown = (output as { content?: unknown }).content;
+      if (typeof content === "string") return content;
     }
   } catch {
     // Hostile has/get trap — fall through to serialization/coercion.
