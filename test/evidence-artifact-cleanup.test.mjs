@@ -186,6 +186,54 @@ describe("summarizeToolOutputForEvidence", () => {
     assert.equal(typeof summarizeToolOutputForEvidence(cyclic), "string");
   });
 
+  it("never throws for a hostile proxy whose has/get traps throw", () => {
+    // Envelope inspection (`"content" in output` and reading `.content`) trips
+    // the proxy traps. Extraction must fail closed rather than propagate.
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error("hostile has trap");
+        },
+        get() {
+          throw new Error("hostile get trap");
+        },
+      }
+    );
+    let out;
+    assert.doesNotThrow(() => {
+      out = summarizeToolOutputForEvidence(hostile);
+    }, "hostile proxy must not throw");
+    assert.equal(typeof out, "string", "must return a string fallback");
+  });
+
+  it("never throws when toJSON and toString both throw", () => {
+    // JSON.stringify trips toJSON; the String() coercion fallback then trips
+    // Symbol.toPrimitive/toString. Both paths must be caught, yielding the
+    // stable non-secret sentinel.
+    const hostile = {
+      toJSON() {
+        throw new Error("hostile toJSON");
+      },
+      toString() {
+        throw new Error("hostile toString");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("hostile Symbol.toPrimitive");
+      },
+    };
+    let out;
+    assert.doesNotThrow(() => {
+      out = summarizeToolOutputForEvidence(hostile);
+    }, "hostile toJSON/toString object must not throw");
+    assert.equal(typeof out, "string", "must return a string fallback");
+    assert.equal(
+      out,
+      "[unserializable tool output]",
+      "must return the deterministic sentinel"
+    );
+  });
+
   it("returns an exactly-4000-char string unchanged", () => {
     const input = "x".repeat(4000);
     assert.equal(input.length, 4000);

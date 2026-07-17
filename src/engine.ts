@@ -483,32 +483,53 @@ export function stripInternalEvidenceArtifacts(text: string): string {
  * payloads (pretty JSON >4000 chars, compact <2500).
  */
 /**
+ * Stable, non-secret sentinel returned only when every extraction strategy
+ * fails closed — i.e. envelope introspection, JSON serialization, and String()
+ * coercion all throw (hostile Proxy traps, hostile toJSON/toString/
+ * Symbol.toPrimitive). It must never leak internal state.
+ */
+const UNSERIALIZABLE_TOOL_OUTPUT = "[unserializable tool output]";
+
+/**
  * extractEvidenceString — pull a string out of an arbitrary tool output without
  * ever throwing. Direct strings and legacy {content:string} envelopes are
- * returned verbatim; anything else is JSON-stringified. When JSON.stringify
- * returns undefined (top-level undefined/function/symbol) or throws
- * (BigInt/cyclic), it falls back to a deterministic String() coercion.
+ * returned verbatim; anything else is JSON-stringified. Every introspection
+ * and coercion step is guarded so that hostile inputs — Proxies whose has/get
+ * traps throw, objects whose toJSON/toString/Symbol.toPrimitive throw — fail
+ * closed to a deterministic sentinel instead of propagating.
  */
 function extractEvidenceString(output: unknown): string {
   if (typeof output === "string") return output;
 
-  if (
-    output &&
-    typeof output === "object" &&
-    "content" in output &&
-    typeof (output as { content?: unknown }).content === "string"
-  ) {
-    return (output as { content: string }).content;
+  // Legacy {content:string} envelope. Both the `in` check and the property
+  // read can trip hostile Proxy traps, so guard the whole inspection.
+  try {
+    if (
+      output &&
+      typeof output === "object" &&
+      "content" in output &&
+      typeof (output as { content?: unknown }).content === "string"
+    ) {
+      return (output as { content: string }).content;
+    }
+  } catch {
+    // Hostile has/get trap — fall through to serialization/coercion.
   }
 
   try {
     const json = JSON.stringify(output);
     if (typeof json === "string") return json;
   } catch {
-    // BigInt / cyclic structures — fall through to deterministic coercion.
+    // BigInt / cyclic structures / hostile toJSON — fall through to coercion.
   }
 
-  return String(output ?? "");
+  // Final fail-closed coercion. String()/`??` can themselves throw via hostile
+  // Symbol.toPrimitive/toString/valueOf, so guard and fall back to a sentinel.
+  try {
+    return String(output ?? "");
+  } catch {
+    return UNSERIALIZABLE_TOOL_OUTPUT;
+  }
 }
 
 export function summarizeToolOutputForEvidence(output: unknown): string {
