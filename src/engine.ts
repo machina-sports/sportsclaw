@@ -473,6 +473,54 @@ export function stripInternalEvidenceArtifacts(text: string): string {
   return out.trim();
 }
 
+/**
+ * summarizeToolOutputForEvidence — condense a raw tool output into a bounded
+ * string used for evidence validation. When the raw output is a pretty-printed
+ * JSON string, it is compacted first so the whole payload can survive within
+ * the budget; if it is still too long (or non-JSON), it is truncated with a
+ * balanced head + tail so facts at both ends are retained. A head-only slice
+ * incorrectly dropped the final venue from oversized worldcup-get-schedule
+ * payloads (pretty JSON >4000 chars, compact <2500).
+ */
+export function summarizeToolOutputForEvidence(output: unknown): string {
+  const MAX_CHARS = 4_000;
+  let raw = "";
+
+  if (typeof output === "string") {
+    raw = output;
+    try {
+      raw = JSON.stringify(JSON.parse(output));
+    } catch {
+      // Not JSON — keep the raw string.
+    }
+  } else if (
+    output &&
+    typeof output === "object" &&
+    "content" in output &&
+    typeof (output as { content?: unknown }).content === "string"
+  ) {
+    raw = (output as { content: string }).content;
+  } else {
+    try {
+      raw = JSON.stringify(output);
+    } catch {
+      raw = String(output ?? "");
+    }
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= MAX_CHARS) return trimmed;
+
+  const marker = "\n...[truncated middle]...\n";
+  const budget = MAX_CHARS - marker.length;
+  const headLen = Math.floor(budget / 2);
+  const tailLen = budget - headLen;
+  const head = trimmed.slice(0, headLen);
+  const tail = trimmed.slice(trimmed.length - tailLen);
+  return `${head}${marker}${tail}`;
+}
+
 // ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
@@ -839,30 +887,7 @@ export class sportsclawEngine {
   }
 
   private summarizeToolOutput(output: unknown): string {
-    const MAX_CHARS = 4_000;
-    let raw = "";
-
-    if (typeof output === "string") {
-      raw = output;
-    } else if (
-      output &&
-      typeof output === "object" &&
-      "content" in output &&
-      typeof (output as { content?: unknown }).content === "string"
-    ) {
-      raw = (output as { content: string }).content;
-    } else {
-      try {
-        raw = JSON.stringify(output);
-      } catch {
-        raw = String(output ?? "");
-      }
-    }
-
-    const trimmed = raw.trim();
-    if (!trimmed) return "";
-    if (trimmed.length <= MAX_CHARS) return trimmed;
-    return `${trimmed.slice(0, MAX_CHARS)}\n...[truncated]`;
+    return summarizeToolOutputForEvidence(output);
   }
 
   private collectToolOutputSnippets(

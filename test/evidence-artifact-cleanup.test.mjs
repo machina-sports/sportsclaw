@@ -8,7 +8,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { stripInternalEvidenceArtifacts } from "../dist/engine.js";
+import {
+  stripInternalEvidenceArtifacts,
+  summarizeToolOutputForEvidence,
+} from "../dist/engine.js";
 
 describe("stripInternalEvidenceArtifacts", () => {
   it("removes the self-correction warning banner", () => {
@@ -56,3 +59,63 @@ describe("stripInternalEvidenceArtifacts", () => {
     assert.equal(stripInternalEvidenceArtifacts(input), input);
   });
 });
+
+describe("summarizeToolOutputForEvidence", () => {
+  it("compacts an oversized pretty-JSON string, keeping beginning and end facts under the limit", () => {
+    // Mirrors the production worldcup-get-schedule payload: pretty JSON is
+    // >4000 chars while its compact form is well under, so a head-only slice
+    // would drop the final venue.
+    const matches = Array.from({ length: 26 }, (_, i) => ({
+      matchId: 1000 + i,
+      stage: "group",
+      home: `Team Home ${i}`,
+      away: `Team Away ${i}`,
+      kickoff: "2026-06-15T18:00:00Z",
+      venue: `Stadium ${i}`,
+    }));
+    const payload = {
+      tournament: "World Cup",
+      firstVenue: "Hard Rock Stadium",
+      matches,
+      finalVenue: "New York New Jersey Stadium",
+    };
+    const pretty = JSON.stringify(payload, null, 2);
+    const compact = JSON.stringify(payload);
+
+    // Precondition: reproduces the production shape (pretty > limit, compact within).
+    assert.ok(pretty.length > 4000, `pretty JSON must exceed 4000 (was ${pretty.length})`);
+    assert.ok(compact.length <= 4000, `compact JSON must be within 4000 (was ${compact.length})`);
+
+    const out = summarizeToolOutputForEvidence(pretty);
+
+    assert.ok(out.length <= 4000, `summary must stay within 4000 (was ${out.length})`);
+    assert.ok(out.includes("Hard Rock Stadium"), "beginning fact preserved");
+    assert.ok(
+      out.includes("New York New Jersey Stadium"),
+      "ending fact preserved (the final venue must survive)"
+    );
+  });
+
+  it("balances head and tail when truncating an oversized non-JSON string", () => {
+    const prefix = "PREFIX_MARKER_START";
+    const suffix = "SUFFIX_MARKER_END";
+    const input = `${prefix} ${"filler ".repeat(1000)} ${suffix}`;
+    assert.ok(input.length > 4000, "input must exceed 4000 to force truncation");
+    assert.ok(!isJson(input), "input must not be valid JSON");
+
+    const out = summarizeToolOutputForEvidence(input);
+
+    assert.ok(out.length <= 4000, `summary must stay within 4000 (was ${out.length})`);
+    assert.ok(out.includes(prefix), "head prefix preserved");
+    assert.ok(out.includes(suffix), "tail suffix preserved");
+  });
+});
+
+function isJson(value) {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
