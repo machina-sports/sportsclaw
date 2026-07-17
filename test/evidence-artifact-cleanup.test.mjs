@@ -61,6 +61,80 @@ describe("stripInternalEvidenceArtifacts", () => {
 });
 
 describe("summarizeToolOutputForEvidence", () => {
+  it("rejects non-JSON whitespace around otherwise valid structured JSON", () => {
+    const prettyValues = [
+      `{
+  "team": "Norway",
+  "score": 3
+}`,
+      `[
+  "Norway",
+  "England"
+]`,
+    ];
+    const invalidBoundaryWhitespace = [
+      ["NBSP U+00A0", "\u00a0"],
+      ["form-feed U+000C", "\u000c"],
+      ["vertical-tab U+000B", "\u000b"],
+      ["BOM U+FEFF", "\ufeff"],
+      ["Ogham space mark U+1680", "\u1680"],
+      ["en quad U+2000", "\u2000"],
+      ["line separator U+2028", "\u2028"],
+      ["paragraph separator U+2029", "\u2029"],
+      ["ideographic space U+3000", "\u3000"],
+    ];
+
+    for (const pretty of prettyValues) {
+      const compact = pretty.replace(/[ \t\r\n]/g, "");
+      for (const [label, boundary] of invalidBoundaryWhitespace) {
+        const input = `${boundary}${pretty}${boundary}`;
+        const out = summarizeToolOutputForEvidence(input);
+        assert.equal(out, input, `${label} and the pretty JSON must be preserved byte-for-byte`);
+        assert.notEqual(out, compact, `${label} must preserve interior pretty whitespace`);
+      }
+    }
+  });
+
+  it("accepts only JSON whitespace around structured JSON and losslessly minifies it", () => {
+    const unsafeInteger = "9007199254740993";
+    const prettyObject = `{\n  "id": ${unsafeInteger},\n  "label": "kept   spacing"\n}`;
+    const prettyArray = `[\n  { "id": ${unsafeInteger} }\n]`;
+    const outerJsonWhitespace = " \t\r\n";
+
+    assert.equal(
+      summarizeToolOutputForEvidence(`${outerJsonWhitespace}${prettyObject}${outerJsonWhitespace}`),
+      `{"id":${unsafeInteger},"label":"kept   spacing"}`
+    );
+    assert.equal(
+      summarizeToolOutputForEvidence({
+        content: `${outerJsonWhitespace}${prettyArray}${outerJsonWhitespace}`,
+      }),
+      `[{"id":${unsafeInteger}}]`
+    );
+  });
+
+  it("preserves unsafe integer digits and only losslessly compacts object/array JSON strings", () => {
+    const unsafeInteger = "9007199254740993";
+    const prettyObject = `{\n  "id": ${unsafeInteger},\n  "label": "kept   spacing\\tand \\\"escapes\\\""\n}`;
+    const prettyArray = `[\n  { "id": ${unsafeInteger} }\n]`;
+
+    assert.equal(summarizeToolOutputForEvidence(9007199254740993n), unsafeInteger);
+    assert.equal(summarizeToolOutputForEvidence({ content: unsafeInteger }), unsafeInteger);
+    assert.equal(
+      summarizeToolOutputForEvidence(prettyObject),
+      `{"id":${unsafeInteger},"label":"kept   spacing\\tand \\\"escapes\\\""}`
+    );
+    assert.equal(
+      summarizeToolOutputForEvidence({ content: prettyArray }),
+      `[{"id":${unsafeInteger}}]`
+    );
+    assert.equal(
+      summarizeToolOutputForEvidence("  9007199254740993  "),
+      unsafeInteger,
+      "arbitrary JSON scalar strings must never be parsed/stringified"
+    );
+  });
+
   it("compacts an oversized pretty-JSON string, keeping beginning and end facts under the limit", () => {
     // Mirrors the production worldcup-get-schedule payload: pretty JSON is
     // >4000 chars while its compact form is well under, so a head-only slice
@@ -228,6 +302,110 @@ describe("summarizeToolOutputForEvidence", () => {
     }, "stateful content getter must not throw");
     assert.equal(typeof out, "string", "must return a string");
     assert.equal(contentReads, 1, "content must be read exactly once");
+  });
+
+  it("fails closed without re-entering a self-referential legacy envelope", () => {
+    let contentReads = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    let toJSONReads = 0;
+    let envelope;
+    envelope = new Proxy({}, {
+      has(_target, property) {
+        return property === "content";
+      },
+      get(_target, property) {
+        if (property === "content") {
+          contentReads += 1;
+          return envelope;
+        }
+        if (property === "toJSON") toJSONReads += 1;
+        return undefined;
+      },
+      ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+      },
+      getOwnPropertyDescriptor() {
+        descriptorCalls += 1;
+        return undefined;
+      },
+    });
+
+    assert.equal(summarizeToolOutputForEvidence(envelope), "[unserializable tool output]");
+    assert.equal(contentReads, 1, "content must be read exactly once");
+    assert.equal(ownKeysCalls, 0, "original envelope ownKeys must not be invoked");
+    assert.equal(descriptorCalls, 0, "original envelope descriptors must not be inspected");
+    assert.equal(toJSONReads, 0, "original envelope toJSON must not be inspected");
+  });
+
+  it("fails closed without inspecting object content that aliases the legacy envelope", () => {
+    let contentReads = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    let toJSONReads = 0;
+    let envelope;
+    envelope = new Proxy({}, {
+      has(_target, property) {
+        return property === "content";
+      },
+      get(_target, property) {
+        if (property === "content") {
+          contentReads += 1;
+          return { nested: envelope };
+        }
+        if (property === "toJSON") toJSONReads += 1;
+        return undefined;
+      },
+      ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+      },
+      getOwnPropertyDescriptor() {
+        descriptorCalls += 1;
+        return undefined;
+      },
+    });
+
+    assert.equal(summarizeToolOutputForEvidence(envelope), "[unserializable tool output]");
+    assert.equal(contentReads, 1, "content must be read exactly once");
+    assert.equal(ownKeysCalls, 0, "original envelope ownKeys must not be invoked");
+    assert.equal(descriptorCalls, 0, "original envelope descriptors must not be inspected");
+    assert.equal(toJSONReads, 0, "original envelope toJSON must not be inspected");
+  });
+
+  it("serializes a cached non-string legacy content value without rereading its getter", () => {
+    let contentReads = 0;
+    const stateful = {
+      get content() {
+        contentReads += 1;
+        return contentReads === 1 ? 9007199254740993n : "changed on second read";
+      },
+    };
+
+    const out = summarizeToolOutputForEvidence(stateful);
+
+    assert.equal(out, "9007199254740993");
+    assert.equal(contentReads, 1, "content must be read exactly once");
+  });
+
+  it("attempts a throwing content getter once and returns the stable sentinel", () => {
+    let contentReads = 0;
+    const hostile = {
+      get content() {
+        contentReads += 1;
+        throw new Error("content getter failed");
+      },
+      toJSON() {
+        throw new Error("original envelope must not be re-serialized");
+      },
+    };
+
+    assert.equal(
+      summarizeToolOutputForEvidence(hostile),
+      "[unserializable tool output]"
+    );
+    assert.equal(contentReads, 1, "throwing content getter must be attempted once");
   });
 
   it("never throws when toJSON and toString both throw", () => {

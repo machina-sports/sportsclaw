@@ -501,19 +501,40 @@ const UNSERIALIZABLE_TOOL_OUTPUT = "[unserializable tool output]";
 function extractEvidenceString(output: unknown): string {
   if (typeof output === "string") return output;
 
-  // Legacy {content:string} envelope. Both the `in` check and the property
-  // read can trip hostile Proxy traps, so guard the whole inspection.
-  try {
-    if (output && typeof output === "object" && "content" in output) {
-      const content: unknown = (output as { content?: unknown }).content;
-      if (typeof content === "string") return content;
+  // Legacy contract: {content:string}. Once presence is established, read the
+  // property exactly once. Primitive values retain the historical safe
+  // conversion, while objects/functions fail closed without any introspection;
+  // they could alias this envelope and route serialization back into its traps.
+  if (output && typeof output === "object") {
+    let hasContent: boolean;
+    try {
+      hasContent = "content" in output;
+    } catch {
+      return UNSERIALIZABLE_TOOL_OUTPUT;
     }
-  } catch {
-    // Hostile has/get trap — fall through to serialization/coercion.
+
+    if (hasContent) {
+      let content: unknown;
+      try {
+        content = (output as { content?: unknown }).content;
+      } catch {
+        return UNSERIALIZABLE_TOOL_OUTPUT;
+      }
+      if ((typeof content === "object" && content !== null) || typeof content === "function") {
+        return UNSERIALIZABLE_TOOL_OUTPUT;
+      }
+      return safelySerializeOrCoerce(content);
+    }
   }
 
+  return safelySerializeOrCoerce(output);
+}
+
+function safelySerializeOrCoerce(value: unknown): string {
+  if (typeof value === "string") return value;
+
   try {
-    const json = JSON.stringify(output);
+    const json = JSON.stringify(value);
     if (typeof json === "string") return json;
   } catch {
     // BigInt / cyclic structures / hostile toJSON — fall through to coercion.
@@ -522,10 +543,49 @@ function extractEvidenceString(output: unknown): string {
   // Final fail-closed coercion. String()/`??` can themselves throw via hostile
   // Symbol.toPrimitive/toString/valueOf, so guard and fall back to a sentinel.
   try {
-    return String(output ?? "");
+    return String(value ?? "");
   } catch {
     return UNSERIALIZABLE_TOOL_OUTPUT;
   }
+}
+
+/** Trim only the four whitespace code points permitted by the JSON grammar. */
+function trimJsonWhitespace(raw: string): string {
+  return raw.replace(/^[\u0020\u0009\u000d\u000a]+|[\u0020\u0009\u000d\u000a]+$/g, "");
+}
+
+/** Losslessly remove JSON whitespace outside strings from objects/arrays only. */
+function compactStructuredJson(raw: string): string {
+  const trimmed = trimJsonWhitespace(raw);
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!((first === "{" && last === "}") || (first === "[" && last === "]"))) {
+    return raw;
+  }
+
+  try {
+    JSON.parse(trimmed);
+  } catch {
+    return raw;
+  }
+
+  let compact = "";
+  let inString = false;
+  let escaped = false;
+  for (const char of trimmed) {
+    if (inString) {
+      compact += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      compact += char;
+      inString = true;
+    } else if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
+      compact += char;
+    }
+  }
+  return compact;
 }
 
 export function summarizeToolOutputForEvidence(output: unknown): string {
@@ -536,18 +596,12 @@ export function summarizeToolOutputForEvidence(output: unknown): string {
   // or BigInt/cyclic values (JSON.stringify throws).
   let raw = extractEvidenceString(output);
 
-  // Shared compaction: any extracted string that is valid JSON is compacted so
-  // the whole payload can survive within budget. This applies uniformly to bare
-  // strings and to strings pulled from legacy {content:string} envelopes; a
-  // head-only slice of pretty JSON incorrectly dropped the final venue from
-  // oversized worldcup-get-schedule payloads (pretty >4000 chars, compact <2500).
-  try {
-    raw = JSON.stringify(JSON.parse(raw));
-  } catch {
-    // Not JSON — keep the raw string.
-  }
+  // Compact only object/array JSON, directly from its original lexical form.
+  // JSON.parse validates the document but its value is never stringified, so
+  // unsafe integer tokens and whitespace inside quoted strings remain exact.
+  raw = compactStructuredJson(raw);
 
-  const trimmed = raw.trim();
+  const trimmed = trimJsonWhitespace(raw);
   if (!trimmed) return "";
   if (trimmed.length <= MAX_CHARS) return trimmed;
 
