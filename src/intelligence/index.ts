@@ -7,3 +7,5 @@
 export * from "./types.js";
 export * from "./entity-resolver.js";
 export * from "./fusion.js";
+export * from "./momentum-explainer.js";
+export * from "./momentum-evaluator.js";
