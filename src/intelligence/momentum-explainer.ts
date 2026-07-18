@@ -76,6 +76,14 @@ export interface MomentumExplainerOptions {
   /** Model id (default: provider default, e.g. claude-opus-4-6). */
   model?: string;
   /**
+   * A pre-resolved language model for the generator, injected instead of
+   * resolving one from `provider`/`model`. This is the test seam: pass an
+   * `ai/test` MockLanguageModel to exercise the generate → evaluate loop in CI
+   * with no network, credentials, or token spend. When set, `provider`/`model`
+   * are used only for logging. Production callers leave this undefined.
+   */
+  modelInstance?: unknown;
+  /**
    * Minimum absolute price move (in cents) that fires a card. Prices are
    * implied win-probability in cents, so 10 cents == a 10 percentage-point
    * swing. Default: 10 (i.e. the ">10%" detector).
@@ -116,6 +124,13 @@ export interface MomentumExplainerOptions {
    * the generator model (maker != checker). e.g. Claude Sonnet 4.5.
    */
   evaluatorModel?: string;
+  /**
+   * A pre-resolved language model for the checker, injected instead of being
+   * resolved from `evaluatorProvider`/`evaluatorModel`. The evaluator's test
+   * seam — pass an `ai/test` MockLanguageModel so the semantic judge runs in CI
+   * without a live model. Production callers leave this undefined.
+   */
+  evaluatorModelInstance?: unknown;
   /**
    * Max generation attempts per swing before giving up (default: 2). This is
    * the loop-engineering "cap before you ship": a circuit breaker so one bad
@@ -561,7 +576,9 @@ export class MomentumExplainer {
     this.env = opts.env;
     this.onCard = opts.onCard ?? printCard;
     this.verbose = opts.verbose ?? false;
-    this.model = resolveExplainerModel(this.provider, this.modelId);
+    // Injected model wins over resolution — the test seam. Resolution (and its
+    // loud no-credentials throw) only runs when no instance is supplied.
+    this.model = opts.modelInstance ?? resolveExplainerModel(this.provider, this.modelId);
 
     this.evaluatorEnabled = opts.evaluate ?? true;
     this.maxAttempts = Math.max(1, opts.maxAttempts ?? 2);
@@ -570,6 +587,7 @@ export class MomentumExplainer {
       ? resolveEvaluator({
           provider: opts.evaluatorProvider ?? this.provider,
           model: opts.evaluatorModel,
+          modelInstance: opts.evaluatorModelInstance,
         })
       : null;
   }

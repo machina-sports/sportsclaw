@@ -62,6 +62,12 @@ export interface EvaluatorConfig {
   provider?: LLMProvider;
   /** Checker model id (default: provider's skeptic, e.g. Claude Sonnet 4.5). */
   model?: string;
+  /**
+   * A pre-resolved checker model, injected instead of resolved from
+   * `provider`/`model`. The test seam for the semantic judge — pass an
+   * `ai/test` MockLanguageModel to run `judgeCard` in CI with no live model.
+   */
+  modelInstance?: unknown;
 }
 
 /** A resolved, ready-to-call evaluator (built once, reused per card). */
@@ -79,8 +85,10 @@ export interface ResolvedEvaluator {
  */
 export function resolveEvaluator(cfg: EvaluatorConfig = {}): ResolvedEvaluator {
   const provider = cfg.provider ?? "anthropic";
-  const modelId = cfg.model ?? DEFAULT_EVALUATOR_MODELS[provider];
-  const model = resolveExplainerModel(provider, modelId);
+  const modelId =
+    cfg.model ?? (cfg.modelInstance ? "injected" : DEFAULT_EVALUATOR_MODELS[provider]);
+  // Injected model wins — resolution (and its no-credentials throw) is skipped.
+  const model = cfg.modelInstance ?? resolveExplainerModel(provider, modelId);
   return { model, modelId, provider };
 }
 

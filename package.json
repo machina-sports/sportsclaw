@@ -74,7 +74,7 @@
     "test:game-subscriptions": "npm run build && node --test test/game-subscriptions.test.mjs",
     "test:game-alerts": "npm run build && node --test test/game-alerts.test.mjs",
     "test:game-alert-tools": "npm run build && node --test test/game-alert-tools.test.mjs",
-    "test:momentum": "npm run build && node --test test/momentum-explainer.test.mjs test/momentum-replay.test.mjs",
+    "test:momentum": "npm run build && node --test test/momentum-explainer.test.mjs test/momentum-evaluator.test.mjs test/momentum-replay.test.mjs",
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
