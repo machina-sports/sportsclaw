@@ -55,6 +55,7 @@ export const DEFAULT_EVALUATOR_MODELS: Record<LLMProvider, string> = {
   anthropic: "claude-sonnet-4-5-20250929",
   openai: DEFAULT_MODELS.openai,
   google: "gemini-3.5-flash",
+  "azure-foundry": DEFAULT_MODELS["azure-foundry"],
 };
 
 export interface EvaluatorConfig {
