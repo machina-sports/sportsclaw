@@ -191,6 +191,10 @@ async function judgeCard(
     "Explainer' card written by another model. Assume the card is WRONG until",
     "the play-by-play window proves it right. You are the check that can say no.",
     "Judge only against the plays given; do not use outside knowledge of the game.",
+    "Reject ONLY for factual failures: a causal claim the window does not",
+    "support, invented players/plays/events, or a direction mismatch. Do NOT",
+    "reject over phrasing, tone, or word choice (e.g. 'extends the lead to 2-0'",
+    "vs 'takes a 2-0 lead') when the underlying facts are correct.",
     "Respond with ONLY a JSON object, no prose, of the exact form:",
     '{"claimSupported": bool, "noHallucination": bool, "directionCoherent": bool, "reasons": [string]}',
     "  - claimSupported: the card attributes the price move to a play that is",
@@ -201,7 +205,8 @@ async function judgeCard(
     "    teams) is NOT a hallucination.",
     "  - directionCoherent: the described effect matches the price direction",
     "    (a home-favorable play should move the HOME price UP, and vice-versa).",
-    "  - reasons: one short reason per failed check; empty array if all pass.",
+    "  - reasons: one reason per failed check, each under 25 words; empty array",
+    "    if all pass.",
   ].join("\n");
 
   const prompt = [
@@ -219,20 +224,25 @@ async function judgeCard(
     "Audit the card now. Output only the JSON verdict.",
   ].join("\n");
 
+  // Generous budget: a truncated verdict is unparseable and fails closed,
+  // which rejects good cards for the wrong reason (seen live 2026-07-17).
   const result = await generateText({
     model: evaluator.model as Parameters<typeof generateText>[0]["model"],
     system,
     prompt,
-    maxOutputTokens: 220,
+    maxOutputTokens: 1000,
   });
 
   const parsed = parseFirstJsonObject(result.text);
   if (!parsed) {
+    // Fail closed, but keep a snippet of what the checker actually said so a
+    // recurring parse failure is diagnosable from the rejection log.
+    const snippet = result.text.trim().slice(0, 120) || "(empty response)";
     return {
       claimSupported: false,
       noHallucination: false,
       directionCoherent: false,
-      reasons: ["Evaluator returned no parseable verdict; failing closed."],
+      reasons: [`Evaluator returned no parseable verdict; failing closed. Raw: ${snippet}`],
     };
   }
 

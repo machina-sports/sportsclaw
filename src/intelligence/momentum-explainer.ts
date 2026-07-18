@@ -277,12 +277,18 @@ function normalizePlay(p: Record<string, unknown>): NormalizedPlay {
 
 /**
  * Pick the play most likely responsible for the move: the last scoring play
- * if any (a TD/FG/INT is what moves a market), else the most recent play.
+ * if any (a TD/FG/INT is what moves a market), else the most recent play
+ * that carries text — MLB feeds interleave text-less pitch events, and a
+ * blank cause play gives both the generator and the evaluator nothing to
+ * verify against.
  */
 function pickCause(plays: NormalizedPlay[]): NormalizedPlay | null {
   if (plays.length === 0) return null;
   for (let i = plays.length - 1; i >= 0; i--) {
     if (plays[i].scoring) return plays[i];
+  }
+  for (let i = plays.length - 1; i >= 0; i--) {
+    if (plays[i].text.trim()) return plays[i];
   }
   return plays[plays.length - 1];
 }
@@ -420,14 +426,30 @@ async function generateCard(
     "Write exactly ONE sentence (max 30 words) explaining why the home team's",
     "win-probability price just moved, attributing it to the given play.",
     "Refer to players and details exactly as they appear in the play text — do",
-    "not add first names, nicknames, or facts not present in the provided data.",
+    "not add first names, nicknames, or facts not present in the provided data,",
+    "and do not speculate about events (pitching changes, injuries, matchups)",
+    "that the plays below do not show.",
     "No preamble, no quotes, no markdown — output only the sentence.",
   ].join("\n");
+
+  // The full window, not just the picked cause: an independent evaluator will
+  // re-derive the cause from these same plays, so the generator claiming
+  // anything beyond them is an automatic reject.
+  const windowLines =
+    resolved.plays.length > 0
+      ? resolved.plays.map(
+          (p, i) =>
+            `  ${i + 1}. [${p.type || "play"}] "${p.text}" ` +
+            `(score home ${p.homeScore}-${p.awayScore} away${p.scoring ? ", SCORING" : ""})`,
+        )
+      : ["  (no plays in window)"];
 
   const prompt = [
     `Matchup: ${away} @ ${home} (${gameClock}).`,
     `Home (${home}) win-probability price moved ${swing.before}c → ${swing.after}c ` +
       `(${dir} ${pts} points).`,
+    "Plays in the window before the move:",
+    ...windowLines,
     play
       ? `Most likely cause play: "${play.text}" [${play.type}], ` +
         `score now home ${play.homeScore}–${play.awayScore} away.`
@@ -587,6 +609,17 @@ export class MomentumExplainer {
   /** Stop all watchers. */
   async stop(): Promise<void> {
     await this.manager.stopAll();
+  }
+
+  /**
+   * Feed one synthetic WatchEvent through the same detect → resolve →
+   * generate → evaluate path the watcher drives. This is the replay seam:
+   * a finished game has a static live price (its market is settled), so the
+   * replay runner reconstructs historical ticks from candlesticks and injects
+   * them here instead of polling. No watcher is started.
+   */
+  async injectEvent(event: WatchEvent): Promise<void> {
+    await this.handleEvent(event);
   }
 
   private async handleEvent(event: WatchEvent): Promise<void> {
