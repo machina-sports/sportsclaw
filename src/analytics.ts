@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -25,6 +25,7 @@ const QUERY_LOG = join(ANALYTICS_DIR, "queries.jsonl");
 const TOOL_METRICS = join(ANALYTICS_DIR, "tool_metrics.json");
 const AGGREGATE_STATS = join(ANALYTICS_DIR, "aggregate.json");
 const SESSION_LOG = join(ANALYTICS_DIR, "sessions.jsonl");
+const TOOL_EXEC_LOG = join(ANALYTICS_DIR, "tool_executions.jsonl");
 
 function ensureDir(): void {
   if (!existsSync(ANALYTICS_DIR)) {
@@ -102,6 +103,90 @@ export function hashUserId(userId: string): string {
  */
 export function generateSessionId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Tool Execution Logging (credential redaction)
+// ---------------------------------------------------------------------------
+
+const REDACT_KEYS = ["api_key", "apikey", "token", "authorization", "auth", "password", "secret", "private_key", "wallet", "credential"];
+
+/**
+ * Recursively redact credential-like keys (at any depth) from a value before
+ * it is logged. Walks plain objects and arrays; other values pass through
+ * unchanged. A seen-set guards against cycles.
+ */
+function redactValue(value: unknown, seen: WeakSet<object>): unknown {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return value;
+    seen.add(value);
+    return value.map((v) => redactValue(v, seen));
+  }
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (seen.has(obj)) return obj;
+    seen.add(obj);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (REDACT_KEYS.some((r) => k.toLowerCase().includes(r))) continue;
+      out[k] = redactValue(v, seen);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Strip credential-like keys from a tool args object before it is logged.
+ */
+export function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return redactValue(args, new WeakSet<object>()) as Record<string, unknown>;
+}
+
+/**
+ * Build a structured tool_execution log event from a ToolExecutionResult.
+ * Args are redacted before hashing, so no secret value is ever hashed or leaked.
+ */
+export function buildToolExecutionEvent(
+  result: import("./tools/executor.js").ToolExecutionResult,
+  timestamp: string,
+): Record<string, unknown> {
+  const argsHash = "sha256:" + createHash("sha256").update(JSON.stringify(redactArgs(result.args))).digest("hex");
+  return {
+    event: "tool_execution",
+    tool_name: result.toolName,
+    ok: result.ok,
+    latency_ms: result.latencyMs ?? null,
+    failure_category: result.failure?.category ?? null,
+    normalized: result.normalized,
+    args_hash: argsHash,
+    timestamp,
+  };
+}
+
+/**
+ * Log a redacted tool_execution event to disk. Called from the tool dispatch
+ * path so credential redaction is enforced at runtime, not just in tests.
+ * A logging failure must never break a tool call, so all errors are swallowed.
+ */
+export function logToolExecution(
+  result: import("./tools/executor.js").ToolExecutionResult,
+  logPath: string = TOOL_EXEC_LOG,
+): void {
+  try {
+    if (logPath === TOOL_EXEC_LOG) {
+      ensureDir();
+    } else {
+      const dir = dirname(logPath);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+    }
+    const event = buildToolExecutionEvent(result, new Date().toISOString());
+    appendFileSync(logPath, JSON.stringify(event) + "\n", "utf-8");
+  } catch {
+    // Analytics failures must never break a tool call.
+  }
 }
 
 // ---------------------------------------------------------------------------

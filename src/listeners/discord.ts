@@ -6,8 +6,8 @@
  *
  * Environment:
  *   DISCORD_BOT_TOKEN    — Your Discord bot token
- *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google)
- *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY
+ *   SPORTSCLAW_PROVIDER  — LLM provider (anthropic, openai, google, azure-foundry)
+ *   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY / AZURE_FOUNDRY_API_KEY
  *   ALLOWED_USERS        — Comma-separated Discord user IDs (optional whitelist)
  *
  * Feature flags (set in ~/.sportsclaw/config.json or env):

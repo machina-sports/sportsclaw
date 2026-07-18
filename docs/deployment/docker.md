@@ -23,7 +23,8 @@ docker run --rm --env-file .env sportsclaw
 
 | Variable | Purpose |
 | --- | --- |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | Your model provider |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` / `AZURE_FOUNDRY_API_KEY` | Your model provider |
+| `AZURE_FOUNDRY_BASE_URL` / `AZURE_FOUNDRY_IMAGE_BASE_URL` | Azure Foundry text/image endpoints when using `provider=azure-foundry` |
 | `DISCORD_BOT_TOKEN` | Run a Discord bot |
 | `TELEGRAM_BOT_TOKEN` | Run a Telegram bot |
 

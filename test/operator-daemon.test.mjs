@@ -77,6 +77,30 @@ function baseConfig(overrides = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// persistence opt-out (single-replica mode)
+// ---------------------------------------------------------------------------
+
+describe("persistence opt-out", () => {
+  it("default configures heartbeat persistence (+ per-job lock)", () => {
+    const daemon = createOperatorDaemon(baseConfig());
+    assert.strictEqual(daemon.heartbeat.hasPersistence, true);
+  });
+
+  it("persistence:false runs the heartbeat in-memory (no lock path)", () => {
+    const daemon = createOperatorDaemon(baseConfig({ persistence: false }));
+    assert.strictEqual(daemon.heartbeat.hasPersistence, false);
+  });
+
+  it("persistence:false still ticks (no lock to stall on)", async () => {
+    const daemon = createOperatorDaemon(baseConfig({ persistence: false }));
+    const first = await daemon.tickOnce();
+    const second = await daemon.tickOnce();
+    assert.strictEqual(first.type, "tick_published");
+    assert.strictEqual(second.type, "tick_published");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // tickOnce — published path
 // ---------------------------------------------------------------------------
 
@@ -938,7 +962,9 @@ describe("tickOnce — structured output", () => {
     assert.deepStrictEqual(event.output, obj);
   });
 
-  it("treats a missing submit_broadcast tool call as tick_silent (model never emitted)", async () => {
+  it("treats a missing output tool call as tick_failed (not a silent success)", async () => {
+    // Domain-neutral operator (PR2): a structured tick that never called the
+    // output tool is a failure to surface, not a silent no-op.
     const gen = makeGenWithResult({ text: "ignored in structured mode", toolCalls: [] });
     const daemon = createOperatorDaemon(
       baseConfig({
@@ -947,9 +973,8 @@ describe("tickOnce — structured output", () => {
       }),
     );
     const event = await daemon.tickOnce();
-    assert.strictEqual(event.type, "tick_silent");
-    assert.strictEqual(event.text, undefined);
-    assert.strictEqual(event.output, undefined);
+    assert.strictEqual(event.type, "tick_failed");
+    assert.match(event.reason ?? "", /did not call the submit_broadcast output tool/);
   });
 
   it("forwards outputSchema.description onto the submit_broadcast tool", async () => {

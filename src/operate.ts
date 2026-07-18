@@ -59,6 +59,60 @@ import {
   TOOL_DISCIPLINE_FRAGMENT,
 } from "./prompts.js";
 import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
+import { invokeModelRole } from "./inference/model-role-router.js";
+
+// Cheap-wake probe budget: a sink's pollWake must be fast I/O. If it hangs or
+// throws we fail closed (skip the tick — never fall through to inference).
+const WAKE_POLL_TIMEOUT_MS = 5_000;
+// Governed second-inference budget (e.g. the Vault skeptic evaluator).
+const MODEL_ROLE_TIMEOUT_MS = 25_000;
+
+/** Governed wrapper around invokeModelRole exposed via SinkContext, so sinks run
+ *  a second inference WITHOUT importing /app/dist internals. Bounded + fail-closed:
+ *  only `completed` carries an output; timeout → timed_out, throw → failed. */
+function makeRunModelRole(): NonNullable<SinkContext["runModelRole"]> {
+  const invoke = invokeModelRole as (a: {
+    role: string;
+    input: unknown;
+    source: string;
+    config?: unknown;
+  }) => Promise<{ output?: unknown }>;
+  return async ({ role = "brain", input, source, config, timeoutMs }) => {
+    const started = Date.now();
+    try {
+      const res = await Promise.race([
+        invoke({ role, input, source: source ?? "sink", config }),
+        new Promise<never>((_r, rej) =>
+          setTimeout(() => rej(new Error("model role timeout")), timeoutMs ?? MODEL_ROLE_TIMEOUT_MS),
+        ),
+      ]);
+      return { status: "completed", output: res.output, latencyMs: Date.now() - started };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { status: /timeout/i.test(msg) ? "timed_out" : "failed", error: msg, latencyMs: Date.now() - started };
+    }
+  };
+}
+
+/** Adapt a sink's optional pollWake into the daemon's wake gate, with a bounded
+ *  timeout + fail-closed behaviour. Returns undefined when the sink has none. */
+function makeWakeGate(
+  sink: { pollWake?: (args: { cfg: OperatorJobConfig }) => unknown },
+  cfg: OperatorJobConfig,
+): (() => Promise<{ wake: boolean; context?: string; reason?: string }>) | undefined {
+  if (!sink.pollWake) return undefined;
+  return async () => {
+    try {
+      const result = (await Promise.race([
+        Promise.resolve(sink.pollWake!({ cfg })),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error("pollWake timeout")), WAKE_POLL_TIMEOUT_MS)),
+      ])) as { wake: boolean; context?: string; reason?: string };
+      return result && typeof result.wake === "boolean" ? result : { wake: false, reason: "pollWake returned no verdict" };
+    } catch (err) {
+      return { wake: false, reason: err instanceof Error ? err.message : "pollWake error" };
+    }
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Public entry — wired into src/index.ts main dispatcher
@@ -72,6 +126,82 @@ interface ParsedFlags {
   dryRun: boolean;
   json: boolean;
   unknown: string[];
+}
+
+export interface SinkPolledLoopOptions {
+  intervalMs: number;
+  pollForWork: () => Promise<boolean> | boolean;
+  tickOnce: () => Promise<unknown>;
+  signal?: AbortSignal;
+  /** Test seam; production uses an abort-aware timer. */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  onError?: (phase: "poll" | "tick", error: unknown) => void;
+}
+
+function waitFor(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done();
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Close the small race between the initial aborted check and listener
+    // registration; an abort in that window should not wait a full cadence.
+    if (signal?.aborted) done();
+  });
+}
+
+/**
+ * Serial work-driven scheduler. Polling is cheap and frequent; model ticks are
+ * awaited, so a 70-second inference can never overlap another tick even when
+ * the queue is checked every five seconds.
+ */
+export async function runSinkPolledLoop(opts: SinkPolledLoopOptions): Promise<void> {
+  if (!Number.isFinite(opts.intervalMs) || opts.intervalMs <= 0) {
+    throw new Error("sink-polled intervalMs must be > 0");
+  }
+  const wait = opts.wait ?? waitFor;
+  while (!opts.signal?.aborted) {
+    let hasWork = false;
+    try {
+      hasWork = await opts.pollForWork();
+    } catch (err) {
+      opts.onError?.("poll", err);
+    }
+
+    if (opts.signal?.aborted) break;
+    if (hasWork) {
+      try {
+        await opts.tickOnce();
+      } catch (err) {
+        opts.onError?.("tick", err);
+      }
+    }
+
+    if (opts.signal?.aborted) break;
+    await wait(opts.intervalMs, opts.signal);
+  }
+}
+
+export function requireSinkPollForWork(
+  cfg: OperatorJobConfig,
+  sink: OperatorSinkPlugin,
+  ctx: SinkContext,
+): () => Promise<boolean> {
+  if (cfg.scheduleMode !== "sink-polled") {
+    throw new Error("requireSinkPollForWork called for a non sink-polled job");
+  }
+  if (typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
+  return async () => (await sink.pollForWork!(ctx)) === true;
 }
 
 function parseFlags(args: string[]): ParsedFlags {
@@ -251,6 +381,19 @@ interface OperatorTools {
 }
 
 /**
+ * Apply an operator job's schema filter exactly once, before schemas load.
+ * `undefined` preserves the legacy all-skills behavior; an explicit empty
+ * array intentionally exposes no sports schemas (MCP/sink tools still load).
+ */
+export function applyOperatorSkillFilter(skills: string[] | undefined): void {
+  const callerConfigured =
+    process.env.SPORTSCLAW_SKILLS !== undefined ||
+    process.env.sportsclaw_SKILLS !== undefined;
+  if (skills === undefined || callerConfigured) return;
+  process.env.SPORTSCLAW_SKILLS = skills.join(",");
+}
+
+/**
  * Build the same ToolSet `sportsclaw chat` would expose, minus engine-state-
  * specific internal tools (memory ops, sport install, etc.). v1: no per-job
  * filtering. The registry + mcpManager are returned so callers can use them
@@ -268,9 +411,7 @@ async function buildOperatorTools(
   // ticks, and the toolset fits within Gemini's responseSchema +
   // function-calling complexity envelope. If the env var is already set
   // by the caller (e.g. integration tests), respect that — don't override.
-  if (cfg.skills && cfg.skills.length > 0 && !process.env.SPORTSCLAW_SKILLS) {
-    process.env.SPORTSCLAW_SKILLS = cfg.skills.join(",");
-  }
+  applyOperatorSkillFilter(cfg.skills);
   const registry = new ToolRegistry();
   for (const schema of loadAllSchemas()) {
     registry.injectSchema(schema, false);
@@ -448,6 +589,7 @@ function applyOpenShellEnv(
       process.env.OPENAI_BASE_URL = openshell.baseUrl;
       break;
     case "google":
+    case "azure-foundry":
       // Never reached — config validator + resolveOpenShell both reject.
       break;
   }
@@ -597,6 +739,8 @@ function defaultModelFor(provider: LLMProvider): string {
       return "gpt-4.1";
     case "google":
       return "gemini-2.5-flash";
+    case "azure-foundry":
+      return "gpt-5.2";
   }
 }
 
@@ -666,6 +810,7 @@ async function runOnce(jobId: string): Promise<void> {
       intervalMs: cfg.intervalMs,
       mcpManager: tools.mcpManager,
       cfg,
+      runModelRole: makeRunModelRole(),
     };
     const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
@@ -680,17 +825,26 @@ async function runOnce(jobId: string): Promise<void> {
       maxOutputTokens: cfg.maxOutputTokens,
       inferenceTimeoutMs: cfg.inferenceTimeoutMs,
       maxSteps: cfg.maxSteps,
+      tickPrompt: cfg.tickPrompt,
       guardOptions: cfg.guardOptions,
       enableMemoryTools: cfg.enableMemoryTools,
+      persistence: cfg.persistence,
       inferenceRoute: inputs.inferenceRoute,
       broadcastSafety: cfg.broadcastSafety,
       mcpManager: tools.mcpManager,
       ...(outputSchema ? { outputSchema } : {}),
+      ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
       onTickEvent: sink.onTickEvent
         ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
         : undefined,
       onToolCall: sink.onToolCall
-        ? (evt) => { void sink.onToolCall!(evt, ctx); }
+        // Return (don't discard) the sink promise: the daemon's bounded awaitHook
+      // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
+      ? async (evt) => { await sink.onToolCall!(evt, ctx); }
+        : undefined,
+      streamOutput: cfg.streamOutput,
+      onPartialOutput: sink.onPartialOutput
+        ? (evt) => { try { sink.onPartialOutput!(evt, ctx); } catch { /* never stall streaming */ } }
         : undefined,
       onComposeTickContext: sink.composeTickContext
         ? async (args) =>
@@ -703,13 +857,12 @@ async function runOnce(jobId: string): Promise<void> {
     });
     const event = await daemon.tickOnce();
     console.log(JSON.stringify(event, null, 2));
-    // Drain: onTickEvent / onToolCall handlers may have fire-and-forget POSTs
-    // (e.g. broadcast sink's tail-server). Give them a short window to flush
-    // before process.exit kills any pending fetches.
-    if (sink.onTickEvent || sink.onToolCall) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-    }
-    process.exit(exitCodeFor(event));
+    // onTickEvent is awaited inside the tick now, so the sink has finished
+    // delivering by the time tickOnce() resolves — no fixed 1.5s flush needed.
+    // Drain any queued work, set the exit code, and let the finally disconnect
+    // MCP so the process exits cleanly when the loop empties (no abrupt exit).
+    await daemon.drain();
+    process.exitCode = exitCodeFor(event);
   } finally {
     await tools.mcpManager.disconnectAll().catch(() => {});
   }
@@ -736,6 +889,12 @@ function exitCodeFor(event: TickEvent): number {
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
   const sink = withOperatorSync(await resolveSink(cfg), cfg);
+  if (cfg.scheduleMode === "sink-polled" && typeof sink.pollForWork !== "function") {
+    throw new Error(
+      `Operator job "${cfg.jobId}" uses scheduleMode="sink-polled", but sink ` +
+        `"${sink.name}" does not implement pollForWork.`,
+    );
+  }
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
   if (inputs.openshell?.enabled) {
@@ -748,6 +907,7 @@ async function runForeground(jobId: string): Promise<void> {
     intervalMs: cfg.intervalMs,
     mcpManager: tools.mcpManager,
     cfg,
+    runModelRole: makeRunModelRole(),
   };
   const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
@@ -762,17 +922,26 @@ async function runForeground(jobId: string): Promise<void> {
     maxOutputTokens: cfg.maxOutputTokens,
     inferenceTimeoutMs: cfg.inferenceTimeoutMs,
     maxSteps: cfg.maxSteps,
+    tickPrompt: cfg.tickPrompt,
     guardOptions: cfg.guardOptions,
     enableMemoryTools: cfg.enableMemoryTools,
+    persistence: cfg.persistence,
     inferenceRoute: inputs.inferenceRoute,
     broadcastSafety: cfg.broadcastSafety,
     mcpManager: tools.mcpManager,
     ...(outputSchema ? { outputSchema } : {}),
+    ...(sink.pollWake ? { wakeGate: makeWakeGate(sink, cfg) } : {}),
     onTickEvent: sink.onTickEvent
       ? async (evt) => { await sink.onTickEvent!(evt, ctx); }
       : (evt) => console.log(JSON.stringify(evt)),
     onToolCall: sink.onToolCall
-      ? (evt) => { void sink.onToolCall!(evt, ctx); }
+      // Return (don't discard) the sink promise: the daemon's bounded awaitHook
+      // catches a rejection; `void` here made a Tail hiccup an unhandledRejection.
+      ? async (evt) => { await sink.onToolCall!(evt, ctx); }
+      : undefined,
+    streamOutput: cfg.streamOutput,
+    onPartialOutput: sink.onPartialOutput
+      ? (evt) => { try { sink.onPartialOutput!(evt, ctx); } catch { /* never stall streaming */ } }
       : undefined,
     onComposeTickContext: sink.composeTickContext
       ? async (args) =>
@@ -784,17 +953,21 @@ async function runForeground(jobId: string): Promise<void> {
       : undefined,
   });
 
+  const stopController = new AbortController();
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error(`[operate] received ${signal}, shutting down`);
-    daemon.stop();
-    // Best-effort final brief so the next start sees an explicit handoff.
+    console.error(`[operate] received ${signal}, draining`);
+    // Stop the sink-polled loop's poll timer first, then drain gracefully:
+    // stop admitting ticks and wait for the active one to finish (incl. awaited
+    // sink delivery). No handoff tickOnce() — that would start a NEW inference
+    // at shutdown and could overlap the in-flight tick (PR1 semantics).
+    stopController.abort();
     try {
-      await daemon.tickOnce();
+      await daemon.drain();
     } catch {
-      // Don't block exit on a final-brief failure.
+      // Don't block exit on a drain failure.
     }
     await tools.mcpManager.disconnectAll().catch(() => {});
     process.exit(0);
@@ -806,12 +979,44 @@ async function runForeground(jobId: string): Promise<void> {
   const inferenceTag = inputs.openshell?.enabled
     ? ` inference=openshell(${inputs.openshell.baseUrl})`
     : "";
+  const schedulingTag = cfg.scheduleMode === "sink-polled" ? " schedule=sink-polled" : "";
   console.error(
-    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}`,
+    `[operate] job=${cfg.jobId} interval=${cfg.intervalMs}ms provider=${inputs.provider} model=${inputs.modelId}${inferenceTag}${schedulingTag}`,
   );
+  if (cfg.scheduleMode === "sink-polled") {
+    const pollForWork = requireSinkPollForWork(cfg, sink, ctx);
+    await runSinkPolledLoop({
+      intervalMs: cfg.intervalMs,
+      pollForWork,
+      tickOnce: () => daemon.tickOnce(),
+      signal: stopController.signal,
+      onError: (phase, err) => {
+        console.error(
+          `[operate] sink-polled ${phase} failed for ${cfg.jobId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      },
+    });
+    return;
+  }
+
   daemon.start();
-  // Keep the process alive without unref'd heartbeat timers exiting early.
-  await new Promise<void>(() => {});
+  // Keep the event loop alive with a REF'd handle so the (unref'd) heartbeat +
+  // cron timers keep firing. A bare pending promise does not hold libuv open;
+  // without any ref'd handle, a daemon that connects no MCP servers (e.g. a
+  // single-purpose operator like the Athlete Vault) goes idle after the first
+  // tick's inference settles and the unref'd recurring cron stops advancing —
+  // the daemon "fires once, then silently never ticks again". A daemon that
+  // happens to hold ref'd handles (MCP stdio/SSE sockets, like the broadcast
+  // operator) masks the bug. This ref'd keep-alive makes foreground `operate`
+  // tick reliably regardless of whether any MCP server is connected.
+  const keepAlive = setInterval(() => {}, 1 << 30); // ref'd; ~12.4 days, no-op
+  try {
+    await new Promise<void>(() => {});
+  } finally {
+    clearInterval(keepAlive);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,20 @@ export interface OperatorJobConfig {
   label?: string;
   /** Tick interval in ms. Must be > 0. */
   intervalMs: number;
+  /**
+   * Scheduling strategy for the foreground operator.
+   *
+   * - `fixed` (default): heartbeat starts a tick every `intervalMs`; the
+   *   inference watchdog must remain shorter than the interval.
+   * - `sink-polled`: the resolved sink polls for work every `intervalMs` and
+   *   each accepted tick is awaited to completion before polling again. This
+   *   is intended for interactive queues where pickup must be fast while an
+   *   individual inference may take longer than the poll cadence.
+   *
+   * `sink-polled` requires the sink to implement `pollForWork`; the launcher
+   * validates that runtime contract before starting the loop.
+   */
+  scheduleMode?: "fixed" | "sink-polled";
   /** EITHER an MCP-resolvable prompt name (resolved at runtime via get_prompt_by_name)... */
   persona?: string;
   /** ...OR inline persona text. One of these two is required. */
@@ -77,10 +91,18 @@ export interface OperatorJobConfig {
    * ticks don't overlap.
    */
   inferenceTimeoutMs?: number;
+  /** Stream the forced output tool's args (structured mode) — opt-in. */
+  streamOutput?: boolean;
   /**
    * Max LLM steps (tool-call rounds) per tick. Overrides the daemon default.
    */
   maxSteps?: number;
+  /**
+   * Per-tick prompt template ({tickId} / {timestamp} substituted). Overrides
+   * the daemon's domain-neutral default. Lets a job own its tick instruction
+   * instead of inheriting a generic one.
+   */
+  tickPrompt?: string;
   /**
    * Sport-skill schemas to load for this job. When set, the launcher applies
    * the list as `SPORTSCLAW_SKILLS` for this process before `loadAllSchemas()`
@@ -99,7 +121,8 @@ export interface OperatorJobConfig {
    * (without the `.json` suffix), e.g.
    * `["football","kalshi","polymarket","news","markets","metadata","betting"]`.
    *
-   * Omit to keep the legacy "load everything" behaviour.
+   * Omit to keep the legacy "load everything" behaviour. Set `[]` to expose
+   * no sports schemas while retaining MCP, sink, and daemon-owned tools.
    */
   skills?: string[];
   /** Tool guardrail overrides — passed through to ToolGuardController. */
@@ -121,6 +144,18 @@ export interface OperatorJobConfig {
    * — the current tick sees a frozen snapshot. Default: true.
    */
   enableMemoryTools?: boolean;
+  /**
+   * Enable heartbeat state persistence + the cross-process per-job tick lock.
+   * The lock exists to coordinate MULTIPLE daemon replicas of the same job so
+   * they don't double-fire a tick. A single-replica operator (the common case,
+   * e.g. one daemon in a sandbox) does not need it, and the lockfile lives on
+   * whatever `stateDir` resolves to — on a restricted/overlay filesystem a
+   * lock that fails to release cleanly stalls every subsequent tick (fires
+   * once, then silently ELOCKED-skips). Set `false` to run the heartbeat fully
+   * in-memory (overlapping ticks are still guarded by an in-process flag).
+   * Default: true (unchanged behaviour for existing single/multi-replica jobs).
+   */
+  persistence?: boolean;
   /**
    * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
    * Absent block = default direct LLM calls; nothing changes. When present
@@ -224,6 +259,7 @@ const VALID_PROVIDERS: ReadonlySet<LLMProvider> = new Set<LLMProvider>([
   "anthropic",
   "openai",
   "google",
+  "azure-foundry",
 ]);
 
 const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -350,6 +386,11 @@ export function validateOperatorJobConfig(
     }
   }
 
+  // streamOutput
+  if (raw.streamOutput !== undefined && typeof raw.streamOutput !== "boolean") {
+    push("streamOutput", `must be a boolean (got ${JSON.stringify(raw.streamOutput)})`);
+  }
+
   // inferenceTimeoutMs / maxSteps
   for (const field of ["inferenceTimeoutMs", "maxSteps"] as const) {
     if (raw[field] !== undefined) {
@@ -360,11 +401,32 @@ export function validateOperatorJobConfig(
     }
   }
 
-  // Cross-field validation: inferenceTimeoutMs < intervalMs
+  // scheduleMode
+  const scheduleMode = raw.scheduleMode ?? "fixed";
+  if (scheduleMode !== "fixed" && scheduleMode !== "sink-polled") {
+    push(
+      "scheduleMode",
+      `must be one of fixed, sink-polled (got ${JSON.stringify(raw.scheduleMode)})`,
+    );
+  }
+  if (scheduleMode === "sink-polled" && !raw.sink) {
+    push("scheduleMode", "sink-polled mode requires a configured sink");
+  }
+
+  // Fixed cadence keeps the conservative timeout<interval invariant (a longer
+  // watchdog would just skip every other fire under tick single-flight — a
+  // config smell worth rejecting). Sink-polled mode is serialized by the
+  // foreground loop, so its inference budget may legitimately exceed the
+  // (idle) poll cadence.
   if (raw.inferenceTimeoutMs !== undefined && raw.intervalMs !== undefined) {
     const timeout = raw.inferenceTimeoutMs;
     const interval = raw.intervalMs;
-    if (typeof timeout === "number" && typeof interval === "number" && timeout >= interval) {
+    if (
+      scheduleMode === "fixed" &&
+      typeof timeout === "number" &&
+      typeof interval === "number" &&
+      timeout >= interval
+    ) {
       push(
         "inferenceTimeoutMs",
         `must be strictly less than intervalMs (${interval}ms) to prevent overlapping execution`
@@ -411,6 +473,11 @@ export function validateOperatorJobConfig(
     push("enableMemoryTools", "must be a boolean");
   }
 
+  // persistence
+  if (raw.persistence !== undefined && typeof raw.persistence !== "boolean") {
+    push("persistence", "must be a boolean");
+  }
+
   // openshell — optional opt-in routing block
   let parsedOpenShell: OpenShellConfig | undefined;
   if (raw.openshell !== undefined) {
@@ -443,6 +510,14 @@ export function validateOperatorJobConfig(
         push(
           "openshell",
           "provider \"google\" is not supported under openshell — the Privacy Router doesn't speak Google's protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
+        );
+      }
+      // azure-foundry targets Azure endpoints directly, not the Privacy
+      // Router's inference.local — the two are mutually exclusive.
+      if (openShellEnabled && raw.provider === "azure-foundry") {
+        push(
+          "openshell",
+          "provider \"azure-foundry\" is not supported under openshell — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
         );
       }
       parsedOpenShell = {
@@ -512,6 +587,10 @@ export function validateOperatorJobConfig(
     }
   }
 
+  if (raw.tickPrompt !== undefined && typeof raw.tickPrompt !== "string") {
+    push("tickPrompt", "must be a string");
+  }
+
   if (issues.length > 0) {
     return { valid: false, issues };
   }
@@ -523,6 +602,8 @@ export function validateOperatorJobConfig(
       jobId: raw.jobId as string,
       label: raw.label as string | undefined,
       intervalMs: raw.intervalMs as number,
+      scheduleMode: scheduleMode as OperatorJobConfig["scheduleMode"],
+      tickPrompt: raw.tickPrompt as string | undefined,
       persona: raw.persona as string | undefined,
       personaText: raw.personaText as string | undefined,
       model: raw.model as string | undefined,
@@ -538,6 +619,8 @@ export function validateOperatorJobConfig(
       guardOptions: raw.guardOptions as Record<string, unknown> | undefined,
       sinkRole: raw.sinkRole as string | undefined,
       enableMemoryTools: raw.enableMemoryTools as boolean | undefined,
+      persistence: raw.persistence as boolean | undefined,
+      streamOutput: raw.streamOutput as boolean | undefined,
       openshell: parsedOpenShell,
       inference: raw.inference as ModelRoleRouterConfig | undefined,
       broadcastSafety: raw.broadcastSafety as OperatorJobConfig["broadcastSafety"],

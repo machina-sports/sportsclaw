@@ -11,6 +11,7 @@ import { join } from "node:path";
 import pc from "picocolors";
 import * as p from "@clack/prompts";
 import {
+  CUSTOM_MODEL_VALUE,
   DEFAULT_MODELS,
   PROVIDER_MODEL_PROFILES,
   type LLMProvider,
@@ -112,6 +113,7 @@ export const PROVIDER_ENV: Record<LLMProvider, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
+  "azure-foundry": "AZURE_FOUNDRY_API_KEY",
 };
 
 export const ASCII_LOGO = `
@@ -312,11 +314,14 @@ export function resolveConfig(): ResolvedConfig {
 
   const model =
     firstEnv("SPORTSCLAW_MODEL", "sportsclaw_MODEL") ||
-    file.model ||
+    (file.provider === provider ? file.model : undefined) ||
     DEFAULT_MODELS[provider];
 
-  // env var > config-file apiKey (only if provider matches)
-  const apiKey = process.env[envVar] || file.apiKey;
+  // env var > config-file apiKey, but only reuse the persisted key when the
+  // persisted provider matches the resolved provider. This prevents a provider
+  // override (e.g. SPORTSCLAW_PROVIDER=azure-foundry) from accidentally reusing
+  // a key saved for a different provider.
+  const apiKey = process.env[envVar] || (file.provider === provider ? file.apiKey : undefined);
   const defaultPythonPath = existsSync("/opt/homebrew/bin/python3")
     ? "/opt/homebrew/bin/python3"
     : "python3";
@@ -835,11 +840,60 @@ export async function runChannelsFlow(): Promise<void> {
 function hasApiKey(savedConfig: CLIConfig, prov: LLMProvider): boolean {
   if (process.env[PROVIDER_ENV[prov]]) return true;
   if (savedConfig.provider === prov && savedConfig.apiKey) return true;
+  // Azure Foundry can run keyless through Microsoft Entra ID.
+  if (prov === "azure-foundry") {
+    const env = parseEnvFile(ENV_PATH);
+    const authMode = process.env.AZURE_FOUNDRY_AUTH_MODE || env.AZURE_FOUNDRY_AUTH_MODE;
+    const baseUrl = process.env.AZURE_FOUNDRY_BASE_URL || env.AZURE_FOUNDRY_BASE_URL;
+    if (authMode === "entra_id" && baseUrl) return true;
+  }
   // For Anthropic, an active Claude Code OAuth opt-in counts as authenticated.
   if (prov === "anthropic" && getAuthMethods().anthropic === "oauth_claude_code") {
     if (inspectClaudeCodeSession().available) return true;
   }
   return false;
+}
+
+async function promptModelSelection(
+  provider: LLMProvider,
+  savedConfig: CLIConfig,
+  opts: { message?: string; placeholder?: string } = {},
+): Promise<string> {
+  const profile = PROVIDER_MODEL_PROFILES[provider];
+  const customOption = {
+    value: CUSTOM_MODEL_VALUE,
+    label: "Custom model / deployment name",
+    hint: "type a provider-specific model id",
+  };
+
+  const choice = await p.select({
+    message: opts.message ?? "Which model?",
+    options: [...(profile?.selectableModels ?? []), customOption],
+    initialValue: savedConfig.model || profile?.defaultModel || undefined,
+  });
+
+  if (p.isCancel(choice)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  if (choice !== CUSTOM_MODEL_VALUE) {
+    return choice as string;
+  }
+
+  const customModel = await p.text({
+    message: "Model / deployment name:",
+    placeholder: opts.placeholder || profile?.defaultModel || "model-id",
+    defaultValue: savedConfig.model || profile?.defaultModel || "",
+    validate: (val) => (!val?.trim() ? "Model ID is required." : undefined),
+  });
+
+  if (p.isCancel(customModel)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  return (customModel as string).trim();
 }
 
 async function configureProvider(savedConfig: CLIConfig): Promise<{
@@ -853,6 +907,7 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
       { value: "anthropic", label: "Anthropic", hint: hasApiKey(savedConfig, "anthropic") ? "Claude · authenticated" : "Claude" },
       { value: "openai", label: "OpenAI", hint: hasApiKey(savedConfig, "openai") ? "GPT · authenticated" : "GPT" },
       { value: "google", label: "Google", hint: hasApiKey(savedConfig, "google") ? "Gemini · authenticated" : "Gemini" },
+      { value: "azure-foundry", label: "Azure Foundry", hint: hasApiKey(savedConfig, "azure-foundry") ? "Microsoft Foundry / Azure OpenAI · authenticated" : "Microsoft Foundry / Azure OpenAI" },
     ],
     initialValue: savedConfig.provider || undefined,
   });
@@ -862,16 +917,13 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
     process.exit(0);
   }
 
-  const model = await p.select({
-    message: "Which model?",
-    options: PROVIDER_MODEL_PROFILES[provider as LLMProvider]?.selectableModels ?? [],
-    initialValue: savedConfig.model || undefined,
-  });
-
-  if (p.isCancel(model)) {
-    p.cancel("Cancelled.");
-    process.exit(0);
+  // Azure Foundry has its own endpoint/auth/api-mode wizard and a free-text
+  // deployment name (deployments are user-defined, not a fixed model list).
+  if (provider === "azure-foundry") {
+    return configureAzureFoundry(savedConfig);
   }
+
+  const model = await promptModelSelection(provider as LLMProvider, savedConfig);
 
   const selectedProvider = provider as LLMProvider;
   const envName = PROVIDER_ENV[selectedProvider];
@@ -953,6 +1005,135 @@ async function configureProvider(savedConfig: CLIConfig): Promise<{
   }
 
   return { provider: selectedProvider, model: model as string, apiKey };
+}
+
+/**
+ * Azure Foundry (Microsoft Foundry / Azure OpenAI) setup. Collects the
+ * endpoint, API mode, auth mode, and deployment name, and persists the
+ * `AZURE_FOUNDRY_*` env vars to `~/.sportsclaw/.env`. The API key (when the
+ * auth mode is `api_key`) is returned to be saved in config.json like other
+ * providers; under Entra ID no key is stored.
+ */
+async function configureAzureFoundry(savedConfig: CLIConfig): Promise<{
+  provider: LLMProvider;
+  model: string;
+  apiKey: string;
+}> {
+  const baseUrlInput = await p.text({
+    message: "Azure Foundry endpoint base URL:",
+    placeholder: "https://<resource>.openai.azure.com/openai/v1",
+    initialValue: process.env.AZURE_FOUNDRY_BASE_URL || parseEnvFile(ENV_PATH).AZURE_FOUNDRY_BASE_URL || "",
+    validate: (val) => {
+      if (!val?.trim()) return "Base URL is required.";
+      try {
+        const u = new URL(val.trim());
+        if (u.protocol !== "http:" && u.protocol !== "https:") return "Must be an http(s) URL.";
+      } catch {
+        return "Not a valid URL.";
+      }
+      return undefined;
+    },
+  });
+  if (p.isCancel(baseUrlInput)) { p.cancel("Cancelled."); process.exit(0); }
+  const baseUrl = (baseUrlInput as string).trim();
+
+  const apiMode = await p.select({
+    message: "API mode:",
+    options: [
+      { value: "auto", label: "Auto-detect", hint: "recommended — infer from URL + model" },
+      { value: "chat_completions", label: "Chat Completions", hint: "OpenAI /chat/completions" },
+      { value: "responses", label: "Responses", hint: "OpenAI /responses (gpt-5*, o-series)" },
+      { value: "codex_responses", label: "Codex Responses", hint: "OpenAI /responses for codex" },
+      { value: "anthropic_messages", label: "Anthropic Messages", hint: "Azure services.ai /anthropic" },
+    ],
+    initialValue: "auto",
+  });
+  if (p.isCancel(apiMode)) { p.cancel("Cancelled."); process.exit(0); }
+
+  const authMode = await p.select({
+    message: "Authentication mode:",
+    options: [
+      { value: "api_key", label: "API key", hint: "AZURE_FOUNDRY_API_KEY (default)" },
+      { value: "entra_id", label: "Entra ID", hint: "DefaultAzureCredential (@azure/identity)" },
+    ],
+    initialValue: "api_key",
+  });
+  if (p.isCancel(authMode)) { p.cancel("Cancelled."); process.exit(0); }
+
+  const model = await promptModelSelection("azure-foundry", savedConfig, {
+    message: "Deployment / model name:",
+    placeholder: "gpt-5.2",
+  });
+
+  const apiVersionInput = await p.text({
+    message: "API version (optional — blank to omit):",
+    placeholder: "preview",
+    defaultValue: process.env.AZURE_FOUNDRY_API_VERSION || parseEnvFile(ENV_PATH).AZURE_FOUNDRY_API_VERSION || "",
+  });
+  if (p.isCancel(apiVersionInput)) { p.cancel("Cancelled."); process.exit(0); }
+  const apiVersion = (apiVersionInput as string).trim();
+
+  // Persist non-secret Foundry settings to ~/.sportsclaw/.env so the runtime
+  // resolver (resolveAzureFoundryConfig) picks them up.
+  writeEnvVar(ENV_PATH, "AZURE_FOUNDRY_BASE_URL", baseUrl);
+  writeEnvVar(ENV_PATH, "AZURE_FOUNDRY_API_MODE", apiMode as string);
+  writeEnvVar(ENV_PATH, "AZURE_FOUNDRY_AUTH_MODE", authMode as string);
+  if (apiVersion) writeEnvVar(ENV_PATH, "AZURE_FOUNDRY_API_VERSION", apiVersion);
+
+  if (authMode === "entra_id") {
+    const scopeInput = await p.text({
+      message: "Entra ID token scope:",
+      placeholder: "https://ai.azure.com/.default",
+      defaultValue:
+        process.env.AZURE_FOUNDRY_SCOPE ||
+        parseEnvFile(ENV_PATH).AZURE_FOUNDRY_SCOPE ||
+        "https://ai.azure.com/.default",
+    });
+    if (p.isCancel(scopeInput)) { p.cancel("Cancelled."); process.exit(0); }
+    const scope = (scopeInput as string).trim();
+    if (scope) writeEnvVar(ENV_PATH, "AZURE_FOUNDRY_SCOPE", scope);
+    p.log.info(
+      "Entra ID auth uses DefaultAzureCredential. Ensure @azure/identity is installed " +
+        "(npm install @azure/identity) and your environment is logged in (az login / managed identity).",
+    );
+    // No API key stored under Entra ID.
+    return { provider: "azure-foundry", model, apiKey: "" };
+  }
+
+  const existingKey =
+    process.env.AZURE_FOUNDRY_API_KEY ||
+    (savedConfig.provider === "azure-foundry" ? savedConfig.apiKey : undefined);
+
+  let apiKey: string;
+  if (existingKey && existingKey.trim().length > 0) {
+    const keep = await p.confirm({ message: "AZURE_FOUNDRY_API_KEY is already set. Keep it?", initialValue: true });
+    if (p.isCancel(keep)) { p.cancel("Cancelled."); process.exit(0); }
+    if (keep) {
+      apiKey = existingKey.trim();
+    } else {
+      const newKey = await p.password({
+        message: "Paste your AZURE_FOUNDRY_API_KEY:",
+        validate: (val) => (!val?.trim() ? "API key is required." : undefined),
+      });
+      if (p.isCancel(newKey)) { p.cancel("Cancelled."); process.exit(0); }
+      apiKey = (newKey as string).trim();
+    }
+  } else {
+    const newKey = await p.password({
+      message: "Paste your AZURE_FOUNDRY_API_KEY:",
+      validate: (val) => (!val?.trim() ? "API key is required." : undefined),
+    });
+    if (p.isCancel(newKey)) { p.cancel("Cancelled."); process.exit(0); }
+    apiKey = (newKey as string).trim();
+  }
+
+  // Keep .env in sync so a stale AZURE_FOUNDRY_API_KEY doesn't shadow the wizard.
+  const sync = syncTokenToEnvFile("AZURE_FOUNDRY_API_KEY", apiKey);
+  if (sync === "updated") {
+    p.log.warn("Rewrote stale AZURE_FOUNDRY_API_KEY in ~/.sportsclaw/.env to match the new key.");
+  }
+
+  return { provider: "azure-foundry", model, apiKey };
 }
 
 async function configurePython(_savedConfig: CLIConfig): Promise<string> {

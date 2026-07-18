@@ -1054,6 +1054,23 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
       console.log(`    Set ANTHROPIC_API_KEY, run ${pc.cyan("sportsclaw config")}, or ${pc.cyan("sportsclaw login claude")}`);
       allGood = false;
     }
+  } else if (provider === "azure-foundry") {
+    const authMode = (process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key").trim() || "api_key";
+    const baseUrl = process.env.AZURE_FOUNDRY_BASE_URL;
+    if (!baseUrl) {
+      console.log(pc.red("  ✗") + " AZURE_FOUNDRY_BASE_URL is not set");
+      console.log(`    Set it or run: ${pc.cyan("sportsclaw config")}`);
+      allGood = false;
+    } else if (authMode === "entra_id") {
+      console.log(pc.green("  ✓") + ` Azure Foundry auth: Entra ID (DefaultAzureCredential, ${baseUrl})`);
+    } else if (apiKey) {
+      const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
+      console.log(pc.green("  ✓") + ` Azure Foundry API key (${masked}, ${baseUrl})`);
+    } else {
+      console.log(pc.red("  ✗") + " No Azure Foundry credentials (auth mode: api_key)");
+      console.log(`    Set AZURE_FOUNDRY_API_KEY or run: ${pc.cyan("sportsclaw config")}`);
+      allGood = false;
+    }
   } else if (apiKey) {
     const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
     console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
@@ -1146,6 +1163,10 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
  */
 function hasUsableAuth(resolved: ReturnType<typeof resolveConfig>): boolean {
   if (resolved.apiKey) return true;
+  if (resolved.provider === "azure-foundry") {
+    const authMode = (process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key").trim() || "api_key";
+    return authMode === "entra_id" && Boolean(process.env.AZURE_FOUNDRY_BASE_URL);
+  }
   if (resolved.provider !== "anthropic") return false;
   const auth = resolveAnthropicAuth();
   return auth?.kind === "oauth_claude_code";
@@ -1166,6 +1187,7 @@ function detectConfigDrift(): string[] {
       case "ANTHROPIC_API_KEY":
       case "OPENAI_API_KEY":
       case "GOOGLE_GENERATIVE_AI_API_KEY":
+      case "AZURE_FOUNDRY_API_KEY":
         // Only meaningful when this is the active provider's env var
         return file.provider && PROVIDER_ENV[file.provider] === key
           ? file.apiKey
@@ -1181,6 +1203,7 @@ function detectConfigDrift(): string[] {
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "GOOGLE_GENERATIVE_AI_API_KEY",
+    "AZURE_FOUNDRY_API_KEY",
   ];
 
   // process.env at this point already has .env loaded (cmdDoctor runs after
@@ -1250,7 +1273,15 @@ async function cmdHealth(args: string[]): Promise<void> {
   }
 
   // 3. Check API configuration
-  if (!apiKey) {
+  if (provider === "azure-foundry") {
+    const authMode = (process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key").trim() || "api_key";
+    if (!process.env.AZURE_FOUNDRY_BASE_URL) {
+      errors.push(`AZURE_FOUNDRY_BASE_URL is not configured for provider "${provider}".`);
+    }
+    if (authMode !== "entra_id" && !apiKey) {
+      errors.push(`API key for provider "${provider}" is not configured.`);
+    }
+  } else if (!apiKey) {
     errors.push(`API key for provider "${provider}" is not configured.`);
   }
 
@@ -1293,6 +1324,12 @@ async function cmdHealth(args: string[]): Promise<void> {
         model: model || null,
         pythonPath,
         apiKeyConfigured: !!apiKey,
+        ...(provider === "azure-foundry"
+          ? {
+              azureFoundryBaseUrlConfigured: !!process.env.AZURE_FOUNDRY_BASE_URL,
+              azureFoundryAuthMode: process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key",
+            }
+          : {}),
       },
       mcp: mcpDetails,
       schemasInstalled: schemasCount,
@@ -1341,6 +1378,80 @@ async function cmdHealth(args: string[]): Promise<void> {
   }
 
   process.exit(status === "down" ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------------
+// CLI: `sportsclaw selftest` — schema smoke tests (Task 3's runner/report,
+// wired to the real Python-bridge tool dispatch used by the engine).
+// ---------------------------------------------------------------------------
+
+async function cmdSelftest(args: string[]): Promise<void> {
+  const json = args.includes("--json");
+  const live = args.includes("--live");
+  const quick = args.includes("--quick");
+  const sportIdx = args.indexOf("--sport");
+  const sports = sportIdx >= 0 && args[sportIdx + 1] ? [args[sportIdx + 1]] : undefined;
+
+  const { runSelftest } = await import("./selftest/runner.js");
+  const { renderMarkdown } = await import("./selftest/report.js");
+  const { classifyFailure } = await import("./failures/classifier.js");
+  const { ToolRegistry } = await import("./tools.js");
+
+  let { pythonPath } = resolveConfig();
+  const registry = new ToolRegistry();
+
+  // Only need the real Python bridge (venv + sport schemas) when actually
+  // executing tool calls; offline runs skip every case before this matters.
+  if (live) {
+    const venvResult = ensureVenv(pythonPath);
+    if (venvResult.ok) pythonPath = venvResult.pythonPath;
+    await ensureDefaultSchemas();
+    const { loadAllSchemas } = await import("./schema.js");
+    for (const schema of loadAllSchemas()) {
+      registry.injectSchema(schema);
+    }
+  }
+
+  const seen = new Set<string>();
+  const executor = async (c: { sport: string; toolName: string; args: Record<string, unknown> }) => {
+    if (quick) {
+      if (seen.has(c.sport)) return { ok: true, skip: true, latencyMs: 0, note: "skipped (quick)" };
+      seen.add(c.sport);
+    }
+    const started = Date.now();
+    try {
+      const result = await registry.dispatchToolCall(c.toolName, c.args, { pythonPath });
+      const latencyMs = Date.now() - started;
+      if (result.isError) {
+        // result.content is already-classified JSON (handleDynamicTool embeds a
+        // `hint` via classifyFailure) — parse it instead of re-classifying the
+        // rendered JSON string as if it were raw error text.
+        let note = result.content.slice(0, 200);
+        try {
+          const parsed = JSON.parse(result.content) as { hint?: string };
+          if (parsed.hint) note = parsed.hint;
+        } catch {
+          // not JSON — fall back to the raw (truncated) content above
+        }
+        return { ok: false, latencyMs, note };
+      }
+      return { ok: true, latencyMs };
+    } catch (err) {
+      const latencyMs = Date.now() - started;
+      const raw = err instanceof Error ? err.message : String(err);
+      const classified = classifyFailure(raw, c.toolName);
+      return { ok: false, latencyMs, note: classified.userMessage || raw.slice(0, 200) };
+    }
+  };
+
+  const report = await runSelftest({ sports, live, version: PKG_VERSION, execute: executor });
+
+  if (json) {
+    console.log(JSON.stringify(report.toJSON(), null, 2));
+  } else {
+    console.log(renderMarkdown(report));
+  }
+  process.exit(report.failed > 0 ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2591,6 +2702,7 @@ function printHelp(): void {
   console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
   console.log("  sportsclaw health [--json]         Check system health and status");
+  console.log("  sportsclaw selftest [--quick] [--sport <s>] [--json] [--live]  Run schema smoke tests");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
   console.log("  sportsclaw login claude            Sign in via existing Claude Code session");
@@ -2639,11 +2751,17 @@ function printHelp(): void {
   console.log("  Environment variables override config file values.");
   console.log("");
   console.log("Environment:");
-  console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, or google (default: anthropic)");
+  console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, google, or azure-foundry (default: anthropic)");
   console.log("  sportsclaw_MODEL        Model override (default: depends on provider)");
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
+  console.log("  AZURE_FOUNDRY_API_KEY   API key for Azure Foundry (when provider=azure-foundry, auth mode api_key)");
+  console.log("  AZURE_FOUNDRY_BASE_URL  Foundry endpoint, e.g. https://<res>.openai.azure.com/openai/v1");
+  console.log("  AZURE_FOUNDRY_API_MODE  auto | chat_completions | responses | codex_responses | anthropic_messages");
+  console.log("  AZURE_FOUNDRY_AUTH_MODE api_key (default) | entra_id (DefaultAzureCredential via @azure/identity)");
+  console.log("  AZURE_FOUNDRY_SCOPE     Entra ID token scope (default: https://ai.azure.com/.default)");
+  console.log("  AZURE_FOUNDRY_API_VERSION  Optional api-version query appended to Foundry calls");
   console.log("  PYTHON_PATH             Path to Python interpreter (default: auto-detect)");
   console.log("  sportsclaw_SCHEMA_DIR   Custom schema storage directory");
   console.log("  DISCORD_BOT_TOKEN       Discord bot token (for listen discord)");
@@ -2807,6 +2925,8 @@ async function main(): Promise<void> {
       return cmdDoctor();
     case "health":
       return cmdHealth(subArgs);
+    case "selftest":
+      return cmdSelftest(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":
