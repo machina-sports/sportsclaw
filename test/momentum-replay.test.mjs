@@ -90,4 +90,14 @@ describe("swingToWatchEvent", () => {
     );
     assert.match(event.snapshot.data.game_clock, /^replay @ \d{2}:\d{2}Z$/);
   });
+
+  it("carries any sport string through unchanged — no MLB-specific coupling", () => {
+    for (const sport of ["nba", "nhl", "wnba", "cfb", "cbb"]) {
+      const event = swingToWatchEvent(
+        { timestamp: 1784311380, before: 62, after: 72, delta: 10 },
+        { ...frame, sport },
+      );
+      assert.equal(event.snapshot.data.sport, sport);
+    }
+  });
 });
