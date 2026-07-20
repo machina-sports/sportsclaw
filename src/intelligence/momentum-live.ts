@@ -22,38 +22,11 @@
  *   SPORTSCLAW_PROVIDER / SPORTSCLAW_MODEL   LLM provider/model
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { MomentumExplainer } from "./momentum-explainer.js";
+import { REPO_ROOT, certifiPath, envInt } from "./momentum-runtime.js";
 import type { LLMProvider } from "../types.js";
-
-const HERE = dirname(fileURLToPath(import.meta.url)); // dist/intelligence
-const REPO_ROOT = resolve(HERE, "..", ".."); // <sportsclaw>
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-/**
- * The macOS cert fix: Python's urllib doesn't trust the system keychain, so a
- * live HTTPS fetch to ESPN/Kalshi fails with a cert error unless SSL_CERT_FILE
- * points at certifi's bundle. Compute it once and thread it into the subprocess
- * env, alongside PYTHONPATH.
- */
-function certifiPath(pythonPath: string): string | undefined {
-  try {
-    return execFileSync(pythonPath, ["-c", "import certifi; print(certifi.where())"], {
-      encoding: "utf8",
-    }).trim();
-  } catch {
-    return undefined;
-  }
-}
 
 async function main(): Promise<void> {
   const sport = (process.env.MOMENTUM_SPORT ?? process.argv[2] ?? "").toLowerCase();

@@ -53,6 +53,37 @@ function textModel(nextText) {
 /** Constant-text model (the generator: its exact wording is not under test). */
 const constModel = (text) => textModel(() => text);
 
+/** A model whose first `throwUntilCall` invocations throw, then returns `text`. */
+function flakyModel(throwUntilCall, text) {
+  const state = { calls: 0 };
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const i = state.calls;
+      state.calls += 1;
+      if (i < throwUntilCall) throw new Error("transient provider timeout");
+      return {
+        content: [{ type: "text", text }],
+        finishReason: "stop",
+        usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 },
+        warnings: [],
+      };
+    },
+  });
+  return { model, state };
+}
+
+/** A model that always throws (simulates a down/timed-out provider). */
+function throwingModel(message) {
+  const state = { calls: 0 };
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      state.calls += 1;
+      throw new Error(message);
+    },
+  });
+  return { model, state };
+}
+
 /** A checker verdict as the JSON the skeptic is prompted to emit. */
 const verdictJson = ({ claim = true, noHall = true, dir = true, reasons = [] }) =>
   JSON.stringify({
@@ -231,5 +262,67 @@ describe("produceCard loop (injected generator + semantic checker)", () => {
       /no parseable verdict/i,
       "the fail-closed reason is recorded for diagnosis",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thrown-error handling — a generator/evaluator exception (incl. an LLM
+// timeout) must fail CLOSED: held for review, never silently dropped, and
+// never allowed to abandon the retry budget. (Regression guard for the review
+// finding where a thrown error bypassed both the retry loop and the inbox.)
+// ---------------------------------------------------------------------------
+
+describe("produceCard loop (thrown-error handling)", () => {
+  it("holds the swing when the generator throws on every attempt — never drops it", async () => {
+    const gen = throwingModel("anthropic 529 overloaded");
+    const checker = constModel(verdictJson({})); // never reached — gen throws first
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker, maxAttempts: 2 });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 0, "no card ships when generation fails");
+    assert.equal(rejected.length, 1, "the swing is HELD for review, not silently dropped");
+    assert.equal(rejected[0].verdict.verdict, "reject");
+    assert.match(rejected[0].verdict.reasons.join(" "), /generation failed/i);
+    assert.match(rejected[0].verdict.reasons.join(" "), /529 overloaded/, "the error is surfaced");
+    assert.equal(explainer.cardsRejected, 1);
+    assert.equal(gen.state.calls, 2, "the full retry budget was spent before holding");
+    assert.equal(checker.state.calls, 0, "the checker is never reached when the generator throws");
+  });
+
+  it("recovers when an early attempt throws but a later one succeeds", async () => {
+    // Generator throws once, then returns a good card; checker approves it.
+    const gen = flakyModel(
+      1,
+      "C.Lawrence's 45-yard TD to B.Thomas moved the home price up 26 points.",
+    );
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker, maxAttempts: 3 });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(rejected.length, 0, "a transient error on attempt 1 doesn't abandon the swing");
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0].verdict.verdict, "pass");
+    assert.equal(emitted[0].verdict.attempts, 2, "passed on the second attempt");
+  });
+
+  it("skips a tick whose snapshot reports a feed error (status:false)", async () => {
+    const gen = constModel("should never be generated");
+    const checker = constModel(verdictJson({}));
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker });
+
+    await explainer.injectEvent({
+      timestamp: "2026-07-01T18:08:00Z",
+      changesSummary: "feed error",
+      changes: [
+        { path: "data.polymarket_home_price_cents", type: "modified", before: 42, after: 68 },
+      ],
+      snapshot: { status: false, message: "ESPN 503" },
+    });
+
+    assert.equal(emitted.length, 0);
+    assert.equal(rejected.length, 0, "a feed-error tick is skipped, not turned into a card or a reject");
+    assert.equal(gen.state.calls, 0, "the generator is never consulted for an error tick");
   });
 });

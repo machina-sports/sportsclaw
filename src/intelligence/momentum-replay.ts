@@ -27,16 +27,12 @@
  *   SPORTSCLAW_PROVIDER / SPORTSCLAW_MODEL / SPORTSCLAW_EVALUATOR_MODEL
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { executePythonBridge } from "../tools.js";
 import { MomentumExplainer } from "./momentum-explainer.js";
+import { REPO_ROOT, certifiPath, envInt, unwrapBridge } from "./momentum-runtime.js";
 import type { LLMProvider, WatchEvent } from "../types.js";
-
-const HERE = dirname(fileURLToPath(import.meta.url)); // dist/intelligence
-const REPO_ROOT = resolve(HERE, "..", ".."); // <sportsclaw>
 
 // ---------------------------------------------------------------------------
 // Pure pieces (exported for tests)
@@ -131,45 +127,6 @@ export function swingToWatchEvent(
 // Runner
 // ---------------------------------------------------------------------------
 
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-/** The macOS cert fix (same as momentum-live): certifi bundle for urllib. */
-function certifiPath(pythonPath: string): string | undefined {
-  try {
-    return execFileSync(pythonPath, ["-c", "import certifi; print(certifi.where())"], {
-      encoding: "utf8",
-    }).trim();
-  } catch {
-    return undefined;
-  }
-}
-
-/** Unwrap a bridge result's inner sports-skills payload, or throw. */
-function bridgeData(
-  result: { success: boolean; data?: unknown; error?: string },
-  what: string,
-): Record<string, unknown> {
-  const envelope =
-    result.success && result.data && typeof result.data === "object"
-      ? (result.data as Record<string, unknown>)
-      : null;
-  if (!envelope || envelope.status !== true) {
-    const msg =
-      (envelope && String(envelope.message ?? "")) || result.error || "unknown error";
-    throw new Error(`${what} failed: ${msg}`);
-  }
-  const data = envelope.data;
-  if (!data || typeof data !== "object") {
-    throw new Error(`${what} returned no data`);
-  }
-  return data as Record<string, unknown>;
-}
-
 async function main(): Promise<void> {
   const sport = (process.env.MOMENTUM_SPORT ?? process.argv[2] ?? "").toLowerCase();
   const eventId = process.env.MOMENTUM_EVENT_ID ?? process.argv[3] ?? "";
@@ -205,7 +162,7 @@ async function main(): Promise<void> {
   );
 
   // 1. ESPN event → Kalshi winner market (settled markets included).
-  const market = bridgeData(
+  const market = unwrapBridge(
     await executePythonBridge(
       "markets",
       "resolve_game_market",
@@ -227,7 +184,7 @@ async function main(): Promise<void> {
     Math.floor(Date.now() / 1000),
     startSec + 600 + 6 * 3600,
   );
-  const history = bridgeData(
+  const history = unwrapBridge(
     await executePythonBridge(
       "markets",
       "get_price_history",

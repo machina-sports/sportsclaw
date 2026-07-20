@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { detectSwings } from "../dist/intelligence/momentum-explainer.js";
+import { unwrapBridge } from "../dist/intelligence/momentum-runtime.js";
 import {
   runHardGates,
   evaluateCard,
@@ -81,6 +82,15 @@ describe("detectSwings", () => {
     assert.equal(detectSwings([priceChange("x", 68)], 10, "up").length, 0);
   });
 
+  it("ignores empty-book sentinel prices (0c) so a recovery can't fake a swing", () => {
+    // An empty Kalshi book resolves to 0c; the recovery tick (0 -> 60) must NOT
+    // register as a +60 phantom swing, and a drop into an empty book must not either.
+    assert.equal(detectSwings([priceChange(0, 60)], 10, "up").length, 0);
+    assert.equal(detectSwings([priceChange(60, 0)], 10, "both").length, 0);
+    // A genuine 1c -> 60c move is still a real swing (1 is a valid live price).
+    assert.equal(detectSwings([priceChange(1, 60)], 10, "up").length, 1);
+  });
+
   it("fires on any path ending in home_price_cents (mock + live feeds)", () => {
     // The source-neutral suffix matches both the mock's polymarket-prefixed
     // key and the live Kalshi feed's bare home_price_cents.
@@ -90,6 +100,39 @@ describe("detectSwings", () => {
       assert.equal(swings[0].delta, 26);
       assert.equal(swings[0].path, path);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unwrapBridge — enforce the sports-skills {status,data} envelope
+// ---------------------------------------------------------------------------
+
+describe("unwrapBridge", () => {
+  it("returns the inner data on a status:true envelope", () => {
+    const result = { success: true, data: { status: true, data: { plays: [1, 2] } } };
+    assert.deepEqual(unwrapBridge(result, "get_plays_near_timestamp"), { plays: [1, 2] });
+  });
+
+  it("throws (never silently empties) when the skill reported status:false", () => {
+    const result = { success: true, data: { status: false, message: "no game found" } };
+    assert.throws(
+      () => unwrapBridge(result, "get_plays_near_timestamp"),
+      /get_plays_near_timestamp failed: no game found/,
+    );
+  });
+
+  it("throws when the process failed outright", () => {
+    assert.throws(
+      () => unwrapBridge({ success: false, error: "python crashed" }, "resolve_game_market"),
+      /resolve_game_market failed: python crashed/,
+    );
+  });
+
+  it("throws when status:true carries no data object", () => {
+    assert.throws(
+      () => unwrapBridge({ success: true, data: { status: true } }, "get_live_tick"),
+      /get_live_tick returned no data/,
+    );
   });
 });
 
