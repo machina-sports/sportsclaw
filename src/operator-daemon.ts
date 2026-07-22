@@ -682,6 +682,21 @@ export function createOperatorDaemon(
           toolCalls: steps.flatMap((st) => st.toolCalls ?? []),
           text: await stream.text,
         };
+        // Salvage: streamed runs occasionally end in prose without the forced
+        // output call (observed on squad-context asks, 2026-07-22). One
+        // non-streaming retry inside the same watchdog window recovers the
+        // structured contract instead of failing the tick.
+        const streamedOutputCall = (result.toolCalls as Array<{ toolName?: string }>).some(
+          (c) => c?.toolName === OUTPUT_TOOL_NAME,
+        );
+        if (!streamedOutputCall) {
+          console.error(
+            `[operator-daemon] streamed tick produced no ${OUTPUT_TOOL_NAME} call — salvaging via non-streaming retry`,
+          );
+          result = await generateImpl(
+            callParams as Parameters<typeof generateImpl>[0],
+          );
+        }
       } else {
         result = await generateImpl(
           callParams as Parameters<typeof generateImpl>[0],
