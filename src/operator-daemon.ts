@@ -699,6 +699,9 @@ export function createOperatorDaemon(
           // tool on squad-context asks (observed live 2026-07-22).
           result = await generateImpl({
             ...callParams,
+            prompt:
+              `${tickPrompt}\n\nFINAL ATTEMPT: answer NOW from the data above by calling ` +
+              `${OUTPUT_TOOL_NAME} with a substantive answer (never idle/silent).`,
             toolChoice: { type: "tool", toolName: OUTPUT_TOOL_NAME },
             stopWhen: stepCountIs(1),
           } as Parameters<typeof generateImpl>[0]);
