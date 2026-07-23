@@ -691,11 +691,17 @@ export function createOperatorDaemon(
         );
         if (!streamedOutputCall) {
           console.error(
-            `[operator-daemon] streamed tick produced no ${OUTPUT_TOOL_NAME} call — salvaging via non-streaming retry`,
+            `[operator-daemon] streamed tick produced no ${OUTPUT_TOOL_NAME} call — salvaging with forced toolChoice`,
           );
-          result = await generateImpl(
-            callParams as Parameters<typeof generateImpl>[0],
-          );
+          // FORCE the output tool on the salvage (vLLM guided decoding makes
+          // this a hard guarantee, not a request): the model answers from the
+          // tick context in one step. A plain retry was still skipping the
+          // tool on squad-context asks (observed live 2026-07-22).
+          result = await generateImpl({
+            ...callParams,
+            toolChoice: { type: "tool", toolName: OUTPUT_TOOL_NAME },
+            stopWhen: stepCountIs(1),
+          } as Parameters<typeof generateImpl>[0]);
         }
       } else {
         result = await generateImpl(
