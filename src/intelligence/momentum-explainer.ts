@@ -590,6 +590,17 @@ export class MomentumExplainer {
           modelInstance: opts.evaluatorModelInstance,
         })
       : null;
+    if (
+      this.evaluator &&
+      this.evaluator.provider === this.provider &&
+      this.evaluator.modelId === this.modelId
+    ) {
+      throw new Error(
+        "Momentum Explainer: evaluator model must differ from the generator " +
+          "for maker/checker separation. Set SPORTSCLAW_EVALUATOR_MODEL or " +
+          "evaluatorModel to a different model.",
+      );
+    }
   }
 
   /** PASSED cards emitted so far (useful for time-boxed demo runs). */

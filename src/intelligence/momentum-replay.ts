@@ -27,7 +27,7 @@
  *   SPORTSCLAW_PROVIDER / SPORTSCLAW_MODEL / SPORTSCLAW_EVALUATOR_MODEL
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,7 +141,7 @@ function envInt(name: string, fallback: number): number {
 /** The macOS cert fix (same as momentum-live): certifi bundle for urllib. */
 function certifiPath(pythonPath: string): string | undefined {
   try {
-    return execSync(`${pythonPath} -c "import certifi; print(certifi.where())"`, {
+    return execFileSync(pythonPath, ["-c", "import certifi; print(certifi.where())"], {
       encoding: "utf8",
     }).trim();
   } catch {

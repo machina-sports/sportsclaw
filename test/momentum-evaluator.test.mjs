@@ -22,6 +22,8 @@ import { describe, it } from "node:test";
 import { MockLanguageModelV3 } from "ai/test";
 
 import { MomentumExplainer } from "../dist/intelligence/momentum-explainer.js";
+import { DEFAULT_MODELS } from "../dist/types.js";
+import { DEFAULT_EVALUATOR_MODELS } from "../dist/intelligence/momentum-evaluator.js";
 
 // ---------------------------------------------------------------------------
 // Mock-model helpers
@@ -126,6 +128,33 @@ function makeExplainer({ gen, checker, maxAttempts = 2 }) {
 // ---------------------------------------------------------------------------
 
 describe("produceCard loop (injected generator + semantic checker)", () => {
+  it("keeps default evaluator models distinct from default generator models", () => {
+    for (const provider of Object.keys(DEFAULT_MODELS)) {
+      assert.notEqual(
+        DEFAULT_EVALUATOR_MODELS[provider],
+        DEFAULT_MODELS[provider],
+        `${provider} evaluator default must differ from generator default`,
+      );
+    }
+  });
+
+  it("rejects same-model maker/checker configuration", () => {
+    const gen = constModel("C.Lawrence's TD moved the home price up 26 points.");
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    assert.throws(
+      () =>
+        new MomentumExplainer({
+          provider: "openai",
+          model: "gpt-5.4-mini",
+          evaluatorProvider: "openai",
+          evaluatorModel: "gpt-5.4-mini",
+          modelInstance: gen.model,
+          evaluatorModelInstance: checker.model,
+        }),
+      /evaluator model must differ/i,
+    );
+  });
+
   it("emits a card the skeptic approves, stamped with the checker's verdict", async () => {
     const gen = constModel(
       "C.Lawrence's 45-yard TD to B.Thomas flipped the home price up 26 points.",
