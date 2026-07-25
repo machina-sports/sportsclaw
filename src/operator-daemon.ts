@@ -652,7 +652,7 @@ export function createOperatorDaemon(
         const emitPartial = (final = false) => {
           if (!cfg.onPartialOutput) return;
           const now = Date.now();
-          if (!final && now - lastEmit < 600) return;
+          if (!final && now - lastEmit < 200) return;
           const m = argsBuf.match(/"(?:answer|narrative)"\s*:\s*"((?:[^"\\]|\\.)*)/);
           if (!m) return;
           lastEmit = now;
