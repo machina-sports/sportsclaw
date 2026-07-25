@@ -700,7 +700,7 @@ export interface GameEvent {
   timestamp: string;
 }
 
-export type WatchOutputMode = "relay" | "stdout" | "file";
+export type WatchOutputMode = "relay" | "stdout" | "file" | "callback";
 
 /** Configuration for a single watcher instance. */
 export interface WatcherConfig {
@@ -718,4 +718,11 @@ export interface WatcherConfig {
   channel?: string;
   /** File path when output is "file" */
   filePath?: string;
+  /**
+   * In-process sink used when `output === "callback"`. Invoked with each
+   * WatchEvent on the same process/tick as detection — no external broker.
+   * This is the local, self-contained transport the Momentum Explainer uses
+   * for the demo (hosted relay stays a separate, opt-in path).
+   */
+  onEvent?: (event: WatchEvent) => void | Promise<void>;
 }

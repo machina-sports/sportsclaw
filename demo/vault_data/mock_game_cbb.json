@@ -1,0 +1,84 @@
+{
+  "_note": "OFF-SEASON MOCK (CBB regular season runs Nov-Mar/Apr; built 2026-07-18 while CBB is out of season). Same interval-matching requirement as mock_game.json: sportsclaw watcher --interval and get_mock_tick's interval_seconds must be equal (both 5 here). See demo/vault_data/README.md.",
+  "game_id": "mock-cbb-unc-duke-2026",
+  "sport": "cbb",
+  "teams": {
+    "home": {"abbrev": "DUKE", "name": "Duke Blue Devils"},
+    "away": {"abbrev": "UNC", "name": "North Carolina Tar Heels"}
+  },
+  "timeline": [
+    {
+      "timestamp": "2027-02-06T23:05:00Z",
+      "game_clock": "1:48 - 2nd",
+      "polymarket_home_price_cents": 40,
+      "play_by_play": [
+        {
+          "id": "d1001",
+          "sequenceNumber": "1",
+          "wallclock": "2027-02-06T23:04:18Z",
+          "text": "K. Boozer misses 3-pt jumper.",
+          "type": {"text": "Jump Shot"},
+          "period": {"displayValue": "2nd Half"},
+          "clock": {"displayValue": "2:05"},
+          "homeScore": 61,
+          "awayScore": 65,
+          "scoringPlay": false,
+          "team": {"id": "150"}
+        },
+        {
+          "id": "d1002",
+          "sequenceNumber": "2",
+          "wallclock": "2027-02-06T23:04:50Z",
+          "text": "UNC defensive rebound.",
+          "type": {"text": "Rebound"},
+          "period": {"displayValue": "2nd Half"},
+          "clock": {"displayValue": "1:48"},
+          "homeScore": 61,
+          "awayScore": 65,
+          "scoringPlay": false,
+          "team": {"id": "153"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2027-02-06T23:06:00Z",
+      "game_clock": "1:15 - 2nd",
+      "polymarket_home_price_cents": 39,
+      "play_by_play": [
+        {
+          "id": "d1003",
+          "sequenceNumber": "3",
+          "wallclock": "2027-02-06T23:05:47Z",
+          "text": "UNC misses 15-foot jumper, shot clock violation on rebound scramble.",
+          "type": {"text": "Turnover"},
+          "period": {"displayValue": "2nd Half"},
+          "clock": {"displayValue": "1:15"},
+          "homeScore": 61,
+          "awayScore": 65,
+          "scoringPlay": false,
+          "team": {"id": "153"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2027-02-06T23:07:30Z",
+      "game_clock": "0:22 - 2nd",
+      "polymarket_home_price_cents": 63,
+      "play_by_play": [
+        {
+          "id": "d1004",
+          "sequenceNumber": "4",
+          "wallclock": "2027-02-06T23:07:12Z",
+          "text": "K. Boozer makes go-ahead 3-pt jumper with 0:22 left. Duke leads 66-65.",
+          "type": {"text": "Jump Shot"},
+          "period": {"displayValue": "2nd Half"},
+          "clock": {"displayValue": "0:22"},
+          "homeScore": 66,
+          "awayScore": 65,
+          "scoringPlay": true,
+          "team": {"id": "150"}
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "_note": "OFF-SEASON MOCK (CFB regular season starts late Aug/Sept; built 2026-07-18 while CFB is out of season). Same interval-matching requirement as mock_game.json: sportsclaw watcher --interval and get_mock_tick's interval_seconds must be equal (both 5 here). See demo/vault_data/README.md.",
+  "game_id": "mock-cfb-mich-osu-2026",
+  "sport": "cfb",
+  "teams": {
+    "home": {"abbrev": "OSU", "name": "Ohio State Buckeyes"},
+    "away": {"abbrev": "MICH", "name": "Michigan Wolverines"}
+  },
+  "timeline": [
+    {
+      "timestamp": "2026-11-28T18:05:00Z",
+      "game_clock": "11:20 - 3rd",
+      "polymarket_home_price_cents": 48,
+      "play_by_play": [
+        {
+          "id": "c1001",
+          "sequenceNumber": "1",
+          "wallclock": "2026-11-28T18:04:15Z",
+          "text": "(11:41 - 3rd) W.Howard rushes up the middle for 2 yards.",
+          "type": {"text": "Rush"},
+          "period": {"displayValue": "3rd Quarter"},
+          "clock": {"displayValue": "11:41"},
+          "homeScore": 17,
+          "awayScore": 20,
+          "scoringPlay": false,
+          "team": {"id": "130"}
+        },
+        {
+          "id": "c1002",
+          "sequenceNumber": "2",
+          "wallclock": "2026-11-28T18:04:48Z",
+          "text": "(11:20 - 3rd) Michigan punts.",
+          "type": {"text": "Punt"},
+          "period": {"displayValue": "3rd Quarter"},
+          "clock": {"displayValue": "11:20"},
+          "homeScore": 17,
+          "awayScore": 20,
+          "scoringPlay": false,
+          "team": {"id": "130"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-28T18:06:00Z",
+      "game_clock": "10:05 - 3rd",
+      "polymarket_home_price_cents": 49,
+      "play_by_play": [
+        {
+          "id": "c1003",
+          "sequenceNumber": "3",
+          "wallclock": "2026-11-28T18:05:44Z",
+          "text": "(10:05 - 3rd) W.Howard pass short right to J.Smith for 6 yards, FIRST DOWN.",
+          "type": {"text": "Pass Reception"},
+          "period": {"displayValue": "3rd Quarter"},
+          "clock": {"displayValue": "10:05"},
+          "homeScore": 17,
+          "awayScore": 20,
+          "scoringPlay": false,
+          "team": {"id": "194"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-28T18:07:30Z",
+      "game_clock": "09:12 - 3rd",
+      "polymarket_home_price_cents": 74,
+      "play_by_play": [
+        {
+          "id": "c1004",
+          "sequenceNumber": "4",
+          "wallclock": "2026-11-28T18:07:20Z",
+          "text": "(09:12 - 3rd) D.Egbuka 61-yard punt return for a TOUCHDOWN.",
+          "type": {"text": "Punt Return Touchdown"},
+          "period": {"displayValue": "3rd Quarter"},
+          "clock": {"displayValue": "09:12"},
+          "homeScore": 24,
+          "awayScore": 20,
+          "scoringPlay": true,
+          "team": {"id": "194"}
+        }
+      ]
+    }
+  ]
+}

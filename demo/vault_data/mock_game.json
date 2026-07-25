@@ -1,0 +1,84 @@
+{
+  "_note": "INTERVAL MUST MATCH: the sportsclaw watcher --interval and get_mock_tick's interval_seconds must be equal (both 5 here). get_mock_tick picks a tick via (epoch // interval_seconds) % total_ticks; the watcher polls every --interval seconds. If they differ, the watcher either polls mid-tick and re-reads the same tick (dupes) or steps over a tick between polls (skips), so the 42->43->68 progression won't emit cleanly. See demo/vault_data/README.md.",
+  "game_id": "mock-nfl-jax-hou-2026",
+  "sport": "nfl",
+  "teams": {
+    "home": {"abbrev": "HOU", "name": "Houston Texans"},
+    "away": {"abbrev": "JAX", "name": "Jacksonville Jaguars"}
+  },
+  "timeline": [
+    {
+      "timestamp": "2026-09-13T18:05:00Z",
+      "game_clock": "10:12 - 2nd",
+      "polymarket_home_price_cents": 42,
+      "play_by_play": [
+        {
+          "id": "p1001",
+          "sequenceNumber": "1",
+          "wallclock": "2026-09-13T18:04:12Z",
+          "text": "(10:31 - 2nd) B.Little rushes up the middle for 3 yards.",
+          "type": {"text": "Rush"},
+          "period": {"displayValue": "2nd Quarter"},
+          "clock": {"displayValue": "10:31"},
+          "homeScore": 10,
+          "awayScore": 13,
+          "scoringPlay": false,
+          "team": {"id": "30"}
+        },
+        {
+          "id": "p1002",
+          "sequenceNumber": "2",
+          "wallclock": "2026-09-13T18:04:55Z",
+          "text": "(10:12 - 2nd) C.Little 41 yard field goal is GOOD.",
+          "type": {"text": "Field Goal Good"},
+          "period": {"displayValue": "2nd Quarter"},
+          "clock": {"displayValue": "10:12"},
+          "homeScore": 10,
+          "awayScore": 13,
+          "scoringPlay": true,
+          "team": {"id": "30"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-09-13T18:06:00Z",
+      "game_clock": "08:40 - 2nd",
+      "polymarket_home_price_cents": 43,
+      "play_by_play": [
+        {
+          "id": "p1003",
+          "sequenceNumber": "3",
+          "wallclock": "2026-09-13T18:05:47Z",
+          "text": "(08:40 - 2nd) C.Stroud pass short right to N.Collins for 8 yards, FIRST DOWN.",
+          "type": {"text": "Pass Reception"},
+          "period": {"displayValue": "2nd Quarter"},
+          "clock": {"displayValue": "08:40"},
+          "homeScore": 10,
+          "awayScore": 13,
+          "scoringPlay": false,
+          "team": {"id": "34"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-09-13T18:07:30Z",
+      "game_clock": "07:55 - 2nd",
+      "polymarket_home_price_cents": 68,
+      "play_by_play": [
+        {
+          "id": "p1004",
+          "sequenceNumber": "4",
+          "wallclock": "2026-09-13T18:07:18Z",
+          "text": "(07:55 - 2nd) D.Stingley Jr. intercepts C.Lawrence and returns it 58 yards for a TOUCHDOWN.",
+          "type": {"text": "Interception Return Touchdown"},
+          "period": {"displayValue": "2nd Quarter"},
+          "clock": {"displayValue": "07:55"},
+          "homeScore": 17,
+          "awayScore": 13,
+          "scoringPlay": true,
+          "team": {"id": "34"}
+        }
+      ]
+    }
+  ]
+}

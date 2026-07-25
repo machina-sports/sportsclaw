@@ -1,0 +1,84 @@
+{
+  "_note": "OFF-SEASON MOCK (NBA regular season runs Oct-Jun; built 2026-07-18 while NBA is out of season). Same interval-matching requirement as mock_game.json: sportsclaw watcher --interval and get_mock_tick's interval_seconds must be equal (both 5 here). See demo/vault_data/README.md.",
+  "game_id": "mock-nba-mia-bos-2026",
+  "sport": "nba",
+  "teams": {
+    "home": {"abbrev": "BOS", "name": "Boston Celtics"},
+    "away": {"abbrev": "MIA", "name": "Miami Heat"}
+  },
+  "timeline": [
+    {
+      "timestamp": "2026-11-04T00:05:00Z",
+      "game_clock": "6:12 - 4th",
+      "polymarket_home_price_cents": 45,
+      "play_by_play": [
+        {
+          "id": "b1001",
+          "sequenceNumber": "1",
+          "wallclock": "2026-11-04T00:04:20Z",
+          "text": "J. Tatum misses 18-foot jumper.",
+          "type": {"text": "Jump Shot"},
+          "period": {"displayValue": "4th Quarter"},
+          "clock": {"displayValue": "6:31"},
+          "homeScore": 96,
+          "awayScore": 99,
+          "scoringPlay": false,
+          "team": {"id": "2"}
+        },
+        {
+          "id": "b1002",
+          "sequenceNumber": "2",
+          "wallclock": "2026-11-04T00:04:52Z",
+          "text": "B. Adebayo defensive rebound.",
+          "type": {"text": "Rebound"},
+          "period": {"displayValue": "4th Quarter"},
+          "clock": {"displayValue": "6:12"},
+          "homeScore": 96,
+          "awayScore": 99,
+          "scoringPlay": false,
+          "team": {"id": "14"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-04T00:06:00Z",
+      "game_clock": "5:40 - 4th",
+      "polymarket_home_price_cents": 46,
+      "play_by_play": [
+        {
+          "id": "b1003",
+          "sequenceNumber": "3",
+          "wallclock": "2026-11-04T00:05:47Z",
+          "text": "J. Brown makes free throw 1 of 2.",
+          "type": {"text": "Free Throw"},
+          "period": {"displayValue": "4th Quarter"},
+          "clock": {"displayValue": "5:40"},
+          "homeScore": 97,
+          "awayScore": 99,
+          "scoringPlay": true,
+          "team": {"id": "2"}
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-04T00:07:30Z",
+      "game_clock": "4:55 - 4th",
+      "polymarket_home_price_cents": 72,
+      "play_by_play": [
+        {
+          "id": "b1004",
+          "sequenceNumber": "4",
+          "wallclock": "2026-11-04T00:07:18Z",
+          "text": "D. White steals inbound pass from J. Butler, makes fast-break dunk. Heat timeout.",
+          "type": {"text": "Steal + Dunk"},
+          "period": {"displayValue": "4th Quarter"},
+          "clock": {"displayValue": "4:55"},
+          "homeScore": 100,
+          "awayScore": 99,
+          "scoringPlay": true,
+          "team": {"id": "2"}
+        }
+      ]
+    }
+  ]
+}
