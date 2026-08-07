@@ -705,11 +705,26 @@ export function createOperatorDaemon(
           // this a hard guarantee, not a request): the model answers from the
           // tick context in one step. A plain retry was still skipping the
           // tool on squad-context asks (observed live 2026-07-22).
+          //
+          // Replay the streamed run (assistant turns + tool results) as
+          // `messages` instead of re-sending the bare prompt: without the
+          // conversation the model would re-answer from the system prompt
+          // alone and publish ungrounded content. `prompt` is dropped — the
+          // SDK rejects both on the same call.
+          const { prompt: _droppedPrompt, ...salvageParams } = callParams;
+          const streamedMessages = (await stream.response).messages;
           result = await generateImpl({
-            ...callParams,
-            prompt:
-              `${tickPrompt}\n\nFINAL ATTEMPT: answer NOW from the data above by calling ` +
-              `${OUTPUT_TOOL_NAME} with a substantive answer (never idle/silent).`,
+            ...salvageParams,
+            messages: [
+              { role: "user", content: tickPrompt },
+              ...streamedMessages,
+              {
+                role: "user",
+                content:
+                  `FINAL ATTEMPT: answer NOW from the data above by calling ` +
+                  `${OUTPUT_TOOL_NAME} with a substantive answer (never idle/silent).`,
+              },
+            ],
             toolChoice: { type: "tool", toolName: OUTPUT_TOOL_NAME },
             stopWhen: stepCountIs(1),
           } as Parameters<typeof generateImpl>[0]);
@@ -758,8 +773,19 @@ export function createOperatorDaemon(
             failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
           }
           // The salvage forces the output tool, so the model cannot decline:
-          // an idle payload or an empty answer is a non-answer, not a skip.
-          if (!failureReason && salvaged && (structuredKind === "idle" || !text.trim())) {
+          // an idle payload is a non-answer, not a skip. Blank text is only a
+          // non-answer when the sink actually has a text surface (an
+          // extractText contract, or a `narrative` property in the schema) —
+          // a purely structured payload legitimately extracts to "".
+          const sinkHasTextSurface =
+            !!cfg.outputSchema?.extractText ||
+            (cfg.outputSchema?.schema as { properties?: Record<string, unknown> } | undefined)
+              ?.properties?.narrative !== undefined;
+          if (
+            !failureReason &&
+            salvaged &&
+            (structuredKind === "idle" || (sinkHasTextSurface && !text.trim()))
+          ) {
             failureReason = `salvage returned a non-answer (${
               structuredKind === "idle" ? "idle payload" : "empty answer"
             }) under forced ${OUTPUT_TOOL_NAME}`;

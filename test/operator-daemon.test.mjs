@@ -984,9 +984,16 @@ describe("tickOnce — structured output", () => {
   describe("streamed salvage", () => {
     /**
      * Deterministic streamText stub. Yields `chunks` on fullStream, then
-     * resolves `steps` / `text` — the three surfaces the daemon reads.
+     * resolves `steps` / `text` / `response` — the four surfaces the daemon
+     * reads. `response.messages` is the run conversation (assistant turns +
+     * tool results) the salvage must be grounded on.
      */
-    function makeStreamImpl({ toolCalls = [], text = "", chunks = [] } = {}) {
+    function makeStreamImpl({
+      toolCalls = [],
+      text = "",
+      chunks = [],
+      responseMessages = [],
+    } = {}) {
       const calls = [];
       const impl = (args) => {
         calls.push(args);
@@ -996,10 +1003,39 @@ describe("tickOnce — structured output", () => {
           })(),
           steps: Promise.resolve([{ toolCalls }]),
           text: Promise.resolve(text),
+          response: Promise.resolve({ messages: responseMessages }),
         };
       };
       impl.calls = calls;
       return impl;
+    }
+
+    /** An assistant tool call + its tool result, as the SDK returns them. */
+    function groundingMessages() {
+      return [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "get_scores",
+              input: { game: "LAL@GSW" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "get_scores",
+              output: { type: "json", value: { home: 104, away: 100 } },
+            },
+          ],
+        },
+      ];
     }
 
     function streamedConfig(overrides) {
@@ -1029,10 +1065,19 @@ describe("tickOnce — structured output", () => {
         { type: "tool", toolName: "submit_broadcast" },
         "salvage forces the output tool",
       );
-      assert.match(
-        salvage.prompt,
-        /substantive answer/i,
-        "salvage prompt demands a substantive answer",
+      assert.strictEqual(
+        salvage.system,
+        stream.calls[0].system,
+        "salvage keeps the tick system prompt",
+      );
+      assert.ok(
+        salvage.tools?.submit_broadcast,
+        "salvage keeps the output tool available",
+      );
+      assert.strictEqual(
+        salvage.maxOutputTokens,
+        stream.calls[0].maxOutputTokens,
+        "salvage keeps the tick token budget",
       );
       assert.strictEqual(
         salvage.abortSignal,
@@ -1044,8 +1089,63 @@ describe("tickOnce — structured output", () => {
         "function",
         "salvage runs a single step (stepCountIs(1)), not the streamed stopWhen array",
       );
+      assert.match(
+        salvage.messages.at(-1).content,
+        /substantive answer/i,
+        "salvage's final instruction demands a substantive answer",
+      );
       assert.strictEqual(event.type, "tick_published");
       assert.strictEqual(event.text, "Salvaged: Lakers up 4.");
+    });
+
+    it("grounds the salvage on the streamed run's messages and tool results", async () => {
+      // Discarding the stream conversation lets the salvage answer from the
+      // system prompt alone — ungrounded content. It must replay the run.
+      const responseMessages = groundingMessages();
+      const stream = makeStreamImpl({
+        toolCalls: [],
+        text: "prose, no tool call",
+        responseMessages,
+      });
+      const gen = makeGenWithResult(
+        outputToolResult({ silent: false, narrative: "Salvaged: Lakers up 4." }),
+      );
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      await daemon.tickOnce();
+
+      const salvage = gen.calls[0];
+      assert.strictEqual(
+        salvage.prompt,
+        undefined,
+        "salvage must not pass both prompt and messages",
+      );
+      assert.ok(Array.isArray(salvage.messages), "salvage passes a messages array");
+      assert.deepStrictEqual(
+        salvage.messages[0],
+        { role: "user", content: stream.calls[0].prompt },
+        "salvage replays the original tick user prompt first",
+      );
+      assert.deepStrictEqual(
+        salvage.messages.slice(1, 1 + responseMessages.length),
+        responseMessages,
+        "salvage replays every streamed response message, tool results included",
+      );
+      const toolResultMsg = salvage.messages.find((m) => m.role === "tool");
+      assert.ok(toolResultMsg, "salvage received the tool-result message");
+      assert.deepStrictEqual(
+        toolResultMsg.content[0].output,
+        { type: "json", value: { home: 104, away: 100 } },
+        "the tool result's data survives into the salvage",
+      );
+      assert.strictEqual(
+        salvage.messages.at(-1).role,
+        "user",
+        "salvage ends with a user instruction",
+      );
+      assert.match(salvage.messages.at(-1).content, /submit_broadcast/);
     });
 
     it("does not salvage when the streamed tick already called the output tool", async () => {
@@ -1115,6 +1215,63 @@ describe("tickOnce — structured output", () => {
       assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
       assert.strictEqual(event.type, "tick_failed");
       assert.strictEqual(gen.calls.length, 1);
+    });
+
+    it("publishes a salvaged narrative-less payload despite empty text", async () => {
+      // The sink declares no text surface (no `narrative` property, no
+      // extractText), so blank extracted text is expected, not a non-answer.
+      const narrativeLessSchema = {
+        type: "object",
+        properties: {
+          scoreboard: { type: "string" },
+          highlights: { type: "array", items: { type: "string" } },
+        },
+        required: ["scoreboard"],
+        additionalProperties: false,
+      };
+      const obj = { scoreboard: "LAL 104 - GSW 100", highlights: ["buzzer three"] };
+      const stream = makeStreamImpl({ toolCalls: [] });
+      const gen = makeGenWithResult(outputToolResult(obj));
+      const daemon = createOperatorDaemon(
+        streamedConfig({
+          generateTextImpl: gen,
+          streamTextImpl: stream,
+          outputSchema: { schema: narrativeLessSchema },
+        }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(gen.calls.length, 1, "one salvage call");
+      assert.strictEqual(event.type, "tick_published");
+      assert.strictEqual(event.text, "");
+      assert.deepStrictEqual(event.output, obj);
+    });
+
+    it("fails a blank salvage when the sink declares a text surface via extractText", async () => {
+      const textSurfaceSchema = {
+        type: "object",
+        properties: { headline: { type: "string" } },
+        required: ["headline"],
+        additionalProperties: false,
+      };
+      const stream = makeStreamImpl({ toolCalls: [] });
+      const gen = makeGenWithResult(outputToolResult({ headline: "  " }));
+      const daemon = createOperatorDaemon(
+        streamedConfig({
+          generateTextImpl: gen,
+          streamTextImpl: stream,
+          outputSchema: {
+            schema: textSurfaceSchema,
+            extractText: (o) => o.headline,
+          },
+        }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(event.type, "tick_failed");
+      assert.match(event.reason ?? "", /empty answer/);
     });
   });
 
