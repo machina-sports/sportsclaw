@@ -21,7 +21,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MockLanguageModelV3 } from "ai/test";
 
-import { MomentumExplainer } from "../dist/intelligence/momentum-explainer.js";
+import {
+  LLM_CALL_TIMEOUT_MS,
+  MomentumExplainer,
+} from "../dist/intelligence/momentum-explainer.js";
 import { DEFAULT_MODELS } from "../dist/types.js";
 import { DEFAULT_EVALUATOR_MODELS } from "../dist/intelligence/momentum-evaluator.js";
 
@@ -31,14 +34,16 @@ import { DEFAULT_EVALUATOR_MODELS } from "../dist/intelligence/momentum-evaluato
 
 /**
  * A language model whose text output is produced by `nextText(callIndex)`.
- * `calls` counts invocations so a test can assert the retry budget was spent.
+ * `calls` counts invocations so a test can assert the retry budget was spent;
+ * `options` records what each call was invoked with (e.g. the abort signal).
  */
 function textModel(nextText) {
-  const state = { calls: 0 };
+  const state = { calls: 0, options: [] };
   const model = new MockLanguageModelV3({
-    doGenerate: async () => {
+    doGenerate: async (options) => {
       const text = nextText(state.calls);
       state.calls += 1;
+      state.options.push(options);
       return {
         content: [{ type: "text", text }],
         finishReason: "stop",
@@ -208,6 +213,27 @@ describe("produceCard loop (injected generator + semantic checker)", () => {
     assert.equal(explainer.cardsEmitted, 1);
     assert.equal(gen.state.calls, 1, "one generation on a first-try pass");
     assert.equal(checker.state.calls, 1, "the skeptic was actually consulted");
+  });
+
+  it("passes a live abort signal to BOTH the generator and the evaluator", async () => {
+    const gen = constModel(
+      "C.Lawrence's 45-yard TD to B.Thomas flipped the home price up 26 points.",
+    );
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    const { explainer, emitted } = makeExplainer({ gen, checker });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 1, "the pass path ran, so both calls were made");
+    assert.ok(
+      Number.isInteger(LLM_CALL_TIMEOUT_MS) && LLM_CALL_TIMEOUT_MS > 0,
+      "the timeout ceiling is a positive finite integer",
+    );
+    for (const [label, state] of [["generator", gen.state], ["evaluator", checker.state]]) {
+      const signal = state.options[0]?.abortSignal;
+      assert.ok(signal instanceof AbortSignal, `${label} call receives an AbortSignal`);
+      assert.equal(signal.aborted, false, `${label} signal is still live well inside the ceiling`);
+    }
   });
 
   it("holds a card the skeptic rejects — never emits it — after exhausting attempts", async () => {
