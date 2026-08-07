@@ -2889,6 +2889,11 @@ function cmdAnalytics(args: string[], _opts?: { fromChat?: boolean }): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
+  // Load ~/.sportsclaw/.env and persisted config into process.env before any
+  // routing, so every command sees the same precedence (shell env > .env >
+  // config.json). Commands like `doctor` and `health` read process.env directly.
+  applyConfigToEnv();
+
   if (args.includes("--help") || args.includes("-h")) {
     printHelp();
     process.exit(0);
