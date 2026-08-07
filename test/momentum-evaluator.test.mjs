@@ -21,7 +21,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MockLanguageModelV3 } from "ai/test";
 
-import { MomentumExplainer } from "../dist/intelligence/momentum-explainer.js";
+import {
+  LLM_CALL_TIMEOUT_MS,
+  MomentumExplainer,
+} from "../dist/intelligence/momentum-explainer.js";
 import { DEFAULT_MODELS } from "../dist/types.js";
 import { DEFAULT_EVALUATOR_MODELS } from "../dist/intelligence/momentum-evaluator.js";
 
@@ -31,14 +34,16 @@ import { DEFAULT_EVALUATOR_MODELS } from "../dist/intelligence/momentum-evaluato
 
 /**
  * A language model whose text output is produced by `nextText(callIndex)`.
- * `calls` counts invocations so a test can assert the retry budget was spent.
+ * `calls` counts invocations so a test can assert the retry budget was spent;
+ * `options` records what each call was invoked with (e.g. the abort signal).
  */
 function textModel(nextText) {
-  const state = { calls: 0 };
+  const state = { calls: 0, options: [] };
   const model = new MockLanguageModelV3({
-    doGenerate: async () => {
+    doGenerate: async (options) => {
       const text = nextText(state.calls);
       state.calls += 1;
+      state.options.push(options);
       return {
         content: [{ type: "text", text }],
         finishReason: "stop",
@@ -52,6 +57,37 @@ function textModel(nextText) {
 
 /** Constant-text model (the generator: its exact wording is not under test). */
 const constModel = (text) => textModel(() => text);
+
+/** A model whose first `throwUntilCall` invocations throw, then returns `text`. */
+function flakyModel(throwUntilCall, text) {
+  const state = { calls: 0 };
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      const i = state.calls;
+      state.calls += 1;
+      if (i < throwUntilCall) throw new Error("transient provider timeout");
+      return {
+        content: [{ type: "text", text }],
+        finishReason: "stop",
+        usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 },
+        warnings: [],
+      };
+    },
+  });
+  return { model, state };
+}
+
+/** A model that always throws (simulates a down/timed-out provider). */
+function throwingModel(message) {
+  const state = { calls: 0 };
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => {
+      state.calls += 1;
+      throw new Error(message);
+    },
+  });
+  return { model, state };
+}
 
 /** A checker verdict as the JSON the skeptic is prompted to emit. */
 const verdictJson = ({ claim = true, noHall = true, dir = true, reasons = [] }) =>
@@ -105,11 +141,12 @@ function makeEvent({ before = 42, after = 68 } = {}) {
 }
 
 /** Build an explainer with injected models and capturing sinks. */
-function makeExplainer({ gen, checker, maxAttempts = 2 }) {
+function makeExplainer({ gen, checker, maxAttempts = 2, mode = "mock", pythonPath }) {
   const emitted = [];
   const rejected = [];
   const explainer = new MomentumExplainer({
-    mode: "mock",
+    mode,
+    pythonPath,
     direction: "up",
     thresholdCents: 10,
     evaluate: true,
@@ -178,6 +215,27 @@ describe("produceCard loop (injected generator + semantic checker)", () => {
     assert.equal(checker.state.calls, 1, "the skeptic was actually consulted");
   });
 
+  it("passes a live abort signal to BOTH the generator and the evaluator", async () => {
+    const gen = constModel(
+      "C.Lawrence's 45-yard TD to B.Thomas flipped the home price up 26 points.",
+    );
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    const { explainer, emitted } = makeExplainer({ gen, checker });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 1, "the pass path ran, so both calls were made");
+    assert.ok(
+      Number.isInteger(LLM_CALL_TIMEOUT_MS) && LLM_CALL_TIMEOUT_MS > 0,
+      "the timeout ceiling is a positive finite integer",
+    );
+    for (const [label, state] of [["generator", gen.state], ["evaluator", checker.state]]) {
+      const signal = state.options[0]?.abortSignal;
+      assert.ok(signal instanceof AbortSignal, `${label} call receives an AbortSignal`);
+      assert.equal(signal.aborted, false, `${label} signal is still live well inside the ceiling`);
+    }
+  });
+
   it("holds a card the skeptic rejects — never emits it — after exhausting attempts", async () => {
     const gen = constModel("A late pitching change swung the home price up 26 points.");
     // Skeptic rejects: the claim is not supported by the (TD) play in the window.
@@ -231,5 +289,104 @@ describe("produceCard loop (injected generator + semantic checker)", () => {
       /no parseable verdict/i,
       "the fail-closed reason is recorded for diagnosis",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thrown-error handling — a generator/evaluator exception (incl. an LLM
+// timeout) must fail CLOSED: held for review, never silently dropped, and
+// never allowed to abandon the retry budget. (Regression guard for the review
+// finding where a thrown error bypassed both the retry loop and the inbox.)
+// ---------------------------------------------------------------------------
+
+describe("produceCard loop (thrown-error handling)", () => {
+  it("holds the swing when the generator throws on every attempt — never drops it", async () => {
+    const gen = throwingModel("anthropic 529 overloaded");
+    const checker = constModel(verdictJson({})); // never reached — gen throws first
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker, maxAttempts: 2 });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 0, "no card ships when generation fails");
+    assert.equal(rejected.length, 1, "the swing is HELD for review, not silently dropped");
+    assert.equal(rejected[0].verdict.verdict, "reject");
+    assert.match(rejected[0].verdict.reasons.join(" "), /generation failed/i);
+    assert.match(rejected[0].verdict.reasons.join(" "), /529 overloaded/, "the error is surfaced");
+    assert.equal(explainer.cardsRejected, 1);
+    assert.equal(gen.state.calls, 2, "the full retry budget was spent before holding");
+    assert.equal(checker.state.calls, 0, "the checker is never reached when the generator throws");
+  });
+
+  it("recovers when an early attempt throws but a later one succeeds", async () => {
+    // Generator throws once, then returns a good card; checker approves it.
+    const gen = flakyModel(
+      1,
+      "C.Lawrence's 45-yard TD to B.Thomas moved the home price up 26 points.",
+    );
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker, maxAttempts: 3 });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(rejected.length, 0, "a transient error on attempt 1 doesn't abandon the swing");
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0].verdict.verdict, "pass");
+    assert.equal(emitted[0].verdict.attempts, 2, "passed on the second attempt");
+  });
+
+  it("holds the swing when live play resolution fails — never drops it, never generates", async () => {
+    // A generator + checker that WOULD produce and approve a card, so a
+    // regression that swallowed the resolution failure (or read it as an empty
+    // play window) would emit a card here instead of holding the swing.
+    const gen = constModel("C.Lawrence's 45-yard TD to B.Thomas moved the home price up 26 points.");
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    // mode "live" calls get_plays_near_timestamp over the Python bridge; an
+    // interpreter path that cannot exist makes that call fail locally and
+    // deterministically (ENOENT), with no network and no credentials.
+    const { explainer, emitted, rejected } = makeExplainer({
+      gen,
+      checker,
+      mode: "live",
+      pythonPath: "/nonexistent/sportsclaw-test-python3",
+    });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 0, "no card ships when the play window cannot be resolved");
+    assert.equal(rejected.length, 1, "the swing is HELD for review, not silently dropped");
+    assert.equal(explainer.cardsRejected, 1);
+    assert.equal(gen.state.calls, 0, "the generator is never asked to write about plays we don't have");
+    assert.equal(checker.state.calls, 0, "the checker is never reached either");
+
+    const held = rejected[0];
+    assert.equal(held.source, "espn-live", "provenance of the failed live lookup is preserved");
+    assert.equal(held.causePlay, null, "no cause play is fabricated");
+    assert.equal(held.verdict.verdict, "reject");
+    assert.equal(held.verdict.checks.hasCause, false);
+    assert.match(
+      held.verdict.reasons.join(" "),
+      /get_plays_near_timestamp failed/i,
+      "the bridge failure is surfaced as the hold reason",
+    );
+    assert.equal(held.verdict.attempts, 0, "the LLM retry loop was never entered");
+  });
+
+  it("skips a tick whose snapshot reports a feed error (status:false)", async () => {
+    const gen = constModel("should never be generated");
+    const checker = constModel(verdictJson({}));
+    const { explainer, emitted, rejected } = makeExplainer({ gen, checker });
+
+    await explainer.injectEvent({
+      timestamp: "2026-07-01T18:08:00Z",
+      changesSummary: "feed error",
+      changes: [
+        { path: "data.polymarket_home_price_cents", type: "modified", before: 42, after: 68 },
+      ],
+      snapshot: { status: false, message: "ESPN 503" },
+    });
+
+    assert.equal(emitted.length, 0);
+    assert.equal(rejected.length, 0, "a feed-error tick is skipped, not turned into a card or a reject");
+    assert.equal(gen.state.calls, 0, "the generator is never consulted for an error tick");
   });
 });

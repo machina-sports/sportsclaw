@@ -31,6 +31,7 @@
 
 import { WatchManager } from "../watch.js";
 import { executePythonBridge } from "../tools.js";
+import { unwrapBridge } from "./momentum-runtime.js";
 import { resolveModel, resolveAuthForModel } from "../llm-providers.js";
 import { resolveAnthropicAuth } from "../credentials.js";
 import {
@@ -224,6 +225,14 @@ export interface CardVerdict {
 const PRICE_PATH_SUFFIX = "home_price_cents";
 
 /**
+ * Wall-clock ceiling for a single generator/evaluator LLM call. A hung provider
+ * response would otherwise block the poll loop indefinitely (and stall
+ * WatchManager graceful shutdown); on timeout the call throws and is handled
+ * like any other generation failure — retried, then held for review.
+ */
+export const LLM_CALL_TIMEOUT_MS = 60_000;
+
+/**
  * Scan a WatchEvent's structural changes for home-price moves at/above the
  * threshold. `endsWith` (not `===`) so one detector serves both feeds: it
  * matches the mock's `polymarket_home_price_cents` AND the live Kalshi feed's
@@ -244,6 +253,11 @@ export function detectSwings(
     const before = Number(c.before);
     const after = Number(c.after);
     if (!Number.isFinite(before) || !Number.isFinite(after)) continue;
+    // An empty Kalshi book resolves to 0c (no bid / no last trade); a real live
+    // price is >0. Skip ticks where either side is 0 so a transient empty tick
+    // and its recovery can't manufacture a phantom swing attributed to an
+    // unrelated play.
+    if (before <= 0 || after <= 0) continue;
     const delta = after - before;
     if (Math.abs(delta) < thresholdCents) continue;
     // Upswings-only unless explicitly opted into down-swings.
@@ -354,10 +368,12 @@ async function resolvePlays(
     },
     { pythonPath: bridge.pythonPath, env: bridge.env },
   );
-  const inner = result.success && result.data && typeof result.data === "object"
-    ? ((result.data as Record<string, unknown>).data as Record<string, unknown> | undefined)
-    : undefined;
-  const rawLive = inner && Array.isArray(inner.plays) ? inner.plays : [];
+  // Enforce the skill's own status envelope — a status:false error would
+  // otherwise be silently read as an empty play window, producing an
+  // unverifiable card. unwrapBridge throws with the skill message on failure,
+  // which handleEvent catches and holds (never a phantom cause).
+  const inner = unwrapBridge(result, "get_plays_near_timestamp");
+  const rawLive = Array.isArray(inner.plays) ? inner.plays : [];
   const plays = rawLive.map((p) => normalizePlay(p as Record<string, unknown>));
   return { plays, causePlay: pickCause(plays), source: "espn-live" };
 }
@@ -477,6 +493,7 @@ async function generateCard(
     system,
     prompt,
     maxOutputTokens: 120,
+    abortSignal: AbortSignal.timeout(LLM_CALL_TIMEOUT_MS),
   });
 
   return {
@@ -652,6 +669,21 @@ export class MomentumExplainer {
   }
 
   private async handleEvent(event: WatchEvent): Promise<void> {
+    // A poll that returned a status:false envelope (feed/bridge error) is not a
+    // real price update — its "changes" are noise against the prior good tick.
+    // Skip it so a transient feed error can't drive a swing. (The Watcher polls
+    // structurally; this is the momentum-layer guard, leaving core watch.ts
+    // semantics untouched for other watchers.)
+    const snap = event.snapshot as Record<string, unknown> | undefined;
+    if (snap && typeof snap === "object" && snap.status === false) {
+      if (this.verbose) {
+        console.log(
+          `[momentum] tick skipped — feed error: ${String(snap.message ?? "unknown")}`,
+        );
+      }
+      return;
+    }
+
     const swings = detectSwings(event.changes, this.thresholdCents, this.direction);
 
     if (this.verbose && swings.length === 0) {
@@ -673,11 +705,26 @@ export class MomentumExplainer {
     }
 
     for (const swing of swings) {
+      let resolved: ResolvedPlays;
       try {
-        const resolved = await resolvePlays(event, this.mode, {
+        resolved = await resolvePlays(event, this.mode, {
           pythonPath: this.pythonPath,
           env: this.env,
         });
+      } catch (err) {
+        // The play window could not be resolved (bridge error / status:false
+        // envelope). Fail CLOSED like any other bad card: hold the swing for a
+        // human with the failure as the reason, rather than logging it away.
+        // The generator is never asked to write about plays we don't have.
+        console.error(
+          "[momentum] play resolution failed — holding swing:",
+          err instanceof Error ? err.message : err,
+        );
+        this.rejectCount++;
+        this.onRejected(this.errorHeldCard(event, swing, null, err));
+        continue;
+      }
+      try {
         await this.produceCard(event, swing, resolved);
       } catch (err) {
         console.error(
@@ -709,36 +756,94 @@ export class MomentumExplainer {
     }
 
     let lastCard: MomentumCard | null = null;
+    let lastError: unknown = null;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
-      const card = await generateCard(this.model, event, swing, resolved);
-      const verdict = await evaluateCard(
-        this.evaluator,
-        card,
-        resolved.plays,
-        swing,
-        attempt,
-      );
-      card.verdict = verdict;
-      lastCard = card;
-
-      if (verdict.verdict === "pass") {
-        this.cardCount++;
-        this.onCard(card);
-        return;
-      }
-
-      if (this.verbose) {
-        console.log(
-          `[momentum] card rejected (attempt ${attempt}/${this.maxAttempts}): ` +
-            verdict.reasons.join("; "),
+      try {
+        const card = await generateCard(this.model, event, swing, resolved);
+        const verdict = await evaluateCard(
+          this.evaluator,
+          card,
+          resolved.plays,
+          swing,
+          attempt,
         );
+        card.verdict = verdict;
+        lastCard = card;
+
+        if (verdict.verdict === "pass") {
+          this.cardCount++;
+          this.onCard(card);
+          return;
+        }
+
+        if (this.verbose) {
+          console.log(
+            `[momentum] card rejected (attempt ${attempt}/${this.maxAttempts}): ` +
+              verdict.reasons.join("; "),
+          );
+        }
+      } catch (err) {
+        // A thrown generator/evaluator error (incl. an LLM timeout) must NOT
+        // abandon the swing — it fails CLOSED like a reject: continue to the
+        // next attempt, and if the budget exhausts, the swing is still held
+        // below rather than silently dropped.
+        lastError = err;
+        if (this.verbose) {
+          console.error(
+            `[momentum] attempt ${attempt}/${this.maxAttempts} errored: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
       }
     }
 
-    // Budget exhausted — hold the last draft for a human. Never ship it.
-    if (lastCard) {
-      this.rejectCount++;
-      this.onRejected(lastCard);
-    }
+    // Budget exhausted — hold for a human. Never silently drop the swing.
+    this.rejectCount++;
+    this.onRejected(lastCard ?? this.errorHeldCard(event, swing, resolved, lastError));
+  }
+
+  /**
+   * A synthetic "held" card for a swing that never produced a real one: either
+   * every generation attempt threw (`resolved` set — e.g. the provider was down
+   * or timed out), or the play window itself could not be resolved (`resolved`
+   * null — bridge/status-envelope failure, so no attempt was ever made). Routes
+   * the swing to the reject inbox with the error as the reason, so it is
+   * visibly held for review instead of vanishing into a log line.
+   */
+  private errorHeldCard(
+    event: WatchEvent,
+    swing: PriceSwing,
+    resolved: ResolvedPlays | null,
+    error: unknown,
+  ): MomentumCard {
+    const data = snapshotData(event);
+    const { home, away } = teamAbbrs(data);
+    const reason = error instanceof Error ? error.message : String(error);
+    const stage = resolved ? "Card generation" : "Play resolution";
+    return {
+      text: "",
+      swing,
+      // No plays resolved means no cause — never fabricate one.
+      causePlay: resolved?.causePlay ?? null,
+      source: resolved?.source ?? (this.mode === "live" ? "espn-live" : "mock-snapshot"),
+      gameLabel: `${away} @ ${home}`,
+      gameClock: String(data.game_clock ?? ""),
+      timestamp: event.timestamp,
+      verdict: {
+        verdict: "reject",
+        reasons: [`${stage} failed, held closed: ${reason}`],
+        checks: {
+          playInWindow: false,
+          hasCause: resolved?.causePlay != null,
+          claimSupported: false,
+          noHallucination: false,
+          directionCoherent: false,
+        },
+        evaluatorModel: this.evaluator?.modelId ?? "n/a",
+        // Zero attempts spent when resolution failed — the retry loop is never
+        // entered, so reporting maxAttempts here would overstate the effort.
+        attempts: resolved ? this.maxAttempts : 0,
+      },
+    };
   }
 }

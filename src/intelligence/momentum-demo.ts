@@ -17,21 +17,11 @@
  *   SPORTSCLAW_PROVIDER / SPORTSCLAW_MODEL   LLM provider/model
  */
 
-import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { MomentumExplainer } from "./momentum-explainer.js";
+import { REPO_ROOT, envInt } from "./momentum-runtime.js";
 import type { LLMProvider } from "../types.js";
-
-const HERE = dirname(fileURLToPath(import.meta.url)); // dist/intelligence
-const REPO_ROOT = resolve(HERE, "..", ".."); // <sportsclaw>
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
 
 async function main(): Promise<void> {
   const mockFile =

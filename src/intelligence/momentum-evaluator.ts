@@ -1,6 +1,11 @@
 /**
  * sportsclaw — Momentum Explainer, Phase 5: the generator/evaluator split.
  *
+ * NOTE — not to be confused with `src/evaluator.ts`. That one is a SOFT,
+ * non-blocking diagnostic (logs intent-alignment, never changes output). THIS
+ * one is a HARD, fail-CLOSED gate: a card it rejects is held, never shipped.
+ * Same word, opposite contract — keep them straight.
+ *
  * Phase 3 proved the loop can *generate* a Momentum Explainer card. But a
  * generator grading its own output is the "Nodding Loop" from the
  * loop-engineering write-up: the model that wrote the card is far too willing
@@ -32,6 +37,7 @@
 import { generateText } from "ai";
 import type { LLMProvider } from "../types.js";
 import {
+  LLM_CALL_TIMEOUT_MS,
   resolveExplainerModel,
   type CardVerdict,
   type MomentumCard,
@@ -239,6 +245,9 @@ async function judgeCard(
     system,
     prompt,
     maxOutputTokens: 1000,
+    // A hung checker must not wedge the loop; on timeout this throws and the
+    // caller treats it as a failed attempt (fail-closed — the card is held).
+    abortSignal: AbortSignal.timeout(LLM_CALL_TIMEOUT_MS),
   });
 
   const parsed = parseFirstJsonObject(result.text);
