@@ -311,6 +311,9 @@ export interface OperatorDaemonConfig {
   heartbeat?: HeartbeatService;
   /** Inject a generateText impl (tests). Default: ai SDK's. */
   generateTextImpl?: typeof generateText;
+  /** Inject a streamText impl (tests). Default: ai SDK's. Injecting this also
+   *  opts a test-injected daemon into the streamed path (see wantStream). */
+  streamTextImpl?: typeof streamText;
   /** MCP manager handle (for ledger syncing to the Pod) */
   mcpManager?: McpManager;
   /**
@@ -415,6 +418,7 @@ export function createOperatorDaemon(
   const recentBriefJobIds = cfg.recentBriefJobIds ?? [jobId];
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
   const generateImpl = cfg.generateTextImpl ?? generateText;
+  const streamImpl = cfg.streamTextImpl ?? streamText;
 
   const heartbeat =
     cfg.heartbeat ??
@@ -628,16 +632,20 @@ export function createOperatorDaemon(
       };
 
       let result: { toolCalls?: unknown[]; text?: string };
+      // True once `result` comes from the forced non-streaming salvage call.
+      let salvaged = false;
       const wantStream =
         cfg.streamOutput === true &&
         useStructuredOutput &&
-        !cfg.generateTextImpl; // test impls keep the legacy path
+        // test generate impls keep the legacy path unless a stream impl is
+        // explicitly injected (which is how tests drive the streamed path).
+        (!cfg.generateTextImpl || !!cfg.streamTextImpl);
       if (wantStream) {
         // Stream the output tool call's arguments and surface the growing
         // "answer"/"narrative" field via onPartialOutput. The Privacy Router
         // strips response_format, so the structured payload only exists as
         // tool-call input — streamed here as tool-input-delta chunks.
-        const stream = streamText(callParams as Parameters<typeof streamText>[0]);
+        const stream = streamImpl(callParams as Parameters<typeof streamText>[0]);
         let outCallId: string | null = null;
         let argsBuf = "";
         let lastEmit = 0;
@@ -682,6 +690,46 @@ export function createOperatorDaemon(
           toolCalls: steps.flatMap((st) => st.toolCalls ?? []),
           text: await stream.text,
         };
+        // Salvage: streamed runs occasionally end in prose without the forced
+        // output call (observed on squad-context asks, 2026-07-22). One
+        // non-streaming retry inside the same watchdog window recovers the
+        // structured contract instead of failing the tick.
+        const streamedOutputCall = (result.toolCalls as Array<{ toolName?: string }>).some(
+          (c) => c?.toolName === OUTPUT_TOOL_NAME,
+        );
+        if (!streamedOutputCall) {
+          console.error(
+            `[operator-daemon] streamed tick produced no ${OUTPUT_TOOL_NAME} call — salvaging with forced toolChoice`,
+          );
+          // FORCE the output tool on the salvage (vLLM guided decoding makes
+          // this a hard guarantee, not a request): the model answers from the
+          // tick context in one step. A plain retry was still skipping the
+          // tool on squad-context asks (observed live 2026-07-22).
+          //
+          // Replay the streamed run (assistant turns + tool results) as
+          // `messages` instead of re-sending the bare prompt: without the
+          // conversation the model would re-answer from the system prompt
+          // alone and publish ungrounded content. `prompt` is dropped — the
+          // SDK rejects both on the same call.
+          const { prompt: _droppedPrompt, ...salvageParams } = callParams;
+          const streamedMessages = (await stream.response).messages;
+          result = await generateImpl({
+            ...salvageParams,
+            messages: [
+              { role: "user", content: tickPrompt },
+              ...streamedMessages,
+              {
+                role: "user",
+                content:
+                  `FINAL ATTEMPT: answer NOW from the data above by calling ` +
+                  `${OUTPUT_TOOL_NAME} with a substantive answer (never idle/silent).`,
+              },
+            ],
+            toolChoice: { type: "tool", toolName: OUTPUT_TOOL_NAME },
+            stopWhen: stepCountIs(1),
+          } as Parameters<typeof generateImpl>[0]);
+          salvaged = true;
+        }
       } else {
         result = await generateImpl(
           callParams as Parameters<typeof generateImpl>[0],
@@ -723,6 +771,24 @@ export function createOperatorDaemon(
             text = stripThink(extracted ?? "");
           } catch (e) {
             failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
+          }
+          // The salvage forces the output tool, so the model cannot decline:
+          // an idle payload is a non-answer, not a skip. Blank text is only a
+          // non-answer when the sink actually has a text surface (an
+          // extractText contract, or a `narrative` property in the schema) —
+          // a purely structured payload legitimately extracts to "".
+          const sinkHasTextSurface =
+            !!cfg.outputSchema?.extractText ||
+            (cfg.outputSchema?.schema as { properties?: Record<string, unknown> } | undefined)
+              ?.properties?.narrative !== undefined;
+          if (
+            !failureReason &&
+            salvaged &&
+            (structuredKind === "idle" || (sinkHasTextSurface && !text.trim()))
+          ) {
+            failureReason = `salvage returned a non-answer (${
+              structuredKind === "idle" ? "idle payload" : "empty answer"
+            }) under forced ${OUTPUT_TOOL_NAME}`;
           }
         }
       } else {
