@@ -705,11 +705,26 @@ export class MomentumExplainer {
     }
 
     for (const swing of swings) {
+      let resolved: ResolvedPlays;
       try {
-        const resolved = await resolvePlays(event, this.mode, {
+        resolved = await resolvePlays(event, this.mode, {
           pythonPath: this.pythonPath,
           env: this.env,
         });
+      } catch (err) {
+        // The play window could not be resolved (bridge error / status:false
+        // envelope). Fail CLOSED like any other bad card: hold the swing for a
+        // human with the failure as the reason, rather than logging it away.
+        // The generator is never asked to write about plays we don't have.
+        console.error(
+          "[momentum] play resolution failed — holding swing:",
+          err instanceof Error ? err.message : err,
+        );
+        this.rejectCount++;
+        this.onRejected(this.errorHeldCard(event, swing, null, err));
+        continue;
+      }
+      try {
         await this.produceCard(event, swing, resolved);
       } catch (err) {
         console.error(
@@ -788,40 +803,46 @@ export class MomentumExplainer {
   }
 
   /**
-   * A synthetic "held" card for when every attempt threw before producing one
-   * (e.g. the generator's provider was down or timed out). Routes the swing to
-   * the reject inbox with the error as the reason, so it is visibly held for
-   * review instead of vanishing into a log line.
+   * A synthetic "held" card for a swing that never produced a real one: either
+   * every generation attempt threw (`resolved` set — e.g. the provider was down
+   * or timed out), or the play window itself could not be resolved (`resolved`
+   * null — bridge/status-envelope failure, so no attempt was ever made). Routes
+   * the swing to the reject inbox with the error as the reason, so it is
+   * visibly held for review instead of vanishing into a log line.
    */
   private errorHeldCard(
     event: WatchEvent,
     swing: PriceSwing,
-    resolved: ResolvedPlays,
+    resolved: ResolvedPlays | null,
     error: unknown,
   ): MomentumCard {
     const data = snapshotData(event);
     const { home, away } = teamAbbrs(data);
     const reason = error instanceof Error ? error.message : String(error);
+    const stage = resolved ? "Card generation" : "Play resolution";
     return {
       text: "",
       swing,
-      causePlay: resolved.causePlay,
-      source: resolved.source,
+      // No plays resolved means no cause — never fabricate one.
+      causePlay: resolved?.causePlay ?? null,
+      source: resolved?.source ?? (this.mode === "live" ? "espn-live" : "mock-snapshot"),
       gameLabel: `${away} @ ${home}`,
       gameClock: String(data.game_clock ?? ""),
       timestamp: event.timestamp,
       verdict: {
         verdict: "reject",
-        reasons: [`Card generation failed, held closed: ${reason}`],
+        reasons: [`${stage} failed, held closed: ${reason}`],
         checks: {
           playInWindow: false,
-          hasCause: resolved.causePlay !== null,
+          hasCause: resolved?.causePlay != null,
           claimSupported: false,
           noHallucination: false,
           directionCoherent: false,
         },
         evaluatorModel: this.evaluator?.modelId ?? "n/a",
-        attempts: this.maxAttempts,
+        // Zero attempts spent when resolution failed — the retry loop is never
+        // entered, so reporting maxAttempts here would overstate the effort.
+        attempts: resolved ? this.maxAttempts : 0,
       },
     };
   }

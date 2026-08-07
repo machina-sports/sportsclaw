@@ -136,11 +136,12 @@ function makeEvent({ before = 42, after = 68 } = {}) {
 }
 
 /** Build an explainer with injected models and capturing sinks. */
-function makeExplainer({ gen, checker, maxAttempts = 2 }) {
+function makeExplainer({ gen, checker, maxAttempts = 2, mode = "mock", pythonPath }) {
   const emitted = [];
   const rejected = [];
   const explainer = new MomentumExplainer({
-    mode: "mock",
+    mode,
+    pythonPath,
     direction: "up",
     thresholdCents: 10,
     evaluate: true,
@@ -305,6 +306,43 @@ describe("produceCard loop (thrown-error handling)", () => {
     assert.equal(emitted.length, 1);
     assert.equal(emitted[0].verdict.verdict, "pass");
     assert.equal(emitted[0].verdict.attempts, 2, "passed on the second attempt");
+  });
+
+  it("holds the swing when live play resolution fails — never drops it, never generates", async () => {
+    // A generator + checker that WOULD produce and approve a card, so a
+    // regression that swallowed the resolution failure (or read it as an empty
+    // play window) would emit a card here instead of holding the swing.
+    const gen = constModel("C.Lawrence's 45-yard TD to B.Thomas moved the home price up 26 points.");
+    const checker = constModel(verdictJson({ claim: true, noHall: true, dir: true }));
+    // mode "live" calls get_plays_near_timestamp over the Python bridge; an
+    // interpreter path that cannot exist makes that call fail locally and
+    // deterministically (ENOENT), with no network and no credentials.
+    const { explainer, emitted, rejected } = makeExplainer({
+      gen,
+      checker,
+      mode: "live",
+      pythonPath: "/nonexistent/sportsclaw-test-python3",
+    });
+
+    await explainer.injectEvent(makeEvent());
+
+    assert.equal(emitted.length, 0, "no card ships when the play window cannot be resolved");
+    assert.equal(rejected.length, 1, "the swing is HELD for review, not silently dropped");
+    assert.equal(explainer.cardsRejected, 1);
+    assert.equal(gen.state.calls, 0, "the generator is never asked to write about plays we don't have");
+    assert.equal(checker.state.calls, 0, "the checker is never reached either");
+
+    const held = rejected[0];
+    assert.equal(held.source, "espn-live", "provenance of the failed live lookup is preserved");
+    assert.equal(held.causePlay, null, "no cause play is fabricated");
+    assert.equal(held.verdict.verdict, "reject");
+    assert.equal(held.verdict.checks.hasCause, false);
+    assert.match(
+      held.verdict.reasons.join(" "),
+      /get_plays_near_timestamp failed/i,
+      "the bridge failure is surfaced as the hold reason",
+    );
+    assert.equal(held.verdict.attempts, 0, "the LLM retry loop was never entered");
   });
 
   it("skips a tick whose snapshot reports a feed error (status:false)", async () => {
