@@ -977,6 +977,147 @@ describe("tickOnce — structured output", () => {
     assert.match(event.reason ?? "", /did not call the submit_broadcast output tool/);
   });
 
+  // -------------------------------------------------------------------------
+  // Streamed tick → non-streaming salvage (PR #138)
+  // -------------------------------------------------------------------------
+
+  describe("streamed salvage", () => {
+    /**
+     * Deterministic streamText stub. Yields `chunks` on fullStream, then
+     * resolves `steps` / `text` — the three surfaces the daemon reads.
+     */
+    function makeStreamImpl({ toolCalls = [], text = "", chunks = [] } = {}) {
+      const calls = [];
+      const impl = (args) => {
+        calls.push(args);
+        return {
+          fullStream: (async function* () {
+            for (const chunk of chunks) yield chunk;
+          })(),
+          steps: Promise.resolve([{ toolCalls }]),
+          text: Promise.resolve(text),
+        };
+      };
+      impl.calls = calls;
+      return impl;
+    }
+
+    function streamedConfig(overrides) {
+      return baseConfig({
+        streamOutput: true,
+        outputSchema: { schema: minimalSchema },
+        ...overrides,
+      });
+    }
+
+    it("salvages a streamed tick that never called the output tool", async () => {
+      const stream = makeStreamImpl({ toolCalls: [], text: "prose, no tool call" });
+      const gen = makeGenWithResult(
+        outputToolResult({ silent: false, narrative: "Salvaged: Lakers up 4." }),
+      );
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
+      assert.strictEqual(gen.calls.length, 1, "exactly one salvage call");
+      const salvage = gen.calls[0];
+      assert.deepStrictEqual(
+        salvage.toolChoice,
+        { type: "tool", toolName: "submit_broadcast" },
+        "salvage forces the output tool",
+      );
+      assert.match(
+        salvage.prompt,
+        /substantive answer/i,
+        "salvage prompt demands a substantive answer",
+      );
+      assert.strictEqual(
+        salvage.abortSignal,
+        stream.calls[0].abortSignal,
+        "salvage stays inside the same watchdog window",
+      );
+      assert.strictEqual(
+        typeof salvage.stopWhen,
+        "function",
+        "salvage runs a single step (stepCountIs(1)), not the streamed stopWhen array",
+      );
+      assert.strictEqual(event.type, "tick_published");
+      assert.strictEqual(event.text, "Salvaged: Lakers up 4.");
+    });
+
+    it("does not salvage when the streamed tick already called the output tool", async () => {
+      const obj = { silent: false, narrative: "Streamed straight through." };
+      const stream = makeStreamImpl({
+        toolCalls: [{ toolName: "submit_broadcast", input: obj }],
+      });
+      const gen = makeGenWithResult(
+        outputToolResult({ silent: false, narrative: "must not be used" }),
+      );
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
+      assert.strictEqual(gen.calls.length, 0, "no salvage when the stream complied");
+      assert.strictEqual(event.type, "tick_published");
+      assert.deepStrictEqual(event.output, obj);
+      assert.strictEqual(event.text, obj.narrative);
+    });
+
+    it("fails the tick after a single salvage attempt that also omits the output tool", async () => {
+      const stream = makeStreamImpl({ toolCalls: [], text: "prose" });
+      const gen = makeGenWithResult({ toolCalls: [], text: "still prose" });
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
+      assert.strictEqual(event.type, "tick_failed");
+      assert.match(
+        event.reason ?? "",
+        /did not call the submit_broadcast output tool/,
+      );
+      assert.strictEqual(gen.calls.length, 1, "exactly one salvage attempt — no retry loop");
+    });
+
+    it("fails the tick when the salvage returns an idle payload", async () => {
+      // Under forced toolChoice the model cannot decline; an idle payload is a
+      // non-answer, not a legitimate skip.
+      const stream = makeStreamImpl({ toolCalls: [] });
+      const gen = makeGenWithResult(outputToolResult({ silent: true, narrative: "" }));
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
+      assert.strictEqual(event.type, "tick_failed");
+      assert.strictEqual(gen.calls.length, 1);
+    });
+
+    it("fails the tick when the salvage returns an empty answer", async () => {
+      const stream = makeStreamImpl({ toolCalls: [] });
+      const gen = makeGenWithResult(outputToolResult({ silent: false, narrative: "   " }));
+      const daemon = createOperatorDaemon(
+        streamedConfig({ generateTextImpl: gen, streamTextImpl: stream }),
+      );
+
+      const event = await daemon.tickOnce();
+
+      assert.strictEqual(stream.calls.length, 1, "streamed pass runs once");
+      assert.strictEqual(event.type, "tick_failed");
+      assert.strictEqual(gen.calls.length, 1);
+    });
+  });
+
   it("forwards outputSchema.description onto the submit_broadcast tool", async () => {
     const gen = makeGenWithResult(
       outputToolResult({ silent: false, narrative: "ok" }),

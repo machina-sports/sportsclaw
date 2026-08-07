@@ -311,6 +311,9 @@ export interface OperatorDaemonConfig {
   heartbeat?: HeartbeatService;
   /** Inject a generateText impl (tests). Default: ai SDK's. */
   generateTextImpl?: typeof generateText;
+  /** Inject a streamText impl (tests). Default: ai SDK's. Injecting this also
+   *  opts a test-injected daemon into the streamed path (see wantStream). */
+  streamTextImpl?: typeof streamText;
   /** MCP manager handle (for ledger syncing to the Pod) */
   mcpManager?: McpManager;
   /**
@@ -415,6 +418,7 @@ export function createOperatorDaemon(
   const recentBriefJobIds = cfg.recentBriefJobIds ?? [jobId];
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
   const generateImpl = cfg.generateTextImpl ?? generateText;
+  const streamImpl = cfg.streamTextImpl ?? streamText;
 
   const heartbeat =
     cfg.heartbeat ??
@@ -628,16 +632,20 @@ export function createOperatorDaemon(
       };
 
       let result: { toolCalls?: unknown[]; text?: string };
+      // True once `result` comes from the forced non-streaming salvage call.
+      let salvaged = false;
       const wantStream =
         cfg.streamOutput === true &&
         useStructuredOutput &&
-        !cfg.generateTextImpl; // test impls keep the legacy path
+        // test generate impls keep the legacy path unless a stream impl is
+        // explicitly injected (which is how tests drive the streamed path).
+        (!cfg.generateTextImpl || !!cfg.streamTextImpl);
       if (wantStream) {
         // Stream the output tool call's arguments and surface the growing
         // "answer"/"narrative" field via onPartialOutput. The Privacy Router
         // strips response_format, so the structured payload only exists as
         // tool-call input — streamed here as tool-input-delta chunks.
-        const stream = streamText(callParams as Parameters<typeof streamText>[0]);
+        const stream = streamImpl(callParams as Parameters<typeof streamText>[0]);
         let outCallId: string | null = null;
         let argsBuf = "";
         let lastEmit = 0;
@@ -705,6 +713,7 @@ export function createOperatorDaemon(
             toolChoice: { type: "tool", toolName: OUTPUT_TOOL_NAME },
             stopWhen: stepCountIs(1),
           } as Parameters<typeof generateImpl>[0]);
+          salvaged = true;
         }
       } else {
         result = await generateImpl(
@@ -747,6 +756,13 @@ export function createOperatorDaemon(
             text = stripThink(extracted ?? "");
           } catch (e) {
             failureReason = failureReason ?? `output extractor threw: ${e instanceof Error ? e.message : e}`;
+          }
+          // The salvage forces the output tool, so the model cannot decline:
+          // an idle payload or an empty answer is a non-answer, not a skip.
+          if (!failureReason && salvaged && (structuredKind === "idle" || !text.trim())) {
+            failureReason = `salvage returned a non-answer (${
+              structuredKind === "idle" ? "idle payload" : "empty answer"
+            }) under forced ${OUTPUT_TOOL_NAME}`;
           }
         }
       } else {
