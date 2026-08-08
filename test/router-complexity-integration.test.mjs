@@ -142,4 +142,23 @@ describe("router complexity integration contract", () => {
       `expected no market skills for a simple query, got: ${result.decision.selectedSkills.join(", ")}`
     );
   });
+
+  it("passes the caller abort signal to the router model call", async () => {
+    const mockModel = makeMockModel();
+    const controller = new AbortController();
+
+    await routePromptToSkills({
+      prompt: "lakers score",
+      installedSkills: ["nba"],
+      toolSpecs: [],
+      model: mockModel,
+      modelId: "mock-model",
+      provider: "anthropic",
+      abortSignal: controller.signal,
+      config: baseConfig,
+    });
+
+    assert.equal(mockModel.doGenerateCalls.length, 1);
+    assert.equal(mockModel.doGenerateCalls[0].abortSignal, controller.signal);
+  });
 });

@@ -20,6 +20,33 @@ export function providerToolCeiling(provider: LLMProvider): number | undefined {
     : undefined;
 }
 
+export interface ResolveParallelAgentRoutedToolsInput {
+  /** Skill-filtered tools for this lane (`undefined` = generalist/no filter). */
+  agentRoutedTools: string[] | undefined;
+  /** Already-finalized, provider-safe tools from the main route. */
+  mainActiveTools: string[] | undefined;
+  /** Size of the full tool registry shared by the parallel lanes. */
+  totalToolCount: number;
+  /** Provider ceiling (`undefined` means the provider is uncapped here). */
+  ceiling?: number;
+}
+
+/**
+ * Preserve a generalist lane's no-filter semantics whenever sending the full
+ * registry is safe. Only a capped, oversized registry reuses the main route's
+ * already-safe filter; `finalizeActiveTools` still performs history widening
+ * and the final ceiling check for every lane.
+ */
+export function resolveParallelAgentRoutedTools(
+  input: ResolveParallelAgentRoutedToolsInput
+): string[] | undefined {
+  if (input.agentRoutedTools !== undefined) return input.agentRoutedTools;
+  if (input.ceiling !== undefined && input.totalToolCount > input.ceiling) {
+    return input.mainActiveTools;
+  }
+  return undefined;
+}
+
 /**
  * Raised locally — before the AI SDK / provider call — when the explicit
  * `activeTools` list itself exceeds the provider ceiling. Truncating it would

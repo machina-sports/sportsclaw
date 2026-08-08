@@ -52,6 +52,7 @@ import { routePromptToSkills, routeToAgents } from "./router.js";
 import {
   finalizeActiveTools,
   providerToolCeiling,
+  resolveParallelAgentRoutedTools,
 } from "./routing/tool-activation.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager, summarizeMcpServers } from "./mcp.js";
@@ -645,29 +646,21 @@ export class sportsclawEngine {
   ): Promise<{ activeTools?: string[]; decision?: RouteDecision; routeMeta?: RouteMeta }> {
     const installedSkills = this.registry.getInstalledSkills();
     if (installedSkills.length === 0) {
-      // No Python sport schemas installed — but MCP tools may still be available
-      const mcpToolNames = toolNames.filter((n) => n.startsWith("mcp__"));
-      if (mcpToolNames.length > 0) {
-        // Include internal tools alongside MCP tools
-        const internalNames = toolNames.filter((n) =>
-          n === "generate_image" || n === "generate_video" ||
-          n.startsWith("update_") || n === "reflect" || n === "evolve_strategy" ||
-          n === "get_agent_config" || n === "install_sport" || n === "remove_sport" ||
-          n === "upgrade_sports_skills" || n === "spawn_subagent" || n === "list_subagents" ||
-          n === "schedule_task" || n === "list_scheduled_tasks" || n === "cancel_scheduled_task" ||
-          n === "consolidate_memory" || n === "machina_loop" || n === "run_selftest"
-        );
-        return {
-          activeTools: [...internalNames, ...mcpToolNames],
-          decision: {
-            selectedSkills: [],
-            mode: "focused" as const,
-            confidence: 0.8,
-            reason: "MCP-only mode — no sport schemas installed",
-          },
-        };
-      }
-      return {};
+      // With no sport schemas there is nothing to skill-filter. Every tool is
+      // engine-owned or MCP-provided, so keep the complete registry active.
+      return {
+        activeTools: toolNames,
+        ...(toolNames.some((name) => name.startsWith("mcp__"))
+          ? {
+              decision: {
+                selectedSkills: [],
+                mode: "focused" as const,
+                confidence: 0.8,
+                reason: "MCP-only mode — no sport schemas installed",
+              },
+            }
+          : {}),
+      };
     }
 
     // Build recent conversation context from user messages (excluding memory
@@ -699,28 +692,10 @@ export class sportsclawEngine {
     const decision = routed.decision;
 
     const selectedSkills = new Set(decision.selectedSkills);
-    const isInternalTool = (name: string) =>
-      name === "generate_image" ||
-      name === "generate_video" ||
-      name.startsWith("update_") ||
-      name === "reflect" ||
-      name === "evolve_strategy" ||
-      name === "get_agent_config" ||
-      name === "install_sport" ||
-      name === "remove_sport" ||
-      name === "upgrade_sports_skills" ||
-      name === "spawn_subagent" ||
-      name === "list_subagents" ||
-      name === "schedule_task" ||
-      name === "list_scheduled_tasks" ||
-      name === "cancel_scheduled_task" ||
-      name === "consolidate_memory" ||
-      name === "run_selftest";
     const active = toolNames.filter((name) => {
-      if (isInternalTool(name)) return true;
       if (name.startsWith("mcp__")) return true; // MCP tools always active
       const skill = this.registry.getSkillName(name);
-      return skill ? selectedSkills.has(skill) : false;
+      return skill !== undefined ? selectedSkills.has(skill) : true;
     });
 
     // Always return the filtered list — even when it is internal-only or empty.
@@ -772,19 +747,10 @@ export class sportsclawEngine {
   private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
     if (agent.skills.length === 0) return undefined;
     const agentSkillSet = new Set(agent.skills);
-    const isInternalTool = (name: string) =>
-      name === "generate_image" || name === "generate_video" ||
-      name.startsWith("update_") || name === "reflect" ||
-      name === "evolve_strategy" || name === "get_agent_config" ||
-      name === "install_sport" || name === "remove_sport" ||
-      name === "upgrade_sports_skills" || name === "spawn_subagent" ||
-      name === "list_subagents" || name === "schedule_task" ||
-      name === "list_scheduled_tasks" || name === "cancel_scheduled_task" ||
-      name === "consolidate_memory" || name === "machina_loop" || name === "run_selftest";
     return allToolNames.filter((name) => {
-      if (isInternalTool(name) || name.startsWith("mcp__")) return true;
+      if (name.startsWith("mcp__")) return true;
       const skill = this.registry.getSkillName(name);
-      return skill ? agentSkillSet.has(skill) : false;
+      return skill !== undefined ? agentSkillSet.has(skill) : true;
     });
   }
 
@@ -3690,13 +3656,15 @@ export class sportsclawEngine {
       const allToolNames = Object.keys(tools);
       const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
       const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+      const ceiling = providerToolCeiling(this.config.provider);
 
       const lanePromises = activeAgents.map((agent) => {
-        // Generalist lanes have no skill filter. Reuse the already-safe main
-        // filter instead of omitting activeTools and exposing a capped
-        // provider to the full registry. Skilled lanes finalize independently.
-        const agentRoutedTools =
-          this.filterToolsForAgent(agent, allToolNames) ?? activeTools;
+        const agentRoutedTools = resolveParallelAgentRoutedTools({
+          agentRoutedTools: this.filterToolsForAgent(agent, allToolNames),
+          mainActiveTools: activeTools,
+          totalToolCount: allToolNames.length,
+          ceiling,
+        });
         const agentActiveTools = finalizeActiveTools({
           routedActiveTools: agentRoutedTools,
           isFollowUp,
@@ -3707,7 +3675,7 @@ export class sportsclawEngine {
           // current message list; pruned tool calls are intentionally absent.
           historyToolNames: Array.from(historyToolNames),
           totalToolCount: allToolNames.length,
-          ceiling: providerToolCeiling(this.config.provider),
+          ceiling,
         });
         const laneLabel = `${agent.name} (${this.mainModelId})`;
         emitProgress?.({ type: "phase", label: laneLabel });

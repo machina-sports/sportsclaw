@@ -18,6 +18,7 @@ interface RouteInput {
   toolSpecs: ToolSpec[];
   memoryBlock?: string;
   recentContext?: string; // Last few user messages for multi-turn context
+  abortSignal?: AbortSignal;
   model: ModelType;
   modelId: string;
   provider: LLMProvider;
@@ -280,6 +281,7 @@ async function runLlmRouter(
         `Return JSON schema: {"selected_skills":["skill"],"mode":"focused|ambiguous","confidence":0.0,"reason":"short reason","intent":"live_scores|standings|schedule|odds|best_bets|player_stats|team_stats|news|roster|analysis|prediction|ambiguous","needs_clarification":false}`,
       ].join("\n"),
       maxOutputTokens: input.config.tokenBudgets?.router ?? DEFAULT_TOKEN_BUDGETS.router,
+      abortSignal: input.abortSignal,
       ...(() => {
         const mainBudget = input.config.thinkingBudget ?? 8192;
         const routerBudget = mainBudget > 0 ? Math.max(256, Math.floor(mainBudget / 16)) : 0;

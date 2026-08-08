@@ -24,6 +24,7 @@ import {
   ProviderToolCeilingError,
   finalizeActiveTools,
   providerToolCeiling,
+  resolveParallelAgentRoutedTools,
 } from "../dist/routing/tool-activation.js";
 
 const SPORTS = [
@@ -38,20 +39,26 @@ const INTERNAL_TOOLS = [
   "get_agent_config", "install_sport", "remove_sport", "upgrade_sports_skills",
   "spawn_subagent", "list_subagents", "schedule_task", "list_scheduled_tasks",
   "cancel_scheduled_task", "consolidate_memory", "run_selftest",
+  "ask_user_question", "write_file", "execute_command", "render_chart", "create_task",
+];
+
+const REVIEW_ENGINE_TOOLS = [
+  "ask_user_question", "write_file", "execute_command", "render_chart", "create_task",
 ];
 
 /** Name of the MCP tool used by the MCP-visibility fixture variant. */
 const MCP_TOOL = "mcp__demo__health";
 
 /**
- * Reproduces the shipped 291-tool registry: 19 internal + 272 sport tools.
+ * Reproduces the shipped 291-tool registry with engine-owned and sport tools.
  * With `{ withMcpTool: true }` one sport tool is swapped for an MCP tool, so
  * the registry stays at 291 while carrying a tool that must survive routing.
  */
 function buildLargeRegistry({ withMcpTool = false } = {}) {
   const skillOf = new Map();
   const sportTools = [];
-  for (let i = 0; i < 272; i++) {
+  const sportToolCount = 291 - INTERNAL_TOOLS.length;
+  for (let i = 0; i < sportToolCount; i++) {
     const sport = SPORTS[i % SPORTS.length];
     const name = `${sport}_tool_${i}`;
     sportTools.push(name);
@@ -130,6 +137,12 @@ describe("Provider tool-cap overflow", () => {
         routing.activeTools.includes("generate_image"),
         "internal tools must stay available on a conversational turn",
       );
+      for (const name of REVIEW_ENGINE_TOOLS) {
+        assert.ok(
+          routing.activeTools.includes(name),
+          `${name} must stay active when getSkillName() reports no sport owner`,
+        );
+      }
     } finally {
       cleanup();
     }
@@ -164,6 +177,91 @@ describe("Provider tool-cap overflow", () => {
     } finally {
       cleanup();
     }
+  });
+
+  it("keeps every engine-owned fixture tool and MCP while skill-filtering a specialized agent", () => {
+    const { engine, toolNames, cleanup } = makeEngine({ withMcpTool: true });
+    try {
+      assert.equal(toolNames.length, 291, "fixture must stay at exactly 291 tools");
+      const active = engine.filterToolsForAgent(
+        { id: "nba", name: "NBA", skills: ["nba"], tags: [], body: "" },
+        toolNames,
+      );
+
+      assert.ok(Array.isArray(active));
+      for (const name of REVIEW_ENGINE_TOOLS) {
+        assert.ok(active.includes(name), `${name} must remain active for a skilled agent`);
+      }
+      assert.ok(active.includes(MCP_TOOL), "MCP tools must remain active for a skilled agent");
+      assert.ok(active.some((name) => name.startsWith("nba_tool_")));
+      assert.ok(!active.some((name) => name.startsWith("nfl_tool_")));
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("parallel generalist tool routing", () => {
+  const mainActiveTools = ["generate_image", "nba_scores"];
+
+  it("preserves no-filter semantics for uncapped providers", () => {
+    for (const provider of ["anthropic", "google"]) {
+      assert.equal(
+        resolveParallelAgentRoutedTools({
+          agentRoutedTools: undefined,
+          mainActiveTools,
+          totalToolCount: 291,
+          ceiling: providerToolCeiling(provider),
+        }),
+        undefined,
+        provider,
+      );
+    }
+  });
+
+  it("preserves no-filter semantics when a capped provider can fit the registry", () => {
+    assert.equal(
+      resolveParallelAgentRoutedTools({
+        agentRoutedTools: undefined,
+        mainActiveTools,
+        totalToolCount: PROVIDER_TOOL_CEILING,
+        ceiling: providerToolCeiling("openai"),
+      }),
+      undefined,
+    );
+  });
+
+  it("falls back to the safe main filter only for a capped oversized registry", () => {
+    const routed = resolveParallelAgentRoutedTools({
+      agentRoutedTools: undefined,
+      mainActiveTools,
+      totalToolCount: PROVIDER_TOOL_CEILING + 1,
+      ceiling: providerToolCeiling("azure-foundry"),
+    });
+    assert.deepEqual(routed, mainActiveTools);
+
+    const finalized = finalizeActiveTools({
+      routedActiveTools: routed,
+      isFollowUp: true,
+      lowConfidence: false,
+      historyToolNames: ["history_tool"],
+      totalToolCount: PROVIDER_TOOL_CEILING + 1,
+      ceiling: providerToolCeiling("azure-foundry"),
+    });
+    assert.deepEqual(finalized, [...mainActiveTools, "history_tool"]);
+  });
+
+  it("preserves a specialized agent's own filter", () => {
+    const agentRoutedTools = ["generate_image", "nfl_scores"];
+    assert.equal(
+      resolveParallelAgentRoutedTools({
+        agentRoutedTools,
+        mainActiveTools,
+        totalToolCount: 291,
+        ceiling: providerToolCeiling("openai"),
+      }),
+      agentRoutedTools,
+    );
   });
 });
 
@@ -379,10 +477,10 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
 });
 
 describe("no installed skills / no MCP regression", () => {
-  it("keeps the small internal registry available instead of resolving to zero tools", async () => {
+  it("keeps every engine-owned tool explicitly active instead of using a partial allowlist", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-tool-small-"));
     const engine = new sportsclawEngine({ rootDir: tmpDir, verbose: false });
-    const toolNames = ["generate_image", "reflect", "run_selftest"];
+    const toolNames = ["generate_image", "reflect", "run_selftest", ...REVIEW_ENGINE_TOOLS];
     engine.registry = {
       getInstalledSkills: () => [],
       getAllToolSpecs: () => [],
@@ -390,7 +488,7 @@ describe("no installed skills / no MCP regression", () => {
     };
     try {
       const routing = await engine.resolveActiveToolsForPrompt("hello", toolNames);
-      assert.equal(routing.activeTools, undefined);
+      assert.deepEqual(routing.activeTools, toolNames);
       const final = finalizeActiveTools({
         routedActiveTools: routing.activeTools,
         isFollowUp: false,
@@ -399,7 +497,7 @@ describe("no installed skills / no MCP regression", () => {
         totalToolCount: toolNames.length,
         ceiling: providerToolCeiling("openai"),
       });
-      assert.equal(final, undefined, "undefined intentionally exposes the small registry");
+      assert.deepEqual(final, toolNames);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

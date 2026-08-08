@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveSubagentActiveTools } from "../dist/subagent.js";
+import { resolveSubagentActiveTools, SubagentManager } from "../dist/subagent.js";
 import { ProviderToolCeilingError } from "../dist/routing/tool-activation.js";
+import { MockLanguageModelV3 } from "ai/test";
 
 const SKILLS = [
   "nba", "nfl", "mlb", "nhl", "wnba", "cbb", "cfb", "football",
@@ -76,5 +77,77 @@ describe("subagent provider-safe tool routing", () => {
       getSkillName: () => "nba",
     });
     assert.deepEqual(active, ["nba_scores", "mcp__demo__health"]);
+  });
+});
+
+describe("subagent cancellation", () => {
+  it("threads the subagent abort signal into its router model call", async () => {
+    let signalSeen;
+    let markRouterStarted;
+    const routerStarted = new Promise((resolve) => {
+      markRouterStarted = resolve;
+    });
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        signalSeen = options.abortSignal;
+        markRouterStarted();
+        if (!signalSeen) throw new Error("router call did not receive an abort signal");
+        await new Promise((_, reject) => {
+          if (signalSeen.aborted) {
+            reject(new Error("router aborted"));
+            return;
+          }
+          signalSeen.addEventListener(
+            "abort",
+            () => reject(new Error("router aborted")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+    });
+
+    let deliverResult;
+    const resultDelivered = new Promise((resolve) => {
+      deliverResult = resolve;
+    });
+    const manager = new SubagentManager({ onResult: deliverResult });
+    const registry = {
+      getInstalledSkills: () => ["nba"],
+      getAllToolSpecs: () => [{
+        name: "nba_scores",
+        description: "NBA scores",
+        input_schema: { type: "object", properties: {} },
+      }],
+      getSkillName: () => "nba",
+      dispatchToolCall: async () => ({ isError: false, content: "ok" }),
+    };
+
+    try {
+      manager.spawn({
+        prompt: "get nba scores",
+        userId: "abort-test",
+        model,
+        provider: "anthropic",
+        config: {},
+        registry,
+      });
+
+      await routerStarted;
+      assert.ok(signalSeen instanceof AbortSignal);
+      assert.equal(signalSeen.aborted, false);
+      manager.shutdown();
+
+      const result = await resultDelivered;
+      assert.equal(signalSeen.aborted, true);
+      assert.equal(result.status, "failed");
+      assert.ok(model.doGenerateCalls.length >= 1);
+      assert.ok(
+        model.doGenerateCalls.every((call) => call.abortSignal === signalSeen),
+        "the router and any aborted fallback generation must share the subagent signal",
+      );
+    } finally {
+      manager.shutdown();
+    }
   });
 });

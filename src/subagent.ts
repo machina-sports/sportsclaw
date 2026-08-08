@@ -287,6 +287,7 @@ export class SubagentManager {
         model: params.model as Parameters<typeof generateText>[0]["model"],
         modelId: params.config.model ?? "subagent",
         provider: params.provider,
+        abortSignal,
         config: {
           routingMode: params.config.routingMode ?? DEFAULT_CONFIG.routingMode,
           routingMaxSkills: params.config.routingMaxSkills ?? DEFAULT_CONFIG.routingMaxSkills,
