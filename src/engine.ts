@@ -49,7 +49,10 @@ import {
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import { MemoryManager, PodMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
-import { finalizeActiveTools } from "./routing/tool-activation.js";
+import {
+  finalizeActiveTools,
+  providerToolCeiling,
+} from "./routing/tool-activation.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager, summarizeMcpServers } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
@@ -3573,6 +3576,7 @@ export class sportsclawEngine {
       ),
       historyToolNames: Array.from(historyToolNames),
       totalToolCount: Object.keys(tools).length,
+      ceiling: providerToolCeiling(this.config.provider),
     });
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
@@ -3687,28 +3691,24 @@ export class sportsclawEngine {
       const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
       const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
 
-      // Collect tool names from session history to ensure parallel lanes
-      // include definitions for tools referenced in prior turns.
-      const historyToolNames: string[] = [];
-      if (isFollowUp) {
-        for (const msg of this.messages) {
-          if (msg.role === "assistant" && Array.isArray(msg.content)) {
-            for (const part of msg.content as Array<{ type?: string; toolName?: string }>) {
-              if (part.type === "tool-call" && part.toolName && part.toolName in tools) {
-                historyToolNames.push(part.toolName);
-              }
-            }
-          }
-        }
-      }
-
       const lanePromises = activeAgents.map((agent) => {
-        let agentActiveTools = this.filterToolsForAgent(agent, allToolNames);
-        if (agentActiveTools && historyToolNames.length > 0) {
-          const merged = new Set(agentActiveTools);
-          for (const name of historyToolNames) merged.add(name);
-          agentActiveTools = Array.from(merged);
-        }
+        // Generalist lanes have no skill filter. Reuse the already-safe main
+        // filter instead of omitting activeTools and exposing a capped
+        // provider to the full registry. Skilled lanes finalize independently.
+        const agentRoutedTools =
+          this.filterToolsForAgent(agent, allToolNames) ?? activeTools;
+        const agentActiveTools = finalizeActiveTools({
+          routedActiveTools: agentRoutedTools,
+          isFollowUp,
+          lowConfidence: Boolean(
+            routing.decision && routing.decision.confidence < this.config.clarifyThreshold
+          ),
+          // This set was collected after context pruning from the retained,
+          // current message list; pruned tool calls are intentionally absent.
+          historyToolNames: Array.from(historyToolNames),
+          totalToolCount: allToolNames.length,
+          ceiling: providerToolCeiling(this.config.provider),
+        });
         const laneLabel = `${agent.name} (${this.mainModelId})`;
         emitProgress?.({ type: "phase", label: laneLabel });
 
@@ -3726,7 +3726,7 @@ export class sportsclawEngine {
           }),
           messages: this.messages,
           tools,
-          ...(agentActiveTools ? { activeTools: agentActiveTools } : {}),
+          ...(agentActiveTools !== undefined ? { activeTools: agentActiveTools } : {}),
           abortSignal: options?.abortSignal,
           stopWhen: stepCountIs(parallelMaxTurns),
           maxOutputTokens: budgets.main,

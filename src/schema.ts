@@ -332,11 +332,16 @@ export function saveSchema(schema: SportSchema): void {
  * only schemas matching the filter are returned. This enables per-user
  * skill selection in multi-tenant relay deployments.
  */
-export function loadAllSchemas(): SportSchema[] {
+export interface LoadAllSchemasOptions {
+  /** Ignore SPORTSCLAW_SKILLS and load every valid schema installed on disk. */
+  installed?: boolean;
+}
+
+export function loadAllSchemas(options: LoadAllSchemasOptions = {}): SportSchema[] {
   const dir = getSchemaDir();
   if (!existsSync(dir)) return [];
 
-  const filter = getSkillFilter();
+  const filter = options.installed ? null : getSkillFilter();
   const schemas: SportSchema[] = [];
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;

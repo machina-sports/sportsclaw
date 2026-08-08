@@ -23,6 +23,7 @@ import {
   PROVIDER_TOOL_CEILING,
   ProviderToolCeilingError,
   finalizeActiveTools,
+  providerToolCeiling,
 } from "../dist/routing/tool-activation.js";
 
 const SPORTS = [
@@ -171,6 +172,13 @@ describe("finalizeActiveTools — provider ceiling boundary", () => {
     assert.equal(PROVIDER_TOOL_CEILING, 128);
   });
 
+  it("applies the ceiling only to OpenAI and Azure Foundry", () => {
+    assert.equal(providerToolCeiling("openai"), PROVIDER_TOOL_CEILING);
+    assert.equal(providerToolCeiling("azure-foundry"), PROVIDER_TOOL_CEILING);
+    assert.equal(providerToolCeiling("anthropic"), undefined);
+    assert.equal(providerToolCeiling("google"), undefined);
+  });
+
   it("keeps the routed filter and merges history on a low-confidence follow-up when the registry exceeds the ceiling", () => {
     const active = finalizeActiveTools({
       routedActiveTools: ["generate_image", "reflect"],
@@ -178,6 +186,7 @@ describe("finalizeActiveTools — provider ceiling boundary", () => {
       lowConfidence: true,
       historyToolNames: ["nba_scores", "reflect"],
       totalToolCount: PROVIDER_TOOL_CEILING + 1,
+      ceiling: providerToolCeiling("openai"),
     });
 
     assert.ok(
@@ -200,6 +209,7 @@ describe("finalizeActiveTools — provider ceiling boundary", () => {
           lowConfidence: true,
           historyToolNames: ["nba_scores"],
           totalToolCount,
+          ceiling: providerToolCeiling("azure-foundry"),
         }),
         undefined,
         `registry of ${totalToolCount} fits the provider ceiling, so the old widen-to-all behavior is preserved`,
@@ -216,6 +226,7 @@ describe("finalizeActiveTools — oversized registry never resolves to undefined
       lowConfidence: false,
       historyToolNames: [],
       totalToolCount: PROVIDER_TOOL_CEILING + 1,
+      ceiling: providerToolCeiling("openai"),
     });
 
     assert.deepEqual(
@@ -232,6 +243,7 @@ describe("finalizeActiveTools — oversized registry never resolves to undefined
       lowConfidence: false,
       historyToolNames: ["nba_scores", "reflect", "nba_scores"],
       totalToolCount: PROVIDER_TOOL_CEILING + 1,
+      ceiling: providerToolCeiling("azure-foundry"),
     });
 
     assert.ok(Array.isArray(active), "must never fall back to `undefined` above the ceiling");
@@ -250,6 +262,7 @@ describe("finalizeActiveTools — oversized registry never resolves to undefined
         lowConfidence: false,
         historyToolNames: [],
         totalToolCount: PROVIDER_TOOL_CEILING,
+        ceiling: providerToolCeiling("openai"),
       }),
       undefined,
       "small-registry behavior is unchanged: no filter means the whole registry is safe to send",
@@ -269,6 +282,7 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
       lowConfidence: false,
       historyToolNames: [],
       totalToolCount: 291,
+      ceiling: providerToolCeiling("openai"),
     });
 
     assert.equal(active.length, PROVIDER_TOOL_CEILING);
@@ -284,6 +298,7 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
           lowConfidence: false,
           historyToolNames: [],
           totalToolCount: 291,
+          ceiling: providerToolCeiling("openai"),
         }),
       (err) => {
         assert.ok(
@@ -294,6 +309,7 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
         assert.match(err.message, new RegExp(String(PROVIDER_TOOL_CEILING + 1)));
         assert.equal(err.ceiling, PROVIDER_TOOL_CEILING);
         assert.equal(err.count, PROVIDER_TOOL_CEILING + 1);
+        assert.match(err.message, /\/compact|fresh session/i);
         return true;
       },
     );
@@ -308,6 +324,7 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
           lowConfidence: false,
           historyToolNames: ["history_only_tool"],
           totalToolCount: 291,
+          ceiling: providerToolCeiling("azure-foundry"),
         }),
       (err) => {
         assert.ok(err instanceof ProviderToolCeilingError);
@@ -325,8 +342,66 @@ describe("finalizeActiveTools — explicit list never silently truncates", () =>
       lowConfidence: false,
       historyToolNames: [routedActiveTools[0], routedActiveTools[5]],
       totalToolCount: 291,
+      ceiling: providerToolCeiling("openai"),
     });
 
     assert.equal(active.length, PROVIDER_TOOL_CEILING);
+  });
+
+  it("preserves an explicit 291-tool list for unlimited providers", () => {
+    const routedActiveTools = toolList(291);
+    for (const provider of ["anthropic", "google"]) {
+      const active = finalizeActiveTools({
+        routedActiveTools,
+        isFollowUp: false,
+        lowConfidence: false,
+        historyToolNames: [],
+        totalToolCount: 291,
+        ceiling: providerToolCeiling(provider),
+      });
+      assert.deepEqual(active, routedActiveTools, provider);
+    }
+  });
+
+  it("preserves unlimited legacy widening to the whole registry", () => {
+    assert.equal(
+      finalizeActiveTools({
+        routedActiveTools: ["nba_scores"],
+        isFollowUp: true,
+        lowConfidence: true,
+        historyToolNames: ["history_tool"],
+        totalToolCount: 291,
+        ceiling: providerToolCeiling("anthropic"),
+      }),
+      undefined,
+    );
+  });
+});
+
+describe("no installed skills / no MCP regression", () => {
+  it("keeps the small internal registry available instead of resolving to zero tools", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-tool-small-"));
+    const engine = new sportsclawEngine({ rootDir: tmpDir, verbose: false });
+    const toolNames = ["generate_image", "reflect", "run_selftest"];
+    engine.registry = {
+      getInstalledSkills: () => [],
+      getAllToolSpecs: () => [],
+      getSkillName: () => undefined,
+    };
+    try {
+      const routing = await engine.resolveActiveToolsForPrompt("hello", toolNames);
+      assert.equal(routing.activeTools, undefined);
+      const final = finalizeActiveTools({
+        routedActiveTools: routing.activeTools,
+        isFollowUp: false,
+        lowConfidence: false,
+        historyToolNames: [],
+        totalToolCount: toolNames.length,
+        ceiling: providerToolCeiling("openai"),
+      });
+      assert.equal(final, undefined, "undefined intentionally exposes the small registry");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

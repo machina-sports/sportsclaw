@@ -22,6 +22,7 @@ import {
   DEFAULT_SUPPORT_SKILLS,
   OPTIONAL_SUPPORT_SKILLS,
   categorizeSchema,
+  loadAllSchemas,
   summarizeInstalledSchemas,
 } from "../dist/schema.js";
 
@@ -205,10 +206,10 @@ describe("sportsclaw list (CLI)", () => {
   ];
   const EXPECTED_TOOLS = INSTALLED.reduce((sum, [, n]) => sum + n, 0);
 
-  function runList(args, dir) {
-    const env = { ...process.env, sportsclaw_SCHEMA_DIR: dir };
-    delete env.SPORTSCLAW_SKILLS;
-    delete env.sportsclaw_SKILLS;
+  function runList(args, dir, extraEnv = {}) {
+    const env = { ...process.env, sportsclaw_SCHEMA_DIR: dir, ...extraEnv };
+    if (!("SPORTSCLAW_SKILLS" in extraEnv)) delete env.SPORTSCLAW_SKILLS;
+    if (!("sportsclaw_SKILLS" in extraEnv)) delete env.sportsclaw_SKILLS;
     return execFileSync("node", ["dist/index.js", "list", ...args], {
       encoding: "utf-8",
       env,
@@ -247,6 +248,16 @@ describe("sportsclaw list (CLI)", () => {
     assert.equal(parsed.totals.schemas, 6);
     assert.equal(parsed.totals.tools, EXPECTED_TOOLS);
     assert.equal(parsed.schemaDir, schemaDir);
+  });
+
+  it("reports every valid installed schema even when runtime skills are filtered", () => {
+    const parsed = JSON.parse(runList(["--json"], schemaDir, {
+      SPORTSCLAW_SKILLS: "nba",
+    }));
+    assert.equal(parsed.totals.schemas, INSTALLED.length);
+    assert.equal(parsed.totals.tools, EXPECTED_TOOLS);
+    assert.deepEqual(parsed.defaultSports, ["nba", "nfl"]);
+    assert.deepEqual(parsed.defaultSupport, ["kalshi"]);
   });
 
   it("emits an empty-but-valid JSON shape when nothing is installed", () => {

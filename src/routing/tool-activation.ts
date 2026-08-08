@@ -7,11 +7,18 @@
  */
 
 /**
- * Largest tool array providers accept in one request. Azure Foundry / OpenAI
- * reject anything above it ("Invalid tools: array too long. Expected maximum
- * 128, got 291").
+ * Largest tool array accepted by the providers with a known request ceiling.
  */
 export const PROVIDER_TOOL_CEILING = 128;
+
+import type { LLMProvider } from "../types.js";
+
+/** Return the provider's tool ceiling, or `undefined` for unlimited legacy behavior. */
+export function providerToolCeiling(provider: LLMProvider): number | undefined {
+  return provider === "openai" || provider === "azure-foundry"
+    ? PROVIDER_TOOL_CEILING
+    : undefined;
+}
 
 /**
  * Raised locally — before the AI SDK / provider call — when the explicit
@@ -20,16 +27,17 @@ export const PROVIDER_TOOL_CEILING = 128;
  * loudly instead.
  */
 export class ProviderToolCeilingError extends Error {
-  readonly ceiling = PROVIDER_TOOL_CEILING;
+  readonly ceiling: number;
   readonly count: number;
 
-  constructor(count: number) {
+  constructor(count: number, ceiling: number = PROVIDER_TOOL_CEILING) {
     super(
-      `activeTools carries ${count} tools, above the ${PROVIDER_TOOL_CEILING}-tool provider ceiling. ` +
-        `Refusing to truncate: narrow the routed skills or reduce the installed tool registry.`
+      `activeTools carries ${count} tools, above the ${ceiling}-tool provider ceiling. ` +
+        `Refusing to truncate. Run /compact or start a fresh session, and narrow the routed skills if the overflow remains.`
     );
     this.name = "ProviderToolCeilingError";
     this.count = count;
+    this.ceiling = ceiling;
   }
 }
 
@@ -44,6 +52,8 @@ export interface FinalizeActiveToolsInput {
   historyToolNames: readonly string[];
   /** Size of the full tool registry for this turn. */
   totalToolCount: number;
+  /** Provider ceiling (`undefined` preserves unlimited legacy behavior). */
+  ceiling?: number;
 }
 
 /**
@@ -51,13 +61,13 @@ export interface FinalizeActiveToolsInput {
  *
  * On low-confidence follow-ups the filter is dropped so the LLM can reach any
  * tool from conversation context — but only when the whole registry fits under
- * `PROVIDER_TOOL_CEILING`. Above the ceiling, dropping the filter would send a
+ * a configured ceiling. Above the ceiling, dropping the filter would send a
  * tool array the provider rejects outright, so the routed filter is kept
  * instead. Any surviving filter is widened with the tools referenced by history
  * so historical tool_use blocks still resolve. Nothing is ever truncated:
  * the routed filter plus history is the minimum the request needs to be valid.
  *
- * Above the ceiling the result is always an explicit array — even when routing
+ * For capped providers, above the ceiling the result is always an explicit array — even when routing
  * produced no filter at all — because `undefined` there means "send all 291
  * tools" and the provider rejects that outright. If the explicit list itself
  * cannot fit the ceiling, the turn fails locally with
@@ -66,7 +76,8 @@ export interface FinalizeActiveToolsInput {
 export function finalizeActiveTools(
   input: FinalizeActiveToolsInput
 ): string[] | undefined {
-  const registryFitsProvider = input.totalToolCount <= PROVIDER_TOOL_CEILING;
+  const registryFitsProvider =
+    input.ceiling === undefined || input.totalToolCount <= input.ceiling;
   let active =
     input.isFollowUp && input.lowConfidence && registryFitsProvider
       ? undefined
@@ -75,7 +86,9 @@ export function finalizeActiveTools(
   // Fail closed: an oversized registry must never resolve to `undefined`. A
   // first turn gets an empty list; a follow-up is widened with history below,
   // so its historical tool calls stay defined.
-  if (active === undefined && !registryFitsProvider) active = [];
+  if (active === undefined && input.ceiling !== undefined && !registryFitsProvider) {
+    active = [];
+  }
 
   if (active && input.isFollowUp && input.historyToolNames.length > 0) {
     const merged = new Set(active);
@@ -83,8 +96,8 @@ export function finalizeActiveTools(
     active = Array.from(merged);
   }
 
-  if (active && active.length > PROVIDER_TOOL_CEILING) {
-    throw new ProviderToolCeilingError(active.length);
+  if (active && input.ceiling !== undefined && active.length > input.ceiling) {
+    throw new ProviderToolCeilingError(active.length, input.ceiling);
   }
 
   return active;

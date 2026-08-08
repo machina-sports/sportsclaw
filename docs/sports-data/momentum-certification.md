@@ -6,7 +6,9 @@ Generated **2026-08-08T14:29:13Z**. Guarded by `test/momentum-certification.test
 > **No sport in this table is currently live-certified.** Synthetic evidence proves the
 > pipeline's mechanics only. The MLB and WNBA rows are *historical reports* from
 > [PR #135](https://github.com/machina-sports/sportsclaw/pull/135) whose complete run
-> receipts were not retained, and the fresh 2026-08-08 revalidation of both was **blocked**.
+> receipts were not retained. Fresh 2026-08-08 revalidation found a WNBA
+> **resolver anomaly** and an unresolved MLB market; separate scoreboard discovery for
+> both sports was **blocked** by ESPN HTTP 403.
 
 ## Evidence types
 
@@ -48,18 +50,18 @@ language, and the evaluator holds the card rather than passing it. That is the f
 gate working as designed — but it means NHL has **never** produced an accepted card, synthetic
 or live. Any future artifact that shows NHL as `accepted` without a new run is a regression.
 
-## Fresh revalidation (2026-08-08T14:29:13Z) — blocked
+## Fresh revalidation (2026-08-08T14:29:13Z) — unresolved
 
 Both live-reported rows were re-run to try to close the receipt gap. Neither succeeded, so
 neither row advanced.
 
-| sport | command | status | observed |
-| --- | --- | --- | --- |
-| wnba | `node dist/intelligence/momentum-replay.js wnba 401857073` | blocked | Resolved a different market, `KXWNBAGAME-26JUL28INDSEA-IND`, instead of the reported `KXWNBAGAME-26JUL17SEAIND-IND`, and returned 0 price points. Follow-up scoreboard discovery returned ESPN HTTP 403. |
-| mlb | `node dist/intelligence/momentum-replay.js mlb 401872178` | blocked | No Kalshi winner market resolved for ESPN event 401872178. Follow-up scoreboard discovery returned ESPN HTTP 403. |
+| sport | command | revalidation status | observed | discovery status | discovery observed |
+| --- | --- | --- | --- | --- | --- |
+| wnba | `node dist/intelligence/momentum-replay.js wnba 401857073` | resolver-anomaly | Resolved a different market, `KXWNBAGAME-26JUL28INDSEA-IND`, instead of the reported `KXWNBAGAME-26JUL17SEAIND-IND`, and returned 0 price points. | blocked | Follow-up scoreboard discovery returned ESPN HTTP 403. |
+| mlb | `node dist/intelligence/momentum-replay.js mlb 401872178` | blocked | No Kalshi winner market resolved for ESPN event 401872178. | blocked | Follow-up scoreboard discovery returned ESPN HTTP 403. |
 
-These are **blocked revalidation receipts, not passes.** Response bodies are deliberately not
-embedded here — only the status and the one-line outcome.
+These are unresolved revalidation and blocked discovery receipts, not passes. Response bodies
+are deliberately not embedded here — only each status and one-line outcome.
 
 ## What the offline test suite does and does not prove
 

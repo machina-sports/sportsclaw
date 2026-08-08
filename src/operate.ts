@@ -60,6 +60,7 @@ import {
 } from "./prompts.js";
 import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
 import { invokeModelRole } from "./inference/model-role-router.js";
+import { providerToolCeiling } from "./routing/tool-activation.js";
 
 // Cheap-wake probe budget: a sink's pollWake must be fast I/O. If it hangs or
 // throws we fail closed (skip the tick — never fall through to inference).
@@ -391,6 +392,39 @@ export function applyOperatorSkillFilter(skills: string[] | undefined): void {
     process.env.sportsclaw_SKILLS !== undefined;
   if (skills === undefined || callerConfigured) return;
   process.env.SPORTSCLAW_SKILLS = skills.join(",");
+}
+
+export interface ValidateOperatorToolCountInput {
+  provider: LLMProvider;
+  toolCount: number;
+  jobId: string;
+  skills: string[] | undefined;
+}
+
+/** Fail before daemon inference when an operator would exceed a provider cap. */
+export function validateOperatorToolCount(input: ValidateOperatorToolCountInput): void {
+  const ceiling = providerToolCeiling(input.provider);
+  if (ceiling === undefined || input.toolCount <= ceiling) return;
+  throw new Error(
+    `Operator job "${input.jobId}" constructed ${input.toolCount} tools, above the ` +
+      `${ceiling}-tool ${input.provider} ceiling. Configure the job's "skills" array ` +
+      `to a focused set and retry.`
+  );
+}
+
+function operatorRequestToolCount(
+  toolSet: ToolSet,
+  cfg: OperatorJobConfig,
+  outputToolName?: string,
+): number {
+  const names = new Set(Object.keys(toolSet));
+  if (cfg.enableMemoryTools !== false) {
+    names.add("add_lesson");
+    names.add("replace_lesson");
+    names.add("remove_lesson");
+  }
+  if (outputToolName) names.add(outputToolName);
+  return names.size;
 }
 
 /**
@@ -754,6 +788,18 @@ async function runDryRun(jobId: string): Promise<void> {
   const tools = await buildOperatorTools(cfg, false, sink);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager);
+    const outputSchema = sink.getOutputSchema?.({ cfg });
+    const totalToolCount = operatorRequestToolCount(
+      tools.toolSet,
+      cfg,
+      outputSchema?.toolName ?? (outputSchema ? "submit_broadcast" : undefined),
+    );
+    validateOperatorToolCount({
+      provider: inputs.provider,
+      toolCount: totalToolCount,
+      jobId: cfg.jobId,
+      skills: cfg.skills,
+    });
     const system = buildSystemPrompt({
       role: inputs.personaText,
       isCron: true,
@@ -766,8 +812,6 @@ async function runDryRun(jobId: string): Promise<void> {
     console.log(system);
     console.log("");
     const memoryToolsOn = cfg.enableMemoryTools !== false;
-    const memoryToolCount = memoryToolsOn ? 3 : 0;
-    const totalToolCount = tools.toolNames.length + memoryToolCount;
     console.log(`=== Tools (${totalToolCount}) ===`);
     for (const name of tools.toolNames) console.log(`  - ${name}`);
     if (memoryToolsOn) {
@@ -801,6 +845,17 @@ async function runOnce(jobId: string): Promise<void> {
   const tools = await buildOperatorTools(cfg, false, sink);
   try {
     const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+    const outputSchema = sink.getOutputSchema?.({ cfg });
+    validateOperatorToolCount({
+      provider: inputs.provider,
+      toolCount: operatorRequestToolCount(
+        tools.toolSet,
+        cfg,
+        outputSchema?.toolName ?? (outputSchema ? "submit_broadcast" : undefined),
+      ),
+      jobId: cfg.jobId,
+      skills: cfg.skills,
+    });
     if (inputs.openshell?.enabled) {
       await probeOpenShellHost(inputs.openshell.baseUrl);
     }
@@ -812,7 +867,6 @@ async function runOnce(jobId: string): Promise<void> {
       cfg,
       runModelRole: makeRunModelRole(),
     };
-    const outputSchema = sink.getOutputSchema?.({ cfg });
     const daemon = createOperatorDaemon({
       jobId: cfg.jobId,
       jobLabel: cfg.label,
@@ -897,6 +951,17 @@ async function runForeground(jobId: string): Promise<void> {
   }
   const tools = await buildOperatorTools(cfg, false, sink);
   const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+  const outputSchema = sink.getOutputSchema?.({ cfg });
+  validateOperatorToolCount({
+    provider: inputs.provider,
+    toolCount: operatorRequestToolCount(
+      tools.toolSet,
+      cfg,
+      outputSchema?.toolName ?? (outputSchema ? "submit_broadcast" : undefined),
+    ),
+    jobId: cfg.jobId,
+    skills: cfg.skills,
+  });
   if (inputs.openshell?.enabled) {
     await probeOpenShellHost(inputs.openshell.baseUrl);
   }
@@ -909,7 +974,6 @@ async function runForeground(jobId: string): Promise<void> {
     cfg,
     runModelRole: makeRunModelRole(),
   };
-  const outputSchema = sink.getOutputSchema?.({ cfg });
   const daemon = createOperatorDaemon({
     jobId: cfg.jobId,
     jobLabel: cfg.label,

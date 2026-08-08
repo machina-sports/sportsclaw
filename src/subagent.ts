@@ -22,8 +22,13 @@
 
 import { generateText, tool as defineTool, jsonSchema, stepCountIs, type ToolSet } from "ai";
 import type { sportsclawConfig, LLMProvider } from "./types.js";
-import { buildProviderOptions } from "./types.js";
+import { buildProviderOptions, DEFAULT_CONFIG } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
+import { routePromptToSkills } from "./router.js";
+import {
+  finalizeActiveTools,
+  providerToolCeiling,
+} from "./routing/tool-activation.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,6 +95,35 @@ const RESTRICTED_TOOLS = new Set([
   "generate_image",        // no image generation from background
   "generate_video",        // no video generation from background
 ]);
+
+export interface ResolveSubagentActiveToolsInput {
+  provider: LLMProvider;
+  toolNames: readonly string[];
+  selectedSkills: readonly string[];
+  getSkillName: (toolName: string) => string | undefined;
+}
+
+/** Pure selection/finalization seam used by the background subagent path. */
+export function resolveSubagentActiveTools(
+  input: ResolveSubagentActiveToolsInput
+): string[] | undefined {
+  const selectedSkills = new Set(input.selectedSkills);
+  const routedActiveTools = input.toolNames.filter((name) => {
+    if (RESTRICTED_TOOLS.has(name)) return false;
+    if (name.startsWith("mcp__")) return true;
+    const skill = input.getSkillName(name);
+    return skill !== undefined && selectedSkills.has(skill);
+  });
+
+  return finalizeActiveTools({
+    routedActiveTools,
+    isFollowUp: false,
+    lowConfidence: false,
+    historyToolNames: [],
+    totalToolCount: input.toolNames.length,
+    ceiling: providerToolCeiling(input.provider),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // SubagentManager
@@ -243,6 +277,32 @@ export class SubagentManager {
       // Build restricted tool set
       const tools = this.buildRestrictedTools(params.registry, params.config);
 
+      const allowedSpecs = params.registry
+        .getAllToolSpecs()
+        .filter((spec) => !RESTRICTED_TOOLS.has(spec.name));
+      const routed = await routePromptToSkills({
+        prompt: task.prompt,
+        installedSkills: params.registry.getInstalledSkills(),
+        toolSpecs: allowedSpecs,
+        model: params.model as Parameters<typeof generateText>[0]["model"],
+        modelId: params.config.model ?? "subagent",
+        provider: params.provider,
+        config: {
+          routingMode: params.config.routingMode ?? DEFAULT_CONFIG.routingMode,
+          routingMaxSkills: params.config.routingMaxSkills ?? DEFAULT_CONFIG.routingMaxSkills,
+          routingAllowSpillover:
+            params.config.routingAllowSpillover ?? DEFAULT_CONFIG.routingAllowSpillover,
+          thinkingBudget: params.thinkingBudget ?? DEFAULT_CONFIG.thinkingBudget,
+          tokenBudgets: params.config.tokenBudgets ?? DEFAULT_CONFIG.tokenBudgets,
+        },
+      });
+      const activeTools = resolveSubagentActiveTools({
+        provider: params.provider,
+        toolNames: Object.keys(tools),
+        selectedSkills: routed.decision.selectedSkills,
+        getSkillName: (name) => params.registry.getSkillName(name),
+      });
+
       const systemPrompt = params.systemPrompt || buildSubagentSystemPrompt(task.prompt);
       const providerOpts = buildProviderOptions(
         params.provider,
@@ -254,6 +314,7 @@ export class SubagentManager {
         system: systemPrompt,
         prompt: task.prompt,
         tools,
+        ...(activeTools !== undefined ? { activeTools } : {}),
         abortSignal,
         stopWhen: stepCountIs(this.maxTurns),
         maxOutputTokens: this.maxTokens,

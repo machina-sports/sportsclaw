@@ -92,6 +92,27 @@ function assertRedacted(output, secret, label) {
 }
 
 describe("sportsclaw doctor credential redaction", () => {
+  it("reports installed schemas as sport and support-module totals even with a runtime filter", () => {
+    const home = makeHome({
+      "config.json": JSON.stringify({ provider: "openai", model: "gpt-4.1" }),
+    });
+    const schemaDir = join(home, ".sportsclaw", "schemas");
+    mkdirSync(schemaDir, { recursive: true });
+    for (const sport of ["nba", "nfl", "kalshi"]) {
+      writeFileSync(join(schemaDir, `${sport}.json`), JSON.stringify({ sport, tools: [] }));
+    }
+    try {
+      const out = runDoctor(home, {
+        OPENAI_API_KEY: OPENAI_KEY,
+        SPORTSCLAW_SKILLS: "nba",
+      });
+      assert.match(out, /3 schemas \(2 sports, 1 support modules\)/);
+      assert.doesNotMatch(out, /3 sport schemas installed/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("does not print Azure Foundry key material or the configured base URL", () => {
     const home = makeHome({
       "config.json": JSON.stringify({ provider: "azure-foundry", model: "gpt-5.2" }),

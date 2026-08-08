@@ -207,17 +207,19 @@ describe("2026-08-08 revalidation is blocked, not passing", () => {
   });
 
   for (const sport of LIVE_REPORTED_SPORTS) {
-    it(`${sport} revalidation is recorded as blocked`, () => {
+    it(`${sport} records the revalidation and scoreboard discovery separately`, () => {
       const { revalidation } = bySport.get(sport);
       assert.equal(revalidation.recordedAt, REVALIDATION_AT);
-      assert.equal(revalidation.status, "blocked");
+      assert.ok(["blocked", "resolver-anomaly"].includes(revalidation.status));
+      assert.equal(revalidation.discoveryStatus, "blocked");
       assert.match(revalidation.command, /momentum-replay\.js/);
       assert.ok(revalidation.observedResult.length > 0);
+      assert.match(revalidation.discoveryObservedResult, /403/);
     });
 
     it(`${sport} revalidation claims no success`, () => {
       const { revalidation } = bySport.get(sport);
-      const text = `${revalidation.status} ${revalidation.observedResult}`;
+      const text = `${revalidation.status} ${revalidation.observedResult} ${revalidation.discoveryStatus} ${revalidation.discoveryObservedResult}`;
       assert.equal(
         /\b(passed|success(ful)?|verified|certified|confirmed)\b/i.test(text),
         false,
@@ -227,7 +229,7 @@ describe("2026-08-08 revalidation is blocked, not passing", () => {
 
     it(`${sport} revalidation embeds no HTML body or secret payload`, () => {
       const { revalidation } = bySport.get(sport);
-      const text = revalidation.observedResult;
+      const text = `${revalidation.observedResult} ${revalidation.discoveryObservedResult}`;
       assert.equal(/<[a-z!/]/i.test(text), false, `${sport}: no HTML markup in observedResult`);
       assert.equal(/akamai|reference\s*#/i.test(text), false, `${sport}: no CDN reference in observedResult`);
       assert.equal(
@@ -241,16 +243,20 @@ describe("2026-08-08 revalidation is blocked, not passing", () => {
 
   it("wnba revalidation records the ticker drift and the empty price series", () => {
     const { revalidation } = bySport.get("wnba");
+    assert.equal(revalidation.status, "resolver-anomaly");
     assert.match(revalidation.command, /wnba 401857073/);
     assert.match(revalidation.observedResult, /KXWNBAGAME-26JUL28INDSEA-IND/);
     assert.match(revalidation.observedResult, /0 price points/i);
+    assert.doesNotMatch(revalidation.observedResult, /403/);
   });
 
   it("mlb revalidation records the unresolved market and the ESPN 403", () => {
     const { revalidation } = bySport.get("mlb");
+    assert.equal(revalidation.status, "blocked");
     assert.match(revalidation.command, /mlb 401872178/);
     assert.match(revalidation.observedResult, /no Kalshi winner market/i);
-    assert.match(revalidation.observedResult, /403/);
+    assert.doesNotMatch(revalidation.observedResult, /403/);
+    assert.match(revalidation.discoveryObservedResult, /403/);
   });
 });
 
@@ -273,6 +279,7 @@ describe("markdown companion", () => {
     assert.match(markdown, /live-reported/);
     assert.match(markdown, /synthetic/);
     assert.match(markdown, /blocked/i);
+    assert.match(markdown, /resolver-anomaly/i);
     assert.match(markdown, new RegExp(REVALIDATION_AT));
   });
 

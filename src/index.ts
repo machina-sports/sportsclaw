@@ -5,7 +5,7 @@
  * Subcommands:
  *   sportsclaw add <sport>       — Inject a sport schema from the Python package
  *   sportsclaw remove <sport>    — Remove a previously added sport schema
- *   sportsclaw list              — List all installed sport schemas
+ *   sportsclaw list [--json]     — List all installed schemas and support modules
  *   sportsclaw init              — Bootstrap all 14 default sport schemas
  *   sportsclaw chat              — Start an interactive conversation (REPL)
  *   sportsclaw doctor            — Check setup and diagnose issues
@@ -947,7 +947,7 @@ function cmdRemove(args: string[], _opts?: { fromChat?: boolean }): void {
 // ---------------------------------------------------------------------------
 
 function cmdList(args: string[] = [], _opts?: { fromChat?: boolean }): void {
-  const schemas = [...loadAllSchemas()].sort((a, b) => a.sport.localeCompare(b.sport));
+  const schemas = [...loadAllSchemas({ installed: true })].sort((a, b) => a.sport.localeCompare(b.sport));
   const summary = summarizeInstalledSchemas(schemas);
 
   if (args.includes("--json")) {
@@ -1131,17 +1131,21 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
   }
 
   // 7. Schemas installed
-  const schemas = listSchemas();
-  if (schemas.length > 0) {
-    console.log(pc.green("  ✓") + ` ${schemas.length} sport schemas installed`);
+  const schemaSummary = summarizeInstalledSchemas(loadAllSchemas({ installed: true }));
+  if (schemaSummary.totalSchemas > 0) {
+    console.log(
+      pc.green("  ✓") +
+        ` ${schemaSummary.totalSchemas} schemas (${schemaSummary.totalSports} sports, ` +
+        `${schemaSummary.totalSupport} support modules)`
+    );
   } else {
-    console.log(pc.yellow("  ⚠") + " No sport schemas installed");
+    console.log(pc.yellow("  ⚠") + " No schemas or support modules installed");
     console.log("    Fix: sportsclaw init --all");
     allGood = false;
   }
 
   // 8. Schema directory location
-  if (schemas.length > 0) {
+  if (schemaSummary.totalSchemas > 0) {
     console.log(pc.green("  ✓") + ` Schema dir: ${getSchemaDir()}`);
   }
 
@@ -1359,7 +1363,8 @@ async function cmdHealth(args: string[]): Promise<void> {
     status = "degraded";
   }
 
-  const schemasCount = listSchemas().length;
+  const schemaSummary = summarizeInstalledSchemas(loadAllSchemas({ installed: true }));
+  const schemasCount = schemaSummary.totalSchemas;
 
   if (jsonMode) {
     const payload = {
@@ -1380,6 +1385,15 @@ async function cmdHealth(args: string[]): Promise<void> {
       },
       mcp: mcpDetails,
       schemasInstalled: schemasCount,
+      sportsInstalled: schemaSummary.totalSports,
+      supportModulesInstalled: schemaSummary.totalSupport,
+      schemaCatalog: {
+        defaultSports: schemaSummary.defaultSports,
+        optionalSports: schemaSummary.optionalSports,
+        defaultSupport: schemaSummary.defaultSupport,
+        optionalSupport: schemaSummary.optionalSupport,
+        unknown: schemaSummary.unknown,
+      },
       errors,
       warnings,
     };
@@ -1392,7 +1406,10 @@ async function cmdHealth(args: string[]): Promise<void> {
   console.log(`  Overall Status:  ${status === "healthy" ? pc.green(status.toUpperCase()) : status === "degraded" ? pc.yellow(status.toUpperCase()) : pc.red(status.toUpperCase())}`);
   console.log(`  Engine Version:  v${PKG_VERSION}`);
   console.log(`  Provider/Model:  ${provider} (${model || "default"})`);
-  console.log(`  Schemas Active:  ${schemasCount} installed`);
+  console.log(
+    `  Schemas Installed: ${schemasCount} schemas ` +
+      `(${schemaSummary.totalSports} sports, ${schemaSummary.totalSupport} support modules)`
+  );
   console.log("");
 
   console.log(pc.bold("  MCP Connectivity:"));
@@ -2756,7 +2773,7 @@ function printHelp(): void {
   console.log("  sportsclaw logout claude           Stop using Claude Code OAuth (revert to API key)");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
-  console.log("  sportsclaw list                    List installed sport schemas");
+  console.log("  sportsclaw list [--json]           List all installed schemas and support modules");
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
