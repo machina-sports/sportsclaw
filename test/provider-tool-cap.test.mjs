@@ -21,11 +21,9 @@ import os from "node:os";
 import { sportsclawEngine } from "../dist/index.js";
 import {
   PROVIDER_TOOL_CEILING,
+  ProviderToolCeilingError,
   finalizeActiveTools,
 } from "../dist/routing/tool-activation.js";
-
-/** Providers cap tool definitions at 128; the registry is far larger. */
-const PROVIDER_CEILING = 128;
 
 const SPORTS = [
   "nba", "nfl", "mlb", "nhl", "football", "tennis", "golf", "cricket",
@@ -41,8 +39,15 @@ const INTERNAL_TOOLS = [
   "cancel_scheduled_task", "consolidate_memory", "run_selftest",
 ];
 
-/** Reproduces the shipped 291-tool registry: 19 internal + 272 sport tools. */
-function buildLargeRegistry() {
+/** Name of the MCP tool used by the MCP-visibility fixture variant. */
+const MCP_TOOL = "mcp__demo__health";
+
+/**
+ * Reproduces the shipped 291-tool registry: 19 internal + 272 sport tools.
+ * With `{ withMcpTool: true }` one sport tool is swapped for an MCP tool, so
+ * the registry stays at 291 while carrying a tool that must survive routing.
+ */
+function buildLargeRegistry({ withMcpTool = false } = {}) {
   const skillOf = new Map();
   const sportTools = [];
   for (let i = 0; i < 272; i++) {
@@ -50,6 +55,11 @@ function buildLargeRegistry() {
     const name = `${sport}_tool_${i}`;
     sportTools.push(name);
     skillOf.set(name, sport);
+  }
+  if (withMcpTool) {
+    const replaced = sportTools[sportTools.length - 1];
+    skillOf.delete(replaced);
+    sportTools[sportTools.length - 1] = MCP_TOOL;
   }
   const toolNames = [...INTERNAL_TOOLS, ...sportTools];
   return {
@@ -81,10 +91,10 @@ const offlineModel = {
   },
 };
 
-function makeEngine() {
+function makeEngine(options) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-tool-cap-"));
   const engine = new sportsclawEngine({ rootDir: tmpDir, verbose: false });
-  const { toolNames, registry } = buildLargeRegistry();
+  const { toolNames, registry } = buildLargeRegistry(options);
   engine.registry = registry;
   engine.mainModel = offlineModel;
   return { engine, toolNames, cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }) };
@@ -107,8 +117,8 @@ describe("Provider tool-cap overflow", () => {
         "activeTools must be present — omitting it makes the AI SDK send all 291 tools and the provider rejects the request",
       );
       assert.ok(
-        routing.activeTools.length <= PROVIDER_CEILING,
-        `activeTools must stay within the ${PROVIDER_CEILING}-tool provider ceiling, got ${routing.activeTools.length}`,
+        routing.activeTools.length <= PROVIDER_TOOL_CEILING,
+        `activeTools must stay within the ${PROVIDER_TOOL_CEILING}-tool provider ceiling, got ${routing.activeTools.length}`,
       );
       assert.deepEqual(
         routing.activeTools.filter((n) => !INTERNAL_TOOLS.includes(n)),
@@ -118,6 +128,37 @@ describe("Provider tool-cap overflow", () => {
       assert.ok(
         routing.activeTools.includes("generate_image"),
         "internal tools must stay available on a conversational turn",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps an MCP tool active on a no-sport route through the 291-tool registry", async () => {
+    const { engine, toolNames, cleanup } = makeEngine({ withMcpTool: true });
+    try {
+      assert.equal(toolNames.length, 291, "fixture must reproduce the 291-tool registry");
+      assert.ok(toolNames.includes(MCP_TOOL), "fixture must carry the MCP tool");
+
+      const routing = await engine.resolveActiveToolsForPrompt(
+        "hey, how are you doing today?",
+        toolNames,
+        undefined,
+      );
+
+      assert.ok(Array.isArray(routing.activeTools), "activeTools must be an explicit list");
+      assert.ok(
+        routing.activeTools.includes(MCP_TOOL),
+        `${MCP_TOOL} must stay active — MCP tools are not sport-schema tools and routing must never drop them`,
+      );
+      assert.ok(
+        routing.activeTools.length <= PROVIDER_TOOL_CEILING,
+        `activeTools must stay within the ${PROVIDER_TOOL_CEILING}-tool provider ceiling, got ${routing.activeTools.length}`,
+      );
+      assert.deepEqual(
+        routing.activeTools.filter((n) => !INTERNAL_TOOLS.includes(n) && n !== MCP_TOOL),
+        [],
+        "no sport-schema tool may be active when routing selected no skill",
       );
     } finally {
       cleanup();
@@ -164,5 +205,128 @@ describe("finalizeActiveTools — provider ceiling boundary", () => {
         `registry of ${totalToolCount} fits the provider ceiling, so the old widen-to-all behavior is preserved`,
       );
     }
+  });
+});
+
+describe("finalizeActiveTools — oversized registry never resolves to undefined", () => {
+  it("fails closed with an empty list on a first turn when routing produced no filter", () => {
+    const active = finalizeActiveTools({
+      routedActiveTools: undefined,
+      isFollowUp: false,
+      lowConfidence: false,
+      historyToolNames: [],
+      totalToolCount: PROVIDER_TOOL_CEILING + 1,
+    });
+
+    assert.deepEqual(
+      active,
+      [],
+      "an oversized registry with no routed filter must send an explicit empty list, not `undefined` (= all tools)",
+    );
+  });
+
+  it("fails closed with the deduped history tools on a follow-up when routing produced no filter", () => {
+    const active = finalizeActiveTools({
+      routedActiveTools: undefined,
+      isFollowUp: true,
+      lowConfidence: false,
+      historyToolNames: ["nba_scores", "reflect", "nba_scores"],
+      totalToolCount: PROVIDER_TOOL_CEILING + 1,
+    });
+
+    assert.ok(Array.isArray(active), "must never fall back to `undefined` above the ceiling");
+    assert.deepEqual(
+      [...active].sort(),
+      ["nba_scores", "reflect"],
+      "historical tool calls must stay defined, deduped, with no other tool added",
+    );
+  });
+
+  it("still allows undefined below the ceiling when routing produced no filter", () => {
+    assert.equal(
+      finalizeActiveTools({
+        routedActiveTools: undefined,
+        isFollowUp: false,
+        lowConfidence: false,
+        historyToolNames: [],
+        totalToolCount: PROVIDER_TOOL_CEILING,
+      }),
+      undefined,
+      "small-registry behavior is unchanged: no filter means the whole registry is safe to send",
+    );
+  });
+});
+
+describe("finalizeActiveTools — explicit list never silently truncates", () => {
+  const toolList = (count, prefix = "tool") =>
+    Array.from({ length: count }, (_, i) => `${prefix}_${i}`);
+
+  it(`accepts an explicit list of exactly ${PROVIDER_TOOL_CEILING} tools`, () => {
+    const routedActiveTools = toolList(PROVIDER_TOOL_CEILING);
+    const active = finalizeActiveTools({
+      routedActiveTools,
+      isFollowUp: false,
+      lowConfidence: false,
+      historyToolNames: [],
+      totalToolCount: 291,
+    });
+
+    assert.equal(active.length, PROVIDER_TOOL_CEILING);
+    assert.deepEqual(active, routedActiveTools);
+  });
+
+  it(`rejects an explicit routed list of ${PROVIDER_TOOL_CEILING + 1} tools before the provider is called`, () => {
+    assert.throws(
+      () =>
+        finalizeActiveTools({
+          routedActiveTools: toolList(PROVIDER_TOOL_CEILING + 1),
+          isFollowUp: false,
+          lowConfidence: false,
+          historyToolNames: [],
+          totalToolCount: 291,
+        }),
+      (err) => {
+        assert.ok(
+          err instanceof ProviderToolCeilingError,
+          "must raise the local pre-provider ceiling error",
+        );
+        assert.match(err.message, new RegExp(String(PROVIDER_TOOL_CEILING)));
+        assert.match(err.message, new RegExp(String(PROVIDER_TOOL_CEILING + 1)));
+        assert.equal(err.ceiling, PROVIDER_TOOL_CEILING);
+        assert.equal(err.count, PROVIDER_TOOL_CEILING + 1);
+        return true;
+      },
+    );
+  });
+
+  it(`rejects a merged routed+history list of ${PROVIDER_TOOL_CEILING + 1} tools`, () => {
+    assert.throws(
+      () =>
+        finalizeActiveTools({
+          routedActiveTools: toolList(PROVIDER_TOOL_CEILING),
+          isFollowUp: true,
+          lowConfidence: false,
+          historyToolNames: ["history_only_tool"],
+          totalToolCount: 291,
+        }),
+      (err) => {
+        assert.ok(err instanceof ProviderToolCeilingError);
+        assert.equal(err.count, PROVIDER_TOOL_CEILING + 1);
+        return true;
+      },
+    );
+  });
+
+  it("accepts a merged list that dedupes back down to the ceiling", () => {
+    const routedActiveTools = toolList(PROVIDER_TOOL_CEILING);
+    const active = finalizeActiveTools({
+      routedActiveTools,
+      isFollowUp: true,
+      lowConfidence: false,
+      historyToolNames: [routedActiveTools[0], routedActiveTools[5]],
+      totalToolCount: 291,
+    });
+
+    assert.equal(active.length, PROVIDER_TOOL_CEILING);
   });
 });

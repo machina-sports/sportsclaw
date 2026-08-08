@@ -25,6 +25,12 @@ const OPENAI_KEY = "OAIKEY-sentinel-openai-key-material-6VQ4";
 const DRIFT_SAVED_KEY = "DRIFTA-sentinel-config-json-key-5UQ5";
 // Assembled from fragments for the same reason as ANTHROPIC_ENV_KEY above.
 const DRIFT_DOTENV_KEY = ["DRIFTB", "sentinel", "dotenv", "key", "4TQ6"].join("-");
+// Chat-integration drift sentinels — same fragment assembly, so no complete
+// bot-token-shaped literal exists in this source file.
+const DRIFT_TELEGRAM_SAVED = ["DRIFTC", "sentinel", "telegram", "config", "3SQ7"].join("-");
+const DRIFT_TELEGRAM_DOTENV = ["DRIFTD", "sentinel", "telegram", "dotenv", "2RQ8"].join("-");
+const DRIFT_DISCORD_SAVED = ["DRIFTE", "sentinel", "discord", "config", "1PQ9"].join("-");
+const DRIFT_DISCORD_DOTENV = ["DRIFTF", "sentinel", "discord", "dotenv", "0NQ0"].join("-");
 
 const STRIPPED_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
@@ -201,14 +207,27 @@ describe("sportsclaw doctor credential redaction", () => {
         provider: "anthropic",
         model: "claude-opus-5",
         apiKey: DRIFT_SAVED_KEY,
+        chatIntegrations: {
+          telegram: { botToken: DRIFT_TELEGRAM_SAVED },
+          discord: { botToken: DRIFT_DISCORD_SAVED },
+        },
       }),
-      ".env": `ANTHROPIC_API_KEY=${DRIFT_DOTENV_KEY}\n`,
+      ".env": [
+        `ANTHROPIC_API_KEY=${DRIFT_DOTENV_KEY}`,
+        `TELEGRAM_BOT_TOKEN=${DRIFT_TELEGRAM_DOTENV}`,
+        `DISCORD_BOT_TOKEN=${DRIFT_DISCORD_DOTENV}`,
+        "",
+      ].join("\n"),
     });
     try {
       const out = runDoctor(home);
       assert.match(out, /Config drift/);
       assertRedacted(out, DRIFT_SAVED_KEY, "drift config.json key");
       assertRedacted(out, DRIFT_DOTENV_KEY, "drift .env key");
+      assertRedacted(out, DRIFT_TELEGRAM_SAVED, "drift config.json telegram token");
+      assertRedacted(out, DRIFT_TELEGRAM_DOTENV, "drift .env telegram token");
+      assertRedacted(out, DRIFT_DISCORD_SAVED, "drift config.json discord token");
+      assertRedacted(out, DRIFT_DISCORD_DOTENV, "drift .env discord token");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
