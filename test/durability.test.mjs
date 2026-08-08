@@ -43,22 +43,30 @@ describe("DurableStateStore Substrate", () => {
 
   it("should auto-expire and delete files when TTL has passed", async () => {
     const data = { secret: "ephemeral" };
-    // Set an immediate TTL of 5ms
-    await store.save("memory", "temp_state", data, { ttlMs: 5 });
+    // Long TTL so the immediate read is guaranteed regardless of scheduling load.
+    await store.save("memory", "temp_state", data, { ttlMs: 60_000 });
 
     // Verify it is readable immediately
     const loadedImmediate = await store.load("memory", "temp_state");
     assert.deepEqual(loadedImmediate, data);
 
-    // Wait 20ms for expiration to trigger
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Age the record deterministically: rewrite the persisted envelope with an
+    // expiresAt in the past instead of sleeping past a short TTL.
+    const filePath = path.join(tmpRootDir, "memory", "temp_state.json");
+    const envelope = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    assert.strictEqual(envelope.namespace, "memory");
+    assert.strictEqual(envelope.id, "temp_state");
+    assert.deepEqual(envelope.data, data);
+    assert.ok(envelope.expiresAt, "TTL save must persist an expiresAt");
+
+    envelope.expiresAt = new Date(Date.now() - 60_000).toISOString();
+    fs.writeFileSync(filePath, JSON.stringify(envelope, null, 2));
 
     // Try to load again — should return null and the file should be deleted
     const loadedExpired = await store.load("memory", "temp_state");
     assert.strictEqual(loadedExpired, null, "Expired state should return null");
 
     // File should no longer exist on disk
-    const filePath = path.join(tmpRootDir, "memory", "temp_state.json");
     assert.strictEqual(fs.existsSync(filePath), false, "Expired file must be deleted");
   });
 

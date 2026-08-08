@@ -2,6 +2,11 @@
 
 Static mock data for the Momentum & Price Explainer loop demo.
 
+For what evidence actually backs each of the seven momentum sports — and why no sport
+is currently live-certified — see the certification artifact:
+[`docs/sports-data/momentum-certification.md`](../../docs/sports-data/momentum-certification.md)
+(machine-readable source: [`docs/sports-data/momentum-certification.json`](../../docs/sports-data/momentum-certification.json)).
+
 ## Cross-sport fixtures (2026-07-18)
 
 The momentum pipeline's `markets` connector is already sport-parametric

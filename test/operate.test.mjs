@@ -19,6 +19,7 @@ import {
   resolveExtraFragments,
   resolvePersona,
   runSinkPolledLoop,
+  validateOperatorToolCount,
 } from "../dist/operate.js";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,51 @@ describe("operator skill filter", () => {
       applyOperatorSkillFilter(["cfb"]);
       assert.strictEqual(process.env.SPORTSCLAW_SKILLS, "");
     });
+  });
+});
+
+describe("operator provider tool ceiling", () => {
+  it("allows unlimited providers to keep an all-tools job", () => {
+    for (const provider of ["anthropic", "google"]) {
+      assert.doesNotThrow(() => validateOperatorToolCount({
+        provider,
+        toolCount: 291,
+        jobId: "all-sports",
+        skills: undefined,
+      }));
+    }
+  });
+
+  it("allows focused capped-provider jobs at or below 128 tools", () => {
+    for (const provider of ["openai", "azure-foundry"]) {
+      assert.doesNotThrow(() => validateOperatorToolCount({
+        provider,
+        toolCount: 128,
+        jobId: "focused",
+        skills: ["nba"],
+      }));
+    }
+  });
+
+  it("fails capped-provider jobs early without slicing and tells operators to configure skills", () => {
+    for (const provider of ["openai", "azure-foundry"]) {
+      assert.throws(
+        () => validateOperatorToolCount({
+          provider,
+          toolCount: 291,
+          jobId: "all-sports",
+          skills: undefined,
+        }),
+        (err) => {
+          assert.match(err.message, /all-sports/);
+          assert.match(err.message, /291/);
+          assert.match(err.message, /128/);
+          assert.match(err.message, /skills/i);
+          assert.doesNotMatch(err.message, /truncat|slice/i);
+          return true;
+        },
+      );
+    }
   });
 });
 

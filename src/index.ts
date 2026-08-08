@@ -5,7 +5,7 @@
  * Subcommands:
  *   sportsclaw add <sport>       — Inject a sport schema from the Python package
  *   sportsclaw remove <sport>    — Remove a previously added sport schema
- *   sportsclaw list              — List all installed sport schemas
+ *   sportsclaw list [--json]     — List all installed schemas and support modules
  *   sportsclaw init              — Bootstrap all 14 default sport schemas
  *   sportsclaw chat              — Start an interactive conversation (REPL)
  *   sportsclaw doctor            — Check setup and diagnose issues
@@ -60,6 +60,8 @@ import {
   saveSchema,
   removeSchema,
   listSchemas,
+  loadAllSchemas,
+  summarizeInstalledSchemas,
   getSchemaDir,
   bootstrapDefaultSchemas,
   ensureSportsSkills,
@@ -944,16 +946,62 @@ function cmdRemove(args: string[], _opts?: { fromChat?: boolean }): void {
 // CLI: `sportsclaw list`
 // ---------------------------------------------------------------------------
 
-function cmdList(_opts?: { fromChat?: boolean }): void {
-  const schemas = listSchemas();
-  if (schemas.length === 0) {
-    console.log("No sport schemas installed.");
+function cmdList(args: string[] = [], _opts?: { fromChat?: boolean }): void {
+  const schemas = [...loadAllSchemas({ installed: true })].sort((a, b) => a.sport.localeCompare(b.sport));
+  const summary = summarizeInstalledSchemas(schemas);
+
+  if (args.includes("--json")) {
+    console.log(
+      JSON.stringify(
+        {
+          schemaDir: getSchemaDir(),
+          defaultSports: summary.defaultSports,
+          optionalSports: summary.optionalSports,
+          defaultSupport: summary.defaultSupport,
+          optionalSupport: summary.optionalSupport,
+          unknown: summary.unknown,
+          totals: {
+            sports: summary.totalSports,
+            support: summary.totalSupport,
+            schemas: summary.totalSchemas,
+            tools: summary.totalTools,
+          },
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (summary.totalSchemas === 0) {
+    console.log("No sport schemas or support modules installed.");
     console.log('Add one with: sportsclaw add <sport>');
     return;
   }
-  console.log(`Installed sport schemas (${schemas.length}):`);
-  for (const name of schemas) {
-    console.log(`  - ${name}`);
+
+  const group = (label: string, names: string[]) => {
+    if (names.length === 0) return;
+    console.log(`  ${label} (${names.length})`);
+    console.log(`    ${names.join(", ")}`);
+  };
+
+  console.log(
+    `Installed schemas (${summary.totalSchemas}) — ${summary.totalTools} tools`
+  );
+  if (summary.totalSports > 0) {
+    console.log(`\nSports (${summary.totalSports})`);
+    group("Default", summary.defaultSports);
+    group("Optional", summary.optionalSports);
+  }
+  if (summary.totalSupport > 0) {
+    console.log(`\nSupport modules (${summary.totalSupport})`);
+    group("Default", summary.defaultSupport);
+    group("Optional", summary.optionalSupport);
+  }
+  if (summary.unknown.length > 0) {
+    console.log(`\nUnknown (${summary.unknown.length})`);
+    console.log(`    ${summary.unknown.join(", ")}`);
   }
   console.log(`\nSchema directory: ${getSchemaDir()}`);
 }
@@ -1046,9 +1094,8 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
       const sub = anthroAuth.tokens.subscriptionType ? ` ${anthroAuth.tokens.subscriptionType}` : "";
       console.log(pc.green("  ✓") + ` Anthropic auth: OAuth (Claude Code${sub}, expires in ${minLeft} min)`);
     } else if (anthroAuth?.kind === "api_key") {
-      const masked = anthroAuth.value.slice(0, 6) + "..." + anthroAuth.value.slice(-4);
       const src = anthroAuth.source === "env" ? "env" : "keychain";
-      console.log(pc.green("  ✓") + ` Anthropic API key (${masked}, ${src})`);
+      console.log(pc.green("  ✓") + ` Anthropic API key configured (source: ${src})`);
     } else {
       console.log(pc.red("  ✗") + ` No Anthropic credentials`);
       console.log(`    Set ANTHROPIC_API_KEY, run ${pc.cyan("sportsclaw config")}, or ${pc.cyan("sportsclaw login claude")}`);
@@ -1062,18 +1109,16 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
       console.log(`    Set it or run: ${pc.cyan("sportsclaw config")}`);
       allGood = false;
     } else if (authMode === "entra_id") {
-      console.log(pc.green("  ✓") + ` Azure Foundry auth: Entra ID (DefaultAzureCredential, ${baseUrl})`);
+      console.log(pc.green("  ✓") + " Azure Foundry auth: Entra ID (DefaultAzureCredential), base URL configured");
     } else if (apiKey) {
-      const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
-      console.log(pc.green("  ✓") + ` Azure Foundry API key (${masked}, ${baseUrl})`);
+      console.log(pc.green("  ✓") + " Azure Foundry API key configured, base URL configured");
     } else {
       console.log(pc.red("  ✗") + " No Azure Foundry credentials (auth mode: api_key)");
       console.log(`    Set AZURE_FOUNDRY_API_KEY or run: ${pc.cyan("sportsclaw config")}`);
       allGood = false;
     }
   } else if (apiKey) {
-    const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
-    console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
+    console.log(pc.green("  ✓") + ` ${provider} API key configured`);
   } else {
     console.log(pc.red("  ✗") + ` No API key for ${provider}`);
     console.log(`    Set the env var or run: sportsclaw config`);
@@ -1086,17 +1131,21 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
   }
 
   // 7. Schemas installed
-  const schemas = listSchemas();
-  if (schemas.length > 0) {
-    console.log(pc.green("  ✓") + ` ${schemas.length} sport schemas installed`);
+  const schemaSummary = summarizeInstalledSchemas(loadAllSchemas({ installed: true }));
+  if (schemaSummary.totalSchemas > 0) {
+    console.log(
+      pc.green("  ✓") +
+        ` ${schemaSummary.totalSchemas} schemas (${schemaSummary.totalSports} sports, ` +
+        `${schemaSummary.totalSupport} support modules)`
+    );
   } else {
-    console.log(pc.yellow("  ⚠") + " No sport schemas installed");
+    console.log(pc.yellow("  ⚠") + " No schemas or support modules installed");
     console.log("    Fix: sportsclaw init --all");
     allGood = false;
   }
 
   // 8. Schema directory location
-  if (schemas.length > 0) {
+  if (schemaSummary.totalSchemas > 0) {
     console.log(pc.green("  ✓") + ` Schema dir: ${getSchemaDir()}`);
   }
 
@@ -1231,8 +1280,10 @@ function detectConfigDrift(): string[] {
     );
     if (distinct.size <= 1) continue; // all matching values
 
-    const mask = (v: string | undefined) =>
-      v ? `${v.slice(0, 6)}...${v.slice(-4)}` : pc.dim("(unset)");
+    // Never render any part of a credential — only whether each source holds
+    // one. The drift itself is already established by the distinct-value check.
+    const state = (v: string | undefined) =>
+      v ? "configured" : pc.dim("(unset)");
 
     const winner = looksFromShell(key)
       ? "shell env"
@@ -1241,8 +1292,8 @@ function detectConfigDrift(): string[] {
         : "config.json";
 
     issues.push(
-      `${pc.bold(key)}: env=${mask(looksFromShell(key) ? inProc : undefined)} ` +
-      `.env=${mask(inDotenv)} config.json=${mask(saved)} → ${pc.yellow(winner)} wins`
+      `${pc.bold(key)}: env=${state(looksFromShell(key) ? inProc : undefined)} ` +
+      `.env=${state(inDotenv)} config.json=${state(saved)} → ${pc.yellow(winner)} wins`
     );
   }
 
@@ -1312,7 +1363,8 @@ async function cmdHealth(args: string[]): Promise<void> {
     status = "degraded";
   }
 
-  const schemasCount = listSchemas().length;
+  const schemaSummary = summarizeInstalledSchemas(loadAllSchemas({ installed: true }));
+  const schemasCount = schemaSummary.totalSchemas;
 
   if (jsonMode) {
     const payload = {
@@ -1333,6 +1385,15 @@ async function cmdHealth(args: string[]): Promise<void> {
       },
       mcp: mcpDetails,
       schemasInstalled: schemasCount,
+      sportsInstalled: schemaSummary.totalSports,
+      supportModulesInstalled: schemaSummary.totalSupport,
+      schemaCatalog: {
+        defaultSports: schemaSummary.defaultSports,
+        optionalSports: schemaSummary.optionalSports,
+        defaultSupport: schemaSummary.defaultSupport,
+        optionalSupport: schemaSummary.optionalSupport,
+        unknown: schemaSummary.unknown,
+      },
       errors,
       warnings,
     };
@@ -1345,7 +1406,10 @@ async function cmdHealth(args: string[]): Promise<void> {
   console.log(`  Overall Status:  ${status === "healthy" ? pc.green(status.toUpperCase()) : status === "degraded" ? pc.yellow(status.toUpperCase()) : pc.red(status.toUpperCase())}`);
   console.log(`  Engine Version:  v${PKG_VERSION}`);
   console.log(`  Provider/Model:  ${provider} (${model || "default"})`);
-  console.log(`  Schemas Active:  ${schemasCount} installed`);
+  console.log(
+    `  Schemas Installed: ${schemasCount} schemas ` +
+      `(${schemaSummary.totalSports} sports, ${schemaSummary.totalSupport} support modules)`
+  );
   console.log("");
 
   console.log(pc.bold("  MCP Connectivity:"));
@@ -1817,7 +1881,7 @@ async function handleSlashMenu(): Promise<true | string> {
   if (selection === "/clip") {
     await cmdClip([], { fromChat: true });
   } else if (selection === "/skills") {
-    cmdList({ fromChat: true });
+    cmdList([], { fromChat: true });
   } else if (selection === "/channels") {
     await cmdChannels({ fromChat: true });
   } else if (selection === "/stats") {
@@ -1955,7 +2019,7 @@ async function cmdChat(args: string[]): Promise<void> {
 
     // Direct slash command shortcuts (without dropdown)
     if (prompt === "/clip") { await cmdClip([], { fromChat: true }); continue; }
-    if (prompt === "/skills") { cmdList({ fromChat: true }); continue; }
+    if (prompt === "/skills") { cmdList([], { fromChat: true }); continue; }
     if (prompt === "/channels") { await cmdChannels({ fromChat: true }); continue; }
     if (prompt === "/stats") { cmdAnalytics(["summary"], { fromChat: true }); continue; }
     if (prompt === "/compact") {
@@ -2709,7 +2773,7 @@ function printHelp(): void {
   console.log("  sportsclaw logout claude           Stop using Claude Code OAuth (revert to API key)");
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
-  console.log("  sportsclaw list                    List installed sport schemas");
+  console.log("  sportsclaw list [--json]           List all installed schemas and support modules");
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
@@ -2937,7 +3001,7 @@ async function main(): Promise<void> {
     case "remove":
       return cmdRemove(subArgs);
     case "list":
-      return cmdList();
+      return cmdList(subArgs);
     case "init":
       return cmdInit(subArgs);
     case "listen":

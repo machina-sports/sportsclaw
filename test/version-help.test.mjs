@@ -16,4 +16,13 @@ describe("CLI --help version", () => {
       `Expected help output to contain "v${pkg.version}" but got:\n${output.split("\n")[0]}`
     );
   });
+
+  it("documents list --json and the full installed schema catalog", () => {
+    const output = execFileSync("node", ["dist/index.js", "--help"], {
+      encoding: "utf-8",
+    });
+    assert.match(output, /sportsclaw list \[--json\]/);
+    assert.match(output, /installed schemas/i);
+    assert.doesNotMatch(output, /List installed sport schemas/);
+  });
 });
