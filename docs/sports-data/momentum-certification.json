@@ -1,0 +1,162 @@
+{
+  "artifact": "momentum-seven-sport-certification",
+  "version": 1,
+  "generatedAt": "2026-08-08T14:29:13Z",
+  "statement": "Synthetic fixture evidence proves the momentum pipeline's mechanics only (swing detection, card generation, evaluator gate). The live-reported evidence for MLB and WNBA is historical, recorded in PR #135, and its complete run receipts (exact run timestamp, latency, and for MLB the output/evaluator counts) were not retained. Fresh revalidation on 2026-08-08 was blocked for both. Therefore no row is currently live-certified.",
+  "revalidationPolicy": "A row may move to live certification only when a single fresh run produces, together: an ESPN event id, a resolved Kalshi market, a non-empty price series, an output verdict, an evaluator verdict, and a measured latency — all captured in one receipt.",
+  "sports": [
+    {
+      "sport": "nfl",
+      "evidenceType": "synthetic",
+      "certificationStatus": "pending-live",
+      "evidenceRecordedAt": null,
+      "espnEventId": null,
+      "marketResolution": null,
+      "outputVerdict": "card-generated",
+      "evaluatorVerdict": "accepted",
+      "latencyMs": null,
+      "fixturePath": "demo/vault_data/mock_game.json",
+      "receiptSources": [
+        "demo/vault_data/mock_game.json",
+        "demo/vault_data/README.md",
+        "https://github.com/machina-sports/sportsclaw/pull/135"
+      ],
+      "pendingLive": true,
+      "notes": "JAX @ HOU synthetic 3-tick timeline (42 -> 43 -> 68 cents). Run end-to-end through momentum-demo.js; the card was accepted by the evaluator. Offline fixture, so this proves mechanics only. The original run timestamp and latency were not retained."
+    },
+    {
+      "sport": "mlb",
+      "evidenceType": "live-reported",
+      "certificationStatus": "pending-live-revalidation",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": "401872178",
+      "marketResolution": {
+        "source": "kalshi",
+        "ticker": "KXMLBGAME-26JUL171335TBBOSG1-BOS",
+        "provenance": "referenced by test/momentum-replay.test.mjs, not read back from a retained run receipt"
+      },
+      "outputVerdict": "not-retained",
+      "evaluatorVerdict": "not-retained",
+      "latencyMs": null,
+      "fixturePath": null,
+      "receiptSources": [
+        "https://github.com/machina-sports/sportsclaw/pull/135",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe",
+        "test/momentum-replay.test.mjs"
+      ],
+      "pendingLive": true,
+      "notes": "PR #135 reports live runs for BOS/TB game 1 and LAD @ NYY. The ESPN event id and Kalshi ticker recorded here come from the replay test fixture frame, not from a retained run receipt. The original output counts, evaluator counts, exact run timestamp and latency were not retained, so this row is a historical report rather than a certified receipt.",
+      "revalidation": {
+        "recordedAt": "2026-08-08T14:29:13Z",
+        "command": "node dist/intelligence/momentum-replay.js mlb 401872178",
+        "status": "blocked",
+        "observedResult": "Run failed: no Kalshi winner market resolved for ESPN event 401872178. A follow-up MLB scoreboard discovery call also returned ESPN HTTP 403, so no alternate live event could be selected."
+      }
+    },
+    {
+      "sport": "nba",
+      "evidenceType": "synthetic",
+      "certificationStatus": "pending-live",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": null,
+      "marketResolution": null,
+      "outputVerdict": "card-generated",
+      "evaluatorVerdict": "accepted",
+      "latencyMs": null,
+      "fixturePath": "demo/vault_data/mock_game_nba.json",
+      "receiptSources": [
+        "demo/vault_data/mock_game_nba.json",
+        "demo/vault_data/README.md",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe"
+      ],
+      "pendingLive": true,
+      "notes": "BOS @ MIA (fictional), steal + dunk swing. NBA was out of season on 2026-07-18, so there was no live game or open Kalshi market. Card generation was run end-to-end and accepted; this proves mechanics only."
+    },
+    {
+      "sport": "nhl",
+      "evidenceType": "synthetic",
+      "certificationStatus": "pending-live",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": null,
+      "marketResolution": null,
+      "outputVerdict": "card-generated",
+      "evaluatorVerdict": "held",
+      "latencyMs": null,
+      "fixturePath": "demo/vault_data/mock_game_nhl.json",
+      "receiptSources": [
+        "demo/vault_data/mock_game_nhl.json",
+        "demo/vault_data/README.md",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe"
+      ],
+      "pendingLive": true,
+      "notes": "TOR @ BOS (fictional), shorthanded goal swing. The generator consistently adds unsupported momentum language on this play and the evaluator holds the card for review rather than passing it. This exercises the fail-closed evaluator rejection path — NHL has never produced an accepted card, synthetic or live."
+    },
+    {
+      "sport": "wnba",
+      "evidenceType": "live-reported",
+      "certificationStatus": "pending-live-revalidation",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": "401857073",
+      "marketResolution": {
+        "source": "kalshi",
+        "ticker": "KXWNBAGAME-26JUL17SEAIND-IND",
+        "provenance": "ticker as originally reported in PR #135; not reproducible in the 2026-08-08 revalidation"
+      },
+      "outputVerdict": "3-cards-generated",
+      "evaluatorVerdict": "2-passed-1-held",
+      "latencyMs": null,
+      "fixturePath": null,
+      "receiptSources": [
+        "https://github.com/machina-sports/sportsclaw/pull/135",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe",
+        "demo/vault_data/README.md"
+      ],
+      "pendingLive": true,
+      "notes": "SEA @ IND, reported as a live run in PR #135: 3 cards generated, 2 passed the evaluator and 1 was held. Evidence was recorded by commit 21ec5b8854150e067146262df7f0dae1e878e9fe at 2026-07-18T15:44:32Z; the original exact run timestamp and latency were not retained, so this is a historical report rather than a certified receipt.",
+      "revalidation": {
+        "recordedAt": "2026-08-08T14:29:13Z",
+        "command": "node dist/intelligence/momentum-replay.js wnba 401857073",
+        "status": "blocked",
+        "observedResult": "Run resolved a different market, KXWNBAGAME-26JUL28INDSEA-IND, instead of the reported KXWNBAGAME-26JUL17SEAIND-IND, and returned 0 price points. A follow-up WNBA scoreboard discovery call returned ESPN HTTP 403."
+      }
+    },
+    {
+      "sport": "cfb",
+      "evidenceType": "synthetic",
+      "certificationStatus": "pending-live",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": null,
+      "marketResolution": null,
+      "outputVerdict": "card-generated",
+      "evaluatorVerdict": "accepted",
+      "latencyMs": null,
+      "fixturePath": "demo/vault_data/mock_game_cfb.json",
+      "receiptSources": [
+        "demo/vault_data/mock_game_cfb.json",
+        "demo/vault_data/README.md",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe"
+      ],
+      "pendingLive": true,
+      "notes": "OSU @ MICH (fictional), punt-return TD swing. CFB was out of season on 2026-07-18, so there was no live game or open Kalshi market. Card generation was run end-to-end and accepted; this proves mechanics only."
+    },
+    {
+      "sport": "cbb",
+      "evidenceType": "synthetic",
+      "certificationStatus": "pending-live",
+      "evidenceRecordedAt": "2026-07-18T15:44:32Z",
+      "espnEventId": null,
+      "marketResolution": null,
+      "outputVerdict": "card-generated",
+      "evaluatorVerdict": "accepted",
+      "latencyMs": null,
+      "fixturePath": "demo/vault_data/mock_game_cbb.json",
+      "receiptSources": [
+        "demo/vault_data/mock_game_cbb.json",
+        "demo/vault_data/README.md",
+        "commit 21ec5b8854150e067146262df7f0dae1e878e9fe"
+      ],
+      "pendingLive": true,
+      "notes": "DUKE @ UNC (fictional), go-ahead 3-pointer swing. CBB was out of season on 2026-07-18, so there was no live game or open Kalshi market. Card generation was run end-to-end and accepted; this proves mechanics only."
+    }
+  ]
+}

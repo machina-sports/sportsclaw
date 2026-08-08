@@ -60,6 +60,8 @@ import {
   saveSchema,
   removeSchema,
   listSchemas,
+  loadAllSchemas,
+  summarizeInstalledSchemas,
   getSchemaDir,
   bootstrapDefaultSchemas,
   ensureSportsSkills,
@@ -944,16 +946,62 @@ function cmdRemove(args: string[], _opts?: { fromChat?: boolean }): void {
 // CLI: `sportsclaw list`
 // ---------------------------------------------------------------------------
 
-function cmdList(_opts?: { fromChat?: boolean }): void {
-  const schemas = listSchemas();
-  if (schemas.length === 0) {
-    console.log("No sport schemas installed.");
+function cmdList(args: string[] = [], _opts?: { fromChat?: boolean }): void {
+  const schemas = [...loadAllSchemas()].sort((a, b) => a.sport.localeCompare(b.sport));
+  const summary = summarizeInstalledSchemas(schemas);
+
+  if (args.includes("--json")) {
+    console.log(
+      JSON.stringify(
+        {
+          schemaDir: getSchemaDir(),
+          defaultSports: summary.defaultSports,
+          optionalSports: summary.optionalSports,
+          defaultSupport: summary.defaultSupport,
+          optionalSupport: summary.optionalSupport,
+          unknown: summary.unknown,
+          totals: {
+            sports: summary.totalSports,
+            support: summary.totalSupport,
+            schemas: summary.totalSchemas,
+            tools: summary.totalTools,
+          },
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (summary.totalSchemas === 0) {
+    console.log("No sport schemas or support modules installed.");
     console.log('Add one with: sportsclaw add <sport>');
     return;
   }
-  console.log(`Installed sport schemas (${schemas.length}):`);
-  for (const name of schemas) {
-    console.log(`  - ${name}`);
+
+  const group = (label: string, names: string[]) => {
+    if (names.length === 0) return;
+    console.log(`  ${label} (${names.length})`);
+    console.log(`    ${names.join(", ")}`);
+  };
+
+  console.log(
+    `Installed schemas (${summary.totalSchemas}) — ${summary.totalTools} tools`
+  );
+  if (summary.totalSports > 0) {
+    console.log(`\nSports (${summary.totalSports})`);
+    group("Default", summary.defaultSports);
+    group("Optional", summary.optionalSports);
+  }
+  if (summary.totalSupport > 0) {
+    console.log(`\nSupport modules (${summary.totalSupport})`);
+    group("Default", summary.defaultSupport);
+    group("Optional", summary.optionalSupport);
+  }
+  if (summary.unknown.length > 0) {
+    console.log(`\nUnknown (${summary.unknown.length})`);
+    console.log(`    ${summary.unknown.join(", ")}`);
   }
   console.log(`\nSchema directory: ${getSchemaDir()}`);
 }
@@ -1046,9 +1094,8 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
       const sub = anthroAuth.tokens.subscriptionType ? ` ${anthroAuth.tokens.subscriptionType}` : "";
       console.log(pc.green("  ✓") + ` Anthropic auth: OAuth (Claude Code${sub}, expires in ${minLeft} min)`);
     } else if (anthroAuth?.kind === "api_key") {
-      const masked = anthroAuth.value.slice(0, 6) + "..." + anthroAuth.value.slice(-4);
       const src = anthroAuth.source === "env" ? "env" : "keychain";
-      console.log(pc.green("  ✓") + ` Anthropic API key (${masked}, ${src})`);
+      console.log(pc.green("  ✓") + ` Anthropic API key configured (source: ${src})`);
     } else {
       console.log(pc.red("  ✗") + ` No Anthropic credentials`);
       console.log(`    Set ANTHROPIC_API_KEY, run ${pc.cyan("sportsclaw config")}, or ${pc.cyan("sportsclaw login claude")}`);
@@ -1062,18 +1109,16 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
       console.log(`    Set it or run: ${pc.cyan("sportsclaw config")}`);
       allGood = false;
     } else if (authMode === "entra_id") {
-      console.log(pc.green("  ✓") + ` Azure Foundry auth: Entra ID (DefaultAzureCredential, ${baseUrl})`);
+      console.log(pc.green("  ✓") + " Azure Foundry auth: Entra ID (DefaultAzureCredential), base URL configured");
     } else if (apiKey) {
-      const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
-      console.log(pc.green("  ✓") + ` Azure Foundry API key (${masked}, ${baseUrl})`);
+      console.log(pc.green("  ✓") + " Azure Foundry API key configured, base URL configured");
     } else {
       console.log(pc.red("  ✗") + " No Azure Foundry credentials (auth mode: api_key)");
       console.log(`    Set AZURE_FOUNDRY_API_KEY or run: ${pc.cyan("sportsclaw config")}`);
       allGood = false;
     }
   } else if (apiKey) {
-    const masked = apiKey.slice(0, 6) + "..." + apiKey.slice(-4);
-    console.log(pc.green("  ✓") + ` ${provider} API key (${masked})`);
+    console.log(pc.green("  ✓") + ` ${provider} API key configured`);
   } else {
     console.log(pc.red("  ✗") + ` No API key for ${provider}`);
     console.log(`    Set the env var or run: sportsclaw config`);
@@ -1231,8 +1276,10 @@ function detectConfigDrift(): string[] {
     );
     if (distinct.size <= 1) continue; // all matching values
 
-    const mask = (v: string | undefined) =>
-      v ? `${v.slice(0, 6)}...${v.slice(-4)}` : pc.dim("(unset)");
+    // Never render any part of a credential — only whether each source holds
+    // one. The drift itself is already established by the distinct-value check.
+    const state = (v: string | undefined) =>
+      v ? "configured" : pc.dim("(unset)");
 
     const winner = looksFromShell(key)
       ? "shell env"
@@ -1241,8 +1288,8 @@ function detectConfigDrift(): string[] {
         : "config.json";
 
     issues.push(
-      `${pc.bold(key)}: env=${mask(looksFromShell(key) ? inProc : undefined)} ` +
-      `.env=${mask(inDotenv)} config.json=${mask(saved)} → ${pc.yellow(winner)} wins`
+      `${pc.bold(key)}: env=${state(looksFromShell(key) ? inProc : undefined)} ` +
+      `.env=${state(inDotenv)} config.json=${state(saved)} → ${pc.yellow(winner)} wins`
     );
   }
 
@@ -1817,7 +1864,7 @@ async function handleSlashMenu(): Promise<true | string> {
   if (selection === "/clip") {
     await cmdClip([], { fromChat: true });
   } else if (selection === "/skills") {
-    cmdList({ fromChat: true });
+    cmdList([], { fromChat: true });
   } else if (selection === "/channels") {
     await cmdChannels({ fromChat: true });
   } else if (selection === "/stats") {
@@ -1955,7 +2002,7 @@ async function cmdChat(args: string[]): Promise<void> {
 
     // Direct slash command shortcuts (without dropdown)
     if (prompt === "/clip") { await cmdClip([], { fromChat: true }); continue; }
-    if (prompt === "/skills") { cmdList({ fromChat: true }); continue; }
+    if (prompt === "/skills") { cmdList([], { fromChat: true }); continue; }
     if (prompt === "/channels") { await cmdChannels({ fromChat: true }); continue; }
     if (prompt === "/stats") { cmdAnalytics(["summary"], { fromChat: true }); continue; }
     if (prompt === "/compact") {
@@ -2937,7 +2984,7 @@ async function main(): Promise<void> {
     case "remove":
       return cmdRemove(subArgs);
     case "list":
-      return cmdList();
+      return cmdList(subArgs);
     case "init":
       return cmdInit(subArgs);
     case "listen":

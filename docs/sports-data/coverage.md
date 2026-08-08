@@ -1,7 +1,9 @@
 # Coverage
 
-sportsclaw comes with live data for 14 sports plus odds and prediction markets — all keyless
-for the data itself. You don't wire up feeds or manage API keys; you just ask.
+sportsclaw comes with live data for 14 default sports plus six default support modules for
+odds, prediction markets, news and metadata — all keyless for the data itself. You don't wire
+up feeds or manage API keys; you just ask. Esports and Polymarket trading are optional
+add-ons you install when you want them.
 
 <div class="tip custom-block"><p class="custom-block-title">Powered by sports-skills</p>
 
@@ -28,6 +30,8 @@ pods. Connect a Machina pod in one command with `sportsclaw machina connect`.
 Typical questions each can answer: live and recent scores, standings, schedules, rosters,
 player stats, play-by-play, and news — availability varies a little by sport.
 
+**Optional:** 🎮 Esports isn't installed by default — add it with `sportsclaw add esports`.
+
 ## Markets & analysis
 
 | Source | What it gives you |
@@ -36,6 +40,9 @@ player stats, play-by-play, and news — availability varies a little by sport.
 | **Kalshi** | Event-market prices |
 | **Polymarket** | Prediction-market odds |
 | **Betting tools** | Edge, de-vig, Kelly, arbitrage math |
+
+**Optional:** Polymarket trading (order placement) ships as a separate module — add it with
+`sportsclaw add polymarket-trading`.
 
 See **[Odds & Prediction Markets](./odds-and-markets)** for how to use these together.
 

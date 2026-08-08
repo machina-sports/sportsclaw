@@ -121,11 +121,14 @@ For deployments that want sandboxed execution and policy-enforced LLM routing, S
 
 ### Built-in Sports Data Skills
 
-sportsclaw ships with **20 skills** out of the box, powered by [`sports-skills`](https://sports-skills.sh):
+sportsclaw ships with **14 default sports and six default support modules** out of the box, powered by [`sports-skills`](https://sports-skills.sh):
 
-- **Sports data** — `football` `nfl` `nba` `nhl` `mlb` `wnba` `tennis` `cfb` `cbb` `golf` `f1` `cricket` `volleyball` `xctf`
+- **Sports data (14 default)** — `football` `nfl` `nba` `nhl` `mlb` `wnba` `tennis` `cfb` `cbb` `golf` `f1` `cricket` `volleyball` `xctf`
 - **Prediction markets & analysis** — `kalshi` `polymarket` `markets` (unified ESPN ↔ Kalshi ↔ Polymarket) `betting` (de-vig, edge, Kelly, arbitrage)
 - **Utility** — `news` `metadata` (team/player logos & badges)
+- **Optional add-ons** — `esports` and `polymarket-trading`, installed on request with `sportsclaw add <name>`
+
+Run `sportsclaw list` (or `sportsclaw list --json`) to see exactly what's installed locally and how many tools it exposes.
 
 Skills are auto-discovered from the installed `sports-skills` package, so the set stays in sync as it grows. When a free public API rate-limits a request, results carry an `upgrade` signal and sportsclaw surfaces the licensed / real-time option via [`sports-skills premium`](https://docs.machina.gg/).
 

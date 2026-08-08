@@ -31,7 +31,8 @@ import { buildSportsSkillsRepairCommand, checkPythonVersion, MIN_PYTHON_VERSION 
 // See https://sports-skills.sh
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_SKILLS = [
+/** Sports installed by default (`sportsclaw init --all`). */
+export const DEFAULT_SPORT_SKILLS = [
   "football",
   "nfl",
   "nba",
@@ -46,12 +47,27 @@ export const DEFAULT_SKILLS = [
   "cricket",
   "volleyball",
   "xctf",
+] as const;
+
+/** Sports available on request but not installed by default. */
+export const OPTIONAL_SPORT_SKILLS = ["esports"] as const;
+
+/** Non-sport modules (markets, news, tooling) installed by default. */
+export const DEFAULT_SUPPORT_SKILLS = [
   "kalshi",
   "polymarket",
   "news",
   "metadata",
   "betting",
   "markets",
+] as const;
+
+/** Non-sport modules available on request but not installed by default. */
+export const OPTIONAL_SUPPORT_SKILLS = ["polymarket-trading"] as const;
+
+export const DEFAULT_SKILLS = [
+  ...DEFAULT_SPORT_SKILLS,
+  ...DEFAULT_SUPPORT_SKILLS,
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +96,85 @@ export const SKILL_DESCRIPTIONS: Record<string, string> = {
   betting: "Betting Analysis — odds conversion, de-vigging, edge detection, Kelly criterion",
   markets: "Markets — unified prediction market dashboard connecting ESPN with Kalshi & Polymarket",
 };
+
+// ---------------------------------------------------------------------------
+// Catalog categorization
+// ---------------------------------------------------------------------------
+
+export type SchemaCategory =
+  | "default-sport"
+  | "optional-sport"
+  | "default-support"
+  | "optional-support"
+  | "unknown";
+
+/** Classify a schema name against the known catalog. */
+export function categorizeSchema(name: string): SchemaCategory {
+  if ((DEFAULT_SPORT_SKILLS as readonly string[]).includes(name)) return "default-sport";
+  if ((OPTIONAL_SPORT_SKILLS as readonly string[]).includes(name)) return "optional-sport";
+  if ((DEFAULT_SUPPORT_SKILLS as readonly string[]).includes(name)) return "default-support";
+  if ((OPTIONAL_SUPPORT_SKILLS as readonly string[]).includes(name)) return "optional-support";
+  return "unknown";
+}
+
+export interface InstalledSchemaSummary {
+  defaultSports: string[];
+  optionalSports: string[];
+  defaultSupport: string[];
+  optionalSupport: string[];
+  unknown: string[];
+  totalSports: number;
+  totalSupport: number;
+  totalSchemas: number;
+  totalTools: number;
+}
+
+/**
+ * Categorize installed schemas and count their tools.
+ *
+ * Pure: the caller supplies the schemas (from `loadAllSchemas()` in the CLI,
+ * from fixtures in tests). Tool counts are always summed from the schemas
+ * themselves — never hard-coded.
+ */
+export function summarizeInstalledSchemas(
+  schemas: readonly Pick<SportSchema, "sport" | "tools">[]
+): InstalledSchemaSummary {
+  const summary: InstalledSchemaSummary = {
+    defaultSports: [],
+    optionalSports: [],
+    defaultSupport: [],
+    optionalSupport: [],
+    unknown: [],
+    totalSports: 0,
+    totalSupport: 0,
+    totalSchemas: schemas.length,
+    totalTools: 0,
+  };
+
+  for (const schema of schemas) {
+    summary.totalTools += schema.tools?.length ?? 0;
+    switch (categorizeSchema(schema.sport)) {
+      case "default-sport":
+        summary.defaultSports.push(schema.sport);
+        break;
+      case "optional-sport":
+        summary.optionalSports.push(schema.sport);
+        break;
+      case "default-support":
+        summary.defaultSupport.push(schema.sport);
+        break;
+      case "optional-support":
+        summary.optionalSupport.push(schema.sport);
+        break;
+      default:
+        summary.unknown.push(schema.sport);
+    }
+  }
+
+  summary.totalSports = summary.defaultSports.length + summary.optionalSports.length;
+  summary.totalSupport = summary.defaultSupport.length + summary.optionalSupport.length;
+  return summary;
+}
 
 // ---------------------------------------------------------------------------
 // Skill filter — restrict active skills via SPORTSCLAW_SKILLS env var

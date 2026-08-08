@@ -49,6 +49,7 @@ import {
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import { MemoryManager, PodMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
+import { finalizeActiveTools } from "./routing/tool-activation.js";
 import { loadAgents, type AgentDef } from "./agents.js";
 import { McpManager, summarizeMcpServers } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
@@ -719,10 +720,11 @@ export class sportsclawEngine {
       return skill ? selectedSkills.has(skill) : false;
     });
 
-    const hasExternalTool = active.some((name) => !isInternalTool(name));
-    return hasExternalTool
-      ? { activeTools: active, decision, routeMeta: routed.meta }
-      : { decision, routeMeta: routed.meta };
+    // Always return the filtered list — even when it is internal-only or empty.
+    // Omitting `activeTools` makes the AI SDK send the ENTIRE registry (291 tools
+    // with all schemas installed), which providers with a tool ceiling reject
+    // outright ("Invalid tools: array too long. Expected maximum 128, got 291").
+    return { activeTools: active, decision, routeMeta: routed.meta };
   }
 
   /**
@@ -3545,20 +3547,13 @@ export class sportsclawEngine {
       Object.keys(tools),
       memoryBlock
     );
-    // On follow-up turns with low routing confidence, clear activeTools so the
-    // LLM can use any tool based on conversation context (e.g. "started already"
-    // after asking about the Celtics game should still access NBA tools).
-    let activeTools = (isFollowUp && routing.decision && routing.decision.confidence < this.config.clarifyThreshold)
-      ? undefined
-      : routing.activeTools;
-
     // When session history contains tool-call messages from prior turns, the
     // Vercel AI SDK only sends tool definitions in `activeTools` to the provider.
     // If the current routing selects different tools, the provider rejects the
     // request because historical tool_use blocks reference undefined tools.
-    // Fix: merge any tool names from the session history into activeTools.
-    if (activeTools && isFollowUp) {
-      const historyToolNames = new Set<string>();
+    // So any surviving filter is widened with the tool names used in history.
+    const historyToolNames = new Set<string>();
+    if (isFollowUp) {
       for (const msg of this.messages) {
         if (msg.role === "assistant" && Array.isArray(msg.content)) {
           for (const part of msg.content) {
@@ -3568,12 +3563,17 @@ export class sportsclawEngine {
           }
         }
       }
-      if (historyToolNames.size > 0) {
-        const merged = new Set(activeTools);
-        for (const name of historyToolNames) merged.add(name);
-        activeTools = Array.from(merged);
-      }
     }
+
+    const activeTools = finalizeActiveTools({
+      routedActiveTools: routing.activeTools,
+      isFollowUp,
+      lowConfidence: Boolean(
+        routing.decision && routing.decision.confidence < this.config.clarifyThreshold
+      ),
+      historyToolNames: Array.from(historyToolNames),
+      totalToolCount: Object.keys(tools).length,
+    });
 
     // --- Agent routing: pick the best agent(s) for this prompt ---
     const selectedSkills = routing.decision?.selectedSkills ?? [];
