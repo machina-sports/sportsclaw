@@ -651,9 +651,14 @@ export async function bootstrapDefaultSchemas(
   const onProgress = options?.onProgress;
   const existing = new Set(listSchemas());
 
-  // Try dynamic discovery; fall back to hardcoded list
+  // Try dynamic discovery, but bootstrap only the default subset. The catalog
+  // also advertises optional (and potentially newer unknown) modules that must
+  // remain explicit installs rather than being pulled in by `init --all`.
   const catalog = discoverAvailableSkills(config);
-  const skills: readonly string[] = catalog?.modules ?? DEFAULT_SKILLS;
+  const discovered = catalog ? new Set(catalog.modules) : null;
+  const skills: readonly string[] = discovered
+    ? DEFAULT_SKILLS.filter((skill) => discovered.has(skill))
+    : DEFAULT_SKILLS;
 
   if (verbose && catalog) {
     console.error(

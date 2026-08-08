@@ -15,12 +15,13 @@ const SKILLS = [
 function buildRegistry291() {
   const skillByTool = new Map();
   const toolNames = [];
-  for (let i = 0; i < 290; i++) {
+  for (let i = 0; i < 289; i++) {
     const skill = SKILLS[i % SKILLS.length];
     const name = `${skill}_tool_${i}`;
     toolNames.push(name);
     skillByTool.set(name, skill);
   }
+  toolNames.push("run_selftest");
   toolNames.push("mcp__demo__health");
   return { toolNames, skillByTool };
 }
@@ -38,9 +39,10 @@ describe("subagent provider-safe tool routing", () => {
       });
       assert.ok(Array.isArray(active), provider);
       assert.ok(active.length > 0 && active.length <= 128, `${provider}: ${active.length}`);
+      assert.ok(active.includes("run_selftest"), provider);
       assert.ok(active.includes("mcp__demo__health"), provider);
       assert.ok(active.every((name) =>
-        name.startsWith("mcp__") || skillByTool.get(name) === "nba"
+        skillByTool.get(name) === undefined || skillByTool.get(name) === "nba"
       ));
     }
   });
@@ -77,6 +79,28 @@ describe("subagent provider-safe tool routing", () => {
       getSkillName: () => "nba",
     });
     assert.deepEqual(active, ["nba_scores", "mcp__demo__health"]);
+  });
+
+  it("keeps safe ownerless tools while filtering tools owned by unselected skills", () => {
+    const skillByTool = new Map([
+      ["nba_scores", "nba"],
+      ["nfl_scores", "nfl"],
+    ]);
+    const active = resolveSubagentActiveTools({
+      provider: "anthropic",
+      toolNames: [
+        "run_selftest",
+        "nba_scores",
+        "nfl_scores",
+        "spawn_subagent",
+        "generate_image",
+        "mcp__demo__health",
+      ],
+      selectedSkills: ["nba"],
+      getSkillName: (name) => skillByTool.get(name),
+    });
+
+    assert.deepEqual(active, ["run_selftest", "nba_scores", "mcp__demo__health"]);
   });
 });
 

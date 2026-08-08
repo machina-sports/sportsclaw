@@ -11,7 +11,14 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -21,6 +28,7 @@ import {
   OPTIONAL_SPORT_SKILLS,
   DEFAULT_SUPPORT_SKILLS,
   OPTIONAL_SUPPORT_SKILLS,
+  bootstrapDefaultSchemas,
   categorizeSchema,
   loadAllSchemas,
   summarizeInstalledSchemas,
@@ -76,6 +84,64 @@ function fixtureSchema(sport, toolCount) {
   };
 }
 
+function createFakeSportsSkills(root, catalogModules) {
+  const executable = join(root, "fake-sports-skills");
+  const catalog = catalogModules === null
+    ? null
+    : { version: "offline-test", modules: catalogModules };
+  writeFileSync(
+    executable,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] !== "-m" || args[1] !== "sports_skills") process.exit(2);
+if (args[2] === "catalog") {
+  const catalog = ${JSON.stringify(catalog)};
+  if (catalog === null) process.exit(1);
+  process.stdout.write(JSON.stringify(catalog));
+  process.exit(0);
+}
+if (args[3] === "schema") {
+  process.stdout.write(JSON.stringify({ sport: args[2], version: "offline-test", tools: [] }));
+  process.exit(0);
+}
+process.exit(2);
+`,
+    "utf-8",
+  );
+  chmodSync(executable, 0o755);
+  return executable;
+}
+
+async function runOfflineBootstrap(catalogModules) {
+  const root = mkdtempSync(join(tmpdir(), "sportsclaw-bootstrap-"));
+  const schemaDir = join(root, "schemas");
+  const pythonPath = createFakeSportsSkills(root, catalogModules);
+  const envKeys = ["sportsclaw_SCHEMA_DIR", "SPORTSCLAW_SKILLS", "sportsclaw_SKILLS"];
+  const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+  const progress = [];
+
+  process.env.sportsclaw_SCHEMA_DIR = schemaDir;
+  delete process.env.SPORTSCLAW_SKILLS;
+  delete process.env.sportsclaw_SKILLS;
+
+  try {
+    const count = await bootstrapDefaultSchemas(
+      { pythonPath },
+      { onProgress: (skill, ok) => progress.push([skill, ok]) },
+    );
+    const installed = readdirSync(schemaDir)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, -5));
+    return { count, installed, progress };
+  } finally {
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 describe("catalog constants", () => {
   it("exposes exactly the 14 default sports, in order", () => {
     assert.deepEqual([...DEFAULT_SPORT_SKILLS], EXPECTED_DEFAULT_SPORTS);
@@ -110,6 +176,38 @@ describe("catalog constants", () => {
       [...EXPECTED_DEFAULT_SPORTS, ...EXPECTED_DEFAULT_SUPPORT]
     );
     assert.equal(DEFAULT_SKILLS.length, 20);
+  });
+});
+
+describe("bootstrapDefaultSchemas", () => {
+  it("installs only defaults when offline discovery includes optional and unknown extras", async () => {
+    const extras = ["esports", "polymarket-trading", "quidditch"];
+    const result = await runOfflineBootstrap([
+      extras[0],
+      ...[...DEFAULT_SKILLS].reverse(),
+      ...extras.slice(1),
+    ]);
+
+    assert.equal(result.count, DEFAULT_SKILLS.length);
+    assert.deepEqual(result.installed.sort(), [...DEFAULT_SKILLS].sort());
+    assert.deepEqual(
+      result.progress.map(([skill]) => skill).sort(),
+      [...DEFAULT_SKILLS].sort(),
+    );
+    assert.ok(result.progress.every(([, ok]) => ok));
+    assert.ok(extras.every((extra) => !result.installed.includes(extra)));
+  });
+
+  it("falls back to every default when offline catalog discovery is unavailable", async () => {
+    const result = await runOfflineBootstrap(null);
+
+    assert.equal(result.count, DEFAULT_SKILLS.length);
+    assert.deepEqual(result.installed.sort(), [...DEFAULT_SKILLS].sort());
+    assert.deepEqual(
+      result.progress.map(([skill]) => skill).sort(),
+      [...DEFAULT_SKILLS].sort(),
+    );
+    assert.ok(result.progress.every(([, ok]) => ok));
   });
 });
 

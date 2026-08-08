@@ -110,9 +110,8 @@ export function resolveSubagentActiveTools(
   const selectedSkills = new Set(input.selectedSkills);
   const routedActiveTools = input.toolNames.filter((name) => {
     if (RESTRICTED_TOOLS.has(name)) return false;
-    if (name.startsWith("mcp__")) return true;
     const skill = input.getSkillName(name);
-    return skill !== undefined && selectedSkills.has(skill);
+    return skill === undefined || selectedSkills.has(skill);
   });
 
   return finalizeActiveTools({
