@@ -36,6 +36,8 @@ import time
 
 from aiohttp import web
 
+from skills_catalog import parse_catalog
+
 
 PORT = int(os.environ.get("RELAY_PORT", 8080))
 SPORTSCLAW_BIN = os.environ.get("SPORTSCLAW_BIN", "node")
@@ -64,23 +66,27 @@ async def health(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 async def list_skills(request: web.Request) -> web.Response:
-    """Return installed sport schemas."""
+    """
+    Return the installed catalog as a flat list of schema/module names.
+
+    Reads the CLI's structured `list --json` output. Human output is categorized
+    prose, so the old line scrape matched nothing and reported a successful empty
+    catalog; a nonzero exit or an unparseable payload is now an error instead.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "list",
+            SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "list", "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_build_env(),
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        lines = stdout.decode().strip().splitlines()
-        skills = [
-            l.strip().lstrip("- ").strip()
-            for l in lines
-            if l.strip().startswith("- ")
-        ]
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        skills = parse_catalog(stdout.decode(), proc.returncode)
         return web.json_response({"status": True, "skills": skills})
     except Exception as e:
+        # Only the parser's own message is surfaced — child stderr is never
+        # forwarded to the client.
+        log(f"skills: {e}")
         return web.json_response(
             {"status": False, "error": str(e)}, status=500
         )

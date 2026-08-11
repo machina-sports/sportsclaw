@@ -69,12 +69,17 @@ RUN npm prune --omit=dev
 # --- Bootstrap default sport schemas -----------------------------------------
 # Fails closed: an image with missing or partial schemas is not shippable, so a
 # failed bootstrap must fail the build rather than log a warning and continue.
-ENV SPORTSCLAW_SCHEMA_DIR=/app/.sportsclaw/schemas
+# The env name is case-sensitive and intentionally lowercase-prefixed: the engine
+# reads `process.env.sportsclaw_SCHEMA_DIR` (src/schema.ts). An uppercase spelling
+# is silently ignored, and the bootstrap below would write to
+# /root/.sportsclaw/schemas — outside the runtime schema dir.
+ENV sportsclaw_SCHEMA_DIR=/app/.sportsclaw/schemas
 RUN mkdir -p /app/.sportsclaw/schemas
 RUN node dist/index.js init --all --verbose
 
 # --- Relay server & entrypoint ------------------------------------------------
 COPY docker/relay/relay_server.py /opt/sportsclaw/relay_server.py
+COPY docker/relay/skills_catalog.py /opt/sportsclaw/skills_catalog.py
 COPY docker/relay/entrypoint.sh /opt/sportsclaw/entrypoint.sh
 RUN chmod +x /opt/sportsclaw/entrypoint.sh
 
