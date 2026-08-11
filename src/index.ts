@@ -64,6 +64,7 @@ import {
   summarizeInstalledSchemas,
   getSchemaDir,
   bootstrapDefaultSchemas,
+  assertDefaultBootstrapComplete,
   ensureSportsSkills,
   getInstalledSportsSkillsVersion,
   getCachedSchemaVersion,
@@ -1547,6 +1548,16 @@ async function cmdInit(args: string[], _opts?: { fromChat?: boolean }): Promise<
         "Some schemas could not be fetched. Ensure sports-skills is up to date:"
       );
       console.log(`  ${buildSportsSkillsRepairCommand(pythonPath)}`);
+    }
+
+    // Fail closed: docker/relay/Dockerfile runs `init --all --verbose` unguarded,
+    // so a partial/empty bootstrap must exit nonzero instead of shipping an
+    // image with a missing schema catalog.
+    try {
+      assertDefaultBootstrapComplete(count, DEFAULT_SKILLS.length);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
     }
   } else {
     // Interactive sport selection

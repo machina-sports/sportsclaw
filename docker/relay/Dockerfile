@@ -42,7 +42,15 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN python3 -c "import sys; assert sys.version_info >= (3, 10), f'Python too old: {sys.version_info}'"
 
 # --- Python packages: sports data + relay server -----------------------------
-RUN pip install --no-cache-dir sports-skills aiohttp
+# sports-skills is pinned exactly: an unpinned install floats to whatever PyPI
+# serves at build time, so two builds of the same commit could ship different
+# tool catalogs. Override with --build-arg SPORTS_SKILLS_VERSION=x.y.z.
+ARG SPORTS_SKILLS_VERSION=0.31.0
+RUN pip install --no-cache-dir "sports-skills==${SPORTS_SKILLS_VERSION}" aiohttp
+
+# Build-time assertion: the resolver must have installed the exact pin, so a
+# substituted or cached wheel fails the build instead of shipping silently.
+RUN python3 -c "import importlib.metadata as md; got = md.version('sports-skills'); want = '${SPORTS_SKILLS_VERSION}'; assert got == want, f'sports-skills mismatch: installed {got}, expected {want}'"
 
 WORKDIR /app
 
@@ -59,10 +67,11 @@ RUN npx tsc
 RUN npm prune --omit=dev
 
 # --- Bootstrap default sport schemas -----------------------------------------
+# Fails closed: an image with missing or partial schemas is not shippable, so a
+# failed bootstrap must fail the build rather than log a warning and continue.
 ENV SPORTSCLAW_SCHEMA_DIR=/app/.sportsclaw/schemas
-RUN mkdir -p /app/.sportsclaw/schemas && \
-    node dist/index.js init --all --verbose 2>&1 || \
-    echo "[sportsclaw-relay] Warning: schema bootstrap incomplete."
+RUN mkdir -p /app/.sportsclaw/schemas
+RUN node dist/index.js init --all --verbose
 
 # --- Relay server & entrypoint ------------------------------------------------
 COPY docker/relay/relay_server.py /opt/sportsclaw/relay_server.py

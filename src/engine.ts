@@ -478,6 +478,147 @@ export function stripInternalEvidenceArtifacts(text: string): string {
   return out.trim();
 }
 
+/**
+ * Stable, non-secret sentinel returned only when every extraction strategy
+ * fails closed — i.e. envelope introspection, JSON serialization, and String()
+ * coercion all throw (hostile Proxy traps, hostile toJSON/toString/
+ * Symbol.toPrimitive). It must never leak internal state.
+ */
+const UNSERIALIZABLE_TOOL_OUTPUT = "[unserializable tool output]";
+
+/**
+ * extractEvidenceString — pull a string out of an arbitrary tool output without
+ * ever throwing. Direct strings and legacy {content:string} envelopes are
+ * returned verbatim; anything else is JSON-stringified. Every introspection
+ * and coercion step is guarded so that hostile inputs — Proxies whose has/get
+ * traps throw, objects whose toJSON/toString/Symbol.toPrimitive throw — fail
+ * closed to a deterministic sentinel instead of propagating.
+ */
+function extractEvidenceString(output: unknown): string {
+  if (typeof output === "string") return output;
+
+  // Legacy contract: {content:string}. Once presence is established, read the
+  // property exactly once. Primitive values retain the historical safe
+  // conversion, while objects/functions fail closed without any introspection;
+  // they could alias this envelope and route serialization back into its traps.
+  if (output && typeof output === "object") {
+    let hasContent: boolean;
+    try {
+      hasContent = "content" in output;
+    } catch {
+      return UNSERIALIZABLE_TOOL_OUTPUT;
+    }
+
+    if (hasContent) {
+      let content: unknown;
+      try {
+        content = (output as { content?: unknown }).content;
+      } catch {
+        return UNSERIALIZABLE_TOOL_OUTPUT;
+      }
+      if ((typeof content === "object" && content !== null) || typeof content === "function") {
+        return UNSERIALIZABLE_TOOL_OUTPUT;
+      }
+      return safelySerializeOrCoerce(content);
+    }
+  }
+
+  return safelySerializeOrCoerce(output);
+}
+
+function safelySerializeOrCoerce(value: unknown): string {
+  if (typeof value === "string") return value;
+
+  try {
+    const json = JSON.stringify(value);
+    if (typeof json === "string") return json;
+  } catch {
+    // BigInt / cyclic structures / hostile toJSON — fall through to coercion.
+  }
+
+  // Final fail-closed coercion. String()/`??` can themselves throw via hostile
+  // Symbol.toPrimitive/toString/valueOf, so guard and fall back to a sentinel.
+  try {
+    return String(value ?? "");
+  } catch {
+    return UNSERIALIZABLE_TOOL_OUTPUT;
+  }
+}
+
+/** Trim only the four whitespace code points permitted by the JSON grammar. */
+function trimJsonWhitespace(raw: string): string {
+  return raw.replace(/^[\u0020\u0009\u000d\u000a]+|[\u0020\u0009\u000d\u000a]+$/g, "");
+}
+
+/** Losslessly remove JSON whitespace outside strings from objects/arrays only. */
+function compactStructuredJson(raw: string): string {
+  const trimmed = trimJsonWhitespace(raw);
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if (!((first === "{" && last === "}") || (first === "[" && last === "]"))) {
+    return raw;
+  }
+
+  try {
+    JSON.parse(trimmed);
+  } catch {
+    return raw;
+  }
+
+  let compact = "";
+  let inString = false;
+  let escaped = false;
+  for (const char of trimmed) {
+    if (inString) {
+      compact += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      compact += char;
+      inString = true;
+    } else if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") {
+      compact += char;
+    }
+  }
+  return compact;
+}
+
+/**
+ * summarizeToolOutputForEvidence — condense a raw tool output into a bounded
+ * string used for evidence validation. When the raw output is a pretty-printed
+ * JSON string, it is compacted first so the whole payload can survive within
+ * the budget; if it is still too long (or non-JSON), it is truncated with a
+ * balanced head + tail so facts at both ends are retained. A head-only slice
+ * incorrectly dropped the final venue from oversized worldcup-get-schedule
+ * payloads (pretty JSON >4000 chars, compact <2500).
+ */
+export function summarizeToolOutputForEvidence(output: unknown): string {
+  const MAX_CHARS = 4_000;
+
+  // Centralized safe extraction: always yields a string, never throws — even
+  // for top-level undefined/function/symbol (JSON.stringify returns undefined)
+  // or BigInt/cyclic values (JSON.stringify throws).
+  let raw = extractEvidenceString(output);
+
+  // Compact only object/array JSON, directly from its original lexical form.
+  // JSON.parse validates the document but its value is never stringified, so
+  // unsafe integer tokens and whitespace inside quoted strings remain exact.
+  raw = compactStructuredJson(raw);
+
+  const trimmed = trimJsonWhitespace(raw);
+  if (!trimmed) return "";
+  if (trimmed.length <= MAX_CHARS) return trimmed;
+
+  const marker = "\n...[truncated middle]...\n";
+  const budget = MAX_CHARS - marker.length;
+  const headLen = Math.floor(budget / 2);
+  const tailLen = budget - headLen;
+  const head = trimmed.slice(0, headLen);
+  const tail = trimmed.slice(trimmed.length - tailLen);
+  return `${head}${marker}${tail}`;
+}
+
 // ---------------------------------------------------------------------------
 // Engine class
 // ---------------------------------------------------------------------------
@@ -811,30 +952,7 @@ export class sportsclawEngine {
   }
 
   private summarizeToolOutput(output: unknown): string {
-    const MAX_CHARS = 4_000;
-    let raw = "";
-
-    if (typeof output === "string") {
-      raw = output;
-    } else if (
-      output &&
-      typeof output === "object" &&
-      "content" in output &&
-      typeof (output as { content?: unknown }).content === "string"
-    ) {
-      raw = (output as { content: string }).content;
-    } else {
-      try {
-        raw = JSON.stringify(output);
-      } catch {
-        raw = String(output ?? "");
-      }
-    }
-
-    const trimmed = raw.trim();
-    if (!trimmed) return "";
-    if (trimmed.length <= MAX_CHARS) return trimmed;
-    return `${trimmed.slice(0, MAX_CHARS)}\n...[truncated]`;
+    return summarizeToolOutputForEvidence(output);
   }
 
   private collectToolOutputSnippets(
