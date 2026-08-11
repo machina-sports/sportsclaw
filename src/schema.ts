@@ -717,3 +717,28 @@ export async function bootstrapDefaultSchemas(
 
   return succeeded;
 }
+
+/**
+ * Fail-closed guard for a `--all` bootstrap.
+ *
+ * `bootstrapDefaultSchemas` uses `Promise.allSettled`, so a partial (or empty)
+ * install resolves normally with a lower count. The relay image bootstraps with
+ * an unguarded `RUN node dist/index.js init --all --verbose`
+ * (docker/relay/Dockerfile), so anything short of the full default catalog has
+ * to raise instead of being reported as success.
+ *
+ * Throws unless `count` is exactly `expected` — a non-integer, NaN, negative or
+ * over-count value is never treated as complete.
+ */
+export function assertDefaultBootstrapComplete(
+  count: number,
+  expected: number = DEFAULT_SKILLS.length
+): void {
+  const actual =
+    Number.isSafeInteger(count) && (count as number) >= 0 ? (count as number) : null;
+  if (actual === expected) return;
+  const reported = actual === null ? `an invalid count (${String(count)})` : String(actual);
+  throw new Error(
+    `Default schema bootstrap incomplete: installed ${reported} of ${expected} required default schemas.`
+  );
+}

@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   mkdtempSync,
@@ -84,7 +84,7 @@ function fixtureSchema(sport, toolCount) {
   };
 }
 
-function createFakeSportsSkills(root, catalogModules) {
+function createFakeSportsSkills(root, catalogModules, failingSkills = []) {
   const executable = join(root, "fake-sports-skills");
   const catalog = catalogModules === null
     ? null
@@ -101,6 +101,11 @@ if (args[2] === "catalog") {
   process.exit(0);
 }
 if (args[3] === "schema") {
+  const failing = ${JSON.stringify(failingSkills)};
+  if (failing.includes(args[2])) {
+    process.stderr.write("simulated schema outage for " + args[2]);
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify({ sport: args[2], version: "offline-test", tools: [] }));
   process.exit(0);
 }
@@ -208,6 +213,125 @@ describe("bootstrapDefaultSchemas", () => {
       [...DEFAULT_SKILLS].sort(),
     );
     assert.ok(result.progress.every(([, ok]) => ok));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-closed bootstrap completeness
+//
+// docker/relay/Dockerfile runs `RUN node dist/index.js init --all --verbose`
+// unguarded, so `init --all` is the only thing standing between a partial
+// bootstrap and a green image with a partial/empty schema catalog.
+// ---------------------------------------------------------------------------
+
+describe("assertDefaultBootstrapComplete", () => {
+  let assertDefaultBootstrapComplete;
+
+  before(async () => {
+    ({ assertDefaultBootstrapComplete } = await import("../dist/schema.js"));
+  });
+
+  it("accepts a complete bootstrap", () => {
+    assert.doesNotThrow(() =>
+      assertDefaultBootstrapComplete(DEFAULT_SKILLS.length)
+    );
+    assert.doesNotThrow(() => assertDefaultBootstrapComplete(3, 3));
+  });
+
+  it("rejects a partial bootstrap and reports actual vs expected counts", () => {
+    assert.throws(
+      () => assertDefaultBootstrapComplete(DEFAULT_SKILLS.length - 1),
+      (err) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, new RegExp(String(DEFAULT_SKILLS.length - 1)));
+        assert.match(err.message, new RegExp(String(DEFAULT_SKILLS.length)));
+        return true;
+      }
+    );
+  });
+
+  it("rejects a zero-schema bootstrap", () => {
+    assert.throws(() => assertDefaultBootstrapComplete(0));
+  });
+
+  it("rejects counts that are not whole non-negative numbers", () => {
+    for (const bogus of [Number.NaN, -1, 19.5, Infinity, "20", null, undefined]) {
+      assert.throws(
+        () => assertDefaultBootstrapComplete(bogus, DEFAULT_SKILLS.length),
+        `expected ${String(bogus)} to be rejected`
+      );
+    }
+  });
+
+  it("rejects an over-count instead of treating it as complete", () => {
+    assert.throws(() =>
+      assertDefaultBootstrapComplete(DEFAULT_SKILLS.length + 1)
+    );
+  });
+});
+
+describe("sportsclaw init --all (CLI, fail-closed)", () => {
+  function runInitAll(failingSkills) {
+    const root = mkdtempSync(join(tmpdir(), "sportsclaw-init-all-"));
+    const schemaDir = join(root, "schemas");
+    const home = join(root, "home");
+    mkdirSync(schemaDir, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    const pythonPath = createFakeSportsSkills(
+      root,
+      [...DEFAULT_SKILLS],
+      failingSkills
+    );
+
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      PYTHON_PATH: pythonPath,
+      sportsclaw_SCHEMA_DIR: schemaDir,
+    };
+    delete env.SPORTSCLAW_SKILLS;
+    delete env.sportsclaw_SKILLS;
+
+    try {
+      const result = spawnSync(
+        "node",
+        ["dist/index.js", "init", "--all", "--verbose"],
+        { encoding: "utf-8", env }
+      );
+      const installed = readdirSync(schemaDir).filter((n) => n.endsWith(".json"));
+      return {
+        status: result.status,
+        output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+        installed,
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("exits nonzero when some default schemas cannot be installed", () => {
+    const failing = ["nba", "kalshi"];
+    const expected = DEFAULT_SKILLS.length;
+    const run = runInitAll(failing);
+
+    assert.equal(run.installed.length, expected - failing.length);
+    assert.notEqual(
+      run.status,
+      0,
+      `a partial bootstrap must not exit 0; output:\n${run.output}`
+    );
+    assert.match(run.output, new RegExp(String(expected - failing.length)));
+    assert.match(run.output, new RegExp(String(expected)));
+    // The repair hint stays, so the operator still knows what to do.
+    assert.match(run.output, /sports-skills/);
+  });
+
+  it("exits zero when every default schema installs", () => {
+    const run = runInitAll([]);
+
+    assert.equal(run.installed.length, DEFAULT_SKILLS.length);
+    assert.equal(run.status, 0, `expected exit 0; output:\n${run.output}`);
   });
 });
 
