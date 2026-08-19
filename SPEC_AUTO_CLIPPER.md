@@ -1,5 +1,30 @@
 # SPEC: Auto-Clipper Plugin (WSC-Killer)
 
+## 0. Implementation Status (V1 — highlights job API)
+
+**Implemented** (see `src/highlights/*`, `docker/relay/highlights_jobs.py`):
+- Deterministic highlights core with typed contracts: rights authorization,
+  local-file source reference, canonical event identity, real PBP actions with
+  provenance, fixed video sync anchor, pre/post-roll + candidate limits,
+  candidate windows, clip manifest with ffprobe evidence, and job state.
+- PBP→video mapping via a fixed sync anchor. Only `elapsed-ascending` clocks
+  are supported; other clock semantics are rejected explicitly. Mocked or
+  evenly-spaced timestamp selection has been removed entirely.
+- `sportsclaw highlights run --request <json> --output <json>` — the typed
+  entrypoint the relay job API invokes.
+- `sportsclaw clip` refactored as an adapter over the same core: it collects
+  real PBP/rights/sync inputs (wizard prompts or `--request`), and fails with
+  an actionable error when they cannot be provided.
+- Relay async job API: `POST /api/highlights/jobs`, status, cancel, artifacts
+  (see README_RELAY.md). FFmpeg/FFprobe installed in the relay image.
+
+**Deferred — specified below but NOT implemented in V1:**
+- Gemini Vision hype scoring / ranking (§10) and Gemini OCR smart sync (§8);
+  V1 requires an explicit sync anchor instead.
+- YOLOv8 vertical 9:16 auto-tracking (§2, §5); V1 is landscape cut-only.
+- ffmpeg auto-installation wizard (§3); V1 fails closed when FFmpeg is missing.
+- Signed-URL/object-store media download, HLS/live ingest, and publishing.
+
 ## 1. Objective
 Build an optional plugin for `sportsclaw` that provides automated, computer-vision driven video clipping and 9:16 auto-tracking, completely bypassing the need for expensive legacy enterprise software.
 

@@ -103,6 +103,7 @@ import {
 } from "./analytics.js";
 import { cmdPlugin } from "./plugin.js";
 import { cmdClip } from "./clipper.js";
+import { cmdHighlights } from "./highlights/cli.js";
 import {
   daemonStart,
   daemonStop,
@@ -3039,6 +3040,8 @@ async function main(): Promise<void> {
     case "clip":
       await cmdClip(subArgs);
       break;
+    case "highlights":
+      return cmdHighlights(subArgs);
 case "plugin":
       return cmdPlugin(subArgs);
     case "mcp":

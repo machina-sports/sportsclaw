@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 sportsclaw-relay — HTTP bridge for headless SportsClaw execution.
 
@@ -18,6 +20,10 @@ Endpoints:
     GET  /api/skills       → List installed sport schemas
     POST /api/query        → Streaming NDJSON response (real-time progress)
     POST /api/query/sync   → Buffered JSON response (waits for result)
+    POST /api/highlights/jobs                     → Create a typed highlights job
+    GET  /api/highlights/jobs/{job_id}            → Job status
+    POST /api/highlights/jobs/{job_id}/cancel     → Cancel a job (terminal state)
+    GET  /api/highlights/jobs/{job_id}/artifacts  → Manifest + clip paths (no base64)
 
 Query body:
     {
@@ -32,11 +38,19 @@ Query body:
 import asyncio
 import json
 import os
+import secrets
 import time
 
 from aiohttp import web
 
 from skills_catalog import parse_catalog
+from highlights_jobs import (
+    DEFAULT_JOB_TTL_SEC,
+    DEFAULT_MAX_JOB_OUTPUT_BYTES,
+    DEFAULT_MAX_STORAGE_BYTES,
+    HighlightsJobManager,
+    JobError,
+)
 
 
 PORT = int(os.environ.get("RELAY_PORT", 8080))
@@ -324,6 +338,116 @@ async def query_sync(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Highlights job API — typed async jobs over the deterministic clipping core
+# ---------------------------------------------------------------------------
+
+HIGHLIGHTS_AUTH_HEADER = "X-Auth-Token"
+
+
+def _highlights_auth_error(request: web.Request) -> web.Response | None:
+    """Fail-closed bearer gate for every /api/highlights/* route.
+
+    Core API provisions HIGHLIGHTS_API_TOKEN into the relay's environment and
+    Client API sends it as X-Auth-Token. Without a configured secret the
+    highlights API is unavailable (503); a missing or mismatched token is 401.
+    Rights/provenance in the request body remain typed evidence supplied by
+    the authenticated project caller — Client API is the authoritative
+    rights/canonical gate, the relay enforces presence plus caller identity.
+    """
+    expected = os.environ.get("HIGHLIGHTS_API_TOKEN", "")
+    if not expected:
+        return web.json_response(
+            {"status": False,
+             "error": "highlights API is unavailable — no API token is configured"},
+            status=503,
+        )
+    supplied = request.headers.get(HIGHLIGHTS_AUTH_HEADER, "")
+    if not supplied or not secrets.compare_digest(
+        supplied.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return web.json_response(
+            {"status": False,
+             "error": f"invalid or missing {HIGHLIGHTS_AUTH_HEADER}"},
+            status=401,
+        )
+    return None
+
+
+async def highlights_create(request: web.Request) -> web.Response:
+    """POST /api/highlights/jobs — validate strictly and enqueue a job."""
+    denied = _highlights_auth_error(request)
+    if denied is not None:
+        return denied
+    manager = request.app["highlights_manager"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"status": False, "error": "request body must be valid JSON"}, status=400
+        )
+    try:
+        job = await manager.create(body)
+        return web.json_response({"status": True, **job}, status=202)
+    except JobError as e:
+        return web.json_response({"status": False, "error": str(e)}, status=e.status)
+    except Exception as e:
+        # Never leak stack traces or internals to the client.
+        log(f"highlights create: {type(e).__name__}: {e}")
+        return web.json_response({"status": False, "error": "internal error"}, status=500)
+
+
+async def highlights_status(request: web.Request) -> web.Response:
+    """GET /api/highlights/jobs/{job_id} — persisted job state."""
+    denied = _highlights_auth_error(request)
+    if denied is not None:
+        return denied
+    manager = request.app["highlights_manager"]
+    try:
+        job = manager.get(request.match_info.get("job_id", ""))
+        return web.json_response({"status": True, **job})
+    except JobError as e:
+        return web.json_response({"status": False, "error": str(e)}, status=e.status)
+    except Exception as e:
+        log(f"highlights status: {type(e).__name__}: {e}")
+        return web.json_response({"status": False, "error": "internal error"}, status=500)
+
+
+async def highlights_cancel(request: web.Request) -> web.Response:
+    """POST /api/highlights/jobs/{job_id}/cancel — terminate and finalize."""
+    denied = _highlights_auth_error(request)
+    if denied is not None:
+        return denied
+    manager = request.app["highlights_manager"]
+    try:
+        job = await manager.cancel(request.match_info.get("job_id", ""))
+        return web.json_response({"status": True, **job})
+    except JobError as e:
+        return web.json_response({"status": False, "error": str(e)}, status=e.status)
+    except Exception as e:
+        log(f"highlights cancel: {type(e).__name__}: {e}")
+        return web.json_response({"status": False, "error": "internal error"}, status=500)
+
+
+async def highlights_artifacts(request: web.Request) -> web.Response:
+    """GET /api/highlights/jobs/{job_id}/artifacts — manifest and clip paths.
+
+    Returns metadata and filesystem references only, never inline video bytes.
+    """
+    denied = _highlights_auth_error(request)
+    if denied is not None:
+        return denied
+    manager = request.app["highlights_manager"]
+    try:
+        artifacts = manager.artifacts(request.match_info.get("job_id", ""))
+        return web.json_response({"status": True, **artifacts})
+    except JobError as e:
+        return web.json_response({"status": False, "error": str(e)}, status=e.status)
+    except Exception as e:
+        log(f"highlights artifacts: {type(e).__name__}: {e}")
+        return web.json_response({"status": False, "error": "internal error"}, status=500)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -395,6 +519,24 @@ def create_app() -> web.Application:
     app.router.add_get("/api/skills", list_skills)
     app.router.add_post("/api/query", query_stream)
     app.router.add_post("/api/query/sync", query_sync)
+
+    app["highlights_manager"] = HighlightsJobManager(
+        jobs_root=os.environ.get("HIGHLIGHTS_JOBS_ROOT", "/data/highlights-jobs"),
+        media_root=os.environ.get("HIGHLIGHTS_MEDIA_ROOT", "/data/media"),
+        cmd_prefix=[SPORTSCLAW_BIN, SPORTSCLAW_ENTRY],
+        max_concurrency=int(os.environ.get("HIGHLIGHTS_MAX_CONCURRENCY", 1)),
+        max_queue=int(os.environ.get("HIGHLIGHTS_MAX_QUEUE", 8)),
+        job_timeout_sec=int(os.environ.get("HIGHLIGHTS_JOB_TIMEOUT", 900)),
+        job_ttl_sec=int(os.environ.get("HIGHLIGHTS_JOB_TTL_SEC", DEFAULT_JOB_TTL_SEC)),
+        max_storage_bytes=int(os.environ.get("HIGHLIGHTS_MAX_STORAGE_BYTES",
+                                             DEFAULT_MAX_STORAGE_BYTES)),
+        max_job_output_bytes=int(os.environ.get("HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES",
+                                                DEFAULT_MAX_JOB_OUTPUT_BYTES)),
+    )
+    app.router.add_post("/api/highlights/jobs", highlights_create)
+    app.router.add_get("/api/highlights/jobs/{job_id}", highlights_status)
+    app.router.add_post("/api/highlights/jobs/{job_id}/cancel", highlights_cancel)
+    app.router.add_get("/api/highlights/jobs/{job_id}/artifacts", highlights_artifacts)
     return app
 
 

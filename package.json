@@ -89,6 +89,8 @@
     "test:momentum": "npm run build && node --test test/momentum-explainer.test.mjs test/momentum-evaluator.test.mjs test/momentum-replay.test.mjs",
     "test:selftest-runner": "npm run build && node --test test/selftest-runner.test.mjs",
     "test:tool-execution-log": "npm run build && node --test test/tool-execution-log.test.mjs",
+    "test:highlights": "npm run build && node --test test/highlights-core.test.mjs test/highlights-cli.test.mjs",
+    "test:relay-highlights": "node --test test/relay-highlights-api.test.mjs",
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",

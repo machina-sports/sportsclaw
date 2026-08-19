@@ -212,6 +212,19 @@ describe("relay container contract", () => {
     );
   });
 
+  it("installs FFmpeg/FFprobe for the highlights job API", () => {
+    const aptLine = instructions.find(
+      (line) => /^RUN\b/.test(line) && /apt-get install/.test(line)
+    );
+
+    assert.ok(aptLine, "an apt-get install RUN must exist");
+    assert.match(
+      aptLine,
+      /\bffmpeg\b/,
+      "ffmpeg (which ships ffprobe) must be installed — highlights jobs fail closed without it"
+    );
+  });
+
   it("ships every local Python module the relay server imports", () => {
     const relaySource = readFileSync(relayServerPath, "utf-8");
     const relayDir = dirname(relayServerPath);
