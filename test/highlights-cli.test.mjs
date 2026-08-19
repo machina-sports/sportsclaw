@@ -30,7 +30,7 @@ before(() => {
   sourceVideo = join(workDir, "synthetic-match.mp4");
   const gen = spawnSync(FFMPEG, [
     "-y", "-f", "lavfi", "-i", "testsrc=duration=45:size=160x90:rate=10",
-    "-c:v", "libx264", "-preset", "ultrafast", "-g", "10", "-keyint_min", "10",
+    "-c:v", "mpeg4", "-q:v", "5", "-g", "10",
     "-pix_fmt", "yuv420p", sourceVideo,
   ], { encoding: "utf-8" });
   assert.equal(gen.status, 0, `fixture generation failed: ${gen.stderr}`);

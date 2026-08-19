@@ -368,7 +368,7 @@ describe("highlight extraction (synthetic media)", () => {
     // 60s test pattern, keyframe every second so stream-copy cuts are accurate.
     const gen = spawnSync(FFMPEG, [
       "-y", "-f", "lavfi", "-i", "testsrc=duration=60:size=160x90:rate=10",
-      "-c:v", "libx264", "-preset", "ultrafast", "-g", "10", "-keyint_min", "10",
+      "-c:v", "mpeg4", "-q:v", "5", "-g", "10",
       "-pix_fmt", "yuv420p", sourceVideo,
     ], { encoding: "utf-8" });
     assert.equal(gen.status, 0, `fixture generation failed: ${gen.stderr}`);
@@ -448,7 +448,7 @@ describe("per-job output budget", () => {
     const gen = spawnSync(FFMPEG, [
       "-y", "-f", "lavfi", "-i", "color=c=black:s=160x90:r=10:d=60",
       "-vf", "noise=alls=100:allf=t+u:enable='gte(t,30)'",
-      "-c:v", "libx264", "-preset", "ultrafast", "-g", "10", "-keyint_min", "10",
+      "-c:v", "mpeg4", "-q:v", "5", "-g", "10",
       "-pix_fmt", "yuv420p", mixedVideo,
     ], { encoding: "utf-8" });
     assert.equal(gen.status, 0, `fixture generation failed: ${gen.stderr}`);
