@@ -25,7 +25,6 @@ import re
 import secrets
 import shutil
 import signal
-import errno
 from datetime import datetime, timezone
 
 
@@ -284,14 +283,6 @@ def _signal_job_tree(proc, hard):
         pass
 
 
-def _pid_is_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError as exc:
-        return exc.errno == errno.EPERM
-
-
 class HighlightsJobManager:
     def __init__(self, jobs_root, media_root, cmd_prefix,
                  max_concurrency=1, max_queue=8, job_timeout_sec=900, env=None,
@@ -505,15 +496,12 @@ class HighlightsJobManager:
                 continue
             if record.get("job_id") != job_id or record.get("state") not in {"queued", "running"}:
                 continue
-            worker_pid = record.get("worker_pid")
-            if isinstance(worker_pid, int) and worker_pid > 0 and _pid_is_alive(worker_pid):
-                try:
-                    if _USE_PROCESS_GROUPS:
-                        os.killpg(worker_pid, signal.SIGKILL)
-                    else:
-                        os.kill(worker_pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+            # Never signal a bare persisted PID after restart: the OS may have
+            # reused it for an unrelated process. Kubernetes terminates the old
+            # container/process namespace before a replacement relay starts;
+            # reconciliation therefore only marks persisted metadata failed.
+            # Live current-instance workers are always managed through _procs,
+            # where process identity and wait semantics are retained.
             record["state"] = "failed"
             record["worker_pid"] = None
             record["error"] = "job was interrupted by a relay restart"
