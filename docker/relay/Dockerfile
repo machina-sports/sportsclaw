@@ -23,6 +23,10 @@
 #   GET  /api/skills            — List installed sport schemas
 #   POST /api/query             — Execute a one-shot sports query (streaming NDJSON)
 #   POST /api/query/sync        — Execute a one-shot query (buffered JSON response)
+#   POST /api/highlights/jobs                     — Create a typed highlights job
+#   GET  /api/highlights/jobs/{job_id}            — Job status
+#   POST /api/highlights/jobs/{job_id}/cancel     — Cancel a job
+#   GET  /api/highlights/jobs/{job_id}/artifacts  — Manifest + clip paths
 # =============================================================================
 
 FROM node:20-slim AS base
@@ -30,7 +34,7 @@ FROM node:20-slim AS base
 # --- System dependencies -----------------------------------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv curl && \
+        python3 python3-pip python3-venv curl ffmpeg tini && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -80,6 +84,7 @@ RUN node dist/index.js init --all --verbose
 # --- Relay server & entrypoint ------------------------------------------------
 COPY docker/relay/relay_server.py /opt/sportsclaw/relay_server.py
 COPY docker/relay/skills_catalog.py /opt/sportsclaw/skills_catalog.py
+COPY docker/relay/highlights_jobs.py /opt/sportsclaw/highlights_jobs.py
 COPY docker/relay/entrypoint.sh /opt/sportsclaw/entrypoint.sh
 RUN chmod +x /opt/sportsclaw/entrypoint.sh
 
@@ -87,6 +92,13 @@ RUN chmod +x /opt/sportsclaw/entrypoint.sh
 ENV SPORTSCLAW_MEMORY_DIR=/data/memory
 RUN mkdir -p /data/memory
 VOLUME /data/memory
+
+# --- Highlights job workspace (overridable) -----------------------------------
+# Jobs get isolated workspaces under HIGHLIGHTS_JOBS_ROOT; input media must
+# resolve under the allowlisted HIGHLIGHTS_MEDIA_ROOT.
+ENV HIGHLIGHTS_JOBS_ROOT=/data/highlights-jobs
+ENV HIGHLIGHTS_MEDIA_ROOT=/data/media
+RUN mkdir -p /data/highlights-jobs /data/media
 
 # --- Runtime defaults (overridable) -------------------------------------------
 ENV RELAY_PORT=8080
@@ -96,5 +108,5 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8080
 
-ENTRYPOINT ["/opt/sportsclaw/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/sportsclaw/entrypoint.sh"]
 CMD ["relay"]

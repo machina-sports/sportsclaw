@@ -1,5 +1,49 @@
 # SPEC: Auto-Clipper Plugin (WSC-Killer)
 
+## 0. Implementation Status (V1 — highlights job API)
+
+**Implemented** (see `src/highlights/*`, `docker/relay/highlights_jobs.py`):
+- Deterministic highlights core with typed contracts: rights authorization,
+  local-file source reference, canonical event identity, real PBP actions with
+  provenance, fixed video sync anchor, pre/post-roll + candidate limits,
+  candidate windows, clip manifest with ffprobe evidence, and job state.
+- PBP→video mapping via a fixed sync anchor. Only `elapsed-ascending` clocks
+  are supported; other clock semantics are rejected explicitly. Mocked or
+  evenly-spaced timestamp selection has been removed entirely.
+- Candidate windows are considered in deterministic primary order (importance,
+  action time, then ID). Only remaining actions that directly overlap that
+  primary by at least 90% of the shorter window are coalesced; overlap chains
+  are not merged transitively. `mergedActions` is an optional additive V1 field:
+  it is omitted for single-action windows and clips, and coalesced outputs
+  include the primary plus every attached action with full provenance. The
+  emitted coalesced bounds are the union of all attached windows, preserving
+  every action's requested pre/post-roll context.
+- Clips are accurately re-encoded to H.264/AAC instead of stream-copied, so
+  sparse source keyframes cannot extend the requested window. Audio is retained
+  when present. FFprobe evidence additively reports optional
+  `videoDurationSec` and `audioDurationSec`; extraction fails closed if video
+  duration is unavailable or differs from the request by more than 0.5 seconds,
+  and manifest `durationSec` is the measured video-stream duration.
+- FFmpeg streams fragmented MP4 to Node instead of writing the output path.
+  Node checks each chunk before writing it, kills FFmpeg on the first chunk that
+  would exceed the remaining exact byte budget, and removes the partial. Source
+  file size/average bitrate and FFmpeg's packet-granular `-fs` are not used to
+  enforce the cap.
+- `sportsclaw highlights run --request <json> --output <json>` — the typed
+  entrypoint the relay job API invokes.
+- `sportsclaw clip` refactored as an adapter over the same core: it collects
+  real PBP/rights/sync inputs (wizard prompts or `--request`), and fails with
+  an actionable error when they cannot be provided.
+- Relay async job API: `POST /api/highlights/jobs`, status, cancel, artifacts
+  (see README_RELAY.md). FFmpeg/FFprobe installed in the relay image.
+
+**Deferred — specified below but NOT implemented in V1:**
+- Gemini Vision hype scoring / ranking (§10) and Gemini OCR smart sync (§8);
+  V1 requires an explicit sync anchor instead.
+- YOLOv8 vertical 9:16 auto-tracking (§2, §5); V1 is landscape cut-only.
+- ffmpeg auto-installation wizard (§3); V1 fails closed when FFmpeg is missing.
+- Signed-URL/object-store media download, HLS/live ingest, and publishing.
+
 ## 1. Objective
 Build an optional plugin for `sportsclaw` that provides automated, computer-vision driven video clipping and 9:16 auto-tracking, completely bypassing the need for expensive legacy enterprise software.
 

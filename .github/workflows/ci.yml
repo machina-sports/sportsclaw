@@ -47,6 +47,8 @@ jobs:
         with:
           name: dist
           path: dist/
+      - name: Install FFmpeg for media contract tests
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Run all node:test files
         run: node --test test/*.test.mjs
       - name: CI smoke (engine boot + memory_loaded log)

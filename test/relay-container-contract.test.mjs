@@ -32,6 +32,7 @@ import { dirname, join } from "node:path";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dockerfilePath = join(repoRoot, "docker/relay/Dockerfile");
 const relayServerPath = join(repoRoot, "docker/relay/relay_server.py");
+const entrypointPath = join(repoRoot, "docker/relay/entrypoint.sh");
 const schemaSourcePath = join(repoRoot, "src/schema.ts");
 
 const EXPECTED_SPORTS_SKILLS_VERSION = "0.31.0";
@@ -210,6 +211,34 @@ describe("relay container contract", () => {
       envIndex < initIndex,
       `ENV (index ${envIndex}) must precede the bootstrap init (index ${initIndex})`
     );
+  });
+
+  it("installs FFmpeg/FFprobe for the highlights job API", () => {
+    const aptLine = instructions.find(
+      (line) => /^RUN\b/.test(line) && /apt-get install/.test(line)
+    );
+
+    assert.ok(aptLine, "an apt-get install RUN must exist");
+    assert.match(
+      aptLine,
+      /\bffmpeg\b/,
+      "ffmpeg (which ships ffprobe) must be installed — highlights jobs fail closed without it"
+    );
+  });
+
+  it("installs tini and makes it container PID 1 ahead of the relay entrypoint", () => {
+    const aptLine = instructions.find(
+      (line) => /^RUN\b/.test(line) && /apt-get install/.test(line)
+    );
+    const entrypoint = instructions.find((line) => /^ENTRYPOINT\b/.test(line));
+
+    assert.match(aptLine ?? "", /\btini\b/, "tini must be installed for orphan reaping");
+    assert.equal(
+      entrypoint,
+      'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/sportsclaw/entrypoint.sh"]',
+      "tini must remain PID 1 and launch the existing mode-routing entrypoint"
+    );
+    assert.equal(existsSync(entrypointPath), true, "the delegated entrypoint must still ship");
   });
 
   it("ships every local Python module the relay server imports", () => {
