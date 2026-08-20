@@ -556,6 +556,115 @@ async def scenario_source_snapshot_quota():
     })
 
 
+async def scenario_incomplete_admission_restart():
+    import highlights_jobs
+    app = relay_server.create_app()
+    manager = app["highlights_manager"]
+    real_copy = highlights_jobs._copy_source_snapshot
+    interrupted_workspace = None
+    admission_record_before_copy = False
+
+    def interrupted_copy(_descriptor, _source_size, destination):
+        nonlocal interrupted_workspace, admission_record_before_copy
+        interrupted_workspace = os.path.dirname(destination)
+        admission_record_before_copy = os.path.isfile(os.path.join(
+            interrupted_workspace, ".admission.json"))
+        with open(destination + ".tmp", "wb") as handle:
+            handle.write(b"x" * 5000)
+        # Simulate abrupt instance death, bypassing normal Exception cleanup.
+        raise KeyboardInterrupt("synthetic snapshot crash")
+
+    highlights_jobs._copy_source_snapshot = interrupted_copy
+    try:
+        try:
+            await manager.create(valid_body())
+        except KeyboardInterrupt:
+            pass
+    finally:
+        highlights_jobs._copy_source_snapshot = real_copy
+
+    bytes_before_restart = manager._storage_bytes()
+    jobs_root = os.environ["HIGHLIGHTS_JOBS_ROOT"]
+    outside = os.path.abspath(os.path.join(jobs_root, os.pardir, "incomplete-outside"))
+    os.makedirs(outside)
+    with open(os.path.join(outside, ".admission.json"), "w") as handle:
+        json.dump({"state": "admitting"}, handle)
+    with open(os.path.join(outside, "keep.bin"), "wb") as handle:
+        handle.write(b"keep-me")
+    linked_workspace = os.path.join(jobs_root, "linked-admission-000001")
+    os.symlink(outside, linked_workspace)
+    app_after_restart = relay_server.create_app()
+    removed_on_restart = interrupted_workspace is not None and not os.path.exists(
+        interrupted_workspace)
+    bytes_after_restart = app_after_restart["highlights_manager"]._storage_bytes()
+    recovered = await create(app_after_restart, body=valid_body())
+    recovered_id = recovered.data.get("job_id")
+    if recovered_id:
+        await wait_state(app_after_restart, recovered_id, ("succeeded", "failed", "canceled"))
+    out({
+        "admission_record_before_copy": admission_record_before_copy,
+        "bytes_before_restart": bytes_before_restart,
+        "removed_on_restart": removed_on_restart,
+        "linked_outside_intact": os.path.isfile(os.path.join(outside, "keep.bin")),
+        "linked_workspace_untouched": os.path.islink(linked_workspace),
+        "bytes_after_restart": bytes_after_restart,
+        "recovered_status": recovered.status,
+    })
+
+
+async def scenario_active_admission_reconciliation():
+    import highlights_jobs
+    app = relay_server.create_app()
+    manager = app["highlights_manager"]
+    real_copy = highlights_jobs._copy_source_snapshot
+    observations = {}
+
+    def observing_copy(descriptor, source_size, destination):
+        workspace = os.path.dirname(destination)
+        marker = os.path.join(workspace, ".admission.json")
+        observations["marker_before_copy"] = (
+            os.path.isfile(marker) and not os.path.islink(marker)
+        )
+        manager._reconcile_persisted_jobs()
+        manager.cleanup()
+        observations["workspace_survived"] = os.path.isdir(workspace)
+        return real_copy(descriptor, source_size, destination)
+
+    highlights_jobs._copy_source_snapshot = observing_copy
+    try:
+        created = await create(app, body=valid_body())
+    finally:
+        highlights_jobs._copy_source_snapshot = real_copy
+    job_id = created.data.get("job_id")
+    final = await wait_state(app, job_id, ("succeeded", "failed", "canceled"))
+    out({
+        **observations,
+        "create_status": created.status,
+        "final_state": final.get("state"),
+    })
+
+
+async def scenario_failed_admission_cleanup():
+    import highlights_jobs
+    app = relay_server.create_app()
+    real_copy = highlights_jobs._copy_source_snapshot
+
+    def failed_copy(_descriptor, _source_size, destination):
+        with open(destination + ".tmp", "wb") as handle:
+            handle.write(b"partial")
+        raise highlights_jobs.JobValidationError("synthetic snapshot failure")
+
+    highlights_jobs._copy_source_snapshot = failed_copy
+    try:
+        response = await create(app, body=valid_body())
+    finally:
+        highlights_jobs._copy_source_snapshot = real_copy
+    out({
+        "status": response.status,
+        "workspace_count": len(os.listdir(os.environ["HIGHLIGHTS_JOBS_ROOT"])),
+    })
+
+
 async def scenario_cancel_during_spawn():
     # Deterministic race: cancel() lands while _run() is awaiting
     # create_subprocess_exec, before the process is registered in _procs.
@@ -1033,6 +1142,8 @@ async def scenario_capacity_hold_recovery():
     created = await create(app, body=valid_body())
     job_id = created.data["job_id"]
     await wait_state(app, job_id, ("running",))
+    queued = await create(app, body=valid_body())
+    queued_id = queued.data["job_id"]
 
     real_shutdown = highlights_jobs._shutdown_job_tree
     real_group_exists = highlights_jobs._process_group_exists
@@ -1055,7 +1166,11 @@ async def scenario_capacity_hold_recovery():
         canceled = await cancel(app, job_id)
         manager._jobs[job_id]["updated_at"] = "2020-01-01T00:00:00+00:00"
         manager._persist(manager._jobs[job_id])
+        await asyncio.sleep(0.2)
+        queued_state_during_hold = manager._jobs[queued_id]["state"]
+        queued_worker_during_hold = manager._jobs[queued_id].get("worker_pid")
         blocked = await create(app, body=valid_body())
+        blocked_id = blocked.data.get("job_id")
         hold_before = dict(manager._capacity_holds)
         # Simulate the formerly-unconfirmed group finally disappearing: stop the
         # real fake process tree, let the runner settle, then make the group
@@ -1067,23 +1182,29 @@ async def scenario_capacity_hold_recovery():
         if task is not None:
             await task
         group_reported_alive = False
-        released = await create(app, body=valid_body())
+        queued_after_release = await wait_state(app, queued_id, ("running",))
         hold_after = dict(manager._capacity_holds)
     finally:
         highlights_jobs._shutdown_job_tree = real_shutdown
         highlights_jobs._process_group_exists = real_group_exists
 
-    released_id = released.data.get("job_id")
     expired_job_removed = not os.path.exists(os.path.join(
         os.environ["HIGHLIGHTS_JOBS_ROOT"], job_id))
+    for cleanup_id in (queued_id, blocked_id):
+        if cleanup_id:
+            await cancel(app, cleanup_id)
+    released = await create(app, body=valid_body())
+    released_id = released.data.get("job_id")
     if released_id:
         await cancel(app, released_id)
-        await wait_state(app, released_id, ("succeeded", "failed", "canceled"))
     out({
         "cancel_status": canceled.status,
         "failed_state": canceled.data.get("state"),
         "blocked_status": blocked.status,
         "blocked_error": blocked.data.get("error", ""),
+        "queued_state_during_hold": queued_state_during_hold,
+        "queued_worker_during_hold": queued_worker_during_hold,
+        "queued_state_after_release": queued_after_release.get("state"),
         "released_status": released.status,
         "hold_before": hold_before,
         "hold_after": hold_after,
@@ -1101,6 +1222,9 @@ SCENARIOS = {
     "source_symlink_swap": scenario_source_symlink_swap,
     "source_ancestor_symlink_swap": scenario_source_ancestor_symlink_swap,
     "source_snapshot_quota": scenario_source_snapshot_quota,
+    "incomplete_admission_restart": scenario_incomplete_admission_restart,
+    "active_admission_reconciliation": scenario_active_admission_reconciliation,
+    "failed_admission_cleanup": scenario_failed_admission_cleanup,
     "cancel_during_spawn": scenario_cancel_during_spawn,
     "timeout": scenario_timeout,
     "traversal_ids": scenario_traversal_ids,
@@ -1621,22 +1745,59 @@ describe("relay highlights retention", () => {
     assert.equal(result.workspace_count, 0, "quota refusal must happen before retaining a workspace");
   });
 
-  it("holds capacity after unconfirmed shutdown, then releases it when the process group disappears", () => {
+  it("removes a crash-interrupted admission on restart and recovers its storage quota", () => {
+    const result = runScenario("incomplete_admission_restart", {
+      ...freshRoots("incomplete-admission-restart"),
+      env: {
+        HIGHLIGHTS_MAX_STORAGE_BYTES: "6000",
+        HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES: "1000",
+      },
+    });
+
+    assert.equal(result.admission_record_before_copy, true, "admission must be durable before snapshot bytes are copied");
+    assert.ok(result.bytes_before_restart >= 5000, "the interrupted snapshot must consume quota before restart");
+    assert.equal(result.removed_on_restart, true, "startup reconciliation must remove the incomplete workspace");
+    assert.equal(result.linked_outside_intact, true, "reconciliation must never follow a linked workspace outside the jobs root");
+    assert.equal(result.linked_workspace_untouched, true, "a linked direct child must be skipped, not traversed");
+    assert.ok(result.bytes_after_restart < result.bytes_before_restart, "reconciliation must recover the interrupted bytes");
+    assert.equal(result.recovered_status, 202, "creation must recover once interrupted bytes are removed");
+  });
+
+  it("never removes a current-instance admission during reconciliation or cleanup", () => {
+    const result = runScenario("active_admission_reconciliation", freshRoots("active-admission-reconciliation"));
+
+    assert.equal(result.marker_before_copy, true, "the active workspace must carry its durable admission record");
+    assert.equal(result.workspace_survived, true, "normal reconciliation and cleanup must preserve an active admission");
+    assert.equal(result.create_status, 202);
+    assert.equal(result.final_state, "succeeded");
+  });
+
+  it("removes the workspace and admission record after a normal snapshot failure", () => {
+    const result = runScenario("failed_admission_cleanup", freshRoots("failed-admission-cleanup"));
+
+    assert.equal(result.status, 400);
+    assert.equal(result.workspace_count, 0, "failed creation must retain neither workspace nor marker");
+  });
+
+  it("blocks worker admission during an unconfirmed shutdown hold, then recovers after disappearance", () => {
     const result = runScenario("capacity_hold_recovery", {
       ...freshRoots("capacity-hold-recovery"),
       env: {
         FAKE_CLI_MODE: "sleep",
         HIGHLIGHTS_JOB_TTL_SEC: "0",
-        HIGHLIGHTS_MAX_STORAGE_BYTES: "7000",
+        HIGHLIGHTS_MAX_STORAGE_BYTES: "100000",
         HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES: "3000",
       },
     });
 
     assert.equal(result.cancel_status, 200);
     assert.equal(result.failed_state, "failed");
-    assert.equal(result.blocked_status, 507, JSON.stringify(result));
-    assert.match(result.blocked_error, /storage|capacity|reserved/i);
+    assert.equal(result.blocked_status, 429, JSON.stringify(result));
+    assert.match(result.blocked_error, /worker|queue|concurrency|capacity|busy/i);
+    assert.equal(result.queued_state_during_hold, "queued", "a previously queued worker must not consume a held slot");
+    assert.equal(result.queued_worker_during_hold, null, "no worker may spawn while the hold owns concurrency");
     assert.ok(Object.keys(result.hold_before).length > 0, "hold must retain job and process-group identity");
+    assert.equal(result.queued_state_after_release, "running", "queued work must resume after group disappearance");
     assert.equal(result.released_status, 202, "admission must recover after the process group disappears");
     assert.deepEqual(result.hold_after, {});
     assert.equal(result.expired_job_removed, true, "released holds must permit normal TTL cleanup");

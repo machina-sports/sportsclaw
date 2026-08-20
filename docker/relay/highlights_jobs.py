@@ -43,6 +43,7 @@ DEFAULT_WINDOW = {"preRollSec": 8, "postRollSec": 12, "maxCandidates": 5}
 SOURCE_COPY_CHUNK_BYTES = 1024 * 1024
 PROCESS_TERM_GRACE_SEC = 1.0
 PROCESS_KILL_TIMEOUT_SEC = 5.0
+ADMISSION_MARKER = ".admission.json"
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
@@ -444,6 +445,10 @@ class HighlightsJobManager:
         self._jobs = {}
         self._procs = {}
         self._tasks = {}
+        # Durable admission markers make an interrupted source snapshot
+        # recognizable after restart. This set protects admissions that still
+        # belong to this instance from concurrent reconciliation/cleanup.
+        self._admissions = set()
         # A failed group-disappearance check remains reserved even after the
         # public state becomes failed. This avoids releasing storage capacity
         # while an unconfirmed descendant may still be writing.
@@ -466,9 +471,13 @@ class HighlightsJobManager:
                 1 for job in self._jobs.values()
                 if job["state"] not in TERMINAL_STATES
             )
-            if active >= self.max_queue:
+            if active + len(self._capacity_holds) >= self.max_queue:
                 raise JobQueueFullError(
                     f"job queue is at capacity ({self.max_queue} in flight) — retry later"
+                )
+            if self._capacity_holds:
+                raise JobQueueFullError(
+                    "highlights worker capacity is held by an unconfirmed process group — retry later"
                 )
 
             source_descriptor, source_size = _open_source_beneath_root(
@@ -490,31 +499,42 @@ class HighlightsJobManager:
 
             job_id = secrets.token_urlsafe(16)
             job_dir = self._job_dir(job_id)
+            created_at = _now()
+            record = {
+                "job_id": job_id,
+                "state": "queued",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "worker_pid": None,
+                "error": None,
+            }
+            self._admissions.add(job_id)
             try:
                 os.makedirs(job_dir, mode=0o700)
+                _atomic_write_json(os.path.join(job_dir, ADMISSION_MARKER), {
+                    "job_id": job_id,
+                    "state": "admitting",
+                    "created_at": created_at,
+                })
                 snapshot_path = os.path.join(job_dir, "source.snapshot")
                 _copy_source_snapshot(source_descriptor, source_size, snapshot_path)
                 core_request["source"]["path"] = snapshot_path
                 core_request["outputDir"] = os.path.join(job_dir, "clips")
                 _atomic_write_json(os.path.join(job_dir, "request.json"), core_request)
+                self._jobs[job_id] = record
+                self._persist(record)
+                os.unlink(os.path.join(job_dir, ADMISSION_MARKER))
+                self._spawn_done[job_id] = asyncio.Event()
+                self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             except Exception:
+                self._jobs.pop(job_id, None)
+                self._tasks.pop(job_id, None)
+                self._spawn_done.pop(job_id, None)
                 shutil.rmtree(job_dir, ignore_errors=True)
                 raise
             finally:
+                self._admissions.discard(job_id)
                 os.close(source_descriptor)
-
-            record = {
-                "job_id": job_id,
-                "state": "queued",
-                "created_at": _now(),
-                "updated_at": _now(),
-                "worker_pid": None,
-                "error": None,
-            }
-            self._jobs[job_id] = record
-            self._persist(record)
-            self._spawn_done[job_id] = asyncio.Event()
-            self._tasks[job_id] = asyncio.create_task(self._run(job_id))
             return self._public(record)
 
     def get(self, job_id):
@@ -591,6 +611,7 @@ class HighlightsJobManager:
         skipped (never followed), and the resolved path must still be a
         direct child of the jobs root."""
         self._release_capacity_holds()
+        self._remove_incomplete_admissions()
         now = datetime.now(timezone.utc)
         for job_id, real in self._direct_job_dirs():
             record = self._jobs.get(job_id)
@@ -629,6 +650,28 @@ class HighlightsJobManager:
             if not _process_group_exists(group_id):
                 self._capacity_holds.pop(job_id, None)
 
+    def _remove_incomplete_admissions(self):
+        """Remove abandoned marked workspaces without following symlinks."""
+        for job_id, real in self._direct_job_dirs():
+            if job_id in self._admissions:
+                continue
+            marker_path = os.path.join(real, ADMISSION_MARKER)
+            try:
+                marker_stat = os.lstat(marker_path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(marker_stat.st_mode):
+                continue
+            # A completed job may retain its marker if the instance died
+            # between persisting job.json and unlinking the marker.
+            if os.path.lexists(os.path.join(real, "job.json")):
+                continue
+            shutil.rmtree(real, ignore_errors=True)
+            self._jobs.pop(job_id, None)
+            self._tasks.pop(job_id, None)
+            self._procs.pop(job_id, None)
+            self._spawn_done.pop(job_id, None)
+
     def _direct_job_dirs(self):
         """Yield validated direct child job directories without following links."""
         try:
@@ -654,9 +697,10 @@ class HighlightsJobManager:
         Keep their prior updated_at so normal TTL cleanup can immediately
         remove an already-expired orphan. Current-instance jobs are skipped.
         """
+        self._remove_incomplete_admissions()
         for job_id, real in self._direct_job_dirs():
             task = self._tasks.get(job_id)
-            if job_id in self._jobs or job_id in self._procs or (
+            if job_id in self._admissions or job_id in self._jobs or job_id in self._procs or (
                     task is not None and not task.done()):
                 continue
             path = os.path.join(real, "job.json")
@@ -755,6 +799,14 @@ class HighlightsJobManager:
 
     async def _run_inner(self, job_id):
         async with self._semaphore:
+            # A process group whose disappearance was not confirmed still owns
+            # worker capacity. Poll here so jobs queued before the hold formed
+            # cannot consume the newly released semaphore slot.
+            while self._jobs[job_id]["state"] == "queued":
+                self._release_capacity_holds()
+                if not self._capacity_holds:
+                    break
+                await asyncio.sleep(0.05)
             if self._jobs[job_id]["state"] != "queued":
                 return  # canceled while waiting for a slot
             self._set_state(job_id, "running")
