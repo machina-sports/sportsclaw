@@ -20,7 +20,19 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -37,6 +49,7 @@ const {
   DEFAULT_MAX_JOB_OUTPUT_BYTES,
   resolveMaxJobOutputBytes,
   extractSegment,
+  probeVideo,
 } = core;
 
 // ---------------------------------------------------------------------------
@@ -490,6 +503,7 @@ function ffprobeStreamTypes(file) {
 describe("highlight extraction (synthetic media)", () => {
   let workDir;
   let sourceVideo;
+  let matroskaVideo;
   let sparseKeyframeVideo;
   let longAudioVideo;
 
@@ -503,6 +517,12 @@ describe("highlight extraction (synthetic media)", () => {
       "-pix_fmt", "yuv420p", sourceVideo,
     ], { encoding: "utf-8" });
     assert.equal(gen.status, 0, `fixture generation failed: ${gen.stderr}`);
+
+    matroskaVideo = join(workDir, "synthetic-match.mkv");
+    const matroskaGen = spawnSync(FFMPEG, [
+      "-y", "-i", sourceVideo, "-t", "5", "-c", "copy", matroskaVideo,
+    ], { encoding: "utf-8" });
+    assert.equal(matroskaGen.status, 0, `Matroska fixture generation failed: ${matroskaGen.stderr}`);
 
     sparseKeyframeVideo = join(workDir, "synthetic-sparse-keyframes.mp4");
     const sparseGen = spawnSync(FFMPEG, [
@@ -562,6 +582,17 @@ describe("highlight extraction (synthetic media)", () => {
         `clip duration ${probed.duration}s must approximate window ${expected}s`
       );
     }
+  });
+
+  it("probes and extracts allowlisted Matroska media", async () => {
+    const evidence = await probeVideo(matroskaVideo);
+    assert.ok(Number(evidence.format.duration) > 4);
+    assert.match(String(evidence.format.format_name), /matroska|webm/);
+
+    const output = join(workDir, "matroska-output.mp4");
+    await extractSegment(matroskaVideo, output, 1, 2, 2_000_000);
+    assert.ok(existsSync(output));
+    assert.ok(Number(ffprobeJson(output).duration) > 1.5);
   });
 
   it("extracts the exact requested duration from sparse-keyframe media and preserves audio", async () => {
@@ -676,6 +707,89 @@ describe("highlight extraction (synthetic media)", () => {
       actions: [action({ actionId: "way-late", elapsedSec: 5000, label: "x", type: "x" })],
     });
     await assert.rejects(() => runHighlights(req), /no candidate windows/i);
+  });
+
+  it("rejects HLS before FFprobe or FFmpeg touches a referenced HTTP endpoint", async () => {
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "video/mp4" });
+      response.end(readFileSync(sourceVideo));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const playlist = join(workDir, "network-sentinel.m3u8");
+    writeFileSync(
+      playlist,
+      `#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXTINF:60,\nhttp://127.0.0.1:${address.port}/sentinel.mp4\n#EXT-X-ENDLIST\n`,
+      "utf-8"
+    );
+
+    try {
+      await assert.rejects(() => probeVideo(playlist), /protocol|format|playlist|invalid|ffprobe/i);
+      assert.equal(requests, 0, "FFprobe must not resolve an HLS segment URL");
+
+      await assert.rejects(
+        () => extractSegment(playlist, join(workDir, "hls-output.mp4"), 0, 1, 1_000_000),
+        /protocol|format|playlist|invalid|ffmpeg/i
+      );
+      assert.equal(requests, 0, "FFmpeg must not resolve an HLS segment URL");
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("rejects concat playlists before touching an outside-root file", async () => {
+    const outside = join(workDir, "..", `outside-sentinel-${process.pid}.mp4`);
+    const playlist = join(workDir, "outside.ffconcat");
+    copyFileSync(sourceVideo, outside);
+    const oldTime = new Date("2000-01-01T00:00:00.000Z");
+    utimesSync(outside, oldTime, oldTime);
+    writeFileSync(playlist, `ffconcat version 1.0\nfile '${outside}'\n`, "utf-8");
+    const originalAtime = statSync(outside).atimeMs;
+
+    try {
+      await assert.rejects(() => probeVideo(playlist), /protocol|format|playlist|concat|invalid|ffprobe/i);
+      assert.equal(
+        statSync(outside).atimeMs,
+        originalAtime,
+        "FFprobe must reject concat before opening the referenced outside-root file"
+      );
+
+      await assert.rejects(
+        () => extractSegment(playlist, join(workDir, "concat-output.mp4"), 0, 1, 1_000_000),
+        /protocol|format|playlist|concat|invalid|ffmpeg/i
+      );
+      assert.equal(
+        statSync(outside).atimeMs,
+        originalAtime,
+        "FFmpeg must reject concat before opening the referenced outside-root file"
+      );
+    } finally {
+      rmSync(outside, { force: true });
+    }
+  });
+});
+
+describe("FFmpeg input confinement contract", () => {
+  it("sets explicit protocol and demuxer allowlists for both FFprobe and FFmpeg", () => {
+    const source = readFileSync(join(repoRoot, "src/highlights/ffmpeg.ts"), "utf-8");
+    const protocolAllowlists = source.match(/["']-protocol_whitelist["']/g) ?? [];
+    const formatAllowlists = source.match(/["']-format_whitelist["']/g) ?? [];
+
+    assert.ok(protocolAllowlists.length >= 2, "FFprobe and FFmpeg must each set a protocol allowlist");
+    assert.ok(formatAllowlists.length >= 2, "FFprobe and FFmpeg must each set a demuxer allowlist");
+    assert.ok(!/ffmpeg\.ffprobe\s*\(/.test(source), "FFprobe must use a direct child process with safe argv");
+    const allowlistValues = [...source.matchAll(/const\s+\w+(?:PROTOCOL|FORMAT)_ALLOWLIST\s*=\s*["']([^"']+)["']/g)]
+      .map((match) => match[1].split(","))
+      .flat();
+    for (const forbidden of ["http", "https", "tcp", "udp", "data", "concat", "crypto", "hls"]) {
+      assert.ok(
+        !allowlistValues.includes(forbidden),
+        `${forbidden} must not be present in an input allowlist`
+      );
+    }
   });
 });
 

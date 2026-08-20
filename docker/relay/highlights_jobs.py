@@ -25,6 +25,8 @@ import re
 import secrets
 import shutil
 import signal
+import stat
+import time
 from datetime import datetime, timezone
 
 
@@ -38,6 +40,9 @@ SUPPORTED_CLOCK_SEMANTICS = "elapsed-ascending"
 MAX_ACTIONS = 500
 MAX_CANDIDATES_CEILING = 20
 DEFAULT_WINDOW = {"preRollSec": 8, "postRollSec": 12, "maxCandidates": 5}
+SOURCE_COPY_CHUNK_BYTES = 1024 * 1024
+PROCESS_TERM_GRACE_SEC = 1.0
+PROCESS_KILL_TIMEOUT_SEC = 5.0
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
@@ -164,6 +169,72 @@ def _resolve_source_path(source_path, media_root):
     return real
 
 
+def _open_source_no_follow(source_path):
+    """Open the validated source itself without following a replacement link."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        before = os.lstat(source_path)
+        if stat.S_ISLNK(before.st_mode):
+            raise JobValidationError("source_path must not be a symlink")
+        descriptor = os.open(source_path, flags)
+    except JobValidationError:
+        raise
+    except OSError as exc:
+        raise JobValidationError(
+            "source_path could not be opened as a regular non-symlink file"
+        ) from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise JobValidationError("source_path must be a regular file")
+        # O_NOFOLLOW is unavailable on some platforms. Comparing the opened
+        # object to the lstat result keeps that fallback fail-closed too.
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise JobValidationError("source_path changed while it was being opened")
+        return descriptor, opened.st_size
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _copy_source_snapshot(descriptor, source_size, destination):
+    """Copy exactly the admitted bytes from an open descriptor, then rename."""
+    temporary = f"{destination}.tmp"
+    output_descriptor = None
+    try:
+        output_descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        remaining = source_size
+        while remaining:
+            chunk = os.read(descriptor, min(SOURCE_COPY_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise JobValidationError("source_path changed while it was being snapshotted")
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output_descriptor, view)
+                view = view[written:]
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise JobValidationError("source_path changed while it was being snapshotted")
+        os.fsync(output_descriptor)
+        os.close(output_descriptor)
+        output_descriptor = None
+        os.replace(temporary, destination)
+    except Exception:
+        if output_descriptor is not None:
+            os.close(output_descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def validate_job_request(body, media_root):
     """Validate a POST /api/highlights/jobs body strictly and convert it to the
     camelCase HighlightsRequest the core consumes (outputDir added later)."""
@@ -283,6 +354,49 @@ def _signal_job_tree(proc, hard):
         pass
 
 
+def _process_group_exists(group_id):
+    if not _USE_PROCESS_GROUPS:
+        return False
+    try:
+        os.killpg(group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+
+
+async def _wait_for_job_tree_exit(proc, parent_wait, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        parent_done = parent_wait.done() or proc.returncode is not None
+        group_gone = not _process_group_exists(proc.pid)
+        if parent_done and group_gone:
+            await parent_wait
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def _shutdown_job_tree(proc):
+    """Bounded TERM→KILL shutdown, confirmed for parent and POSIX group."""
+    parent_wait = asyncio.ensure_future(proc.wait())
+    _signal_job_tree(proc, hard=False)
+    if await _wait_for_job_tree_exit(
+            proc, parent_wait, PROCESS_TERM_GRACE_SEC):
+        return True
+
+    _signal_job_tree(proc, hard=True)
+    if await _wait_for_job_tree_exit(
+            proc, parent_wait, PROCESS_KILL_TIMEOUT_SEC):
+        return True
+
+    # Keep the waiter attached to an unconfirmed process without producing an
+    # unhandled task exception if it eventually exits after the timeout.
+    parent_wait.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+    return False
+
+
 class HighlightsJobManager:
     def __init__(self, jobs_root, media_root, cmd_prefix,
                  max_concurrency=1, max_queue=8, job_timeout_sec=900, env=None,
@@ -307,6 +421,10 @@ class HighlightsJobManager:
         self._jobs = {}
         self._procs = {}
         self._tasks = {}
+        # A failed group-disappearance check remains reserved even after the
+        # public state becomes failed. This avoids releasing storage capacity
+        # while an unconfirmed descendant may still be writing.
+        self._capacity_holds = set()
         # Per-job "the spawn attempt is over" events: cancel() must never race
         # an in-flight create_subprocess_exec and leave the tree running.
         self._spawn_done = {}
@@ -330,24 +448,37 @@ class HighlightsJobManager:
                     f"job queue is at capacity ({self.max_queue} in flight) — retry later"
                 )
 
+            source_descriptor, source_size = _open_source_no_follow(
+                core_request["source"]["path"])
             # Reserve the full effective output budget for every accepted
             # non-terminal job. This intentionally double-counts bytes already
             # written by those jobs: admission stays conservative even while a
             # subprocess is growing its output between checks.
             projected_storage = (
                 self._storage_bytes()
-                + (active + 1) * self.max_job_output_bytes
+                + (active + len(self._capacity_holds) + 1) * self.max_job_output_bytes
+                + source_size
             )
             if projected_storage > self.max_storage_bytes:
+                os.close(source_descriptor)
                 raise JobStorageFullError(
                     "highlights storage capacity is fully used or reserved — retry later"
                 )
 
             job_id = secrets.token_urlsafe(16)
             job_dir = self._job_dir(job_id)
-            os.makedirs(job_dir, mode=0o700)
-            core_request["outputDir"] = os.path.join(job_dir, "clips")
-            _atomic_write_json(os.path.join(job_dir, "request.json"), core_request)
+            try:
+                os.makedirs(job_dir, mode=0o700)
+                snapshot_path = os.path.join(job_dir, "source.snapshot")
+                _copy_source_snapshot(source_descriptor, source_size, snapshot_path)
+                core_request["source"]["path"] = snapshot_path
+                core_request["outputDir"] = os.path.join(job_dir, "clips")
+                _atomic_write_json(os.path.join(job_dir, "request.json"), core_request)
+            except Exception:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                raise
+            finally:
+                os.close(source_descriptor)
 
             record = {
                 "job_id": job_id,
@@ -387,13 +518,15 @@ class HighlightsJobManager:
         if spawn_done is not None:
             await spawn_done.wait()
         proc = self._procs.get(job_id)
-        if proc is not None and proc.returncode is None:
-            _signal_job_tree(proc, hard=False)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                _signal_job_tree(proc, hard=True)
-                await proc.wait()
+        if proc is not None:
+            stopped = await _shutdown_job_tree(proc)
+            if not stopped:
+                self._capacity_holds.add(job_id)
+                self._set_state(
+                    job_id, "failed",
+                    error="cancellation failed to confirm process-group shutdown",
+                )
+                return self._public(self._jobs[job_id])
         self._set_state(job_id, "canceled", error="canceled by request")
         return self._public(self._jobs[job_id])
 
@@ -413,11 +546,14 @@ class HighlightsJobManager:
             raise JobError("job manifest is missing or unreadable")
         clips_dir = os.path.join(job_dir, "clips")
         _check_manifest_clips(manifest, clips_dir)
+        public_manifest = json.loads(json.dumps(manifest))
+        if isinstance(public_manifest.get("source"), dict):
+            public_manifest["source"].pop("path", None)
         return {
             "job_id": job_id,
             "state": record["state"],
             "clips_dir": clips_dir,
-            "manifest": manifest,
+            "manifest": public_manifest,
         }
 
     def cleanup(self):
@@ -445,6 +581,8 @@ class HighlightsJobManager:
                 continue  # e.g. canceled while queued — let the runner finish
             if job_id in self._procs:
                 continue
+            if job_id in self._capacity_holds:
+                continue
             updated_at = _parse_updated_at(record.get("updated_at"))
             if updated_at is None:
                 continue
@@ -455,6 +593,7 @@ class HighlightsJobManager:
             self._tasks.pop(job_id, None)
             self._procs.pop(job_id, None)
             self._spawn_done.pop(job_id, None)
+            self._capacity_holds.discard(job_id)
 
     # --- internals ----------------------------------------------------------
 
@@ -625,18 +764,28 @@ class HighlightsJobManager:
             if self._jobs[job_id]["state"] == "canceled":
                 # cancel() landed while the spawn was in flight — the process
                 # was born already-canceled, so kill its whole tree now.
-                _signal_job_tree(proc, hard=True)
-                await proc.wait()
+                stopped = await _shutdown_job_tree(proc)
+                if not stopped:
+                    self._capacity_holds.add(job_id)
+                    self._set_state(
+                        job_id, "failed",
+                        error="cancellation failed to confirm process-group shutdown",
+                    )
                 self._procs.pop(job_id, None)
                 return
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=self.job_timeout_sec)
             except asyncio.TimeoutError:
-                _signal_job_tree(proc, hard=True)
-                await proc.wait()
+                stopped = await _shutdown_job_tree(proc)
+                if not stopped:
+                    self._capacity_holds.add(job_id)
                 if self._jobs[job_id]["state"] != "canceled":
                     self._set_state(job_id, "failed",
-                                    error=f"job timed out after {self.job_timeout_sec}s")
+                                    error=(
+                                        f"job timed out after {self.job_timeout_sec}s"
+                                        if stopped else
+                                        "job timed out and process-group shutdown could not be confirmed"
+                                    ))
                 return
             finally:
                 self._procs.pop(job_id, None)

@@ -5,19 +5,87 @@
  * producing broadly playable social/highlight clips.
  */
 
-import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { open, rm } from "node:fs/promises";
+import { extname } from "node:path";
 import type { FfprobeData } from "fluent-ffmpeg";
 
-const require = createRequire(import.meta.url);
-const ffmpeg = require("fluent-ffmpeg") as typeof import("fluent-ffmpeg");
+const INPUT_PROTOCOL_ALLOWLIST = "file";
+const FFMPEG_PROTOCOL_ALLOWLIST = "file,pipe";
+const INPUT_FORMAT_ALLOWLIST = "mov,matroska,webm";
+const INDIRECT_EXTENSIONS = new Set([".m3u", ".m3u8", ".ffconcat"]);
+const MAX_PROBE_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-export function probeVideo(filePath: string): Promise<FfprobeData> {
+async function rejectIndirectInput(filePath: string): Promise<void> {
+  if (INDIRECT_EXTENSIONS.has(extname(filePath).toLowerCase())) {
+    throw new Error("Playlist and concat inputs are not supported");
+  }
+  const handle = await open(filePath, "r");
+  try {
+    const fileStat = await handle.stat();
+    if (!fileStat.isFile()) throw new Error("Input must be a regular video file");
+    const prefix = Buffer.alloc(Math.min(4096, fileStat.size));
+    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0);
+    const text = prefix.subarray(0, bytesRead).toString("utf8").trimStart();
+    if (/^(?:#EXTM3U|ffconcat\s+version\b)/i.test(text)) {
+      throw new Error("Playlist and concat inputs are not supported");
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function probeVideo(filePath: string): Promise<FfprobeData> {
+  await rejectIndirectInput(filePath);
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err: Error | null, data: FfprobeData) => {
-      if (err) return reject(err);
-      resolve(data);
+    const child = spawn(process.env.FFPROBE_PATH || "ffprobe", [
+      "-v", "error",
+      "-protocol_whitelist", INPUT_PROTOCOL_ALLOWLIST,
+      "-format_whitelist", INPUT_FORMAT_ALLOWLIST,
+      "-show_streams",
+      "-show_format",
+      "-of", "json",
+      filePath,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderr = "";
+    let outputExceeded = false;
+    child.stdout.on("data", (rawChunk: Buffer) => {
+      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_PROBE_OUTPUT_BYTES) {
+        outputExceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-16_384);
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (outputExceeded) {
+        reject(new Error(`FFprobe output exceeded ${MAX_PROBE_OUTPUT_BYTES} bytes`));
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(
+          `FFprobe exited with code ${String(code)}${signal ? ` (${signal})` : ""}: ${stderr.trim()}`,
+        ));
+        return;
+      }
+      try {
+        const data = JSON.parse(Buffer.concat(stdout).toString("utf8")) as FfprobeData;
+        if (data.format?.duration !== undefined) {
+          data.format.duration = Number(data.format.duration);
+        }
+        resolve(data);
+      } catch (err) {
+        reject(new Error(`FFprobe returned invalid JSON: ${String(err)}`));
+      }
     });
   });
 }
@@ -43,10 +111,13 @@ async function streamExtractSegment(
   durationSec: number,
   maxOutputBytes: number,
 ): Promise<void> {
+  await rejectIndirectInput(input);
   const handle = await open(output, "w");
   const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", [
     "-v", "error",
     "-ss", String(startSec),
+    "-protocol_whitelist", FFMPEG_PROTOCOL_ALLOWLIST,
+    "-format_whitelist", INPUT_FORMAT_ALLOWLIST,
     "-i", input,
     "-t", String(durationSec),
     "-map", "0:v:0",

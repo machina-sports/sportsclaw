@@ -44,7 +44,7 @@ const TEST_TOKEN = "test-highlights-token-0123456789";
 // cancellation/queue tests), "fail" exits nonzero.
 
 const FAKE_CLI = `
-import json, os, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
 
 argv_log = os.environ.get("FAKE_ARGV_LOG")
 if argv_log:
@@ -65,12 +65,26 @@ out_path = args[args.index("--output") + 1]
 
 mode = os.environ.get("FAKE_CLI_MODE", "success")
 
-if mode == "sleep":
+if mode in ("sleep", "stubborn_descendant"):
     # Mirror the real topology: relay -> Node CLI -> FFmpeg. The grandchild
     # must die with the job on cancel/timeout, not just this parent.
-    grandchild = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)"]
-    )
+    if mode == "stubborn_descendant":
+        ready_file = os.environ.get("FAKE_PID_FILE", "") + ".ready"
+        grandchild = subprocess.Popen([
+            sys.executable, "-c",
+            "import signal,sys,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "open(sys.argv[1], 'w').write('ready'); time.sleep(120)",
+            ready_file,
+        ])
+        deadline = time.monotonic() + 10
+        while not os.path.exists(ready_file) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    else:
+        grandchild = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"]
+        )
     pid_file = os.environ.get("FAKE_PID_FILE")
     if pid_file:
         with open(pid_file, "a") as handle:
@@ -93,7 +107,11 @@ clips = []
 for i, action in enumerate(request["actions"]):
     clip_path = os.path.join(request["outputDir"], f"clip_{i + 1}.mp4")
     with open(clip_path, "wb") as handle:
-        handle.write(b"synthetic-clip-bytes")
+        if mode == "echo_source":
+            with open(request["source"]["path"], "rb") as source:
+                handle.write(source.read())
+        else:
+            handle.write(b"synthetic-clip-bytes")
     clips.append({
         "actionId": action["actionId"],
         "provenance": action["provenance"],
@@ -413,6 +431,84 @@ async def scenario_cancel():
         "artifacts_status_after_cancel": arts.status,
         "cancel_idempotent_status": cancel_again.status,
         "cancel_idempotent_state": cancel_again.data.get("state"),
+    })
+
+
+async def scenario_source_snapshot():
+    app = relay_server.create_app()
+    media_source = os.path.realpath(os.path.join(
+        os.environ["HIGHLIGHTS_MEDIA_ROOT"], "match.mp4"))
+    original_bytes = open(media_source, "rb").read()
+    created = await create(app, body=valid_body())
+    job_id = created.data["job_id"]
+
+    # Acceptance must finish the immutable snapshot. Replacing the caller's
+    # pathname afterward cannot change what the queued worker reads.
+    with open(media_source, "wb") as handle:
+        handle.write(b"attacker-replacement")
+
+    final = await wait_state(app, job_id, ("succeeded", "failed", "canceled"))
+    arts = await artifacts(app, job_id)
+    job_dir = os.path.realpath(os.path.join(
+        os.environ["HIGHLIGHTS_JOBS_ROOT"], job_id))
+    with open(os.path.join(job_dir, "request.json")) as handle:
+        persisted_request = json.load(handle)
+    clip_path = arts.data["manifest"]["clips"][0]["file"]
+    with open(clip_path, "rb") as handle:
+        clip_bytes = handle.read()
+    public_body = json.dumps({"created": created.data, "artifacts": arts.data})
+    out({
+        "create_status": created.status,
+        "final_state": final.get("state"),
+        "clip_matches_original": clip_bytes == original_bytes,
+        "request_source": persisted_request["source"]["path"],
+        "job_dir": job_dir,
+        "caller_source": media_source,
+        "public_exposes_caller_source": media_source in public_body,
+        "public_exposes_snapshot": persisted_request["source"]["path"] in public_body,
+    })
+
+
+async def scenario_source_symlink_swap():
+    import highlights_jobs
+    app = relay_server.create_app()
+    media_source = os.path.join(os.environ["HIGHLIGHTS_MEDIA_ROOT"], "match.mp4")
+    outside = os.path.abspath(os.path.join(
+        os.environ["HIGHLIGHTS_MEDIA_ROOT"], os.pardir, "swap-outside.mp4"))
+    with open(outside, "wb") as handle:
+        handle.write(b"outside-sentinel")
+
+    real_validate = highlights_jobs.validate_job_request
+    def validate_then_swap(body, media_root):
+        request = real_validate(body, media_root)
+        os.unlink(media_source)
+        os.symlink(outside, media_source)
+        return request
+
+    highlights_jobs.validate_job_request = validate_then_swap
+    try:
+        response = await create(app, body=valid_body())
+    finally:
+        highlights_jobs.validate_job_request = real_validate
+    out({
+        "status": response.status,
+        "error": response.data.get("error", ""),
+        "workspace_count": len(os.listdir(os.environ["HIGHLIGHTS_JOBS_ROOT"])),
+        "outside_bytes": open(outside, "rb").read().decode(),
+        "body": json.dumps(response.data),
+    })
+
+
+async def scenario_source_snapshot_quota():
+    media_source = os.path.join(os.environ["HIGHLIGHTS_MEDIA_ROOT"], "match.mp4")
+    with open(media_source, "wb") as handle:
+        handle.write(b"s" * 1500)
+    app = relay_server.create_app()
+    response = await create(app, body=valid_body())
+    out({
+        "status": response.status,
+        "error": response.data.get("error", ""),
+        "workspace_count": len(os.listdir(os.environ["HIGHLIGHTS_JOBS_ROOT"])),
     })
 
 
@@ -795,6 +891,9 @@ async def scenario_job_budget():
     # The manager's per-job output budget must never exceed the global storage
     # quota, and the clamped value must reach the job subprocess environment.
     import highlights_jobs
+    # A zero-byte regular source isolates the output-budget clamp itself. Any
+    # nonzero source must additionally consume snapshot quota by contract.
+    open(os.path.join(os.environ["HIGHLIGHTS_MEDIA_ROOT"], "match.mp4"), "wb").close()
     app = relay_server.create_app()
     manager = app["highlights_manager"]
     created = await create(app, body=valid_body())
@@ -887,6 +986,9 @@ SCENARIOS = {
     "lifecycle": scenario_lifecycle,
     "orphan": scenario_orphan,
     "cancel": scenario_cancel,
+    "source_snapshot": scenario_source_snapshot,
+    "source_symlink_swap": scenario_source_symlink_swap,
+    "source_snapshot_quota": scenario_source_snapshot_quota,
     "cancel_during_spawn": scenario_cancel_during_spawn,
     "timeout": scenario_timeout,
     "traversal_ids": scenario_traversal_ids,
@@ -1143,6 +1245,49 @@ describe("relay highlights job lifecycle", () => {
     assert.equal(result.cancel_idempotent_state, "canceled");
   });
 
+  it("does not mark cancellation terminal until a SIGTERM-resistant descendant is gone", () => {
+    const roots = freshRoots("cancel-stubborn");
+    const pidFile = join(workDir, "cancel-stubborn.pid");
+    const result = runScenario("cancel", {
+      ...roots,
+      env: { FAKE_CLI_MODE: "stubborn_descendant", FAKE_PID_FILE: pidFile },
+    });
+
+    assert.equal(result.cancel_status, 200);
+    assert.equal(result.final_state, "canceled");
+    assert.equal(result.pid_recorded, true);
+    assert.equal(result.pid_alive, false, "the parent must be gone before cancel returns terminal");
+    assert.equal(
+      result.grandchild_alive,
+      false,
+      "a descendant that ignores SIGTERM must be SIGKILLed before cancel returns terminal"
+    );
+  });
+
+  it("snapshots source bytes before acceptance and never passes the caller pathname to the core", () => {
+    const result = runScenario("source_snapshot", {
+      ...freshRoots("source-snapshot"),
+      env: { FAKE_CLI_MODE: "echo_source" },
+    });
+
+    assert.equal(result.create_status, 202);
+    assert.equal(result.final_state, "succeeded");
+    assert.equal(result.clip_matches_original, true);
+    assert.ok(result.request_source.startsWith(`${result.job_dir}/`));
+    assert.notEqual(result.request_source, result.caller_source);
+    assert.equal(result.public_exposes_caller_source, false);
+    assert.equal(result.public_exposes_snapshot, false);
+  });
+
+  it("fails closed when the validated source is swapped to a symlink before snapshot open", () => {
+    const result = runScenario("source_symlink_swap", freshRoots("source-symlink-swap"));
+
+    assert.equal(result.status, 400, result.body);
+    assert.match(result.error, /source|symlink|regular/i);
+    assert.equal(result.workspace_count, 0, "a failed snapshot must leave no job workspace");
+    assert.equal(result.outside_bytes, "outside-sentinel");
+  });
+
   it("cancellation during a stalled spawn still kills the whole process tree", () => {
     const roots = freshRoots("cancel-spawn");
     const pidFile = join(workDir, "cancel-spawn.pid");
@@ -1259,7 +1404,10 @@ describe("relay highlights retention", () => {
     const roots = freshRoots("retention-quota");
     const result = runScenario("retention_quota", {
       ...roots,
-      env: { HIGHLIGHTS_MAX_STORAGE_BYTES: "1000" },
+      env: {
+        HIGHLIGHTS_MAX_STORAGE_BYTES: "1000",
+        HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES: "500",
+      },
     });
 
     assert.equal(result.over_status, 507, `over-quota create must 507, got ${result.over_status}: ${result.over_body}`);
@@ -1334,6 +1482,20 @@ describe("relay highlights retention", () => {
     assert.deepEqual(result.statuses, [202, 507], JSON.stringify(result));
     assert.equal(result.workspace_count, 1, "a rejected admission must not create a workspace");
     assert.ok(result.errors.some((error) => /storage|capacity|quota|reserved/i.test(error)));
+  });
+
+  it("includes immutable source snapshot bytes in storage admission", () => {
+    const result = runScenario("source_snapshot_quota", {
+      ...freshRoots("source-snapshot-quota"),
+      env: {
+        HIGHLIGHTS_MAX_STORAGE_BYTES: "4000",
+        HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES: "3000",
+      },
+    });
+
+    assert.equal(result.status, 507);
+    assert.match(result.error, /storage|quota|capacity|reserved/i);
+    assert.equal(result.workspace_count, 0, "quota refusal must happen before retaining a workspace");
   });
 
   it("reconciles restart orphans at startup before TTL cleanup without touching terminal or live jobs", () => {
