@@ -16,6 +16,7 @@ test("tracked public files do not expose restricted links or local paths", () =>
     .toString("utf8").split("\0").filter(Boolean);
   const violations = [];
   for (const file of files) {
+    if (file === "test/public-surface-sanitization.test.mjs") continue;
     let text;
     try { text = readFileSync(file, "utf8"); } catch { continue; }
     for (const pattern of forbidden) {
