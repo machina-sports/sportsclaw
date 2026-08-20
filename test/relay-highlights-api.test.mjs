@@ -499,6 +499,50 @@ async def scenario_source_symlink_swap():
     })
 
 
+async def scenario_source_ancestor_symlink_swap():
+    import datetime
+    import highlights_jobs
+    app = relay_server.create_app()
+    media_root = os.environ["HIGHLIGHTS_MEDIA_ROOT"]
+    ancestor = os.path.join(media_root, "league")
+    displaced = os.path.join(media_root, "league-original")
+    outside_dir = os.path.abspath(os.path.join(media_root, os.pardir, "ancestor-outside"))
+    os.makedirs(ancestor)
+    os.makedirs(outside_dir)
+    with open(os.path.join(ancestor, "match.mp4"), "wb") as handle:
+        handle.write(b"inside-source")
+    outside = os.path.join(outside_dir, "match.mp4")
+    with open(outside, "wb") as handle:
+        handle.write(b"outside-sentinel")
+    old_time = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc).timestamp()
+    os.utime(outside, (old_time, old_time))
+    original_atime = os.stat(outside).st_atime_ns
+
+    real_validate = highlights_jobs.validate_job_request
+    def validate_then_swap(body, media_root_arg):
+        request = real_validate(body, media_root_arg)
+        os.rename(ancestor, displaced)
+        os.symlink(outside_dir, ancestor)
+        return request
+
+    highlights_jobs.validate_job_request = validate_then_swap
+    try:
+        response = await create(app, body=valid_body(source_path="league/match.mp4"))
+    finally:
+        highlights_jobs.validate_job_request = real_validate
+    outside_atime_unchanged = os.stat(outside).st_atime_ns == original_atime
+    with open(outside, "rb") as handle:
+        outside_bytes = handle.read().decode()
+    out({
+        "status": response.status,
+        "error": response.data.get("error", ""),
+        "workspace_count": len(os.listdir(os.environ["HIGHLIGHTS_JOBS_ROOT"])),
+        "outside_bytes": outside_bytes,
+        "outside_atime_unchanged": outside_atime_unchanged,
+        "body": json.dumps(response.data),
+    })
+
+
 async def scenario_source_snapshot_quota():
     media_source = os.path.join(os.environ["HIGHLIGHTS_MEDIA_ROOT"], "match.mp4")
     with open(media_source, "wb") as handle:
@@ -980,6 +1024,73 @@ async def scenario_startup_reconciliation():
     })
 
 
+async def scenario_capacity_hold_recovery():
+    import datetime
+    import highlights_jobs
+    import signal
+    app = relay_server.create_app()
+    manager = app["highlights_manager"]
+    created = await create(app, body=valid_body())
+    job_id = created.data["job_id"]
+    await wait_state(app, job_id, ("running",))
+
+    real_shutdown = highlights_jobs._shutdown_job_tree
+    real_group_exists = highlights_jobs._process_group_exists
+    group_reported_alive = True
+
+    async def failed_shutdown(proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return False
+
+    def simulated_group_exists(_group_id):
+        return group_reported_alive
+
+    highlights_jobs._shutdown_job_tree = failed_shutdown
+    highlights_jobs._process_group_exists = simulated_group_exists
+    try:
+        canceled = await cancel(app, job_id)
+        manager._jobs[job_id]["updated_at"] = "2020-01-01T00:00:00+00:00"
+        manager._persist(manager._jobs[job_id])
+        blocked = await create(app, body=valid_body())
+        hold_before = dict(manager._capacity_holds)
+        # Simulate the formerly-unconfirmed group finally disappearing: stop the
+        # real fake process tree, let the runner settle, then make the group
+        # existence probe report ESRCH for cleanup/admission.
+        proc = manager._procs.get(job_id)
+        if proc is not None:
+            await real_shutdown(proc)
+        task = manager._tasks.get(job_id)
+        if task is not None:
+            await task
+        group_reported_alive = False
+        released = await create(app, body=valid_body())
+        hold_after = dict(manager._capacity_holds)
+    finally:
+        highlights_jobs._shutdown_job_tree = real_shutdown
+        highlights_jobs._process_group_exists = real_group_exists
+
+    released_id = released.data.get("job_id")
+    expired_job_removed = not os.path.exists(os.path.join(
+        os.environ["HIGHLIGHTS_JOBS_ROOT"], job_id))
+    if released_id:
+        await cancel(app, released_id)
+        await wait_state(app, released_id, ("succeeded", "failed", "canceled"))
+    out({
+        "cancel_status": canceled.status,
+        "failed_state": canceled.data.get("state"),
+        "blocked_status": blocked.status,
+        "blocked_error": blocked.data.get("error", ""),
+        "released_status": released.status,
+        "hold_before": hold_before,
+        "hold_after": hold_after,
+        "expired_job_removed": expired_job_removed,
+    })
+
+
 SCENARIOS = {
     "routes": scenario_routes,
     "validation": scenario_validation,
@@ -988,6 +1099,7 @@ SCENARIOS = {
     "cancel": scenario_cancel,
     "source_snapshot": scenario_source_snapshot,
     "source_symlink_swap": scenario_source_symlink_swap,
+    "source_ancestor_symlink_swap": scenario_source_ancestor_symlink_swap,
     "source_snapshot_quota": scenario_source_snapshot_quota,
     "cancel_during_spawn": scenario_cancel_during_spawn,
     "timeout": scenario_timeout,
@@ -1003,6 +1115,7 @@ SCENARIOS = {
     "job_budget_default": scenario_job_budget_default,
     "concurrent_storage_admission": scenario_concurrent_storage_admission,
     "startup_reconciliation": scenario_startup_reconciliation,
+    "capacity_hold_recovery": scenario_capacity_hold_recovery,
 }
 
 asyncio.run(SCENARIOS[sys.argv[2]]())
@@ -1288,6 +1401,16 @@ describe("relay highlights job lifecycle", () => {
     assert.equal(result.outside_bytes, "outside-sentinel");
   });
 
+  it("fails closed when an ancestor is swapped to an outside symlink before descriptor traversal", () => {
+    const result = runScenario("source_ancestor_symlink_swap", freshRoots("source-ancestor-symlink-swap"));
+
+    assert.equal(result.status, 400, result.body);
+    assert.match(result.error, /source|symlink|directory|regular/i);
+    assert.equal(result.workspace_count, 0, "a failed descriptor traversal must leave no workspace");
+    assert.equal(result.outside_bytes, "outside-sentinel");
+    assert.equal(result.outside_atime_unchanged, true, "the outside sentinel must never be opened or read");
+  });
+
   it("cancellation during a stalled spawn still kills the whole process tree", () => {
     const roots = freshRoots("cancel-spawn");
     const pidFile = join(workDir, "cancel-spawn.pid");
@@ -1496,6 +1619,27 @@ describe("relay highlights retention", () => {
     assert.equal(result.status, 507);
     assert.match(result.error, /storage|quota|capacity|reserved/i);
     assert.equal(result.workspace_count, 0, "quota refusal must happen before retaining a workspace");
+  });
+
+  it("holds capacity after unconfirmed shutdown, then releases it when the process group disappears", () => {
+    const result = runScenario("capacity_hold_recovery", {
+      ...freshRoots("capacity-hold-recovery"),
+      env: {
+        FAKE_CLI_MODE: "sleep",
+        HIGHLIGHTS_JOB_TTL_SEC: "0",
+        HIGHLIGHTS_MAX_STORAGE_BYTES: "7000",
+        HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES: "3000",
+      },
+    });
+
+    assert.equal(result.cancel_status, 200);
+    assert.equal(result.failed_state, "failed");
+    assert.equal(result.blocked_status, 507, JSON.stringify(result));
+    assert.match(result.blocked_error, /storage|capacity|reserved/i);
+    assert.ok(Object.keys(result.hold_before).length > 0, "hold must retain job and process-group identity");
+    assert.equal(result.released_status, 202, "admission must recover after the process group disappears");
+    assert.deepEqual(result.hold_after, {});
+    assert.equal(result.expired_job_removed, true, "released holds must permit normal TTL cleanup");
   });
 
   it("reconciles restart orphans at startup before TTL cleanup without touching terminal or live jobs", () => {

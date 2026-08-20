@@ -23,6 +23,7 @@ import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -504,6 +505,8 @@ describe("highlight extraction (synthetic media)", () => {
   let workDir;
   let sourceVideo;
   let matroskaVideo;
+  let aviVideo;
+  let mpegTsVideo;
   let sparseKeyframeVideo;
   let longAudioVideo;
 
@@ -523,6 +526,18 @@ describe("highlight extraction (synthetic media)", () => {
       "-y", "-i", sourceVideo, "-t", "5", "-c", "copy", matroskaVideo,
     ], { encoding: "utf-8" });
     assert.equal(matroskaGen.status, 0, `Matroska fixture generation failed: ${matroskaGen.stderr}`);
+
+    aviVideo = join(workDir, "synthetic-match.avi");
+    const aviGen = spawnSync(FFMPEG, [
+      "-y", "-i", sourceVideo, "-t", "5", "-c:v", "mpeg4", "-an", aviVideo,
+    ], { encoding: "utf-8" });
+    assert.equal(aviGen.status, 0, `AVI fixture generation failed: ${aviGen.stderr}`);
+
+    mpegTsVideo = join(workDir, "synthetic-match.ts");
+    const mpegTsGen = spawnSync(FFMPEG, [
+      "-y", "-i", sourceVideo, "-t", "5", "-c:v", "mpeg2video", "-an", "-f", "mpegts", mpegTsVideo,
+    ], { encoding: "utf-8" });
+    assert.equal(mpegTsGen.status, 0, `MPEG-TS fixture generation failed: ${mpegTsGen.stderr}`);
 
     sparseKeyframeVideo = join(workDir, "synthetic-sparse-keyframes.mp4");
     const sparseGen = spawnSync(FFMPEG, [
@@ -593,6 +608,62 @@ describe("highlight extraction (synthetic media)", () => {
     await extractSegment(matroskaVideo, output, 1, 2, 2_000_000);
     assert.ok(existsSync(output));
     assert.ok(Number(ffprobeJson(output).duration) > 1.5);
+  });
+
+  it("probes and extracts a real synthetic AVI direct file", async () => {
+    const evidence = await probeVideo(aviVideo);
+    assert.ok(Number(evidence.format.duration) > 4);
+    assert.match(String(evidence.format.format_name), /avi/);
+
+    const output = join(workDir, "avi-output.mp4");
+    await extractSegment(aviVideo, output, 1, 2, 2_000_000);
+    assert.ok(Number(ffprobeJson(output).duration) > 1.5);
+  });
+
+  it("probes and extracts a real synthetic MPEG-TS direct file", async () => {
+    const evidence = await probeVideo(mpegTsVideo);
+    assert.ok(Number(evidence.format.duration) > 4);
+    assert.match(String(evidence.format.format_name), /mpegts/);
+
+    const output = join(workDir, "mpegts-output.mp4");
+    await extractSegment(mpegTsVideo, output, 1, 2, 2_000_000);
+    assert.ok(Number(ffprobeJson(output).duration) > 1.5);
+  });
+
+  it("rejects a generated clip path that is the source without truncating or deleting it", async () => {
+    const outputDir = join(workDir, "source-collision");
+    mkdirSync(outputDir, { recursive: true });
+    const collidingSource = join(outputDir, "clip_01_a1.mp4");
+    copyFileSync(sourceVideo, collidingSource);
+    const original = readFileSync(collidingSource);
+
+    await assert.rejects(
+      () => runHighlights(validRequest({
+        source: { kind: "local-file", path: collidingSource },
+        outputDir,
+      })),
+      /source|collision|target/i
+    );
+    assert.deepEqual(readFileSync(collidingSource), original);
+  });
+
+  it("rejects a generated target symlink without touching its outside target", async () => {
+    const outputDir = join(workDir, "output-symlink-collision");
+    mkdirSync(outputDir, { recursive: true });
+    const outside = join(workDir, "output-symlink-sentinel.txt");
+    writeFileSync(outside, "outside-sentinel", "utf-8");
+    const generatedTarget = join(outputDir, "clip_01_a1.mp4");
+    symlinkSync(outside, generatedTarget);
+
+    await assert.rejects(
+      () => runHighlights(validRequest({
+        source: { kind: "local-file", path: sourceVideo },
+        outputDir,
+      })),
+      /symlink|target|output/i
+    );
+    assert.equal(readFileSync(outside, "utf-8"), "outside-sentinel");
+    assert.equal(statSync(outside).isFile(), true);
   });
 
   it("extracts the exact requested duration from sparse-keyframe media and preserves audio", async () => {

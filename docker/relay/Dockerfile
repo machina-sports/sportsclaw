@@ -34,7 +34,7 @@ FROM node:20-slim AS base
 # --- System dependencies -----------------------------------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv curl ffmpeg && \
+        python3 python3-pip python3-venv curl ffmpeg tini && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -108,5 +108,5 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8080
 
-ENTRYPOINT ["/opt/sportsclaw/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/sportsclaw/entrypoint.sh"]
 CMD ["relay"]

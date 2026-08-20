@@ -145,61 +145,84 @@ def _validate_action(value, field):
     return action
 
 
-def _resolve_source_path(source_path, media_root):
-    """Resolve a request path against the allowlisted media root, rejecting
-    traversal, arbitrary host paths, symlink escapes, and non-regular files."""
+def _source_components(source_path, media_root):
+    """Normalize an accepted source to relative components under media_root."""
     if "\x00" in source_path:
         raise JobValidationError("source_path contains an invalid character")
-    candidate = source_path if os.path.isabs(source_path) else os.path.join(media_root, source_path)
-    media_real = os.path.realpath(media_root)
-    # Reject any symlink in the requested path. This removes the TOCTOU class
-    # where an allowed symlink target can be swapped after validation.
-    current = os.path.abspath(candidate)
-    while current != media_real and current.startswith(media_real + os.sep):
-        if os.path.islink(current):
-            raise JobValidationError("source_path must not contain symlinks")
-        current = os.path.dirname(current)
-    real = os.path.realpath(candidate)
-    if real != media_real and os.path.commonpath([real, media_real]) != media_real:
+    raw_parts = source_path.split(os.sep)
+    is_absolute = os.path.isabs(source_path)
+    if any(part == ".." for part in raw_parts) or any(
+            part == "" and not (is_absolute and index == 0)
+            for index, part in enumerate(raw_parts)):
+        raise JobValidationError(
+            "source_path must resolve under the allowlisted media root")
+    media_absolute = os.path.abspath(media_root)
+    if is_absolute:
+        candidate = os.path.abspath(source_path)
+        try:
+            contained = os.path.commonpath([candidate, media_absolute]) == media_absolute
+        except ValueError:
+            contained = False
+        if not contained:
+            raise JobValidationError(
+                "source_path must resolve under the allowlisted media root")
+        relative_path = os.path.relpath(candidate, media_absolute)
+    else:
+        relative_path = os.path.normpath(source_path)
+    components = relative_path.split(os.sep)
+    if not components or any(part in {"", ".", ".."} for part in components):
         raise JobValidationError(
             "source_path must resolve under the allowlisted media root"
         )
-    if not os.path.isfile(real) or os.path.islink(candidate):
-        raise JobValidationError("source_path does not exist as a regular non-symlink file under the media root")
-    return real
+    return components
 
 
-def _open_source_no_follow(source_path):
-    """Open the validated source itself without following a replacement link."""
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        before = os.lstat(source_path)
-        if stat.S_ISLNK(before.st_mode):
-            raise JobValidationError("source_path must not be a symlink")
-        descriptor = os.open(source_path, flags)
-    except JobValidationError:
-        raise
-    except OSError as exc:
+def _open_source_beneath_root(media_root, components):
+    """Open a source through no-follow descriptor-relative POSIX traversal."""
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    if (os.name != "posix" or os.open not in getattr(os, "supports_dir_fd", set())
+            or any(not hasattr(os, name) for name in required_flags)):
         raise JobValidationError(
-            "source_path could not be opened as a regular non-symlink file"
-        ) from exc
-
+            "secure descriptor-relative source traversal is unavailable")
+    common_flags = getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    current_descriptor = None
+    final_descriptor = None
     try:
-        opened = os.fstat(descriptor)
+        current_descriptor = os.open(
+            media_root, os.O_RDONLY | os.O_DIRECTORY | common_flags)
+        if not stat.S_ISDIR(os.fstat(current_descriptor).st_mode):
+            raise JobValidationError("media root must be a directory")
+        for component in components[:-1]:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | common_flags,
+                dir_fd=current_descriptor,
+            )
+            if not stat.S_ISDIR(os.fstat(next_descriptor).st_mode):
+                os.close(next_descriptor)
+                raise JobValidationError("source_path ancestor must be a directory")
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        final_descriptor = os.open(
+            components[-1], os.O_RDONLY | common_flags,
+            dir_fd=current_descriptor,
+        )
+        opened = os.fstat(final_descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise JobValidationError("source_path must be a regular file")
-        # O_NOFOLLOW is unavailable on some platforms. Comparing the opened
-        # object to the lstat result keeps that fallback fail-closed too.
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
-            raise JobValidationError("source_path changed while it was being opened")
+        descriptor = final_descriptor
+        final_descriptor = None
         return descriptor, opened.st_size
-    except Exception:
-        os.close(descriptor)
+    except JobValidationError:
         raise
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise JobValidationError(
+            "source_path could not be securely opened under the media root") from exc
+    finally:
+        if final_descriptor is not None:
+            os.close(final_descriptor)
+        if current_descriptor is not None:
+            os.close(current_descriptor)
 
 
 def _copy_source_snapshot(descriptor, source_size, destination):
@@ -247,7 +270,7 @@ def validate_job_request(body, media_root):
     )
 
     source_path = _require_str(body["source_path"], "source_path")
-    real_source = _resolve_source_path(source_path, media_root)
+    source_components = _source_components(source_path, media_root)
 
     event = _require_dict(body["event"], "event",
                           allowed=("provider", "sport", "event_id"),
@@ -297,7 +320,7 @@ def validate_job_request(body, media_root):
             "licenseRef": _require_str(rights["license_ref"], "rights.license_ref"),
             "clearedForClipping": True,
         },
-        "source": {"kind": "local-file", "path": real_source},
+        "source": {"kind": "local-file", "path": os.path.join(*source_components)},
         "event": {
             "provider": _require_str(event["provider"], "event.provider"),
             "sport": _require_str(event["sport"], "event.sport"),
@@ -424,7 +447,7 @@ class HighlightsJobManager:
         # A failed group-disappearance check remains reserved even after the
         # public state becomes failed. This avoids releasing storage capacity
         # while an unconfirmed descendant may still be writing.
-        self._capacity_holds = set()
+        self._capacity_holds = {}
         # Per-job "the spawn attempt is over" events: cancel() must never race
         # an in-flight create_subprocess_exec and leave the tree running.
         self._spawn_done = {}
@@ -448,8 +471,8 @@ class HighlightsJobManager:
                     f"job queue is at capacity ({self.max_queue} in flight) — retry later"
                 )
 
-            source_descriptor, source_size = _open_source_no_follow(
-                core_request["source"]["path"])
+            source_descriptor, source_size = _open_source_beneath_root(
+                self.media_root, core_request["source"]["path"].split(os.sep))
             # Reserve the full effective output budget for every accepted
             # non-terminal job. This intentionally double-counts bytes already
             # written by those jobs: admission stays conservative even while a
@@ -521,12 +544,14 @@ class HighlightsJobManager:
         if proc is not None:
             stopped = await _shutdown_job_tree(proc)
             if not stopped:
-                self._capacity_holds.add(job_id)
+                self._capacity_holds[job_id] = proc.pid
                 self._set_state(
                     job_id, "failed",
                     error="cancellation failed to confirm process-group shutdown",
                 )
+                self._procs.pop(job_id, None)
                 return self._public(self._jobs[job_id])
+            self._procs.pop(job_id, None)
         self._set_state(job_id, "canceled", error="canceled by request")
         return self._public(self._jobs[job_id])
 
@@ -565,6 +590,7 @@ class HighlightsJobManager:
         entries are matched against the job-ID grammar, symlinked entries are
         skipped (never followed), and the resolved path must still be a
         direct child of the jobs root."""
+        self._release_capacity_holds()
         now = datetime.now(timezone.utc)
         for job_id, real in self._direct_job_dirs():
             record = self._jobs.get(job_id)
@@ -593,9 +619,15 @@ class HighlightsJobManager:
             self._tasks.pop(job_id, None)
             self._procs.pop(job_id, None)
             self._spawn_done.pop(job_id, None)
-            self._capacity_holds.discard(job_id)
+            self._capacity_holds.pop(job_id, None)
 
     # --- internals ----------------------------------------------------------
+
+    def _release_capacity_holds(self):
+        """Release reservations only after their exact process group is gone."""
+        for job_id, group_id in list(self._capacity_holds.items()):
+            if not _process_group_exists(group_id):
+                self._capacity_holds.pop(job_id, None)
 
     def _direct_job_dirs(self):
         """Yield validated direct child job directories without following links."""
@@ -766,7 +798,7 @@ class HighlightsJobManager:
                 # was born already-canceled, so kill its whole tree now.
                 stopped = await _shutdown_job_tree(proc)
                 if not stopped:
-                    self._capacity_holds.add(job_id)
+                    self._capacity_holds[job_id] = proc.pid
                     self._set_state(
                         job_id, "failed",
                         error="cancellation failed to confirm process-group shutdown",
@@ -778,7 +810,7 @@ class HighlightsJobManager:
             except asyncio.TimeoutError:
                 stopped = await _shutdown_job_tree(proc)
                 if not stopped:
-                    self._capacity_holds.add(job_id)
+                    self._capacity_holds[job_id] = proc.pid
                 if self._jobs[job_id]["state"] != "canceled":
                     self._set_state(job_id, "failed",
                                     error=(

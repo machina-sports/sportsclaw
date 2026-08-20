@@ -5,7 +5,7 @@
  * clip) fails closed with a descriptive error.
  */
 
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { extractSegment, probeVideo } from "./ffmpeg.js";
 import { DEFAULT_WINDOW_POLICY, parseHighlightsRequest, planCandidateWindows } from "./plan.js";
@@ -39,6 +39,15 @@ export function resolveMaxJobOutputBytes(raw: string | undefined): number {
 
 function safeFileName(actionId: string): string {
   return actionId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64);
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function probeEvidence(file: string, what: string): Promise<FfprobeEvidence> {
@@ -95,13 +104,38 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
   }
 
   const budgetBytes = resolveMaxJobOutputBytes(process.env.HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES);
+  const plannedFiles = windows.map((window, index) => join(
+    req.outputDir,
+    `clip_${String(index + 1).padStart(2, "0")}_${safeFileName(window.actionId)}.mp4`,
+  ));
+  for (const file of plannedFiles) {
+    const targetExists = pathEntryExists(file);
+    const targetStat = targetExists ? lstatSync(file) : undefined;
+    if (targetStat?.isSymbolicLink() || (targetStat && !targetStat.isFile())) {
+      throw new HighlightsRunError(`Generated clip target must be a new regular file, not a symlink or special file: ${file}`);
+    }
+    const target = targetExists ? realpathSync(file) : resolve(file);
+    if (target === sourceReal) {
+      throw new HighlightsRunError(`Generated clip target resolves to the source file: ${file}`);
+    }
+    if (targetExists) {
+      throw new HighlightsRunError(`Generated clip target already exists and will not be overwritten: ${file}`);
+    }
+  }
   mkdirSync(req.outputDir, { recursive: true });
 
   let writtenBytes = 0;
   const clips: ClipArtifact[] = [];
-  const removePartialOutputs = (currentFile?: string) => {
-    for (const partial of [...clips.map((clip) => clip.file), ...(currentFile ? [currentFile] : [])]) {
-      rmSync(partial, { force: true });
+  const createdFiles = new Set<string>();
+  const removePartialOutputs = () => {
+    for (const partial of createdFiles) {
+      try {
+        if (existsSync(partial) && realpathSync(partial) !== sourceReal) {
+          rmSync(partial, { force: true });
+        }
+      } catch {
+        // The path changed after creation; fail closed without deleting it.
+      }
     }
   };
   for (let i = 0; i < windows.length; i++) {
@@ -115,10 +149,7 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
         "(HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES) — partial clips were removed"
       );
     }
-    const file = join(
-      req.outputDir,
-      `clip_${String(i + 1).padStart(2, "0")}_${safeFileName(w.actionId)}.mp4`
-    );
+    const file = plannedFiles[i];
     try {
       await extractSegment(
         req.source.path,
@@ -127,17 +158,23 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
         requestedDurationSec,
         remainingBudgetBytes
       );
+      createdFiles.add(file);
     } catch (err) {
-      removePartialOutputs(file);
+      removePartialOutputs();
       throw new HighlightsRunError(
         `FFmpeg extraction failed for action ${w.actionId} — is FFmpeg installed? ${String(err)}`
       );
     }
     // Check actual cumulative bytes after every clip; a breach removes
     // everything written so far rather than leaving partial output behind.
-    writtenBytes += statSync(file).size;
+    const outputStat = lstatSync(file);
+    if (outputStat.isSymbolicLink() || !outputStat.isFile()) {
+      removePartialOutputs();
+      throw new HighlightsRunError(`Generated clip target changed during extraction: ${file}`);
+    }
+    writtenBytes += outputStat.size;
     if (writtenBytes > budgetBytes) {
-      removePartialOutputs(file);
+      removePartialOutputs();
       throw new HighlightsRunError(
         `Generated output (${writtenBytes} bytes after ${i + 1} clip(s)) exceeded the per-job ` +
         `output budget of ${budgetBytes} bytes (HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES) — ` +
@@ -148,17 +185,17 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     try {
       ffprobe = await probeEvidence(file, `clip for action ${w.actionId}`);
     } catch (err) {
-      removePartialOutputs(file);
+      removePartialOutputs();
       throw err;
     }
     if (ffprobe.videoDurationSec === undefined) {
-      removePartialOutputs(file);
+      removePartialOutputs();
       throw new HighlightsRunError(
         `FFprobe reported no usable video duration for action ${w.actionId} — partial clips were removed`,
       );
     }
     if (Math.abs(ffprobe.videoDurationSec - requestedDurationSec) > CLIP_DURATION_TOLERANCE_SEC) {
-      removePartialOutputs(file);
+      removePartialOutputs();
       throw new HighlightsRunError(
         `FFmpeg produced a ${ffprobe.videoDurationSec}s video duration for action ${w.actionId}, outside the allowed ` +
         `±${CLIP_DURATION_TOLERANCE_SEC}s tolerance for the ${requestedDurationSec}s request ` +

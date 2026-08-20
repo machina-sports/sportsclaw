@@ -6,13 +6,14 @@
  */
 
 import { spawn } from "node:child_process";
+import { constants } from "node:fs";
 import { open, rm } from "node:fs/promises";
 import { extname } from "node:path";
 import type { FfprobeData } from "fluent-ffmpeg";
 
 const INPUT_PROTOCOL_ALLOWLIST = "file";
 const FFMPEG_PROTOCOL_ALLOWLIST = "file,pipe";
-const INPUT_FORMAT_ALLOWLIST = "mov,matroska,webm";
+const INPUT_FORMAT_ALLOWLIST = "mov,matroska,webm,avi,mpegts";
 const INDIRECT_EXTENSIONS = new Set([".m3u", ".m3u8", ".ffconcat"]);
 const MAX_PROBE_OUTPUT_BYTES = 16 * 1024 * 1024;
 
@@ -112,7 +113,9 @@ async function streamExtractSegment(
   maxOutputBytes: number,
 ): Promise<void> {
   await rejectIndirectInput(input);
-  const handle = await open(output, "w");
+  const outputFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+    (constants.O_NOFOLLOW ?? 0);
+  const handle = await open(output, outputFlags, 0o600);
   const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", [
     "-v", "error",
     "-ss", String(startSec),

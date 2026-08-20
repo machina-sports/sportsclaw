@@ -10,7 +10,17 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -169,6 +179,99 @@ describe("sportsclaw highlights run", () => {
     );
     assert.notEqual(run.status, 0, "missing ffmpeg must fail, not silently skip");
     assert.match(run.stderr, /ffprobe|ffmpeg/i);
+  });
+
+  it("rejects --output equal to the source before extraction and preserves the source", () => {
+    const caseDir = join(workDir, "manifest-source-collision");
+    mkdirSync(caseDir, { recursive: true });
+    const sourceCopy = join(caseDir, "source.mp4");
+    copyFileSync(sourceVideo, sourceCopy);
+    const requestPath = join(caseDir, "request.json");
+    const outputDir = join(caseDir, "clips");
+    writeFileSync(requestPath, JSON.stringify(requestFor(outputDir, {
+      source: { kind: "local-file", path: sourceCopy },
+    })), "utf-8");
+    const original = readFileSync(sourceCopy);
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", sourceCopy]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|source|manifest/i);
+    assert.deepEqual(readFileSync(sourceCopy), original);
+    assert.equal(existsSync(outputDir), false, "collision must be rejected before clips are created");
+  });
+
+  it("rejects --output equal to the request without overwriting the request", () => {
+    const caseDir = join(workDir, "manifest-request-collision");
+    mkdirSync(caseDir, { recursive: true });
+    const requestPath = join(caseDir, "request.json");
+    const outputDir = join(caseDir, "clips");
+    const requestJson = JSON.stringify(requestFor(outputDir));
+    writeFileSync(requestPath, requestJson, "utf-8");
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", requestPath]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|request|manifest/i);
+    assert.equal(readFileSync(requestPath, "utf-8"), requestJson);
+    assert.equal(existsSync(outputDir), false, "collision must be rejected before clips are created");
+  });
+
+  it("rejects --output equal to the clip output directory", () => {
+    const caseDir = join(workDir, "manifest-output-dir-collision");
+    mkdirSync(caseDir, { recursive: true });
+    const requestPath = join(caseDir, "request.json");
+    const outputDir = join(caseDir, "clips");
+    writeFileSync(requestPath, JSON.stringify(requestFor(outputDir)), "utf-8");
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", outputDir]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|directory|manifest/i);
+    assert.equal(existsSync(outputDir), false, "collision must be rejected before clips are created");
+  });
+
+  it("rejects a manifest path inside the clip output directory", () => {
+    const caseDir = join(workDir, "manifest-inside-clips");
+    mkdirSync(caseDir, { recursive: true });
+    const requestPath = join(caseDir, "request.json");
+    const outputDir = join(caseDir, "clips");
+    const outputPath = join(outputDir, "manifest.json");
+    writeFileSync(requestPath, JSON.stringify(requestFor(outputDir)), "utf-8");
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", outputPath]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|directory|manifest/i);
+    assert.equal(existsSync(outputDir), false, "collision must be rejected before clips are created");
+  });
+
+  it("rejects a manifest inside a clip directory reached through a symlink", () => {
+    const caseDir = join(workDir, "manifest-inside-symlinked-clips");
+    const realOutputDir = join(caseDir, "real-clips");
+    const outputDir = join(caseDir, "clips-link");
+    mkdirSync(realOutputDir, { recursive: true });
+    symlinkSync(realOutputDir, outputDir);
+    const requestPath = join(caseDir, "request.json");
+    const outputPath = join(outputDir, "manifest.json");
+    writeFileSync(requestPath, JSON.stringify(requestFor(outputDir)), "utf-8");
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", outputPath]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|directory|manifest/i);
+    assert.deepEqual(readdirSync(realOutputDir), [], "collision must be rejected before clips are created");
+  });
+
+  it("does not overwrite an unrelated existing manifest target", () => {
+    const caseDir = join(workDir, "manifest-existing-target");
+    mkdirSync(caseDir, { recursive: true });
+    const requestPath = join(caseDir, "request.json");
+    const outputDir = join(caseDir, "clips");
+    const outputPath = join(caseDir, "occupied.json");
+    writeFileSync(requestPath, JSON.stringify(requestFor(outputDir)), "utf-8");
+    writeFileSync(outputPath, "unrelated-sentinel", "utf-8");
+
+    const run = runCli(["highlights", "run", "--request", requestPath, "--output", outputPath]);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /output|exist|manifest/i);
+    assert.equal(readFileSync(outputPath, "utf-8"), "unrelated-sentinel");
+    assert.equal(existsSync(outputDir), false, "occupied manifest must be rejected before extraction");
   });
 });
 
