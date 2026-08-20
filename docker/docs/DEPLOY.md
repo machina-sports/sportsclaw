@@ -143,7 +143,8 @@ patches:
         value:
           - name: clone-skills
             image: alpine/git
-            command: ["sh", "-c", "git clone --depth 1 https://github.com/machina-sports/adidas-templates.git /skill-guides/adidas"]
+            # Replace with a repository your deployment is authorized to access.
+            command: ["sh", "-c", "git clone --depth 1 https://github.com/your-org/skill-guides.git /skill-guides/custom"]
             volumeMounts:
               - name: skill-guides
                 mountPath: /skill-guides

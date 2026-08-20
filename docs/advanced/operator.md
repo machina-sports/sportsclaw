@@ -87,8 +87,7 @@ without a pod: `npm run test:operator-sync`.
 
 ::: warning Dispatch needs the MCP redeploy
 operator-sync starts the loop via MCP `execute_agent` **by name** (`loop-runner`) — the same path
-as `machina_loop`. The deployed pod MCP must support agent-by-name
-([machina-client-api#287](https://github.com/machina-sports/machina-client-api/issues/287)); on a
-stale MCP the dispatch returns `status:error` and operator-sync stays inert (it never silently
-passes). The read path (`search_documents`) is unaffected.
+as `machina_loop`. The deployed pod MCP must support agent-by-name. On a stale MCP the dispatch
+returns `status:error` and operator-sync stays inert (it never silently passes). The read path
+(`search_documents`) is unaffected.
 :::
