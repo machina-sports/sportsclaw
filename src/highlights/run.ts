@@ -26,11 +26,8 @@ export class HighlightsRunError extends Error {
  */
 export const DEFAULT_MAX_JOB_OUTPUT_BYTES = 2 * 1024 ** 3;
 
-/** Preflight over-estimation margin for container overhead and bitrate skew. */
-const ESTIMATE_SAFETY_FACTOR = 1.25;
-
-/** Stream-copy timestamps can vary slightly at keyframe boundaries. */
-const CLIP_DURATION_TOLERANCE_SEC = 0.75;
+/** Fail closed if measured output differs from its requested window by more than this. */
+const CLIP_DURATION_TOLERANCE_SEC = 0.5;
 
 /** Parse a budget env value; anything but a positive integer falls back to the finite default. */
 export function resolveMaxJobOutputBytes(raw: string | undefined): number {
@@ -57,7 +54,17 @@ async function probeEvidence(file: string, what: string): Promise<FfprobeEvidenc
   if (!durationSec || durationSec <= 0) {
     throw new HighlightsRunError(`Could not determine duration via ffprobe for ${what}: ${file}`);
   }
-  return { durationSec, formatName: String(data.format?.format_name ?? "") };
+  const streamDuration = (type: "video" | "audio") => {
+    const stream = data.streams?.find((candidate) => candidate.codec_type === type);
+    const duration = Number(stream?.duration);
+    return Number.isFinite(duration) && duration > 0 ? duration : undefined;
+  };
+  return {
+    durationSec,
+    formatName: String(data.format?.format_name ?? ""),
+    videoDurationSec: streamDuration("video"),
+    audioDurationSec: streamDuration("audio"),
+  };
 }
 
 /** Execute a validated highlights request and return the clip manifest. */
@@ -87,24 +94,7 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     );
   }
 
-  // Preflight: bound the job before FFmpeg writes anything. The estimate uses
-  // the source's average bytes-per-second over the planned total clip
-  // duration, padded by a safety factor; anything over the budget is rejected
-  // before the output directory even exists.
   const budgetBytes = resolveMaxJobOutputBytes(process.env.HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES);
-  const sourceBytes = statSync(req.source.path).size;
-  const totalClipSec = windows.reduce((sum, w) => sum + (w.endSec - w.startSec), 0);
-  const estimatedBytes = Math.ceil(
-    (totalClipSec / sourceEvidence.durationSec) * sourceBytes * ESTIMATE_SAFETY_FACTOR
-  );
-  if (estimatedBytes > budgetBytes) {
-    throw new HighlightsRunError(
-      `Estimated output (~${estimatedBytes} bytes for ${totalClipSec}s of clips) exceeds the ` +
-      `per-job output budget of ${budgetBytes} bytes (HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES) — ` +
-      "reduce pre/post-roll or the number of candidates"
-    );
-  }
-
   mkdirSync(req.outputDir, { recursive: true });
 
   let writtenBytes = 0;
@@ -143,9 +133,8 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
         `FFmpeg extraction failed for action ${w.actionId} — is FFmpeg installed? ${String(err)}`
       );
     }
-    // Cumulative backstop: the preflight is an estimate, so actual bytes are
-    // re-checked after every clip; a breach removes everything written so far
-    // and fails the job rather than leaving partial output behind.
+    // Check actual cumulative bytes after every clip; a breach removes
+    // everything written so far rather than leaving partial output behind.
     writtenBytes += statSync(file).size;
     if (writtenBytes > budgetBytes) {
       removePartialOutputs(file);
@@ -162,15 +151,21 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
       removePartialOutputs(file);
       throw err;
     }
-    if (ffprobe.durationSec + CLIP_DURATION_TOLERANCE_SEC < requestedDurationSec) {
+    if (ffprobe.videoDurationSec === undefined) {
       removePartialOutputs(file);
       throw new HighlightsRunError(
-        `FFmpeg stopped the clip for action ${w.actionId} after ${ffprobe.durationSec}s, short of the ` +
-        `${requestedDurationSec}s request because the remaining ${remainingBudgetBytes}-byte output budget ` +
-        "was reached — partial clips were removed"
+        `FFprobe reported no usable video duration for action ${w.actionId} — partial clips were removed`,
       );
     }
-    clips.push({ ...w, file, durationSec: requestedDurationSec, ffprobe });
+    if (Math.abs(ffprobe.videoDurationSec - requestedDurationSec) > CLIP_DURATION_TOLERANCE_SEC) {
+      removePartialOutputs(file);
+      throw new HighlightsRunError(
+        `FFmpeg produced a ${ffprobe.videoDurationSec}s video duration for action ${w.actionId}, outside the allowed ` +
+        `±${CLIP_DURATION_TOLERANCE_SEC}s tolerance for the ${requestedDurationSec}s request ` +
+        `(remaining output budget: ${remainingBudgetBytes} bytes) — partial clips were removed`
+      );
+    }
+    clips.push({ ...w, file, durationSec: ffprobe.videoDurationSec, ffprobe });
   }
 
   return {

@@ -219,6 +219,15 @@ describe("candidate window planning", () => {
     }
   });
 
+  it("keeps mergedActions additive by omitting it from single-action windows", () => {
+    const windows = planCandidateWindows(validRequest(), SOURCE_DURATION);
+
+    assert.equal(windows.length, 3);
+    for (const window of windows) {
+      assert.equal(Object.hasOwn(window, "mergedActions"), false);
+    }
+  });
+
   it("is not evenly spaced — windows derive from PBP times, not duration division", () => {
     // The legacy mock spread N windows at duration/(N+1) intervals (15/30/45
     // for 60s). Real mapping of elapsed 7/9/41 lands at 12/14/46.
@@ -283,6 +292,116 @@ describe("candidate window planning", () => {
     });
     const windows = planCandidateWindows(req, SOURCE_DURATION);
     assert.deepEqual(windows.map((w) => w.actionId), ["big-early", "big-late"]);
+  });
+
+  it("coalesces near-simultaneous goal and shot windows under the higher-importance action", () => {
+    const req = validRequest({
+      actions: [
+        action({
+          actionId: "shot-926",
+          elapsedSec: 926,
+          label: "Shots on target",
+          type: "shot-on-target",
+          importance: 80,
+        }),
+        action({
+          actionId: "goal-927",
+          elapsedSec: 927,
+          label: "Goal",
+          type: "goal",
+          importance: 100,
+          period: 2,
+        }),
+        action({
+          actionId: "save-960",
+          elapsedSec: 960,
+          label: "Save",
+          type: "save",
+          importance: 50,
+          period: 2,
+        }),
+      ],
+      syncAnchor: { videoSec: 0, clockSec: 0 },
+      window: { preRollSec: 8, postRollSec: 12, maxCandidates: 2 },
+    });
+
+    const windows = planCandidateWindows(req, 1_000);
+
+    assert.equal(windows.length, 2, "maxCandidates must count coalesced windows, not raw actions");
+    assert.equal(windows[0].actionId, "goal-927", "the higher-importance action must be primary");
+    assert.equal(windows[0].startSec, 918, "coalesced start must include the earlier attached context");
+    assert.equal(windows[0].endSec, 939, "coalesced end must include the primary context");
+    assert.deepEqual(windows[0].mergedActions, [
+      {
+        actionId: "goal-927",
+        provider: "espn",
+        provenance: "espn:pbp:401234567:goal-927",
+        label: "Goal",
+        type: "goal",
+        period: 2,
+        importance: 100,
+      },
+      {
+        actionId: "shot-926",
+        provider: "espn",
+        provenance: "espn:pbp:401234567:shot-926",
+        label: "Shots on target",
+        type: "shot-on-target",
+        period: 1,
+        importance: 80,
+      },
+    ]);
+    assert.equal(windows[1].actionId, "save-960", "a unique non-overlapping action must remain separate");
+    assert.equal(Object.hasOwn(windows[1], "mergedActions"), false);
+
+    const reversed = planCandidateWindows({ ...req, actions: [...req.actions].reverse() }, 1_000);
+    assert.deepEqual(reversed, windows, "coalescing must not depend on provider input order");
+  });
+
+  it("does not transitively merge an action that does not strongly overlap the primary", () => {
+    const req = validRequest({
+      actions: [
+        action({ actionId: "a", elapsedSec: 20, label: "A", type: "shot", importance: 100 }),
+        action({ actionId: "b", elapsedSec: 21, label: "B", type: "save", importance: 90 }),
+        action({ actionId: "c", elapsedSec: 22, label: "C", type: "rebound", importance: 80 }),
+      ],
+      syncAnchor: { videoSec: 0, clockSec: 0 },
+      window: { preRollSec: 5, postRollSec: 5, maxCandidates: 5 },
+    });
+
+    const windows = planCandidateWindows(req, SOURCE_DURATION);
+
+    assert.deepEqual(windows.map((window) => window.actionId), ["a", "c"]);
+    assert.deepEqual(
+      windows.map(({ startSec, endSec }) => ({ startSec, endSec })),
+      [
+        { startSec: 15, endSec: 26 },
+        { startSec: 17, endSec: 27 },
+      ],
+      "attached bounds must expand the emitted window without causing transitive grouping"
+    );
+    assert.deepEqual(windows[0].mergedActions.map((merged) => merged.actionId), ["a", "b"]);
+    assert.equal(Object.hasOwn(windows[1], "mergedActions"), false);
+
+    const reversed = planCandidateWindows({ ...req, actions: [...req.actions].reverse() }, SOURCE_DURATION);
+    assert.deepEqual(reversed, windows, "greedy primary selection must be input-order independent");
+  });
+
+  it("allows existing TypeScript consumers to construct a V1 CandidateWindow without mergedActions", () => {
+    const fixture = join(repoRoot, "test/fixtures/highlights-v1-candidate-window.ts");
+    const tsc = join(repoRoot, "node_modules/typescript/bin/tsc");
+    const run = spawnSync(process.execPath, [
+      tsc,
+      "--noEmit",
+      "--strict",
+      "--skipLibCheck",
+      "--target", "ES2022",
+      "--module", "Node16",
+      "--moduleResolution", "Node16",
+      fixture,
+    ], { encoding: "utf-8" });
+
+    assert.equal(run.status, 0, `V1 consumer compatibility compile failed:\n${run.stdout}\n${run.stderr}`);
   });
 
   it("is deterministic — identical input yields identical output", () => {
@@ -358,20 +477,54 @@ function ffprobeJson(file) {
   return JSON.parse(run.stdout).format;
 }
 
+function ffprobeStreamTypes(file) {
+  const run = spawnSync(
+    FFPROBE,
+    ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", file],
+    { encoding: "utf-8" }
+  );
+  assert.equal(run.status, 0, `ffprobe must pass for ${file}: ${run.stderr}`);
+  return JSON.parse(run.stdout).streams.map((stream) => stream.codec_type);
+}
+
 describe("highlight extraction (synthetic media)", () => {
   let workDir;
   let sourceVideo;
+  let sparseKeyframeVideo;
+  let longAudioVideo;
 
   before(() => {
     workDir = mkdtempSync(join(tmpdir(), "sportsclaw-highlights-core-"));
     sourceVideo = join(workDir, "synthetic-match.mp4");
-    // 60s test pattern, keyframe every second so stream-copy cuts are accurate.
+    // 60s baseline test pattern with regular keyframes.
     const gen = spawnSync(FFMPEG, [
       "-y", "-f", "lavfi", "-i", "testsrc=duration=60:size=160x90:rate=10",
       "-c:v", "mpeg4", "-q:v", "5", "-g", "10",
       "-pix_fmt", "yuv420p", sourceVideo,
     ], { encoding: "utf-8" });
     assert.equal(gen.status, 0, `fixture generation failed: ${gen.stderr}`);
+
+    sparseKeyframeVideo = join(workDir, "synthetic-sparse-keyframes.mp4");
+    const sparseGen = spawnSync(FFMPEG, [
+      "-y",
+      "-f", "lavfi", "-i", "testsrc=duration=45:size=160x90:rate=10",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=45",
+      "-c:v", "mpeg4", "-q:v", "5", "-g", "300",
+      "-c:a", "aac", "-b:a", "96k",
+      "-pix_fmt", "yuv420p", "-shortest", sparseKeyframeVideo,
+    ], { encoding: "utf-8" });
+    assert.equal(sparseGen.status, 0, `sparse-keyframe fixture generation failed: ${sparseGen.stderr}`);
+
+    longAudioVideo = join(workDir, "synthetic-long-audio.mp4");
+    const longAudioGen = spawnSync(FFMPEG, [
+      "-y",
+      "-f", "lavfi", "-i", "testsrc=duration=5:size=160x90:rate=10",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=10",
+      "-c:v", "mpeg4", "-q:v", "5", "-g", "10",
+      "-c:a", "aac", "-b:a", "96k",
+      "-pix_fmt", "yuv420p", longAudioVideo,
+    ], { encoding: "utf-8" });
+    assert.equal(longAudioGen.status, 0, `long-audio fixture generation failed: ${longAudioGen.stderr}`);
   });
 
   after(() => {
@@ -411,6 +564,103 @@ describe("highlight extraction (synthetic media)", () => {
     }
   });
 
+  it("extracts the exact requested duration from sparse-keyframe media and preserves audio", async () => {
+    const outputDir = join(workDir, "exact-duration-clips");
+    const req = validRequest({
+      source: { kind: "local-file", path: sparseKeyframeVideo },
+      outputDir,
+      actions: [action({ actionId: "goal-18", elapsedSec: 18, label: "Goal", type: "goal", importance: 100 })],
+      syncAnchor: { videoSec: 0, clockSec: 0 },
+      window: { preRollSec: 8, postRollSec: 12, maxCandidates: 1 },
+    });
+
+    const manifest = await runHighlights(req);
+    assert.equal(manifest.clips.length, 1);
+    const clip = manifest.clips[0];
+    const requestedDuration = clip.endSec - clip.startSec;
+    const probedDuration = Number(ffprobeJson(clip.file).duration);
+
+    assert.ok(
+      Math.abs(probedDuration - requestedDuration) <= 0.5,
+      `ffprobe duration ${probedDuration}s must be within 0.5s of requested ${requestedDuration}s`
+    );
+    assert.equal(Object.hasOwn(clip, "mergedActions"), false);
+    assert.ok(clip.ffprobe.videoDurationSec > 0, "clip evidence must include video-stream duration");
+    assert.ok(clip.ffprobe.audioDurationSec > 0, "audio duration evidence must be included when available");
+    assert.equal(clip.durationSec, clip.ffprobe.videoDurationSec, "manifest duration must use the video stream");
+    assert.deepEqual(ffprobeStreamTypes(clip.file).sort(), ["audio", "video"]);
+
+    const seek = spawnSync(FFMPEG, [
+      "-v", "error", "-ss", "19", "-i", clip.file,
+      "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ]);
+    assert.equal(seek.status, 0, `independent seek/decode must pass: ${seek.stderr.toString()}`);
+    assert.ok(seek.stdout.length > 0, "independent seek must decode a frame near the clip end");
+  });
+
+  it("extracts one artifact for overlapping actions and preserves both provenance records", async () => {
+    const outputDir = join(workDir, "coalesced-clips");
+    const req = validRequest({
+      source: { kind: "local-file", path: sparseKeyframeVideo },
+      outputDir,
+      actions: [
+        action({
+          actionId: "shot-18",
+          elapsedSec: 18,
+          label: "Shots on target",
+          type: "shot-on-target",
+          importance: 80,
+        }),
+        action({ actionId: "goal-19", elapsedSec: 19, label: "Goal", type: "goal", importance: 100 }),
+      ],
+      syncAnchor: { videoSec: 0, clockSec: 0 },
+      window: { preRollSec: 8, postRollSec: 12, maxCandidates: 5 },
+    });
+
+    const manifest = await runHighlights(req);
+
+    assert.equal(manifest.windows.length, 1);
+    assert.equal(manifest.clips.length, 1);
+    assert.equal(manifest.clips[0].actionId, "goal-19");
+    assert.equal(manifest.clips[0].startSec, 10, "clip must start at the attached action's earlier bound");
+    assert.equal(manifest.clips[0].endSec, 31, "clip must end at the primary action's later bound");
+    assert.deepEqual(
+      manifest.clips[0].mergedActions.map(({ actionId, provenance }) => ({ actionId, provenance })),
+      [
+        { actionId: "goal-19", provenance: "espn:pbp:401234567:goal-19" },
+        { actionId: "shot-18", provenance: "espn:pbp:401234567:shot-18" },
+      ]
+    );
+    const extractedDuration = Number(ffprobeJson(manifest.clips[0].file).duration);
+    assert.ok(
+      Math.abs(extractedDuration - 21) <= 0.5,
+      `coalesced clip duration ${extractedDuration}s must match the 21s union window`
+    );
+    assert.deepEqual(readdirSync(outputDir), ["clip_01_goal-19.mp4"]);
+  });
+
+  it("fails closed when longer audio masks a short video stream", async () => {
+    const outputDir = join(workDir, "long-audio-clips");
+    const req = validRequest({
+      source: { kind: "local-file", path: longAudioVideo },
+      outputDir,
+      actions: [action({ actionId: "goal-4", elapsedSec: 4, label: "Goal", type: "goal", importance: 100 })],
+      syncAnchor: { videoSec: 0, clockSec: 0 },
+      window: { preRollSec: 4, postRollSec: 4, maxCandidates: 1 },
+    });
+
+    await assert.rejects(
+      () => runHighlights(req),
+      /video.*duration|duration.*video/i,
+      "container/audio duration must not hide a video stream shorter than the requested window"
+    );
+    assert.deepEqual(
+      existsSync(outputDir) ? readdirSync(outputDir) : [],
+      [],
+      "a clip with invalid video duration must be removed"
+    );
+  });
+
   it("fails closed when the input file is missing", async () => {
     const req = validRequest({
       source: { kind: "local-file", path: join(workDir, "nope.mp4") },
@@ -430,7 +680,7 @@ describe("highlight extraction (synthetic media)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Per-job output budget — bounded before FFmpeg writes, hard-capped after
+// Per-job output budget — hard-capped during FFmpeg writes and checked after
 // ---------------------------------------------------------------------------
 
 describe("per-job output budget", () => {
@@ -441,9 +691,8 @@ describe("per-job output budget", () => {
   before(() => {
     budgetDir = mkdtempSync(join(tmpdir(), "sportsclaw-highlights-budget-"));
     // 60s source: 30s of black (near-zero bitrate) followed by 30s of noise
-    // (high bitrate). Clips planned inside the noise half deterministically
-    // outweigh the source-average preflight estimate, so the cumulative
-    // backstop — not the preflight — is what must catch them.
+    // (high bitrate). This lets tests distinguish source size from CRF output
+    // size and exercise the hard cap against noisy extraction windows.
     mixedVideo = join(budgetDir, "black-then-noise.mp4");
     const gen = spawnSync(FFMPEG, [
       "-y", "-f", "lavfi", "-i", "color=c=black:s=160x90:r=10:d=60",
@@ -491,31 +740,36 @@ describe("per-job output budget", () => {
     }
   });
 
-  it("rejects an oversized pre/post-roll request before any clip is written", async () => {
-    const outputDir = join(budgetDir, "preflight-clips");
+  it("does not reject a high-bitrate source when the re-encoded output fits", async () => {
+    const baselineFile = join(budgetDir, "low-bitrate-baseline.mp4");
+    await extractSegment(mixedVideo, baselineFile, 8, 5, mixedBytes);
+    const baselineBytes = statSync(baselineFile).size;
+    const budget = baselineBytes + 272 * 1024;
+    const oldSourceEstimate = Math.ceil((5 / 60) * mixedBytes * 1.25);
+    assert.ok(
+      oldSourceEstimate > budget,
+      `fixture must exceed the removed source-size estimate (${oldSourceEstimate} <= ${budget})`
+    );
+
+    const outputDir = join(budgetDir, "high-source-bitrate-clips");
     const req = validRequest({
       source: { kind: "local-file", path: mixedVideo },
       outputDir,
-      actions: [action({ actionId: "big-roll", elapsedSec: 35, label: "Goal", type: "goal" })],
+      actions: [action({ actionId: "black-segment", elapsedSec: 10, label: "Goal", type: "goal" })],
       syncAnchor: { videoSec: 0, clockSec: 0 },
-      window: { preRollSec: 15, postRollSec: 15, maxCandidates: 5 },
+      window: { preRollSec: 2, postRollSec: 3, maxCandidates: 1 },
     });
-    await withBudget("1024", async () => {
-      await assert.rejects(
-        () => runHighlights(req),
-        /budget|HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES/i,
-        "preflight estimate over the budget must reject the job"
-      );
-    });
-    assert.equal(existsSync(outputDir), false, "rejection must happen before the output dir is created");
+
+    const manifest = await withBudget(String(budget), () => runHighlights(req));
+
+    assert.equal(manifest.clips.length, 1);
+    assert.ok(statSync(manifest.clips[0].file).size <= budget);
   });
 
   it("fails and cleans up partial clips when actual output exceeds the budget", async () => {
     const outputDir = join(budgetDir, "cumulative-clips");
-    // Two 5s windows inside the noise half: planned total 10s of a 60s source
-    // → conservative estimate ≈ 0.21 × source bytes, below the budget; actual
-    // noise-heavy output ≈ 0.33 × source bytes, above it. The first clip fits
-    // on its own, the second breaches — both must be gone afterwards.
+    // Two 5s windows inside the noise half. The first clip fits on its own;
+    // the second exhausts the remaining hard cap, so both must be removed.
     const budget = Math.floor(mixedBytes * 0.27);
     const req = validRequest({
       source: { kind: "local-file", path: mixedVideo },
@@ -545,18 +799,14 @@ describe("per-job output budget", () => {
     const budget = Math.floor(mixedBytes * 0.13);
     const directOutput = join(budgetDir, "hard-capped-single.mp4");
 
-    // Exercise the shared extraction implementation directly: -fs may exceed
-    // the requested limit by a final packet/container trailer, but it must not
-    // write the complete high-bitrate clip before the caller notices.
-    await extractSegment(mixedVideo, directOutput, 35, 5, budget).catch(() => {});
-    assert.ok(existsSync(directOutput), "FFmpeg should leave a bounded partial for the caller to inspect");
-    assert.ok(
-      statSync(directOutput).size <= budget + 64 * 1024,
-      `hard-capped output ${statSync(directOutput).size} must stay near ${budget}`
+    await assert.rejects(
+      () => extractSegment(mixedVideo, directOutput, 35, 5, budget),
+      /budget|maxOutputBytes/i,
+      "streaming extraction must reject on the first over-budget chunk"
     );
     assert.ok(
-      Number(ffprobeJson(directOutput).duration) < 4.25,
-      "the hard byte limit must stop this high-bitrate 5s extraction early"
+      !existsSync(directOutput) || statSync(directOutput).size <= budget,
+      `partial output must never exceed the exact ${budget}-byte budget`
     );
     rmSync(directOutput, { force: true });
 

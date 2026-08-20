@@ -77,6 +77,15 @@ unsupported clock semantics (only `elapsed-ascending` in V1), unknown fields,
 and any `source_path` that does not resolve under the allowlisted media root
 (traversal, absolute host paths, and symlink escapes are all rejected).
 
+Candidate windows are considered in deterministic primary order (importance,
+action time, then ID). Only remaining actions sharing at least 90% of the
+shorter window directly with that primary are coalesced; overlap chains are not
+merged transitively. A coalesced candidate uses the union of its attached
+windows' bounds so every action's requested context is extracted.
+`mergedActions` is an optional additive V1 field, omitted for single-action
+windows/clips and populated with every action and its provenance for coalesced
+outputs.
+
 ### Configuration (env)
 
 | Variable | Default | Meaning |
@@ -89,7 +98,7 @@ and any `source_path` that does not resolve under the allowlisted media root
 | `HIGHLIGHTS_API_TOKEN` | *(none — required)* | Shared secret for `X-Auth-Token`; unset → all highlights routes return `503` |
 | `HIGHLIGHTS_JOB_TTL_SEC` | `86400` (24h) | Terminal jobs older than this are removed from disk and memory |
 | `HIGHLIGHTS_MAX_STORAGE_BYTES` | `10737418240` (10 GiB) | Storage cap for the jobs root; still above it after cleanup → create returns `507` |
-| `HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES` | `2147483648` (2 GiB) | Hard per-job output budget enforced by the extraction core (preflight estimate + cumulative actual bytes); clamped to `HIGHLIGHTS_MAX_STORAGE_BYTES` |
+| `HIGHLIGHTS_MAX_JOB_OUTPUT_BYTES` | `2147483648` (2 GiB) | Exact per-job disk-byte budget enforced while streaming FFmpeg output; an over-budget chunk is never written, FFmpeg is killed, and partial clips are removed. Clamped to `HIGHLIGHTS_MAX_STORAGE_BYTES` |
 
 ### Retention
 
@@ -107,9 +116,13 @@ a restart are reported as `failed`, never stuck `running`.
 
 ### Implemented in V1 vs deferred
 
-Implemented: deterministic PBP→video window planning, FFmpeg/FFprobe
-extraction with manifest evidence, rights/authorization gating, bounded async
-jobs, cancellation, file-backed persistence.
+Implemented: deterministic PBP→video window planning, overlap coalescing,
+accurate fragmented-MP4 H.264/AAC FFmpeg extraction with optional source audio,
+exact streaming disk-byte limits, and symmetric ±0.5-second FFprobe video-stream
+duration enforcement. FFprobe evidence retains the container `durationSec` and
+additively includes optional `videoDurationSec`/`audioDurationSec`; clip manifest
+`durationSec` is the measured video duration. Rights/authorization gating,
+bounded async jobs, cancellation, and file-backed persistence are also included.
 
 Deferred (explicitly **not** in V1): Gemini/LLM ranking, HyperFrames/Remotion
 rendering, vertical (9:16) tracking, signed-URL/object-store media download,

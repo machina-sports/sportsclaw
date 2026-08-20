@@ -92,7 +92,18 @@ export interface HighlightsRequest {
   outputDir: string;
 }
 
-/** A planned candidate window, mapped deterministically from one PBP action. */
+/** Action provenance retained when overlapping candidate windows are coalesced. */
+export interface MergedAction {
+  actionId: string;
+  provider: string;
+  provenance: string;
+  label: string;
+  type: string;
+  period: number;
+  importance?: number;
+}
+
+/** A planned candidate window, led by one primary PBP action. */
 export interface CandidateWindow {
   actionId: string;
   provider: string;
@@ -101,6 +112,8 @@ export interface CandidateWindow {
   type: string;
   period: number;
   importance?: number;
+  /** Present only for coalesced windows: primary action first, then attached actions. */
+  mergedActions?: MergedAction[];
   /** Source-video second the action maps to. */
   actionVideoSec: number;
   startSec: number;
@@ -111,6 +124,10 @@ export interface CandidateWindow {
 export interface FfprobeEvidence {
   durationSec: number;
   formatName: string;
+  /** Video-stream duration when FFprobe reports a finite positive value. */
+  videoDurationSec?: number;
+  /** Audio-stream duration when FFprobe reports a finite positive value. */
+  audioDurationSec?: number;
 }
 
 /** One extracted clip in the output manifest. */

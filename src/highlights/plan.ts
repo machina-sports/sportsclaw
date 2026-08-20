@@ -29,6 +29,9 @@ export const DEFAULT_WINDOW_POLICY: WindowPolicy = {
   maxCandidates: 5,
 };
 
+/** Windows sharing at least this fraction of the shorter window are coalesced. */
+export const STRONG_WINDOW_OVERLAP_RATIO = 0.9;
+
 /** Hard ceilings so a single request stays bounded regardless of caller. */
 const MAX_CANDIDATES_CEILING = 20;
 const MAX_ACTIONS = 500;
@@ -195,10 +198,11 @@ export function validateHighlightsRequest(value: unknown): void {
  *
  * videoSec(action) = anchor.videoSec + (action.elapsedSec - anchor.clockSec)
  *
- * Actions landing outside [0, sourceDurationSec] are dropped. When more than
- * maxCandidates windows remain, the highest-importance actions win (ties break
- * on earlier video time, then actionId); the final list is sorted by start
- * time, then actionId, so identical input always yields identical output.
+ * Actions landing outside [0, sourceDurationSec] are dropped. In primary
+ * selection order, remaining windows sharing at least 90% of the shorter
+ * window directly with that primary are coalesced. maxCandidates then keeps
+ * the highest-importance primaries (ties break on earlier video time, then
+ * actionId). The final list is sorted by start time, then actionId.
  */
 export function planCandidateWindows(
   request: HighlightsRequest | unknown,
@@ -231,17 +235,53 @@ export function planCandidateWindows(
     });
   }
 
-  let selected = mapped;
-  if (mapped.length > window.maxCandidates) {
-    selected = [...mapped]
-      .sort(
-        (x, y) =>
-          (y.importance ?? 0) - (x.importance ?? 0) ||
-          x.actionVideoSec - y.actionVideoSec ||
-          x.actionId.localeCompare(y.actionId),
-      )
-      .slice(0, window.maxCandidates);
+  const byImportance = (x: CandidateWindow, y: CandidateWindow) =>
+    (y.importance ?? 0) - (x.importance ?? 0) ||
+    x.actionVideoSec - y.actionVideoSec ||
+    x.actionId.localeCompare(y.actionId);
+  const stronglyOverlaps = (x: CandidateWindow, y: CandidateWindow) => {
+    const overlapSec = Math.max(0, Math.min(x.endSec, y.endSec) - Math.max(x.startSec, y.startSec));
+    const shorterSec = Math.min(x.endSec - x.startSec, y.endSec - y.startSec);
+    return overlapSec / shorterSec >= STRONG_WINDOW_OVERLAP_RATIO;
+  };
+
+  // Select primaries deterministically, then attach only windows that directly
+  // strongly overlap that primary. This avoids transitive overlap chains.
+  const coalesced: CandidateWindow[] = [];
+  let remaining = [...mapped].sort(byImportance);
+  while (remaining.length > 0) {
+    const primary = remaining[0];
+    const attached = [primary];
+    const unattached: CandidateWindow[] = [];
+    for (const candidate of remaining.slice(1)) {
+      if (stronglyOverlaps(primary, candidate)) {
+        attached.push(candidate);
+      } else {
+        unattached.push(candidate);
+      }
+    }
+    remaining = unattached;
+    if (attached.length === 1) {
+      coalesced.push(primary);
+      continue;
+    }
+    coalesced.push({
+      ...primary,
+      startSec: Math.min(...attached.map((candidate) => candidate.startSec)),
+      endSec: Math.max(...attached.map((candidate) => candidate.endSec)),
+      mergedActions: attached.map(({ actionId, provider, provenance, label, type, period, importance }) => ({
+        actionId,
+        provider,
+        provenance,
+        label,
+        type,
+        period,
+        importance,
+      })),
+    });
   }
+
+  const selected = [...coalesced].sort(byImportance).slice(0, window.maxCandidates);
 
   return [...selected].sort(
     (x, y) => x.startSec - y.startSec || x.actionId.localeCompare(y.actionId),
