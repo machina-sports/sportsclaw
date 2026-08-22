@@ -59,6 +59,7 @@ overlays/<tenant>/
 | `SPORTSCLAW_PROVIDER` | **yes** | — | LLM provider: `google`, `anthropic`, `openai` |
 | `SPORTSCLAW_MODEL` | no | provider default | Model override (e.g. `gemini-2.0-flash`) |
 | `SPORTSCLAW_MEMORY_DIR` | no | `/data/memory` | Persistent memory path (mapped to PVC) |
+| `SPORTSCLAW_AGENTS_DIR` | no | `/data/memory/native-agents` | Native agent definitions (same PVC) |
 | `SPORTSCLAW_MCP_SERVERS` | no | — | MCP server connections (JSON, see below) |
 | `SPORTSCLAW_SKILL_GUIDES_DIR` | no | — | Path to SKILL.md guides in container |
 | `RELAY_PORT` | no | `8080` | HTTP port inside container |

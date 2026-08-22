@@ -54,7 +54,12 @@ import {
   providerToolCeiling,
   resolveParallelAgentRoutedTools,
 } from "./routing/tool-activation.js";
-import { loadAgents, type AgentDef } from "./agents.js";
+import {
+  filterToolNamesForAgent,
+  listAgents,
+  selectExplicitAgents,
+  type AgentDef,
+} from "./agents.js";
 import { McpManager, summarizeMcpServers } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
 import type { SkillGuide } from "./types.js";
@@ -401,6 +406,19 @@ export class SessionStore {
 /** Global session store — shared across all engine instances. */
 export const sessionStore = new SessionStore();
 
+/** Keep one platform session from crossing native-agent boundaries. */
+export function scopeSessionId(sessionId: string, agentId?: string): string {
+  return agentId ? `${sessionId}::agent::${agentId}` : sessionId;
+}
+
+export function conversationNamespace(
+  userId?: string,
+  agentId?: string,
+  sessionId?: string,
+): string {
+  return [userId ?? "anonymous", agentId ?? "auto", sessionId ?? "no-session"].join("::");
+}
+
 // ---------------------------------------------------------------------------
 // Halt sentinel guard
 // ---------------------------------------------------------------------------
@@ -636,6 +654,7 @@ export class sportsclawEngine {
   private skillGuides: SkillGuide[] = [];
   private _mcpReady = false;
   private _threadLoaded = false;
+  private _conversationNamespace?: string;
   private _loggedMemoryBackend?: string;
   private _lastUsage: TokenUsage | null = null;
 
@@ -676,7 +695,7 @@ export class sportsclawEngine {
       ttlMs: this.config.cacheTtlMs,
     });
     this.loadDynamicSchemas();
-    this.agents = loadAgents();
+    this.agents = listAgents({ includeInactive: true });
     this.mcpManager = new McpManager(
       this.config.verbose,
       process.argv.includes("--refresh-mcp")
@@ -886,13 +905,7 @@ export class sportsclawEngine {
   }
 
   private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
-    if (agent.skills.length === 0) return undefined;
-    const agentSkillSet = new Set(agent.skills);
-    return allToolNames.filter((name) => {
-      if (name.startsWith("mcp__")) return true;
-      const skill = this.registry.getSkillName(name);
-      return skill !== undefined ? agentSkillSet.has(skill) : true;
-    });
+    return filterToolNamesForAgent(agent, allToolNames, (name) => this.registry.getSkillName(name));
   }
 
   private isLowSignalResponse(text: string): boolean {
@@ -3419,6 +3432,25 @@ export class sportsclawEngine {
     this._generatedVideos = [];
     this._lastUsage = null;
 
+    this.agents = listAgents({ includeInactive: true });
+    const explicitAgents = options?.agentIds
+      ? selectExplicitAgents(this.agents, options.agentIds)
+      : undefined;
+    const nativeAgentId = explicitAgents?.[0]?.id;
+    const activeConversationNamespace = conversationNamespace(
+      options?.userId,
+      nativeAgentId,
+      options?.sessionId,
+    );
+    if (
+      this._conversationNamespace &&
+      this._conversationNamespace !== activeConversationNamespace
+    ) {
+      this.messages = [];
+      this._threadLoaded = false;
+    }
+    this._conversationNamespace = activeConversationNamespace;
+
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
     const sanitizedPrompt = sanitization.sanitized;
@@ -3470,7 +3502,9 @@ export class sportsclawEngine {
     }
 
     // --- Session: restore prior conversation history ---
-    const sessionId = options?.sessionId;
+    const sessionId = options?.sessionId
+      ? scopeSessionId(options.sessionId, nativeAgentId)
+      : undefined;
     if (sessionId) {
       const prior = await sessionStore.load(sessionId);
       if (prior.length > 0) {
@@ -3522,7 +3556,7 @@ export class sportsclawEngine {
         this._loggedMemoryBackend = memoryLogKey;
       }
 
-      memory = new MemoryManager(options.userId, podStorage);
+      memory = new MemoryManager(options.userId, podStorage, nativeAgentId);
       options?.onProgress?.({ type: "phase", label: "Loading memory" });
       [memoryBlock, strategyContent] = await Promise.all([
         memory.buildMemoryBlock(),
@@ -3628,6 +3662,10 @@ export class sportsclawEngine {
       options?.platform,
       options?.chatId,
     );
+    if ((options?.delegationDepth ?? 0) > 0) {
+      delete tools.spawn_subagent;
+      delete tools.list_subagents;
+    }
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,
@@ -3652,7 +3690,7 @@ export class sportsclawEngine {
       }
     }
 
-    const activeTools = finalizeActiveTools({
+    let activeTools = finalizeActiveTools({
       routedActiveTools: routing.activeTools,
       isFollowUp,
       lowConfidence: Boolean(
@@ -3670,8 +3708,33 @@ export class sportsclawEngine {
     // skill-overlap fallback which biases toward broad-skill generalists.
     const intentTags: string[] = [];
     if (isVisualIntent(sanitizedPrompt)) intentTags.push("visual");
-    const agentRoutes = routeToAgents(this.agents, selectedSkills, sanitizedPrompt, intentTags);
+    const agentRoutes = explicitAgents
+      ? explicitAgents.map((agent) => ({
+          agent,
+          score: 1,
+          reason: "Explicit native agent selection.",
+        }))
+      : routeToAgents(
+          this.agents.filter((agent) => agent.active),
+          selectedSkills,
+          sanitizedPrompt,
+          intentTags,
+        );
     const activeAgents = agentRoutes.map((r) => r.agent);
+
+    if (explicitAgents) {
+      const constrained = this.filterToolsForAgent(explicitAgents[0], Object.keys(tools));
+      if (constrained !== undefined) {
+        activeTools = finalizeActiveTools({
+          routedActiveTools: constrained,
+          isFollowUp,
+          lowConfidence: false,
+          historyToolNames: Array.from(historyToolNames),
+          totalToolCount: Object.keys(tools).length,
+          ceiling: providerToolCeiling(this.config.provider),
+        });
+      }
+    }
 
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;

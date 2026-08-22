@@ -21,6 +21,11 @@ Version: **v0.9.4** | Image: `machinasports/sportsclaw-relay`
 | `GET` | `/api/skills` | `application/json` | List installed sport schemas |
 | `POST` | `/api/query` | `application/x-ndjson` | **Streaming** — real-time progress events |
 | `POST` | `/api/query/sync` | `application/json` | **Buffered** — single JSON response |
+| `GET` | `/api/agents` | `application/json` | List native agents, including inactive agents |
+| `POST` | `/api/agents` | `application/json` | Create a native agent |
+| `GET` | `/api/agents/{id}` | `application/json` | Get one native agent |
+| `PATCH` | `/api/agents/{id}` | `application/json` | Update or inactivate a native agent |
+| `POST` | `/api/agents/delegate` | `application/json` | Run a one-hop query with a target native agent |
 
 ### `GET /health`
 
@@ -49,6 +54,7 @@ Both `/api/query` and `/api/query/sync` accept the same JSON body:
   "timeout": 180,
   "provider": "google",
   "model": "gemini-3-flash-preview",
+  "agent_id": "analyst",
   "verbose": false,
   "format": "markdown"
 }
@@ -61,6 +67,7 @@ Both `/api/query` and `/api/query/sync` accept the same JSON body:
 | `timeout` | number | no | `180` | Max seconds before timeout |
 | `provider` | string | no | env default | Override LLM provider (`anthropic`, `openai`, `google`) |
 | `model` | string | no | provider default | Override model ID |
+| `agent_id` | string | no | automatic routing | Select exactly one active native agent |
 | `api_key` | string | no | env default | Override API key for the provider |
 | `verbose` | boolean | no | `false` | Include debug events in output |
 | `format` | string | no | — | Output format hint |
@@ -155,6 +162,38 @@ Waits for the full engine execution and returns a single JSON response.
 ```
 
 Use sync mode for simple integrations that don't need real-time progress (scripts, Slack bots, etc.). Use streaming for any interactive UI.
+
+## Native Agents
+
+Create an agent with a lowercase slug, display name, optional title, markdown directives, and optional skill/tag filters:
+
+```json
+POST /api/agents
+{
+  "id": "match-reader",
+  "name": "Match Reader",
+  "title": "Football Briefing Specialist",
+  "skills": ["football", "news"],
+  "tags": ["briefing"],
+  "body": "## Directives\n\nProduce concise match briefs."
+}
+```
+
+Update fields with `PATCH /api/agents/match-reader`. Inactivation is non-destructive and must be sent alone as `{"active": false}`. Built-in agents cannot be changed or inactivated.
+
+Delegation requires distinct source and target agents:
+
+```json
+POST /api/agents/delegate
+{
+  "prompt": "Summarize today's transfer news",
+  "user_id": "dashboard-user-42",
+  "source_agent_id": "analyst",
+  "agent_id": "newsdesk"
+}
+```
+
+Delegation is one hop. Recursive markers and `system_prompt` are rejected. The target uses its own `memory/<userId>/agents/<agentId>/` namespace.
 
 ---
 
@@ -280,6 +319,7 @@ Provider and model can be overridden per-request via the query body.
 | `SPORTSCLAW_PROVIDER` | no | `anthropic` | LLM provider |
 | `SPORTSCLAW_MODEL` | no | provider default | Model override |
 | `SPORTSCLAW_MEMORY_DIR` | no | `/data/memory` | Persistent memory path |
+| `SPORTSCLAW_AGENTS_DIR` | no | `/data/memory/native-agents` | Persistent native agent definitions |
 | `SPORTSCLAW_MCP_SERVERS` | no | — | MCP server config (JSON) |
 | `SPORTSCLAW_SKILL_GUIDES_DIR` | no | — | Path to skill guides directory |
 | `RELAY_PORT` | no | `8080` | HTTP listen port |
