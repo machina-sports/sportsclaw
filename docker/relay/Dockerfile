@@ -90,7 +90,8 @@ RUN chmod +x /opt/sportsclaw/entrypoint.sh
 
 # --- Persistent memory volume ------------------------------------------------
 ENV SPORTSCLAW_MEMORY_DIR=/data/memory
-RUN mkdir -p /data/memory
+ENV SPORTSCLAW_AGENTS_DIR=/data/memory/native-agents
+RUN mkdir -p /data/memory/native-agents
 VOLUME /data/memory
 
 # --- Highlights job workspace (overridable) -----------------------------------

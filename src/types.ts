@@ -511,6 +511,10 @@ export type ToolProgressEvent =
 export interface RunOptions {
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
+  /** Exactly one native agent ID to select explicitly for this run. */
+  agentIds?: string[];
+  /** Internal one-hop delegation marker. Delegated runs cannot spawn subagents. */
+  delegationDepth?: 0 | 1;
   /**
    * Session ID for multi-turn conversation continuity.
    * When provided, the engine loads prior message history from the global

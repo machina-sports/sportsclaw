@@ -14,6 +14,9 @@ https://<relay-host>:8080
 | `GET` | `/api/skills` | JSON | List installed skills |
 | `POST` | `/api/query` | NDJSON stream | Real-time progress + result |
 | `POST` | `/api/query/sync` | JSON | Simple request/response |
+| `GET`, `POST` | `/api/agents` | JSON | List or create native agents |
+| `GET`, `PATCH` | `/api/agents/{id}` | JSON | Read, update, or inactivate an agent |
+| `POST` | `/api/agents/delegate` | JSON | One-hop delegation to another agent |
 
 ## Request Body (`POST /api/query` and `/api/query/sync`)
 
@@ -21,6 +24,7 @@ https://<relay-host>:8080
 {
   "prompt": "Who is top of the Premier League?",
   "user_id": "user-123",
+  "agent_id": "scoreboard",
   "stream": true
 }
 ```
@@ -29,6 +33,7 @@ https://<relay-host>:8080
 |-------|------|----------|-------------|
 | `prompt` | string | yes | The user's query |
 | `user_id` | string | no | Enables per-user memory. Default: `api-anonymous` |
+| `agent_id` | string | no | Select exactly one active native agent |
 | `provider` | string | no | Override LLM provider (`anthropic`, `openai`, `google`) |
 | `model` | string | no | Override model ID |
 | `verbose` | boolean | no | Enable debug output |
@@ -144,6 +149,23 @@ const data = await res.json();
 ```json
 { "status": false, "error": "Query timed out after 180s" }
 ```
+
+## Agent Delegation
+
+```typescript
+await fetch("/api/agents/delegate", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    prompt: "Prepare a concise NBA injury brief",
+    user_id: "user-123",
+    source_agent_id: "scoreboard",
+    agent_id: "analyst",
+  }),
+});
+```
+
+The source and target must be different active agents. Delegation cannot recurse and does not accept `system_prompt`.
 
 ## CORS
 

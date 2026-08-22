@@ -20,6 +20,7 @@
 import { mkdir, readFile, writeFile, appendFile, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import type { McpManager } from "./mcp.js";
 
 // ---------------------------------------------------------------------------
@@ -77,11 +78,11 @@ export interface ThreadMessage {
 // ---------------------------------------------------------------------------
 
 export interface MemoryStorage {
-  read(userId: string, file: string): Promise<string>;
-  write(userId: string, file: string, content: string): Promise<void>;
-  append(userId: string, file: string, content: string): Promise<void>;
-  list(userId: string, pattern: string): Promise<string[]>;
-  remove(userId: string, file: string): Promise<void>;
+  read(userId: string, file: string, agentId?: string): Promise<string>;
+  write(userId: string, file: string, content: string, agentId?: string): Promise<void>;
+  append(userId: string, file: string, content: string, agentId?: string): Promise<void>;
+  list(userId: string, pattern: string, agentId?: string): Promise<string[]>;
+  remove(userId: string, file: string, agentId?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +129,13 @@ export class FileMemoryStorage implements MemoryStorage {
     this.base = base;
   }
 
-  private userDir(userId: string): string {
-    return join(this.base, sanitizeId(userId));
+  private userDir(userId: string, agentId?: string): string {
+    const userDir = join(this.base, sanitizeId(userId));
+    return agentId ? join(userDir, "agents", sanitizeId(agentId)) : userDir;
   }
 
-  private async ensureDir(userId: string): Promise<string> {
-    const dir = this.userDir(userId);
+  private async ensureDir(userId: string, agentId?: string): Promise<string> {
+    const dir = this.userDir(userId, agentId);
     if (!this.dirCache.has(dir)) {
       await mkdir(dir, { recursive: true });
       this.dirCache.add(dir);
@@ -141,13 +143,13 @@ export class FileMemoryStorage implements MemoryStorage {
     return dir;
   }
 
-  async read(userId: string, file: string): Promise<string> {
-    const dir = await this.ensureDir(userId);
+  async read(userId: string, file: string, agentId?: string): Promise<string> {
+    const dir = await this.ensureDir(userId, agentId);
     return safeRead(join(dir, file));
   }
 
-  async write(userId: string, file: string, content: string): Promise<void> {
-    const dir = await this.ensureDir(userId);
+  async write(userId: string, file: string, content: string, agentId?: string): Promise<void> {
+    const dir = await this.ensureDir(userId, agentId);
     const path = join(dir, file);
     // Atomic write: temp + rename so a crash mid-write never tears the file.
     const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
@@ -155,13 +157,13 @@ export class FileMemoryStorage implements MemoryStorage {
     await rename(tmp, path);
   }
 
-  async append(userId: string, file: string, content: string): Promise<void> {
-    const dir = await this.ensureDir(userId);
+  async append(userId: string, file: string, content: string, agentId?: string): Promise<void> {
+    const dir = await this.ensureDir(userId, agentId);
     await appendFile(join(dir, file), content, "utf-8");
   }
 
-  async list(userId: string, _pattern: string): Promise<string[]> {
-    const dir = await this.ensureDir(userId);
+  async list(userId: string, _pattern: string, agentId?: string): Promise<string[]> {
+    const dir = await this.ensureDir(userId, agentId);
     try {
       const files = await readdir(dir);
       return files
@@ -172,8 +174,8 @@ export class FileMemoryStorage implements MemoryStorage {
     }
   }
 
-  async remove(userId: string, file: string): Promise<void> {
-    const dir = this.userDir(userId);
+  async remove(userId: string, file: string, agentId?: string): Promise<void> {
+    const dir = this.userDir(userId, agentId);
     const { unlink } = await import("node:fs/promises");
     try {
       await unlink(join(dir, file));
@@ -183,8 +185,8 @@ export class FileMemoryStorage implements MemoryStorage {
   }
 
   /** Absolute path to a user's memory directory */
-  getUserDir(userId: string): string {
-    return this.userDir(userId);
+  getUserDir(userId: string, agentId?: string): string {
+    return this.userDir(userId, agentId);
   }
 }
 
@@ -244,15 +246,26 @@ export class PodMemoryStorage implements MemoryStorage {
    * Includes auto-migration from old multi-doc layout on first access.
    * Concurrent calls share one in-flight promise to prevent duplicate-doc creation.
    */
-  private loadCached(userId: string): Promise<MemoryEntry> {
-    const cached = this.cache.get(userId);
+  private namespaceKey(userId: string, agentId?: string): string {
+    return agentId ? `${userId}::agent::${agentId}` : userId;
+  }
+
+  private documentName(userId: string, agentId?: string): string {
+    if (!agentId) return `memory-${userId}`;
+    const userHash = createHash("sha256").update(userId).digest("hex").slice(0, 32);
+    return `memory-agent-${userHash}-${sanitizeId(agentId)}`;
+  }
+
+  private loadCached(userId: string, agentId?: string): Promise<MemoryEntry> {
+    const key = this.namespaceKey(userId, agentId);
+    const cached = this.cache.get(key);
     if (cached) return cached;
-    const promise = this.loadFromPod(userId);
-    this.cache.set(userId, promise);
+    const promise = this.loadFromPod(userId, agentId);
+    this.cache.set(key, promise);
     return promise;
   }
 
-  private async loadFromPod(userId: string): Promise<MemoryEntry> {
+  private async loadFromPod(userId: string, agentId?: string): Promise<MemoryEntry> {
     // Search for the most-recently-updated consolidated doc with a non-empty
     // value. This handles two failure modes from earlier engine versions:
     //   (1) zombie empty docs from prior race-condition migrations, and
@@ -261,7 +274,7 @@ export class PodMemoryStorage implements MemoryStorage {
     // hit is empty, we fall back to the freshest empty hit (still better than
     // re-creating).
     const result = await this.callPod("search_documents", {
-      filters: { name: `memory-${userId}` },
+      filters: { name: this.documentName(userId, agentId) },
       fields: ["_id", "value", "content", "updated"],
       sorters: [["updated", -1]],
       page_size: 10,
@@ -283,7 +296,9 @@ export class PodMemoryStorage implements MemoryStorage {
     }
 
     // No consolidated doc anywhere — attempt migration from old multi-doc layout
-    const migrated = await this.migrateOldDocs(userId);
+    const migrated = agentId
+      ? { doc: {}, docId: null }
+      : await this.migrateOldDocs(userId);
     return { doc: migrated.doc, docId: migrated.docId, dirty: false };
   }
 
@@ -375,9 +390,9 @@ export class PodMemoryStorage implements MemoryStorage {
     return { doc, docId };
   }
 
-  async read(userId: string, file: string): Promise<string> {
+  async read(userId: string, file: string, agentId?: string): Promise<string> {
     try {
-      const { doc } = await this.loadCached(userId);
+      const { doc } = await this.loadCached(userId, agentId);
       const { field, date } = fileToField(file);
 
       if (field === "today" && date) {
@@ -392,9 +407,9 @@ export class PodMemoryStorage implements MemoryStorage {
     }
   }
 
-  async write(userId: string, file: string, content: string): Promise<void> {
+  async write(userId: string, file: string, content: string, agentId?: string): Promise<void> {
     try {
-      const entry = await this.loadCached(userId);
+      const entry = await this.loadCached(userId, agentId);
       const { field, date } = fileToField(file);
 
       if (field === "today" && date) {
@@ -412,38 +427,39 @@ export class PodMemoryStorage implements MemoryStorage {
       }
 
       entry.dirty = true;
-      await this.flush(userId);
+      await this.flush(userId, agentId);
     } catch {
       // Non-fatal
     }
   }
 
-  async append(userId: string, file: string, content: string): Promise<void> {
+  async append(userId: string, file: string, content: string, agentId?: string): Promise<void> {
     // Serialize concurrent appends per userId. read+write share a cached doc
     // that mutates synchronously, but the read→mutate→flush sequence isn't
     // atomic, so two concurrent appends would both read pre-mutation state
     // and the second write would overwrite the first. Queue them instead.
-    const previous = this.appendChain.get(userId) ?? Promise.resolve();
+    const key = this.namespaceKey(userId, agentId);
+    const previous = this.appendChain.get(key) ?? Promise.resolve();
     const next = previous
       .catch(() => {}) // existing append swallowed errors; preserve that
       .then(async () => {
-        const existing = await this.read(userId, file);
-        await this.write(userId, file, existing ? `${existing}\n${content}` : content);
+        const existing = await this.read(userId, file, agentId);
+        await this.write(userId, file, existing ? `${existing}\n${content}` : content, agentId);
       });
-    this.appendChain.set(userId, next);
+    this.appendChain.set(key, next);
     try {
       await next;
     } finally {
       // Drop the entry once we're the tail of the chain so the map doesn't grow.
-      if (this.appendChain.get(userId) === next) {
-        this.appendChain.delete(userId);
+      if (this.appendChain.get(key) === next) {
+        this.appendChain.delete(key);
       }
     }
   }
 
-  async list(userId: string, _pattern: string): Promise<string[]> {
+  async list(userId: string, _pattern: string, agentId?: string): Promise<string[]> {
     try {
-      const { doc } = await this.loadCached(userId);
+      const { doc } = await this.loadCached(userId, agentId);
       if (doc.today && doc.today_date) {
         return [`${doc.today_date}.md`];
       }
@@ -453,9 +469,9 @@ export class PodMemoryStorage implements MemoryStorage {
     }
   }
 
-  async remove(userId: string, file: string): Promise<void> {
+  async remove(userId: string, file: string, agentId?: string): Promise<void> {
     try {
-      const entry = await this.loadCached(userId);
+      const entry = await this.loadCached(userId, agentId);
       const { field } = fileToField(file);
 
       if (field === "today") {
@@ -466,15 +482,15 @@ export class PodMemoryStorage implements MemoryStorage {
       }
 
       entry.dirty = true;
-      await this.flush(userId);
+      await this.flush(userId, agentId);
     } catch {
       // Non-fatal
     }
   }
 
   /** Write cached doc back to pod if dirty. */
-  async flush(userId: string): Promise<void> {
-    const cachedPromise = this.cache.get(userId);
+  async flush(userId: string, agentId?: string): Promise<void> {
+    const cachedPromise = this.cache.get(this.namespaceKey(userId, agentId));
     if (!cachedPromise) return;
     const entry = await cachedPromise;
     if (!entry?.dirty) return;
@@ -487,9 +503,13 @@ export class PodMemoryStorage implements MemoryStorage {
         });
       } else {
         const result = await this.callPod("create_document", {
-          name: `memory-${userId}`,
+          name: this.documentName(userId, agentId),
           content: { value: entry.doc },
-          metadata: { type: "user-memory", user_id: userId },
+          metadata: {
+            type: "user-memory",
+            user_id: userId,
+            ...(agentId ? { agent_id: agentId } : {}),
+          },
         });
         entry.docId = result?.data?.data?._id ?? null;
       }
@@ -538,18 +558,21 @@ function timestamp(): string {
 export class MemoryManager {
   private storage: MemoryStorage;
   private userId: string;
+  private agentId?: string;
 
-  constructor(userId: string, storage?: MemoryStorage) {
+  constructor(userId: string, storage?: MemoryStorage, agentId?: string) {
     this.userId = userId;
     this.storage = storage ?? new FileMemoryStorage(MEMORY_BASE);
+    this.agentId = agentId;
   }
 
   /** Absolute path to the user's memory directory (only meaningful for file storage) */
   get memoryDir(): string {
     if (this.storage instanceof FileMemoryStorage) {
-      return this.storage.getUserDir(this.userId);
+      return this.storage.getUserDir(this.userId, this.agentId);
     }
-    return join(MEMORY_BASE, sanitizeId(this.userId));
+    const userDir = join(MEMORY_BASE, sanitizeId(this.userId));
+    return this.agentId ? join(userDir, "agents", sanitizeId(this.agentId)) : userDir;
   }
 
   // -------------------------------------------------------------------------
@@ -557,11 +580,11 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readContext(): Promise<string> {
-    return this.storage.read(this.userId, CONTEXT_FILE);
+    return this.storage.read(this.userId, CONTEXT_FILE, this.agentId);
   }
 
   async writeContext(content: string): Promise<void> {
-    await this.storage.write(this.userId, CONTEXT_FILE, content);
+    await this.storage.write(this.userId, CONTEXT_FILE, content, this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -569,7 +592,7 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readTodayLog(): Promise<string> {
-    return this.storage.read(this.userId, `${todayStamp()}.md`);
+    return this.storage.read(this.userId, `${todayStamp()}.md`, this.agentId);
   }
 
   async appendExchange(userPrompt: string, assistantReply: string): Promise<void> {
@@ -585,13 +608,13 @@ export class MemoryManager {
       "",
     ].join("\n");
 
-    await this.storage.append(this.userId, `${todayStamp()}.md`, entry);
+    await this.storage.append(this.userId, `${todayStamp()}.md`, entry, this.agentId);
   }
 
   async appendNote(label: string, content: string): Promise<void> {
     const ts = timestamp();
     const entry = [`> **${label}** (${ts}): ${content}`, ""].join("\n");
-    await this.storage.append(this.userId, `${todayStamp()}.md`, entry);
+    await this.storage.append(this.userId, `${todayStamp()}.md`, entry, this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -599,11 +622,11 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readSoul(): Promise<string> {
-    return this.storage.read(this.userId, SOUL_FILE);
+    return this.storage.read(this.userId, SOUL_FILE, this.agentId);
   }
 
   async writeSoul(content: string): Promise<void> {
-    await this.storage.write(this.userId, SOUL_FILE, content);
+    await this.storage.write(this.userId, SOUL_FILE, content, this.agentId);
   }
 
   parseSoulHeader(raw: string): SoulData {
@@ -637,7 +660,7 @@ export class MemoryManager {
 
     const header = `# Soul\nBorn: ${data.born}\nExchanges: ${data.exchanges}\n`;
     const content = data.rest ? `${header}\n${data.rest}\n` : header;
-    await this.storage.write(this.userId, SOUL_FILE, content);
+    await this.storage.write(this.userId, SOUL_FILE, content, this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -645,11 +668,11 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readFanProfile(): Promise<string> {
-    return this.storage.read(this.userId, FAN_PROFILE_FILE);
+    return this.storage.read(this.userId, FAN_PROFILE_FILE, this.agentId);
   }
 
   async writeFanProfile(content: string): Promise<void> {
-    await this.storage.write(this.userId, FAN_PROFILE_FILE, content);
+    await this.storage.write(this.userId, FAN_PROFILE_FILE, content, this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -657,11 +680,11 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readReflections(): Promise<string> {
-    return this.storage.read(this.userId, REFLECTIONS_FILE);
+    return this.storage.read(this.userId, REFLECTIONS_FILE, this.agentId);
   }
 
   async appendReflection(entry: string): Promise<void> {
-    await this.storage.append(this.userId, REFLECTIONS_FILE, entry + "\n");
+    await this.storage.append(this.userId, REFLECTIONS_FILE, entry + "\n", this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -669,11 +692,11 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readStrategy(): Promise<string> {
-    return this.storage.read(this.userId, STRATEGY_FILE);
+    return this.storage.read(this.userId, STRATEGY_FILE, this.agentId);
   }
 
   async writeStrategy(content: string): Promise<void> {
-    await this.storage.write(this.userId, STRATEGY_FILE, content);
+    await this.storage.write(this.userId, STRATEGY_FILE, content, this.agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -681,7 +704,7 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readThread(): Promise<ThreadMessage[]> {
-    const raw = await this.storage.read(this.userId, THREAD_FILE);
+    const raw = await this.storage.read(this.userId, THREAD_FILE, this.agentId);
     if (!raw) return [];
     try {
       return JSON.parse(raw);
@@ -692,7 +715,7 @@ export class MemoryManager {
 
   async writeThread(messages: ThreadMessage[]): Promise<void> {
     const capped = messages.slice(-MAX_THREAD_MESSAGES);
-    await this.storage.write(this.userId, THREAD_FILE, JSON.stringify(capped));
+    await this.storage.write(this.userId, THREAD_FILE, JSON.stringify(capped), this.agentId);
   }
 
   async appendToThread(userPrompt: string, assistantReply: string): Promise<void> {
@@ -710,15 +733,15 @@ export class MemoryManager {
   // -------------------------------------------------------------------------
 
   async readConsolidated(): Promise<string> {
-    return this.storage.read(this.userId, CONSOLIDATED_FILE);
+    return this.storage.read(this.userId, CONSOLIDATED_FILE, this.agentId);
   }
 
   async writeConsolidated(content: string): Promise<void> {
-    await this.storage.write(this.userId, CONSOLIDATED_FILE, content);
+    await this.storage.write(this.userId, CONSOLIDATED_FILE, content, this.agentId);
   }
 
   async listDailyLogs(): Promise<string[]> {
-    return this.storage.list(this.userId, "daily-log");
+    return this.storage.list(this.userId, "daily-log", this.agentId);
   }
 
   async getConsolidationCandidates(
@@ -738,7 +761,7 @@ export class MemoryManager {
       const dateStr = file.replace(".md", "");
       if (dateStr >= cutoffStamp || dateStr === today) continue;
 
-      const content = await this.storage.read(this.userId, file);
+      const content = await this.storage.read(this.userId, file, this.agentId);
       if (!content.trim()) continue;
 
       if (totalChars + content.length > MAX_CONSOLIDATION_INPUT_CHARS) break;
@@ -769,7 +792,7 @@ export class MemoryManager {
     await this.writeConsolidated(summary);
 
     for (const file of candidates.files) {
-      await this.storage.remove(this.userId, file);
+      await this.storage.remove(this.userId, file, this.agentId);
     }
 
     return candidates.files.length;

@@ -46,6 +46,7 @@
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
@@ -93,7 +94,11 @@ import {
 import {
   bootstrapDefaultAgents,
   needsAgentBootstrap,
-  loadAgents,
+  loadAgent,
+  listAgents,
+  createAgent,
+  updateAgent,
+  inactivateAgent,
   getAgentsDir,
 } from "./agents.js";
 import {
@@ -181,11 +186,15 @@ export type { PythonVersionResult, PrerequisiteStatus, EnsureVenvResult } from "
 export {
   loadAgents,
   loadAgent,
+  listAgents,
   listAgentIds,
+  createAgent,
+  updateAgent,
+  inactivateAgent,
   bootstrapDefaultAgents,
   getAgentsDir,
 } from "./agents.js";
-export type { AgentDef } from "./agents.js";
+export type { AgentDef, CreateAgentInput, UpdateAgentInput } from "./agents.js";
 export {
   loadConfig,
   saveConfig,
@@ -2175,6 +2184,7 @@ async function cmdQuery(args: string[]): Promise<void> {
   }
   const forceJson = args.includes("--json");
   const yoloMode = args.includes("--yolo");
+  const delegated = args.includes("--delegated");
   const explicitFormat = args.find((a) => a.startsWith("--format="))?.split("=")[1];
   const formatArg = explicitFormat ?? (forcePipe || forceJson ? "markdown" : "cli");
 
@@ -2194,9 +2204,19 @@ async function cmdQuery(args: string[]): Promise<void> {
     args.splice(systemPromptIdx, 2);
   }
 
+  const agentIds: string[] = [];
+  while (args.includes("--agent")) {
+    const agentIdx = args.indexOf("--agent");
+    if (agentIdx + 1 >= args.length || args[agentIdx + 1].startsWith("--")) {
+      throw new Error("--agent requires an agent id");
+    }
+    agentIds.push(args[agentIdx + 1]);
+    args.splice(agentIdx, 2);
+  }
+
   const filteredArgs = args.filter((a) =>
     a !== "--verbose" && a !== "-v" && a !== "--pipe" &&
-    a !== "--json" && a !== "--yolo" && !a.startsWith("--format=")
+    a !== "--json" && a !== "--yolo" && a !== "--delegated" && !a.startsWith("--format=")
   );
   const prompt = filteredArgs.join(" ");
 
@@ -2256,6 +2276,8 @@ async function cmdQuery(args: string[]): Promise<void> {
       }
       const result = await engine.run(prompt, {
         userId,
+        ...(agentIds.length > 0 ? { agentIds } : {}),
+        ...(delegated ? { delegationDepth: 1 as const } : {}),
         systemPrompt,
         ...(inboundImages && { images: inboundImages }),
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
@@ -2287,7 +2309,11 @@ async function cmdQuery(args: string[]): Promise<void> {
   } else if (verbose) {
     // Verbose mode: no spinner, raw console.error logs
     try {
-      const result = await engine.run(prompt, { systemPrompt });
+      const result = await engine.run(prompt, {
+        systemPrompt,
+        ...(agentIds.length > 0 ? { agentIds } : {}),
+        ...(delegated ? { delegationDepth: 1 as const } : {}),
+      });
       console.log(renderMarkdown(result));
       await saveGeneratedImages(engine);
       await saveGeneratedVideos(engine);
@@ -2313,6 +2339,8 @@ async function cmdQuery(args: string[]): Promise<void> {
     try {
       const result = await engine.run(prompt, {
         systemPrompt,
+        ...(agentIds.length > 0 ? { agentIds } : {}),
+        ...(delegated ? { delegationDepth: 1 as const } : {}),
         onProgress: tracker.handler,
         abortSignal: cancel.abortSignal,
       });
@@ -2820,6 +2848,7 @@ function printHelp(): void {
   console.log("  --yolo           Bypass all Y/n approval prompts (autonomous execution)");
   console.log("  --json           Force headless NDJSON output (no spinners/clack)");
   console.log("  --pipe           Alias for --json (legacy)");
+  console.log("  --agent <id>     Select exactly one active native agent");
   console.log("  --help, -h       Show this help message");
   console.log("");
   console.log("Configuration:");
@@ -2868,11 +2897,51 @@ async function cmdChannels(_opts?: { fromChat?: boolean }): Promise<void> {
 // CLI: `sportsclaw agents` — list installed agents
 // ---------------------------------------------------------------------------
 
-function cmdAgents(_opts?: { fromChat?: boolean }): void {
+function readAgentInput(): Record<string, unknown> {
+  const raw = readFileSync(0, "utf-8");
+  if (!raw.trim()) throw new Error("Agent JSON input is required on stdin");
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Agent JSON input must be an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function cmdAgents(args: string[] = []): void {
   if (needsAgentBootstrap()) {
     bootstrapDefaultAgents();
   }
-  const agents = loadAgents();
+  const json = args.includes("--json");
+  const command = args.find((arg) => !arg.startsWith("--"));
+  const commandIndex = command ? args.indexOf(command) : -1;
+  const id = commandIndex >= 0 ? args.slice(commandIndex + 1).find((arg) => !arg.startsWith("--")) : undefined;
+
+  let result: unknown;
+  if (command === "get") {
+    if (!id) throw new Error("agents get requires an agent id");
+    const agent = loadAgent(id);
+    if (!agent) throw new Error(`Agent "${id}" not found`);
+    result = agent;
+  } else if (command === "create") {
+    result = createAgent(readAgentInput() as unknown as Parameters<typeof createAgent>[0]);
+  } else if (command === "update") {
+    if (!id) throw new Error("agents update requires an agent id");
+    result = updateAgent(id, readAgentInput() as Parameters<typeof updateAgent>[1]);
+  } else if (command === "inactivate") {
+    if (!id) throw new Error("agents inactivate requires an agent id");
+    result = inactivateAgent(id);
+  } else if (command && command !== "list") {
+    throw new Error(`Unknown agents command: ${command}`);
+  } else {
+    result = listAgents({ includeInactive: args.includes("--all") });
+  }
+
+  if (json) {
+    console.log(JSON.stringify({ status: true, data: result }));
+    return;
+  }
+
+  const agents = Array.isArray(result) ? result : [result];
   if (agents.length === 0) {
     console.log("No agents installed.");
     console.log(`Create agent files in: ${getAgentsDir()}/`);
@@ -3033,7 +3102,7 @@ async function main(): Promise<void> {
     case "openshell":
       return cmdOpenshell(subArgs);
     case "agents":
-      return cmdAgents();
+      return cmdAgents(subArgs);
     case "analytics":
       return cmdAnalytics(subArgs);
     
@@ -3070,5 +3139,8 @@ try {
 }
 
 if (isMain) {
-  main();
+  void main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }

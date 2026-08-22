@@ -83,6 +83,8 @@ const engine = new sportsclawEngine();
 const answer = await engine.run("Who leads the Premier League?");
 ```
 
+Select one file-backed native agent explicitly with `sportsclaw --agent analyst "Compare today's odds"`, or pass `agentIds: ["analyst"]` to `engine.run`. Agent definitions can be managed through the exported `createAgent`, `updateAgent`, `inactivateAgent`, and `listAgents` functions. Selected agents keep SOUL and conversation memory isolated under `memory/<userId>/agents/<agentId>/`.
+
 **Docker in one command.** Ship the whole thing — Node.js engine + Python data layer — as a single container:
 
 ```bash

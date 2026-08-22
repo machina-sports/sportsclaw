@@ -21,20 +21,42 @@
  * ---
  * name: The Analyst
  * skills: [kalshi, polymarket, nfl, nba, football]
+ * active: true
  * ---
  * ## Directives
  * ...
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import lockfile from "proper-lockfile";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const AGENTS_DIR = join(homedir(), ".sportsclaw", "agents");
+const DEFAULT_AGENTS_DIR = join(homedir(), ".sportsclaw", "agents");
+const AGENT_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_AGENT_ID_LENGTH = 64;
+const MAX_AGENT_NAME_LENGTH = 80;
+const MAX_AGENT_TITLE_LENGTH = 120;
+const MAX_AGENT_BODY_LENGTH = 100_000;
+const MAX_AGENT_LIST_LENGTH = 64;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,6 +67,8 @@ export interface AgentDef {
   id: string;
   /** Display name (from frontmatter) */
   name: string;
+  /** Optional display title (from frontmatter). Empty when omitted. */
+  title: string;
   /** Skills this agent can use. Empty = all skills (no filter). */
   skills: string[];
   /**
@@ -55,6 +79,27 @@ export interface AgentDef {
   tags: string[];
   /** The full markdown body (directives + voice), injected into system prompt */
   body: string;
+  /** Inactive agents remain on disk but cannot be selected or routed. */
+  active: boolean;
+  /** Built-ins are reserved and cannot be modified or inactivated. */
+  builtin: boolean;
+}
+
+export interface CreateAgentInput {
+  id: string;
+  name: string;
+  title?: string;
+  body: string;
+  skills?: string[];
+  tags?: string[];
+}
+
+export interface UpdateAgentInput {
+  name?: string;
+  title?: string;
+  body?: string;
+  skills?: string[];
+  tags?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -68,10 +113,20 @@ export interface AgentDef {
  * (name: string, skills: [list]) to parse with regex.
  */
 function parseAgentFile(id: string, raw: string): AgentDef {
+  validateAgentId(id);
   const fmMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
   if (!fmMatch) {
     // No frontmatter — treat entire file as body
-    return { id, name: id, skills: [], tags: [], body: raw.trim() };
+    return {
+      id,
+      name: id,
+      title: "",
+      skills: [],
+      tags: [],
+      body: validateBody(raw),
+      active: true,
+      builtin: isBuiltinAgent(id),
+    };
   }
 
   const frontmatter = fmMatch[1];
@@ -79,7 +134,11 @@ function parseAgentFile(id: string, raw: string): AgentDef {
 
   // Parse name
   const nameMatch = frontmatter.match(/^name:\s*(.+)$/m);
-  const name = nameMatch ? nameMatch[1].trim() : id;
+  const name = validateName(nameMatch ? nameMatch[1].trim() : id);
+
+  // Parse optional title. Legacy files without it normalize to an empty title.
+  const titleMatch = frontmatter.match(/^title:\s*(.*)$/m);
+  const title = validateTitle(titleMatch ? titleMatch[1].trim() : "");
 
   // Parse a YAML list field (inline `[a, b, c]` or block `\n  - a\n  - b`)
   const parseList = (key: string): string[] => {
@@ -97,10 +156,24 @@ function parseAgentFile(id: string, raw: string): AgentDef {
     return [];
   };
 
-  const skills = parseList("skills");
-  const tags = parseList("tags");
+  const skills = validateSlugList(parseList("skills"), "skills");
+  const tags = validateSlugList(parseList("tags"), "tags");
+  const activeLine = frontmatter.match(/^active:\s*(.+)$/m);
+  if (activeLine && activeLine[1] !== "true" && activeLine[1] !== "false") {
+    throw new Error('Invalid agent active status: expected "true" or "false"');
+  }
+  const active = activeLine?.[1] !== "false";
 
-  return { id, name, skills, tags, body };
+  return {
+    id,
+    name,
+    title,
+    skills,
+    tags,
+    body: validateBody(body),
+    active,
+    builtin: isBuiltinAgent(id),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,54 +181,198 @@ function parseAgentFile(id: string, raw: string): AgentDef {
 // ---------------------------------------------------------------------------
 
 /** Ensure the agents directory exists */
-function ensureAgentsDir(): void {
-  if (!existsSync(AGENTS_DIR)) {
-    mkdirSync(AGENTS_DIR, { recursive: true });
+function agentsDir(): string {
+  return process.env.SPORTSCLAW_AGENTS_DIR || DEFAULT_AGENTS_DIR;
+}
+
+function ensureAgentsDir(): string {
+  const dir = agentsDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  if (!lstatSync(dir).isDirectory()) {
+    throw new Error("Agents path must be a real directory");
+  }
+  return dir;
+}
+
+function validateAgentId(id: unknown): string {
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.length > MAX_AGENT_ID_LENGTH ||
+    !AGENT_ID_PATTERN.test(id)
+  ) {
+    throw new Error(
+      "Invalid agent id: expected a lowercase slug using letters, numbers, and single hyphens"
+    );
+  }
+  return id;
+}
+
+function validateName(name: unknown): string {
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name.length > MAX_AGENT_NAME_LENGTH ||
+    name !== name.trim() ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw new Error(`Invalid agent name: expected 1-${MAX_AGENT_NAME_LENGTH} printable characters`);
+  }
+  return name;
+}
+
+function validateTitle(title: unknown): string {
+  if (
+    typeof title !== "string" ||
+    title.length > MAX_AGENT_TITLE_LENGTH ||
+    title !== title.trim() ||
+    /[\u0000-\u001f\u007f]/.test(title)
+  ) {
+    throw new Error(`Invalid agent title: expected at most ${MAX_AGENT_TITLE_LENGTH} printable characters`);
+  }
+  return title;
+}
+
+function validateBody(body: unknown): string {
+  if (
+    typeof body !== "string" ||
+    body.trim().length === 0 ||
+    body.length > MAX_AGENT_BODY_LENGTH ||
+    body.includes("\0")
+  ) {
+    throw new Error(`Invalid agent body: expected 1-${MAX_AGENT_BODY_LENGTH} characters`);
+  }
+  return body.trim();
+}
+
+function validateSlugList(value: unknown, field: "skills" | "tags"): string[] {
+  if (!Array.isArray(value) || value.length > MAX_AGENT_LIST_LENGTH) {
+    throw new Error(`Invalid agent ${field}: expected an array of at most ${MAX_AGENT_LIST_LENGTH} slugs`);
+  }
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || item.length > MAX_AGENT_ID_LENGTH || !AGENT_ID_PATTERN.test(item)) {
+      throw new Error(`Invalid agent ${field}: every value must be a lowercase slug`);
+    }
+    if (seen.has(item)) {
+      throw new Error(`Invalid agent ${field}: duplicate value "${item}"`);
+    }
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+
+function agentPath(id: string): string {
+  return join(ensureAgentsDir(), `${validateAgentId(id)}.md`);
+}
+
+function assertRegularAgentFile(path: string): void {
+  if (existsSync(path) && !lstatSync(path).isFile()) {
+    throw new Error("Agent definition must be a regular file");
+  }
+}
+
+function readAgentContents(path: string): string {
+  assertRegularAgentFile(path);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("Agent definition must be a regular file");
+    return readFileSync(fd, "utf-8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function withAgentLock<T>(path: string, operation: () => T): T {
+  const release = lockfile.lockSync(path, {
+    realpath: false,
+  });
+  try {
+    return operation();
+  } finally {
+    release();
+  }
+}
+
+function serializeAgent(agent: Pick<AgentDef, "name" | "title" | "skills" | "tags" | "body" | "active">): string {
+  return [
+    "---",
+    `name: ${agent.name}`,
+    `title: ${agent.title}`,
+    `skills: [${agent.skills.join(", ")}]`,
+    `tags: [${agent.tags.join(", ")}]`,
+    `active: ${agent.active}`,
+    "---",
+    "",
+    agent.body,
+    "",
+  ].join("\n");
+}
+
+function writeAgentAtomic(path: string, content: string, createOnly = false): void {
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    writeFileSync(tmp, content, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+    if (createOnly) {
+      linkSync(tmp, path);
+      unlinkSync(tmp);
+    } else {
+      renameSync(tmp, path);
+    }
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // The temp file may already have been linked and removed.
+    }
+    throw error;
   }
 }
 
 /** Load all agent definitions from disk */
 export function loadAgents(): AgentDef[] {
-  ensureAgentsDir();
-  const agents: AgentDef[] = [];
+  return listAgents();
+}
 
-  for (const file of readdirSync(AGENTS_DIR)) {
+/** List native agent definitions, excluding inactive agents by default. */
+export function listAgents(options?: { includeInactive?: boolean }): AgentDef[] {
+  const dir = ensureAgentsDir();
+  const agents: AgentDef[] = [];
+  for (const file of readdirSync(dir).sort()) {
     if (!file.endsWith(".md")) continue;
     const id = file.replace(/\.md$/, "");
+    if (!AGENT_ID_PATTERN.test(id)) continue;
     try {
-      const raw = readFileSync(join(AGENTS_DIR, file), "utf-8");
-      agents.push(parseAgentFile(id, raw));
+      const path = join(dir, file);
+      const agent = parseAgentFile(id, readAgentContents(path));
+      if (agent.active || options?.includeInactive) agents.push(agent);
     } catch {
-      // Skip unreadable files
+      // Skip unreadable or unsafe files during bulk listing.
     }
   }
-
   return agents;
 }
 
 /** Load a single agent by ID, or undefined if not found */
 export function loadAgent(id: string): AgentDef | undefined {
-  const filePath = join(AGENTS_DIR, `${id}.md`);
+  const filePath = agentPath(id);
   if (!existsSync(filePath)) return undefined;
-  try {
-    const raw = readFileSync(filePath, "utf-8");
-    return parseAgentFile(id, raw);
-  } catch {
-    return undefined;
-  }
+  const raw = readAgentContents(filePath);
+  return parseAgentFile(id, raw);
 }
 
 /** List agent IDs on disk */
 export function listAgentIds(): string[] {
-  ensureAgentsDir();
-  return readdirSync(AGENTS_DIR)
-    .filter((f) => f.endsWith(".md"))
-    .map((f) => f.replace(/\.md$/, ""));
+  return loadAgents().map((agent) => agent.id);
 }
 
 /** Get the agents directory path */
 export function getAgentsDir(): string {
-  return AGENTS_DIR;
+  return ensureAgentsDir();
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +471,105 @@ Time-stamp major stories.
 `,
 };
 
+export function isBuiltinAgent(id: string): boolean {
+  return Object.hasOwn(BUILTIN_AGENTS, id);
+}
+
+export function createAgent(input: CreateAgentInput): AgentDef {
+  const id = validateAgentId(input?.id);
+  if (isBuiltinAgent(id)) {
+    throw new Error(`Agent "${id}" is a reserved built-in agent`);
+  }
+  const filePath = agentPath(id);
+  if (existsSync(filePath)) throw new Error(`Agent "${id}" already exists`);
+
+  const agent: AgentDef = {
+    id,
+    name: validateName(input?.name),
+    title: validateTitle(input?.title ?? ""),
+    skills: validateSlugList(input?.skills ?? [], "skills"),
+    tags: validateSlugList(input?.tags ?? [], "tags"),
+    body: validateBody(input?.body),
+    active: true,
+    builtin: false,
+  };
+  try {
+    writeAgentAtomic(filePath, serializeAgent(agent), true);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`Agent "${id}" already exists`);
+    }
+    throw error;
+  }
+  return agent;
+}
+
+export function updateAgent(id: string, updates: UpdateAgentInput): AgentDef {
+  validateAgentId(id);
+  if (isBuiltinAgent(id)) throw new Error(`Built-in agent "${id}" cannot be modified`);
+  if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
+    throw new Error("Agent updates must be an object");
+  }
+  const allowed = new Set(["name", "title", "body", "skills", "tags"]);
+  const keys = Object.keys(updates);
+  if (keys.length === 0 || keys.some((key) => !allowed.has(key))) {
+    throw new Error("Agent updates may contain only name, title, body, skills, and tags");
+  }
+  const filePath = agentPath(id);
+  if (!existsSync(filePath)) throw new Error(`Agent "${id}" not found`);
+  return withAgentLock(filePath, () => {
+    const current = parseAgentFile(id, readAgentContents(filePath));
+    const agent: AgentDef = {
+      ...current,
+      ...(updates.name !== undefined ? { name: validateName(updates.name) } : {}),
+      ...(updates.title !== undefined ? { title: validateTitle(updates.title) } : {}),
+      ...(updates.body !== undefined ? { body: validateBody(updates.body) } : {}),
+      ...(updates.skills !== undefined ? { skills: validateSlugList(updates.skills, "skills") } : {}),
+      ...(updates.tags !== undefined ? { tags: validateSlugList(updates.tags, "tags") } : {}),
+    };
+    writeAgentAtomic(filePath, serializeAgent(agent));
+    return agent;
+  });
+}
+
+export function inactivateAgent(id: string): AgentDef {
+  validateAgentId(id);
+  if (isBuiltinAgent(id)) throw new Error(`Built-in agent "${id}" cannot be inactivated`);
+  const filePath = agentPath(id);
+  if (!existsSync(filePath)) throw new Error(`Agent "${id}" not found`);
+  return withAgentLock(filePath, () => {
+    const current = parseAgentFile(id, readAgentContents(filePath));
+    const agent = { ...current, active: false };
+    writeAgentAtomic(filePath, serializeAgent(agent));
+    return agent;
+  });
+}
+
+/** Resolve one caller-selected active agent without falling back to routing. */
+export function selectExplicitAgents(agents: AgentDef[], agentIds: readonly string[]): AgentDef[] {
+  if (agentIds.length !== 1) throw new Error("Explicit agent selection requires exactly one agent id");
+  const id = validateAgentId(agentIds[0]);
+  const agent = agents.find((candidate) => candidate.id === id);
+  if (!agent) throw new Error(`Agent "${id}" not found`);
+  if (!agent.active) throw new Error(`Agent "${id}" is inactive`);
+  return [agent];
+}
+
+/** Restrict skill-owned tools while preserving safe engine and MCP tools. */
+export function filterToolNamesForAgent(
+  agent: AgentDef,
+  allToolNames: readonly string[],
+  getSkillName: (toolName: string) => string | undefined,
+): string[] | undefined {
+  if (agent.skills.length === 0) return undefined;
+  const skills = new Set(agent.skills);
+  return allToolNames.filter((name) => {
+    if (name.startsWith("mcp__")) return true;
+    const skill = getSkillName(name);
+    return skill === undefined || skills.has(skill);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
@@ -264,14 +580,20 @@ Time-stamp major stories.
  * Returns the number of agents bootstrapped.
  */
 export function bootstrapDefaultAgents(): number {
-  ensureAgentsDir();
+  const dir = ensureAgentsDir();
   let count = 0;
 
   for (const [id, content] of Object.entries(BUILTIN_AGENTS)) {
-    const filePath = join(AGENTS_DIR, `${id}.md`);
+    const filePath = join(dir, `${id}.md`);
     if (!existsSync(filePath)) {
-      writeFileSync(filePath, content, "utf-8");
-      count++;
+      try {
+        writeAgentAtomic(filePath, content, true);
+        count++;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST")) {
+          throw error;
+        }
+      }
     }
   }
 
@@ -280,7 +602,6 @@ export function bootstrapDefaultAgents(): number {
 
 /** Check if default agents need bootstrapping */
 export function needsAgentBootstrap(): boolean {
-  ensureAgentsDir();
-  const existing = readdirSync(AGENTS_DIR).filter((f) => f.endsWith(".md"));
-  return existing.length === 0;
+  const dir = ensureAgentsDir();
+  return Object.keys(BUILTIN_AGENTS).some((id) => !existsSync(join(dir, `${id}.md`)));
 }

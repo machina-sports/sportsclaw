@@ -153,6 +153,9 @@ class _Router:
     def add_post(self, path, handler):
         self.routes.append(("POST", path, handler))
 
+    def add_patch(self, path, handler):
+        self.routes.append(("PATCH", path, handler))
+
 
 class _Application(dict):
     def __init__(self):

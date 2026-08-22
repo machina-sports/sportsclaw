@@ -152,6 +152,7 @@ describe("resolveConfig", () => {
 
       const resolved = runResolveConfigWithHome(home, {
         AZURE_FOUNDRY_BASE_URL: "https://example.openai.azure.com/openai/v1",
+        AZURE_FOUNDRY_API_KEY: "",
       });
 
       assert.strictEqual(resolved.provider, "azure-foundry");

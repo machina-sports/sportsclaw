@@ -20,6 +20,11 @@ Endpoints:
     GET  /api/skills       → List installed sport schemas
     POST /api/query        → Streaming NDJSON response (real-time progress)
     POST /api/query/sync   → Buffered JSON response (waits for result)
+    GET  /api/agents       → List native agents
+    POST /api/agents       → Create a native agent
+    GET  /api/agents/{id}  → Get a native agent
+    PATCH /api/agents/{id} → Update or inactivate a native agent
+    POST /api/agents/delegate → One-hop query delegated to another native agent
     POST /api/highlights/jobs                     → Create a typed highlights job
     GET  /api/highlights/jobs/{job_id}            → Job status
     POST /api/highlights/jobs/{job_id}/cancel     → Cancel a job (terminal state)
@@ -31,6 +36,7 @@ Query body:
         "user_id": "discord-12345",        // optional, enables memory
         "provider": "anthropic",           // optional, override provider
         "model": "claude-sonnet-4-5-...",  // optional, override model
+        "agent_id": "analyst",             // optional, exact native agent
         "verbose": false                   // optional, enable debug output
     }
 """
@@ -38,6 +44,7 @@ Query body:
 import asyncio
 import json
 import os
+import re
 import secrets
 import time
 
@@ -57,6 +64,8 @@ PORT = int(os.environ.get("RELAY_PORT", 8080))
 SPORTSCLAW_BIN = os.environ.get("SPORTSCLAW_BIN", "node")
 SPORTSCLAW_ENTRY = os.environ.get("SPORTSCLAW_ENTRY", "/app/dist/index.js")
 DEFAULT_TIMEOUT = int(os.environ.get("RELAY_TIMEOUT", 180))
+AGENT_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+AGENTS_AUTH_HEADER = "X-Auth-Token"
 
 
 def log(msg: str) -> None:
@@ -107,6 +116,255 @@ async def list_skills(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Native agents
+# ---------------------------------------------------------------------------
+
+class AgentApiError(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _agents_auth_error(request: web.Request) -> web.Response | None:
+    expected = os.environ.get("AGENTS_API_TOKEN", "")
+    if not expected:
+        return web.json_response(
+            {"status": False, "error": "agents API is unavailable — no API token is configured"},
+            status=503,
+        )
+    supplied = request.headers.get(AGENTS_AUTH_HEADER, "")
+    if not supplied or not secrets.compare_digest(
+        supplied.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return web.json_response(
+            {"status": False, "error": f"invalid or missing {AGENTS_AUTH_HEADER}"},
+            status=401,
+        )
+    return None
+
+
+def _query_agent_auth_error(
+    request: web.Request, body: dict
+) -> web.Response | None:
+    """Keep legacy queries public, but authenticate explicit agent selection."""
+    if body.get("agent_id") is None:
+        return None
+    return _agents_auth_error(request)
+
+
+def _validate_agent_id(agent_id: object) -> str:
+    if (not isinstance(agent_id, str) or not agent_id
+            or len(agent_id) > 64 or not AGENT_ID_PATTERN.fullmatch(agent_id)):
+        raise AgentApiError(
+            "invalid agent_id: expected a lowercase slug using letters, numbers, and single hyphens"
+        )
+    return agent_id
+
+
+def _validate_agent_payload(body: object, *, create: bool) -> dict:
+    if not isinstance(body, dict):
+        raise AgentApiError("request body must be a JSON object")
+    allowed = {"id", "name", "title", "body", "skills", "tags"} if create else {
+        "name", "title", "body", "skills", "tags", "active"
+    }
+    unknown = set(body) - allowed
+    if unknown:
+        raise AgentApiError(f"unsupported agent fields: {', '.join(sorted(unknown))}")
+    if create:
+        _validate_agent_id(body.get("id"))
+        for required in ("name", "body"):
+            if required not in body:
+                raise AgentApiError(f"{required} is required")
+    if "name" in body:
+        name = body["name"]
+        if (not isinstance(name, str) or not name or len(name) > 80
+                or name != name.strip() or any(ord(ch) < 32 for ch in name)):
+            raise AgentApiError("invalid agent name")
+    if "title" in body:
+        title = body["title"]
+        if (not isinstance(title, str) or len(title) > 120
+                or title != title.strip()
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in title)):
+            raise AgentApiError("invalid agent title")
+    if "body" in body:
+        text = body["body"]
+        if (not isinstance(text, str) or not text.strip()
+                or len(text) > 100_000 or "\0" in text):
+            raise AgentApiError("invalid agent body")
+    for field in ("skills", "tags"):
+        if field not in body:
+            continue
+        values = body[field]
+        if not isinstance(values, list) or len(values) > 64:
+            raise AgentApiError(f"invalid agent {field}")
+        if any(not isinstance(value, str)
+               or len(value) > 64
+               or not AGENT_ID_PATTERN.fullmatch(value)
+               for value in values):
+            raise AgentApiError(f"invalid agent {field}")
+        if len(values) != len(set(values)):
+            raise AgentApiError(f"invalid agent {field}: duplicate values")
+    if "active" in body and not isinstance(body["active"], bool):
+        raise AgentApiError("invalid agent active status: expected a boolean")
+    return body
+
+
+async def _read_json_object(request: web.Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise AgentApiError("request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise AgentApiError("request body must be a JSON object")
+    return body
+
+
+async def _run_agent_cli(args: list[str], payload: dict | None = None):
+    cmd = [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "agents", *args, "--json"]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE if payload is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_build_env(),
+    )
+    stdin = json.dumps(payload).encode() if payload is not None else None
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout=10)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.communicate()
+        raise AgentApiError("agent operation timed out", 504) from exc
+    if proc.returncode != 0:
+        detail = stderr.decode().strip().splitlines()
+        message = detail[-1] if detail else "agent operation failed"
+        status = 404 if "not found" in message.lower() else 409 if "exists" in message.lower() else 400
+        raise AgentApiError(message, status)
+    try:
+        result = json.loads(stdout.decode())
+        return result["data"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise AgentApiError("agent operation returned an invalid response", 500) from exc
+
+
+def _agent_error_response(error: Exception) -> web.Response:
+    status = error.status if isinstance(error, AgentApiError) else 500
+    message = str(error) if isinstance(error, AgentApiError) else "internal error"
+    return web.json_response({"status": False, "error": message}, status=status)
+
+
+async def agents_list(request: web.Request) -> web.Response:
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        agents = await _run_agent_cli(["list", "--all"])
+        return web.json_response({"status": True, "agents": agents})
+    except Exception as error:
+        return _agent_error_response(error)
+
+
+async def agents_get(request: web.Request) -> web.Response:
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        agent_id = _validate_agent_id(request.match_info.get("agent_id"))
+        agent = await _run_agent_cli(["get", agent_id])
+        return web.json_response({"status": True, "agent": agent})
+    except Exception as error:
+        return _agent_error_response(error)
+
+
+async def agents_create(request: web.Request) -> web.Response:
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        body = _validate_agent_payload(await _read_json_object(request), create=True)
+        agent = await _run_agent_cli(["create"], body)
+        return web.json_response({"status": True, "agent": agent}, status=201)
+    except Exception as error:
+        return _agent_error_response(error)
+
+
+async def agents_patch(request: web.Request) -> web.Response:
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        agent_id = _validate_agent_id(request.match_info.get("agent_id"))
+        body = _validate_agent_payload(await _read_json_object(request), create=False)
+        if "active" in body:
+            if len(body) != 1 or body["active"] is not False:
+                raise AgentApiError("active may only be set to false as a standalone inactivation")
+            agent = await _run_agent_cli(["inactivate", agent_id])
+        else:
+            if not body:
+                raise AgentApiError("at least one update field is required")
+            agent = await _run_agent_cli(["update", agent_id], body)
+        return web.json_response({"status": True, "agent": agent})
+    except Exception as error:
+        return _agent_error_response(error)
+
+
+def _build_delegated_body(body: object) -> dict:
+    if not isinstance(body, dict):
+        raise AgentApiError("request body must be a JSON object")
+    forbidden = {"system_prompt", "delegation_depth", "delegated", "source_chain"}
+    if forbidden.intersection(body):
+        raise AgentApiError("recursive delegation and delegated system_prompt are not allowed")
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise AgentApiError("prompt is required")
+    source_id = _validate_agent_id(body.get("source_agent_id"))
+    target_id = _validate_agent_id(body.get("agent_id"))
+    if source_id == target_id:
+        raise AgentApiError("self-delegation is not allowed")
+    delegated = {"prompt": prompt, "agent_id": target_id, "_delegated": True}
+    for key in ("user_id", "provider", "model", "verbose", "format", "timeout", "api_key"):
+        if key in body:
+            delegated[key] = body[key]
+    return delegated
+
+
+class _DelegatedRequest:
+    def __init__(self, body: dict, headers):
+        self._body = body
+        self.headers = headers
+
+    async def json(self) -> dict:
+        return self._body
+
+
+async def agents_delegate(request: web.Request) -> web.Response:
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        original = await _read_json_object(request)
+        delegated = _build_delegated_body(original)
+        source = await _run_agent_cli(["get", original["source_agent_id"]])
+        target = await _run_agent_cli(["get", delegated["agent_id"]])
+        if not source.get("active"):
+            raise AgentApiError(f'Agent "{source["id"]}" is inactive', 403)
+        if not target.get("active"):
+            raise AgentApiError(f'Agent "{target["id"]}" is inactive', 403)
+        return await query_sync(_DelegatedRequest(delegated, request.headers))
+    except Exception as error:
+        return _agent_error_response(error)
+
+
+async def _require_active_query_agent(body: dict) -> None:
+    if body.get("agent_id") is None:
+        return
+    agent_id = _validate_agent_id(body["agent_id"])
+    agent = await _run_agent_cli(["get", agent_id])
+    if not agent.get("active"):
+        raise AgentApiError(f'Agent "{agent_id}" is inactive', 403)
+
+
+# ---------------------------------------------------------------------------
 # Query — streaming NDJSON (forwards engine events in real-time)
 # ---------------------------------------------------------------------------
 
@@ -127,6 +385,15 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
 
     user_id = body.get("user_id", "api-anonymous")
     timeout = body.get("timeout", DEFAULT_TIMEOUT)
+
+    denied = _query_agent_auth_error(request, body)
+    if denied is not None:
+        return denied
+
+    try:
+        await _require_active_query_agent(body)
+    except Exception as error:
+        return _agent_error_response(error)
 
     cmd = _build_cmd(body)
     env = _build_env(body)
@@ -213,6 +480,15 @@ async def query_sync(request: web.Request) -> web.Response:
 
     user_id = body.get("user_id", "api-anonymous")
     timeout = body.get("timeout", DEFAULT_TIMEOUT)
+
+    denied = _query_agent_auth_error(request, body)
+    if denied is not None:
+        return denied
+
+    try:
+        await _require_active_query_agent(body)
+    except Exception as error:
+        return _agent_error_response(error)
 
     cmd = _build_cmd(body)
     env = _build_env(body)
@@ -465,6 +741,13 @@ def _build_cmd(body: dict) -> list[str]:
     if user_id:
         cmd.extend(["--user", user_id])
 
+    agent_id = body.get("agent_id")
+    if agent_id is not None:
+        cmd.extend(["--agent", _validate_agent_id(agent_id)])
+
+    if body.get("_delegated") is True:
+        cmd.append("--delegated")
+
     system_prompt = body.get("system_prompt")
     if system_prompt:
         cmd.extend(["--system-prompt", system_prompt])
@@ -519,6 +802,11 @@ def create_app() -> web.Application:
     app.router.add_get("/api/skills", list_skills)
     app.router.add_post("/api/query", query_stream)
     app.router.add_post("/api/query/sync", query_sync)
+    app.router.add_get("/api/agents", agents_list)
+    app.router.add_post("/api/agents", agents_create)
+    app.router.add_post("/api/agents/delegate", agents_delegate)
+    app.router.add_get("/api/agents/{agent_id}", agents_get)
+    app.router.add_patch("/api/agents/{agent_id}", agents_patch)
 
     app["highlights_manager"] = HighlightsJobManager(
         jobs_root=os.environ.get("HIGHLIGHTS_JOBS_ROOT", "/data/highlights-jobs"),
