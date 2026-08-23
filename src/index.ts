@@ -55,7 +55,7 @@ import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
 import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
-import { MemoryManager } from "./memory.js";
+import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
   fetchSportSchema,
   saveSchema,
@@ -71,7 +71,7 @@ import {
   getCachedSchemaVersion,
   DEFAULT_SKILLS,
 } from "./schema.js";
-import type { ToolProgressEvent, McpServerConfig } from "./types.js";
+import type { ToolProgressEvent, McpServerConfig, RunOptions } from "./types.js";
 import {
   loadConfig,
   resolveConfig,
@@ -1962,8 +1962,24 @@ async function cmdChat(args: string[]): Promise<void> {
   p.intro(`sportsclaw chat${yoloMode ? " [YOLO]" : ""} — type 'exit' or 'quit' to leave`);
 
   // Welcome message — evolves with the relationship
-  const memory = new MemoryManager(userId);
-  const soulRaw = await memory.readSoul();
+  const selectedWelcomeStorage =
+    process.env.SPORTSCLAW_MEMORY_PROVIDER?.toLowerCase() === "hindsight"
+      ? createMemoryStorage({ verbose }).storage
+      : undefined;
+  const memory = new MemoryManager(userId, selectedWelcomeStorage);
+  let soulRaw: string;
+  if (selectedWelcomeStorage) {
+    try {
+      soulRaw = await memory.readSoul();
+    } catch (err) {
+      soulRaw = "";
+      if (verbose) {
+        console.error(`[sportsclaw] memory read error: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  } else {
+    soulRaw = await memory.readSoul();
+  }
   const soul = memory.parseSoulHeader(soulRaw);
 
   if (soul.exchanges >= 20) {
@@ -2176,6 +2192,45 @@ function emitNdjson(event: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(event) + "\n");
 }
 
+export function buildOneShotRunOptions(params: {
+  userId?: string;
+  systemPrompt?: string;
+  agentIds: string[];
+  delegated: boolean;
+  images?: RunOptions["images"];
+  onProgress?: RunOptions["onProgress"];
+  abortSignal?: AbortSignal;
+}): RunOptions {
+  return {
+    userId: params.userId,
+    systemPrompt: params.systemPrompt,
+    ...(params.agentIds.length > 0 ? { agentIds: params.agentIds } : {}),
+    ...(params.delegated ? { delegationDepth: 1 as const } : {}),
+    ...(params.images ? { images: params.images } : {}),
+    ...(params.onProgress ? { onProgress: params.onProgress } : {}),
+    ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+  };
+}
+
+export function runOneShotEngine(
+  engine: Pick<sportsclawEngine, "run">,
+  prompt: string,
+  params: Parameters<typeof buildOneShotRunOptions>[0]
+): Promise<string> {
+  return engine.run(prompt, buildOneShotRunOptions(params));
+}
+
+export function takeOneShotUserId(args: string[]): string | undefined {
+  const userIdx = args.indexOf("--user");
+  if (userIdx < 0) return undefined;
+  if (userIdx + 1 >= args.length || args[userIdx + 1].startsWith("--")) {
+    throw new Error("--user requires a user id");
+  }
+  const userId = args[userIdx + 1];
+  args.splice(userIdx, 2);
+  return userId;
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
@@ -2189,12 +2244,7 @@ async function cmdQuery(args: string[]): Promise<void> {
   const formatArg = explicitFormat ?? (forcePipe || forceJson ? "markdown" : "cli");
 
   // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
-  let userId: string | undefined;
-  const userIdx = args.indexOf("--user");
-  if (userIdx >= 0 && userIdx + 1 < args.length) {
-    userId = args[userIdx + 1];
-    args.splice(userIdx, 2); // remove --user and its value from args
-  }
+  const userId = takeOneShotUserId(args);
 
   // Parse --system-prompt <text> flag (used by relay to inject caller context)
   let systemPrompt: string | undefined;
@@ -2274,12 +2324,12 @@ async function cmdQuery(args: string[]): Promise<void> {
           console.error("[sportsclaw] Failed to parse SPORTSCLAW_INBOUND_IMAGES env:", err);
         }
       }
-      const result = await engine.run(prompt, {
+      const result = await runOneShotEngine(engine, prompt, {
         userId,
-        ...(agentIds.length > 0 ? { agentIds } : {}),
-        ...(delegated ? { delegationDepth: 1 as const } : {}),
         systemPrompt,
-        ...(inboundImages && { images: inboundImages }),
+        agentIds,
+        delegated,
+        images: inboundImages,
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
       });
       const formatted = formatResponse(result, formatArg as any);
@@ -2309,10 +2359,11 @@ async function cmdQuery(args: string[]): Promise<void> {
   } else if (verbose) {
     // Verbose mode: no spinner, raw console.error logs
     try {
-      const result = await engine.run(prompt, {
+      const result = await runOneShotEngine(engine, prompt, {
+        userId,
         systemPrompt,
-        ...(agentIds.length > 0 ? { agentIds } : {}),
-        ...(delegated ? { delegationDepth: 1 as const } : {}),
+        agentIds,
+        delegated,
       });
       console.log(renderMarkdown(result));
       await saveGeneratedImages(engine);
@@ -2337,10 +2388,11 @@ async function cmdQuery(args: string[]): Promise<void> {
     cancel.activate();
     tracker.start();
     try {
-      const result = await engine.run(prompt, {
+      const result = await runOneShotEngine(engine, prompt, {
+        userId,
         systemPrompt,
-        ...(agentIds.length > 0 ? { agentIds } : {}),
-        ...(delegated ? { delegationDepth: 1 as const } : {}),
+        agentIds,
+        delegated,
         onProgress: tracker.handler,
         abortSignal: cancel.abortSignal,
       });
