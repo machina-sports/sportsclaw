@@ -32,9 +32,17 @@ const TYPE_IMPORTANCE: Record<string, number> = {
 };
 
 /** Normalize a raw provider type/description pair into one action type. */
+/**
+ * Phrases that mean "this was NOT a goal". Checked before the goal pattern so
+ * a disallowed/ruled-out goal never reaches importance 100. "goal kick" is a
+ * routine restart that merely contains the word "goal".
+ */
+const NOT_A_GOAL =
+  /\b(no goal|goal kick|tiro de meta)\b|\b(goal|gol|golo)\b[^.]{0,40}\b(disallowed|ruled out|chalked off|cancelled|canceled|anulado|invalidado)\b|\b(disallowed|ruled out|chalked off|anulado)\b/;
+
 export function classifyActionType(rawType: string, rawText: string): string {
   const t = `${rawType} ${rawText}`.toLowerCase();
-  if (/(^|\W)(goal|gol|golo)(\W|$)/.test(t) && !/own goal disallowed|no goal/.test(t)) return "goal";
+  if (/(^|\W)(goal|gol|golo)(\W|$)/.test(t) && !NOT_A_GOAL.test(t)) return "goal";
   if (/penalty (kick|awarded|scored)|pênalti|penalti/.test(t)) return "penalty";
   if (/red card|cartão vermelho|second yellow/.test(t)) return "red-card";
   if (/\bvar\b|video assistant/.test(t)) return "var";
@@ -60,13 +68,28 @@ function clockStringToSec(raw: string): number {
   return 0;
 }
 
+/** How a feed's clock relates to elapsed match time. */
+export type ClockMode = "absolute" | "per-period" | "auto";
+
 /**
  * Clock seconds → elapsed-ascending seconds. ESPN soccer clocks are already
  * absolute across periods ("52:10" in period 2); per-period clocks
  * (canonical "07:10" in period 2) get the elapsed periods added.
+ *
+ * `mode` should be stated by the caller whenever the feed's semantics are
+ * known. "auto" infers from magnitude and is AMBIGUOUS in stoppage time: a
+ * per-period P2 clock of 45:00+ is indistinguishable from an absolute one and
+ * is read as absolute, mapping stoppage-time actions ~45 minutes early.
  */
-export function toElapsedSec(clockSec: number, period: number, periodMinutes = 45): number {
+export function toElapsedSec(
+  clockSec: number,
+  period: number,
+  periodMinutes = 45,
+  mode: ClockMode = "auto",
+): number {
   const periodBase = (period - 1) * periodMinutes * 60;
+  if (mode === "absolute") return clockSec;
+  if (mode === "per-period") return periodBase + clockSec;
   return clockSec >= periodBase ? clockSec : periodBase + clockSec;
 }
 
@@ -77,6 +100,12 @@ export interface NormalizeOptions {
   periodMinutes?: number;
   /** Provenance string recorded on every action (feed name / capture ref). */
   provenance?: string;
+  /**
+   * How the feed's clock relates to elapsed time. Defaults to "auto"
+   * (magnitude inference), which is ambiguous in stoppage time — state it
+   * explicitly whenever the provider's semantics are known.
+   */
+  clockMode?: ClockMode;
 }
 
 /** Parse a raw provider PBP payload into typed PBPAction[]. */
@@ -94,6 +123,7 @@ export function normalizeProviderPayload(
     opts.provider ??
     (Array.isArray(root.plays) ? "espn" : Array.isArray(root.events) ? "canonical" : undefined);
   const periodMinutes = opts.periodMinutes ?? 45;
+  const clockMode: ClockMode = opts.clockMode ?? "auto";
 
   if (detected === "espn" && Array.isArray(root.plays)) {
     const provenance = opts.provenance ?? "espn:sports-skills playbyplay";
@@ -111,7 +141,7 @@ export function normalizeProviderPayload(
         period,
         clock: {
           semantics: SUPPORTED_CLOCK_SEMANTICS,
-          elapsedSec: toElapsedSec(clockSec, period, periodMinutes),
+          elapsedSec: toElapsedSec(clockSec, period, periodMinutes, clockMode),
         },
         label: text,
         type,
@@ -134,7 +164,7 @@ export function normalizeProviderPayload(
         period,
         clock: {
           semantics: SUPPORTED_CLOCK_SEMANTICS,
-          elapsedSec: toElapsedSec(clockSec, period, periodMinutes),
+          elapsedSec: toElapsedSec(clockSec, period, periodMinutes, clockMode),
         },
         label: text,
         type,
