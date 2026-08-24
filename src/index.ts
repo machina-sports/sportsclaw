@@ -122,6 +122,7 @@ import {
 import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
 import { cmdMachina } from "./machina.js";
+import { cmdPremierLeagueRecap } from "./premier-league-recap.js";
 import { runSetup } from "./setup.js";
 import {
   resolveAnthropicAuth,
@@ -183,6 +184,17 @@ export {
   MIN_PYTHON_VERSION,
 } from "./python.js";
 export type { PythonVersionResult, PrerequisiteStatus, EnsureVenvResult } from "./python.js";
+export {
+  createPremierLeagueRecap,
+  extractScheduleFixtures,
+  selectTargetMatchweek,
+} from "./premier-league-recap.js";
+export type {
+  RecapDependencies,
+  RecapFixture,
+  RecapOptions,
+  RecapResult,
+} from "./premier-league-recap.js";
 export {
   loadAgents,
   loadAgent,
@@ -2884,6 +2896,7 @@ function printHelp(): void {
   console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
   console.log("  sportsclaw mcp list                List configured MCP servers");
   console.log("  sportsclaw machina connect [proj]  Connect a Machina premium pod (via machina-cli)");
+  console.log("  sportsclaw recap premier-league   Build a gated Monday recap review package");
   console.log("  sportsclaw watch <sport> <command>  Watch an endpoint for realtime changes");
   console.log("  sportsclaw watch --config=<path>   Run multiple watchers from config file");
   console.log("  sportsclaw plugin install <name>   Install an optional plugin");
@@ -3169,6 +3182,14 @@ case "plugin":
       return cmdMcp(subArgs);
     case "machina":
       return cmdMachina(subArgs);
+    case "recap":
+      try {
+        return await cmdPremierLeagueRecap(subArgs);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+        return;
+      }
     case "watch":
       return cmdWatch(subArgs);
     default:
