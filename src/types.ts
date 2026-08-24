@@ -180,9 +180,9 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
         hint: "recommended",
       },
       {
-        value: "gemini-3.5-pro",
-        label: "Gemini 3.5 Pro",
-        hint: "advanced reasoning",
+        value: "gemini-3.7-flash",
+        label: "Gemini 3.7 Flash",
+        hint: "latest",
       },
       {
         value: "gemini-3-flash-preview",
