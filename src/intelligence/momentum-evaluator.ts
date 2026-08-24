@@ -59,7 +59,7 @@ import {
 export const DEFAULT_EVALUATOR_MODELS: Record<LLMProvider, string> = {
   anthropic: "claude-sonnet-4-5-20250929",
   openai: "gpt-5.4",
-  google: "gemini-3.5-pro",
+  google: "gemini-3.7-flash",
   "azure-foundry": "gpt-5.4-mini",
 };
 
