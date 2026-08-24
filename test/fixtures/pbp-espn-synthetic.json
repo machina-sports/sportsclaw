@@ -1,0 +1,34 @@
+{
+  "data": {
+    "plays": [
+      {
+        "id": "pl-1",
+        "type": { "text": "Goal" },
+        "text": "Goal! Machina FC 1-0 Synthetic United (Silva 1')",
+        "clock": { "displayValue": "0:15" },
+        "period": { "number": 1 }
+      },
+      {
+        "id": "pl-2",
+        "type": { "text": "Shot on Target" },
+        "text": "Shot on target — Costa's strike saved by the keeper",
+        "clock": { "displayValue": "0:40" },
+        "period": { "number": 1 }
+      },
+      {
+        "id": "pl-3",
+        "type": { "text": "Goal" },
+        "text": "Goal! Machina FC 2-0 Synthetic United (Costa 2')",
+        "clock": { "displayValue": "1:05" },
+        "period": { "number": 1 }
+      },
+      {
+        "id": "pl-4",
+        "type": { "text": "Substitution" },
+        "text": "Substitution — Pereira replaces Silva",
+        "clock": { "displayValue": "1:20" },
+        "period": { "number": 1 }
+      }
+    ]
+  }
+}

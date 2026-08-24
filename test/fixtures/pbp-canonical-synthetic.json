@@ -1,0 +1,32 @@
+{
+  "events": [
+    {
+      "id": "urn:synthetic:event:1",
+      "type": "goal",
+      "description": "Goal — Silva opens the score for Machina FC",
+      "match_time": "0:15",
+      "period": 1
+    },
+    {
+      "id": "urn:synthetic:event:2",
+      "type": "shot_on_target",
+      "description": "Shot on target — saved",
+      "match_time": "0:40",
+      "period": 1
+    },
+    {
+      "id": "urn:synthetic:event:3",
+      "type": "goal",
+      "description": "Goal — Costa doubles the lead",
+      "match_time": "1:05",
+      "period": 1
+    },
+    {
+      "id": "urn:synthetic:event:4",
+      "type": "substitution",
+      "description": "Substitution — Pereira on",
+      "match_time": "1:20",
+      "period": 1
+    }
+  ]
+}

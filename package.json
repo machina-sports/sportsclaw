@@ -97,7 +97,8 @@
     "bench:moment-to-air": "npm run build && node scripts/bench-moment-to-air.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "test:highlights-providers": "npm run build && node --test test/highlights-providers.test.mjs"
   },
   "keywords": [
     "sports",
