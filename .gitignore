@@ -32,3 +32,7 @@ site/docs/
 # Staged from scripts/install.sh by build-site.yml at deploy time
 docs/public/install.sh
 site/html/
+
+# Python bytecode (docker/relay is a Python package; test runs regenerate these)
+__pycache__/
+*.py[cod]
