@@ -26,19 +26,20 @@ offers `delete_document` or `execute_workflow`, the agent can call them.
 Set `tools` on the server entry to register only the ones you name. Anything the server
 advertises that is not on the list is never given to the model:
 
+`~/.sportsclaw/mcp.json` — the server name is the top-level key:
+
 ```json
 {
-  "mcpServers": {
-    "my-pod": {
-      "url": "https://my-pod.org.machina.gg/mcp/sse",
-      "tools": ["search_documents", "get_document", "health_check"]
-    }
+  "my-pod": {
+    "url": "https://my-pod.org.machina.gg/mcp/sse",
+    "tools": ["search_documents", "get_document", "health_check"]
   }
 }
 ```
 
-The same key works in the relay's `SPORTSCLAW_MCP_SERVERS` env var. Run with `--verbose` to
-confirm what registered — the log reads `mcp: "my-pod" has 3 tool(s) (filtered from 41)`.
+`SPORTSCLAW_MCP_SERVERS` takes the same object as a JSON string, so the relay is configured
+the same way. Run with `--verbose` to confirm what registered — the log reads
+`mcp: "my-pod" has 3 tool(s) (filtered from 41)`.
 
 ::: warning Prompt rules are not enforcement
 Telling the agent in its instructions not to call a write tool is not a control: the tool is
