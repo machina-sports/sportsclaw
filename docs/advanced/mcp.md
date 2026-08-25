@@ -17,8 +17,48 @@ sportsclaw mcp remove <name>                             # disconnect one
 - `--token <token>` — a bearer token, if the server needs auth.
 - `--description <text>` and `--timeout <ms>` — optional metadata and per-call timeout.
 
-Once connected, the tools that server exposes become available to the agent automatically,
-alongside the built-in sports tools.
+Once connected, **every** tool that server exposes becomes available to the agent,
+alongside the built-in sports tools. There is no read/write classification: if the server
+offers `delete_document` or `execute_workflow`, the agent can call them.
+
+### Restricting a server to specific tools
+
+Set `tools` on the server entry to register only the ones you name. Anything the server
+advertises that is not on the list is never given to the model:
+
+```json
+{
+  "mcpServers": {
+    "my-pod": {
+      "url": "https://my-pod.org.machina.gg/mcp/sse",
+      "tools": ["search_documents", "get_document", "health_check"]
+    }
+  }
+}
+```
+
+The same key works in the relay's `SPORTSCLAW_MCP_SERVERS` env var. Run with `--verbose` to
+confirm what registered — the log reads `mcp: "my-pod" has 3 tool(s) (filtered from 41)`.
+
+::: warning Prompt rules are not enforcement
+Telling the agent in its instructions not to call a write tool is not a control: the tool is
+still registered and the model can still call it. `tools` is the enforcement point.
+
+The approval gate does not help here either. It is declarative — it fires when a tool spec
+defines `needsApproval` — and MCP tool specs are built from the server's advertised schema
+with no such field, so an MCP write runs without a confirmation prompt. The gate is also
+interactive-only: outside a TTY it fails closed, which is not what you want for a relay.
+
+If a server exposes writes you do want, one workable shape is to allowlist only its read tools
+and have your own application perform the writes after a user confirms them — the agent
+proposes, your app executes.
+:::
+
+::: tip Pod memory needs write tools
+`SPORTSCLAW_MEMORY_PROVIDER=pod` stores memory through the pod's own `create_document` and
+`update_document`. A read-only allowlist denies those: leave the provider at `auto` (it falls
+back to file memory) rather than `pod`, or the run throws.
+:::
 
 ### Where tokens live
 
