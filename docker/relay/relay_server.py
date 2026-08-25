@@ -779,12 +779,24 @@ def _build_env(body: dict | None = None) -> dict[str, str]:
         if body.get("api_key"):
             # Determine the right env var based on provider
             provider = body.get("provider", env.get("SPORTSCLAW_PROVIDER", "anthropic"))
+            # Mirrors PROVIDER_API_KEY_ENV in src/config.ts. A provider missing
+            # here silently lands the caller's key in ANTHROPIC_API_KEY, so the
+            # run authenticates with the wrong credential instead of failing.
             key_map = {
                 "anthropic": "ANTHROPIC_API_KEY",
                 "openai": "OPENAI_API_KEY",
                 "google": "GOOGLE_GENERATIVE_AI_API_KEY",
+                "azure-foundry": "AZURE_FOUNDRY_API_KEY",
             }
-            env_var = key_map.get(provider, "ANTHROPIC_API_KEY")
+            env_var = key_map.get(provider)
+            if env_var is None:
+                raise web.HTTPBadRequest(
+                    text=json.dumps({
+                        "status": False,
+                        "error": f"unsupported provider for api_key override: {provider}",
+                    }),
+                    content_type="application/json",
+                )
             env[env_var] = body["api_key"]
         if body.get("images"):
             env["SPORTSCLAW_INBOUND_IMAGES"] = json.dumps(body["images"])
