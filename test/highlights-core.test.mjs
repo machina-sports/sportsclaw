@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -580,6 +581,8 @@ describe("highlight extraction (synthetic media)", () => {
     assert.equal(manifest.rights.rightsHolder, "Machina Test League");
     assert.equal(manifest.rights.clearedForClipping, true);
     assert.equal(manifest.source.path, sourceVideo);
+    assert.equal(manifest.source.sha256, createHash("sha256").update(readFileSync(sourceVideo)).digest("hex"));
+    assert.equal(manifest.source.sizeBytes, statSync(sourceVideo).size);
     assert.ok(manifest.source.ffprobe.durationSec > 59, "source ffprobe evidence required");
     assert.equal(manifest.clips.length, 3);
 
@@ -588,6 +591,8 @@ describe("highlight extraction (synthetic media)", () => {
       assert.ok(clip.actionId, "clip must keep its action ID");
       assert.ok(existsSync(clip.file), `clip file must exist: ${clip.file}`);
       assert.ok(clip.ffprobe.durationSec > 0, "clip manifest must embed ffprobe evidence");
+      assert.equal(clip.sha256, createHash("sha256").update(readFileSync(clip.file)).digest("hex"));
+      assert.equal(clip.sizeBytes, statSync(clip.file).size);
 
       // Independent ffprobe pass over the produced file.
       const probed = ffprobeJson(clip.file);
@@ -608,6 +613,30 @@ describe("highlight extraction (synthetic media)", () => {
     await extractSegment(matroskaVideo, output, 1, 2, 2_000_000);
     assert.ok(existsSync(output));
     assert.ok(Number(ffprobeJson(output).duration) > 1.5);
+  });
+
+  it("refuses a source changed during extraction and removes only this run's clips", async () => {
+    const mutableSource = join(workDir, "mutable-source.mp4");
+    copyFileSync(sourceVideo, mutableSource);
+    const outputDir = join(workDir, "changed-source-clips");
+    let changed = false;
+    const timer = setInterval(() => {
+      if (!changed && existsSync(outputDir) && readdirSync(outputDir).length > 0) {
+        const timestamp = new Date(Date.now() + 10_000);
+        utimesSync(mutableSource, timestamp, timestamp);
+        changed = true;
+      }
+    }, 1);
+    try {
+      await assert.rejects(() => runHighlights(validRequest({
+        source: { kind: "local-file", path: mutableSource }, outputDir,
+      })), /changed during extraction/);
+      assert.equal(changed, true, "mutation must occur after extraction started");
+      assert.deepEqual(readdirSync(outputDir), []);
+      assert.deepEqual(readFileSync(mutableSource), readFileSync(sourceVideo), "source is preserved");
+    } finally {
+      clearInterval(timer);
+    }
   });
 
   it("probes and extracts a real synthetic AVI direct file", async () => {
