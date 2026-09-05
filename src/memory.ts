@@ -1430,10 +1430,10 @@ export class MemoryManager {
   // Combined read for prompt injection-safe context assembly
   // -------------------------------------------------------------------------
 
-  async buildMemoryBlock(): Promise<string> {
+  async buildMemoryBlock(options?: { includeConversationLog?: boolean }): Promise<string> {
     const [context, todayLog, fanProfile, soul, reflections, consolidated] = await Promise.all([
       this.readContext(),
-      this.readTodayLog(),
+      options?.includeConversationLog === false ? Promise.resolve("") : this.readTodayLog(),
       this.readFanProfile(),
       this.readSoul(),
       this.readReflections(),

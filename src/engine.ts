@@ -3443,8 +3443,9 @@ export class sportsclawEngine {
       options?.sessionId,
     );
     if (
-      this._conversationNamespace &&
-      this._conversationNamespace !== activeConversationNamespace
+      options?.historyMode === "caller" ||
+      (this._conversationNamespace &&
+      this._conversationNamespace !== activeConversationNamespace)
     ) {
       this.messages = [];
       this._threadLoaded = false;
@@ -3502,7 +3503,7 @@ export class sportsclawEngine {
     }
 
     // --- Session: restore prior conversation history ---
-    const sessionId = options?.sessionId
+    const sessionId = options?.historyMode !== "caller" && options?.sessionId
       ? scopeSessionId(options.sessionId, nativeAgentId)
       : undefined;
     if (sessionId) {
@@ -3547,7 +3548,7 @@ export class sportsclawEngine {
       options?.onProgress?.({ type: "phase", label: "Loading memory" });
       try {
         [memoryBlock, strategyContent] = await Promise.all([
-          memory.buildMemoryBlock(),
+          memory.buildMemoryBlock({ includeConversationLog: options?.historyMode !== "caller" }),
           memory.readStrategy(),
         ]);
       } catch (err) {
@@ -3610,7 +3611,7 @@ export class sportsclawEngine {
     // accumulates naturally via subsequent run() calls, so skip to avoid
     // duplicating history. The _threadLoaded flag distinguishes "first run
     // with memory/system messages" from "second run with real history".
-    if (memory && !this._threadLoaded) {
+    if (memory && options?.historyMode !== "caller" && !this._threadLoaded) {
       this._threadLoaded = true;
       try {
         const threadHistory = await memory.readThread();
@@ -3802,8 +3803,8 @@ export class sportsclawEngine {
       this.messages.push({ role: "assistant", content: [{ type: "text", text: clarification }] });
       if (memory) {
         try {
-          await memory.appendToThread(sanitizedPrompt, clarification);
-          await memory.appendExchange(sanitizedPrompt, clarification);
+          if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, clarification);
+          if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, clarification);
         } catch (err) {
           if (!hindsightMemory) throw err;
           console.error(
@@ -3836,8 +3837,8 @@ export class sportsclawEngine {
       this.messages.push({ role: "assistant", content: [{ type: "text", text: intentQ }] });
       if (memory) {
         try {
-          await memory.appendToThread(sanitizedPrompt, intentQ);
-          await memory.appendExchange(sanitizedPrompt, intentQ);
+          if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, intentQ);
+          if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, intentQ);
         } catch (err) {
           if (!hindsightMemory) throw err;
           console.error(
@@ -3995,8 +3996,8 @@ export class sportsclawEngine {
       // Memory persistence
       if (memory) {
         try {
-          await memory.appendToThread(sanitizedPrompt, responseText);
-          await memory.appendExchange(sanitizedPrompt, responseText);
+          if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, responseText);
+          if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, responseText);
         } catch (err) {
           console.error(
             `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
@@ -4337,8 +4338,8 @@ export class sportsclawEngine {
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {
       try {
-        await memory.appendToThread(sanitizedPrompt, responseText);
-        await memory.appendExchange(sanitizedPrompt, responseText);
+        if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, responseText);
+        if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, responseText);
       } catch (err) {
         console.error(
           `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`

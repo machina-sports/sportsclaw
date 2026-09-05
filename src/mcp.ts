@@ -670,8 +670,9 @@ export class McpManager {
     // Only attempt if the server has the standard discovery tools
     const hasSearch = (toolName: string) =>
       this.routeMap.has(`mcp__${serverName}__${toolName}`);
+    const workflowSearch = hasSearch("search_workflow") ? "search_workflow" : "search_workflows";
 
-    if (!hasSearch("search_workflows") && !hasSearch("search_agents") && !hasSearch("connector_search")) {
+    if (!hasSearch(workflowSearch) && !hasSearch("search_agents") && !hasSearch("connector_search")) {
       return; // Not a Machina pod — skip discovery
     }
 
@@ -680,8 +681,8 @@ export class McpManager {
       // miss entries beyond the API's small default page size.
       const args = { page_size: 100 };
       const [wfResult, agResult, cnResult] = await Promise.allSettled([
-        hasSearch("search_workflows")
-          ? this.callTool(`mcp__${serverName}__search_workflows`, args)
+        hasSearch(workflowSearch)
+          ? this.callTool(`mcp__${serverName}__${workflowSearch}`, args)
           : Promise.resolve(null),
         hasSearch("search_agents")
           ? this.callTool(`mcp__${serverName}__search_agents`, args)

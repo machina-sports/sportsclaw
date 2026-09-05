@@ -1410,9 +1410,9 @@ describe("relay highlights authentication", () => {
       assert.ok(!r.body.includes(token), `secret-unset ${route} must never echo a token`);
     }
 
-    // The existing query endpoints stay token-free (prompt validation, not auth).
-    assert.equal(results["query-no-token"].status, 400);
-    assert.equal(results["query-sync-no-token"].status, 400);
+    // Queries also fail closed before prompt validation when no secret is set.
+    assert.equal(results["query-no-token"].status, 503);
+    assert.equal(results["query-sync-no-token"].status, 503);
   });
 });
 
