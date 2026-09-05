@@ -47,10 +47,13 @@ import os
 import re
 import secrets
 import time
+from functools import wraps
+from pathlib import Path
 
 from aiohttp import web
 
 from skills_catalog import parse_catalog
+from query_runtime import buffered, process, MAX_OUTPUT_BYTES
 from highlights_jobs import (
     DEFAULT_JOB_TTL_SEC,
     DEFAULT_MAX_JOB_OUTPUT_BYTES,
@@ -64,6 +67,11 @@ PORT = int(os.environ.get("RELAY_PORT", 8080))
 SPORTSCLAW_BIN = os.environ.get("SPORTSCLAW_BIN", "node")
 SPORTSCLAW_ENTRY = os.environ.get("SPORTSCLAW_ENTRY", "/app/dist/index.js")
 DEFAULT_TIMEOUT = int(os.environ.get("RELAY_TIMEOUT", 180))
+MAX_QUERY_TIMEOUT = int(os.environ.get("RELAY_MAX_QUERY_TIMEOUT", 300))
+MAX_QUERY_CONCURRENCY = int(os.environ.get("RELAY_MAX_QUERY_CONCURRENCY", 4))
+MAX_PROMPT_CHARS = 20000
+if not 1 <= DEFAULT_TIMEOUT <= MAX_QUERY_TIMEOUT or MAX_QUERY_CONCURRENCY < 1:
+    raise ValueError("invalid relay query limits")
 AGENT_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 AGENTS_AUTH_HEADER = "X-Auth-Token"
 
@@ -97,14 +105,9 @@ async def list_skills(request: web.Request) -> web.Response:
     catalog; a nonzero exit or an unparseable payload is now an error instead.
     """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "list", "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_build_env(),
-        )
-        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        skills = parse_catalog(stdout.decode(), proc.returncode)
+        stdout, _stderr, returncode = await buffered(
+            [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "list", "--json"], _build_env(), 10)
+        skills = parse_catalog(stdout.decode(), returncode)
         return web.json_response({"status": True, "skills": skills})
     except Exception as e:
         # Only the parser's own message is surfaced — child stderr is never
@@ -129,7 +132,7 @@ def _agents_auth_error(request: web.Request) -> web.Response | None:
     expected = os.environ.get("AGENTS_API_TOKEN", "")
     if not expected:
         return web.json_response(
-            {"status": False, "error": "agents API is unavailable — no API token is configured"},
+            {"status": False, "error": "relay API is unavailable — no API token is configured"},
             status=503,
         )
     supplied = request.headers.get(AGENTS_AUTH_HEADER, "")
@@ -146,10 +149,71 @@ def _agents_auth_error(request: web.Request) -> web.Response | None:
 def _query_agent_auth_error(
     request: web.Request, body: dict
 ) -> web.Response | None:
-    """Keep legacy queries public, but authenticate explicit agent selection."""
-    if body.get("agent_id") is None:
-        return None
+    """Every query uses the same trusted caller boundary, including auto-routing."""
     return _agents_auth_error(request)
+
+
+def query_guard(handler):
+    @wraps(handler)
+    async def guarded(request):
+        denied = _agents_auth_error(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
+            prompt = body.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS:
+                raise ValueError(f"prompt must contain 1-{MAX_PROMPT_CHARS} characters")
+            timeout = body.get("timeout", DEFAULT_TIMEOUT)
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= MAX_QUERY_TIMEOUT:
+                raise ValueError(f"timeout must be an integer between 1 and {MAX_QUERY_TIMEOUT}")
+            if body.get("history_mode", "engine") not in ("caller", "engine"):
+                raise ValueError("history_mode must be caller or engine")
+            for key in ("user_id", "provider", "model", "system_prompt", "format", "api_key"):
+                if key in body and (not isinstance(body[key], str) or len(body[key]) > MAX_PROMPT_CHARS):
+                    raise ValueError(f"invalid {key}")
+        except (ValueError, TypeError) as error:
+            return web.json_response({"status": False, "error": str(error)}, status=400)
+        app = request.app
+        # No await between inspection and increment: admission is atomic on the event loop.
+        if app.get("active_queries", 0) >= MAX_QUERY_CONCURRENCY:
+            return web.json_response({"status": False, "error": "query capacity exhausted"}, status=429)
+        app["active_queries"] = app.get("active_queries", 0) + 1
+        try:
+            return await handler(request)
+        finally:
+            app["active_queries"] -= 1
+    return guarded
+
+
+async def capabilities(request):
+    denied = _agents_auth_error(request)
+    if denied is not None:
+        return denied
+    try:
+        stdout, _, code = await buffered(
+            [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "list", "--json"], _build_env(), 10)
+        skills = parse_catalog(stdout.decode(), code)
+        package = json.loads((Path(SPORTSCLAW_ENTRY).resolve().parent.parent / "package.json").read_text())
+        configs = json.loads(os.environ.get("SPORTSCLAW_MCP_SERVERS", "{}"))
+        mcp = [{"server": name, "allowed_tools": config.get("tools") or None,
+                "policy": "allowlist" if config.get("tools") else "all_discovered"}
+               for name, config in configs.items()]
+        return web.json_response({
+            "protocol_version": "1.0", "engine_version": package["version"],
+            "build_revision": os.environ.get("SPORTSCLAW_BUILD_REVISION"),
+            "skills": skills, "mcp_servers": mcp,
+            "history_modes": ["engine", "caller"],
+            "query": {"default_timeout_seconds": DEFAULT_TIMEOUT,
+                      "max_timeout_seconds": MAX_QUERY_TIMEOUT,
+                      "max_concurrency": MAX_QUERY_CONCURRENCY,
+                      "max_prompt_characters": MAX_PROMPT_CHARS,
+                      "max_output_bytes": MAX_OUTPUT_BYTES},
+        })
+    except Exception:
+        return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
 
 
 def _validate_agent_id(agent_id: object) -> str:
@@ -221,21 +285,12 @@ async def _read_json_object(request: web.Request) -> dict:
 
 async def _run_agent_cli(args: list[str], payload: dict | None = None):
     cmd = [SPORTSCLAW_BIN, SPORTSCLAW_ENTRY, "agents", *args, "--json"]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE if payload is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_build_env(),
-    )
     stdin = json.dumps(payload).encode() if payload is not None else None
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout=10)
+        stdout, stderr, returncode = await buffered(cmd, _build_env(), 10, stdin)
     except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.communicate()
         raise AgentApiError("agent operation timed out", 504) from exc
-    if proc.returncode != 0:
+    if returncode != 0:
         detail = stderr.decode().strip().splitlines()
         message = detail[-1] if detail else "agent operation failed"
         status = 404 if "not found" in message.lower() else 409 if "exists" in message.lower() else 400
@@ -322,16 +377,17 @@ def _build_delegated_body(body: object) -> dict:
     if source_id == target_id:
         raise AgentApiError("self-delegation is not allowed")
     delegated = {"prompt": prompt, "agent_id": target_id, "_delegated": True}
-    for key in ("user_id", "provider", "model", "verbose", "format", "timeout", "api_key"):
+    for key in ("user_id", "provider", "model", "verbose", "format", "timeout", "api_key", "history_mode"):
         if key in body:
             delegated[key] = body[key]
     return delegated
 
 
 class _DelegatedRequest:
-    def __init__(self, body: dict, headers):
+    def __init__(self, body: dict, headers, app=None):
         self._body = body
         self.headers = headers
+        self.app = app if app is not None else {}
 
     async def json(self) -> dict:
         return self._body
@@ -350,7 +406,7 @@ async def agents_delegate(request: web.Request) -> web.Response:
             raise AgentApiError(f'Agent "{source["id"]}" is inactive', 403)
         if not target.get("active"):
             raise AgentApiError(f'Agent "{target["id"]}" is inactive', 403)
-        return await query_sync(_DelegatedRequest(delegated, request.headers))
+        return await query_sync(_DelegatedRequest(delegated, request.headers, request.app))
     except Exception as error:
         return _agent_error_response(error)
 
@@ -368,6 +424,7 @@ async def _require_active_query_agent(body: dict) -> None:
 # Query — streaming NDJSON (forwards engine events in real-time)
 # ---------------------------------------------------------------------------
 
+@query_guard
 async def query_stream(request: web.Request) -> web.StreamResponse:
     """
     Execute a SportsClaw query and stream NDJSON events in real-time.
@@ -411,51 +468,43 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
     await response.prepare(request)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            limit=16 * 1024 * 1024,  # 16MB line buffer (base64 images ~88KB, videos can be several MB)
-        )
-
-        async def stream_stdout():
-            async for line in proc.stdout:
-                decoded = line.decode().rstrip("\n")
-                if not decoded:
-                    continue
-                # Try to parse as JSON and inject user_id
-                try:
-                    event = json.loads(decoded)
-                    event["user_id"] = user_id
-                    await response.write(json.dumps(event).encode() + b"\n")
-                except json.JSONDecodeError:
-                    # Non-JSON line (e.g. pip output) — wrap as debug
-                    await response.write(json.dumps({
-                        "type": "debug", "text": decoded,
-                    }).encode() + b"\n")
-
-        await asyncio.wait_for(stream_stdout(), timeout=timeout)
-        await proc.wait()
-
-        # If engine exited with error and no error event was emitted
-        if proc.returncode != 0:
-            stderr_bytes = await proc.stderr.read()
-            stderr_text = stderr_bytes.decode().strip() if stderr_bytes else ""
-            await response.write(json.dumps({
-                "type": "error",
-                "error": stderr_text or f"Exit code {proc.returncode}",
-                "returncode": proc.returncode,
-            }).encode() + b"\n")
+        async with process(cmd, env) as (proc, stderr):
+            async def stream_stdout():
+                size = 0
+                async for line in proc.stdout:
+                    size += len(line)
+                    if size > MAX_OUTPUT_BYTES:
+                        raise ValueError("query output exceeds configured limit")
+                    decoded = line.decode(errors="replace").rstrip("\n")
+                    if not decoded:
+                        continue
+                    try:
+                        event = json.loads(decoded)
+                        if not isinstance(event, dict):
+                            continue
+                        event["user_id"] = user_id
+                        await response.write(json.dumps(event).encode() + b"\n")
+                    except json.JSONDecodeError:
+                        # Child diagnostics are not a public protocol or credential-safe output.
+                        continue
+                await proc.wait()
+                await stderr
+            await asyncio.wait_for(stream_stdout(), timeout=timeout)
+            if proc.returncode != 0:
+                await response.write(json.dumps({
+                    "type": "error", "error": "Query engine failed",
+                    "returncode": proc.returncode,
+                }).encode() + b"\n")
 
     except asyncio.TimeoutError:
-        proc.kill()
         await response.write(json.dumps({
             "type": "error",
             "error": f"Query timed out after {timeout}s",
         }).encode() + b"\n")
     except (ConnectionResetError, asyncio.CancelledError):
-        proc.kill()
+        raise
+    except (ValueError, OSError):
+        await response.write(json.dumps({"type": "error", "error": "Query engine failed"}).encode() + b"\n")
 
     await response.write_eof()
     return response
@@ -465,6 +514,7 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
 # Query — synchronous (buffered) response
 # ---------------------------------------------------------------------------
 
+@query_guard
 async def query_sync(request: web.Request) -> web.Response:
     """
     Execute a SportsClaw query and return a single JSON response.
@@ -497,20 +547,7 @@ async def query_sync(request: web.Request) -> web.Response:
     log(f"sync: user={user_id} prompt={prompt[:80]}")
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        # Use communicate() to read ALL stdout bytes at once (no line-length
-        # limit), then split by \n ourselves.  readline() enforces a 64KB
-        # default StreamReader limit that truncates large base64 lines;
-        # communicate() uses read() which has no such limit.
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        stdout_bytes, stderr_bytes, returncode = await buffered(cmd, env, timeout)
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
 
         stdout_text = stdout_bytes.decode() if stdout_bytes else ""
@@ -518,7 +555,7 @@ async def query_sync(request: web.Request) -> web.Response:
 
         log(f"sync: stdout={len(stdout_bytes)} bytes, "
             f"stderr={len(stderr_bytes)} bytes, "
-            f"exit={proc.returncode}")
+            f"exit={returncode}")
 
         # Parse NDJSON lines from engine output
         result_text = None
@@ -535,6 +572,9 @@ async def query_sync(request: web.Request) -> web.Response:
             line_num += 1
             try:
                 event = json.loads(decoded)
+                if not isinstance(event, dict):
+                    parse_failures += 1
+                    continue
                 etype = event.get("type")
                 if etype == "result":
                     result_text = event.get("text", "")
@@ -565,10 +605,10 @@ async def query_sync(request: web.Request) -> web.Response:
         if parse_failures:
             log(f"sync: {parse_failures} NDJSON line(s) failed to parse")
 
-        if error_text:
+        if error_text or returncode != 0:
             return web.json_response({
                 "status": False,
-                "error": error_text,
+                "error": error_text or "Query engine failed",
                 "user_id": user_id,
                 "elapsed_ms": elapsed_ms,
             }, status=500)
@@ -590,27 +630,28 @@ async def query_sync(request: web.Request) -> web.Response:
 
         # Fallback: no result event parsed
         log(f"sync: no result event found in {line_num} lines")
-        if proc.returncode == 0:
+        if returncode == 0:
             return web.json_response({
-                "status": True,
-                "text": "(no result event emitted by engine)",
+                "status": False,
+                "error": "Query completed without a result event",
                 "user_id": user_id,
                 "elapsed_ms": elapsed_ms,
-            })
+            }, status=502)
         else:
             return web.json_response({
                 "status": False,
-                "error": stderr_text or f"Exit code {proc.returncode}",
-                "returncode": proc.returncode,
+                "error": "Query engine failed",
+                "returncode": returncode,
                 "elapsed_ms": elapsed_ms,
             }, status=500)
 
     except asyncio.TimeoutError:
-        proc.kill()
         return web.json_response({
             "status": False,
             "error": f"Query timed out after {timeout}s",
         }, status=504)
+    except (ValueError, OSError):
+        return web.json_response({"status": False, "error": "Query engine failed"}, status=502)
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +781,8 @@ def _build_cmd(body: dict) -> list[str]:
     user_id = body.get("user_id")
     if user_id:
         cmd.extend(["--user", user_id])
+    if body.get("history_mode") is not None:
+        cmd.extend(["--history-mode", body["history_mode"]])
 
     agent_id = body.get("agent_id")
     if agent_id is not None:
@@ -812,6 +855,7 @@ def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/api/skills", list_skills)
+    app.router.add_get("/api/capabilities", capabilities)
     app.router.add_post("/api/query", query_stream)
     app.router.add_post("/api/query/sync", query_sync)
     app.router.add_get("/api/agents", agents_list)
@@ -842,4 +886,4 @@ def create_app() -> web.Application:
 
 if __name__ == "__main__":
     log(f"Starting on port {PORT}")
-    web.run_app(create_app(), host="0.0.0.0", port=PORT)
+    web.run_app(create_app(), host="0.0.0.0", port=PORT, handler_cancellation=True)

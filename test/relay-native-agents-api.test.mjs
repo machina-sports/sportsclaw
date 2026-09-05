@@ -210,7 +210,7 @@ describe("relay native agents API", () => {
   it("fails closed without agent API auth and rejects non-boolean inactivation", () => {
     assert.equal(run("auth").status, 401);
     assert.equal(run("query_auth").status, 401);
-    assert.equal(run("query_compat").allowed, true);
+    assert.equal(run("query_compat").allowed, false);
     assert.match(run("active_type").error, /active/i);
   });
 

@@ -2205,6 +2205,7 @@ function emitNdjson(event: Record<string, unknown>): void {
 }
 
 export function buildOneShotRunOptions(params: {
+  historyMode?: RunOptions["historyMode"];
   userId?: string;
   systemPrompt?: string;
   agentIds: string[];
@@ -2214,6 +2215,7 @@ export function buildOneShotRunOptions(params: {
   abortSignal?: AbortSignal;
 }): RunOptions {
   return {
+    ...(params.historyMode ? { historyMode: params.historyMode } : {}),
     userId: params.userId,
     systemPrompt: params.systemPrompt,
     ...(params.agentIds.length > 0 ? { agentIds: params.agentIds } : {}),
@@ -2257,6 +2259,12 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
   const userId = takeOneShotUserId(args);
+  const historyIdx = args.indexOf("--history-mode");
+  const historyMode = historyIdx >= 0 ? args[historyIdx + 1] : "engine";
+  if (historyMode !== "caller" && historyMode !== "engine") {
+    throw new Error("--history-mode must be caller or engine");
+  }
+  if (historyIdx >= 0) args.splice(historyIdx, 2);
 
   // Parse --system-prompt <text> flag (used by relay to inject caller context)
   let systemPrompt: string | undefined;
@@ -2337,6 +2345,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         }
       }
       const result = await runOneShotEngine(engine, prompt, {
+        historyMode,
         userId,
         systemPrompt,
         agentIds,
@@ -2372,6 +2381,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     // Verbose mode: no spinner, raw console.error logs
     try {
       const result = await runOneShotEngine(engine, prompt, {
+        historyMode,
         userId,
         systemPrompt,
         agentIds,
@@ -2402,6 +2412,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     try {
       const result = await runOneShotEngine(engine, prompt, {
         userId,
+        historyMode,
         systemPrompt,
         agentIds,
         delegated,

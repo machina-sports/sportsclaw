@@ -83,6 +83,7 @@ RUN node dist/index.js init --all --verbose
 
 # --- Relay server & entrypoint ------------------------------------------------
 COPY docker/relay/relay_server.py /opt/sportsclaw/relay_server.py
+COPY docker/relay/query_runtime.py /opt/sportsclaw/query_runtime.py
 COPY docker/relay/skills_catalog.py /opt/sportsclaw/skills_catalog.py
 COPY docker/relay/highlights_jobs.py /opt/sportsclaw/highlights_jobs.py
 COPY docker/relay/entrypoint.sh /opt/sportsclaw/entrypoint.sh
@@ -103,6 +104,8 @@ RUN mkdir -p /data/highlights-jobs /data/media
 
 # --- Runtime defaults (overridable) -------------------------------------------
 ENV RELAY_PORT=8080
+ARG SPORTSCLAW_BUILD_REVISION=unknown
+ENV SPORTSCLAW_BUILD_REVISION=${SPORTSCLAW_BUILD_REVISION}
 ENV SPORTSCLAW_PROVIDER=anthropic
 ENV PYTHON_PATH=/opt/venv/bin/python3
 ENV PYTHONDONTWRITEBYTECODE=1

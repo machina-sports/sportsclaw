@@ -509,6 +509,8 @@ export type ToolProgressEvent =
   | { type: "synthesizing" };
 
 export interface RunOptions {
+  /** Caller mode leaves transcript ownership to the API caller; durable memory remains enabled. */
+  historyMode?: "caller" | "engine";
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
   /** Exactly one native agent ID to select explicitly for this run. */
