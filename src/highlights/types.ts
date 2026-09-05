@@ -133,6 +133,9 @@ export interface FfprobeEvidence {
 /** One extracted clip in the output manifest. */
 export interface ClipArtifact extends CandidateWindow {
   file: string;
+  /** Present on new runs; historical V1 artifacts must be re-extracted before verified use. */
+  sha256?: string;
+  sizeBytes?: number;
   durationSec: number;
   ffprobe: FfprobeEvidence;
 }
@@ -147,7 +150,7 @@ export interface ClipManifest {
   state: "succeeded";
   event: CanonicalEventId;
   rights: RightsAuthorization;
-  source: SourceMediaRef & { ffprobe: FfprobeEvidence };
+  source: SourceMediaRef & { ffprobe: FfprobeEvidence; sha256?: string; sizeBytes?: number };
   syncAnchor: SyncAnchor;
   window: WindowPolicy;
   windows: CandidateWindow[];

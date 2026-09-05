@@ -6,6 +6,10 @@
  */
 
 import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { constants } from "node:fs";
+import { createHash } from "node:crypto";
+import type { BigIntStats } from "node:fs";
 import { join, resolve } from "node:path";
 import { extractSegment, probeVideo } from "./ffmpeg.js";
 import { DEFAULT_WINDOW_POLICY, parseHighlightsRequest, planCandidateWindows } from "./plan.js";
@@ -47,6 +51,37 @@ function pathEntryExists(path: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function fingerprint(stat: BigIntStats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+}
+
+/** Bounded-memory hashing of a regular file; never follow a replaced path or FIFO. */
+async function fileIntegrity(path: string) {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new HighlightsRunError("Integrity evidence requires a regular file");
+    const digest = createHash("sha256");
+    const buffer = Buffer.alloc(1024 * 1024);
+    let sizeBytes = 0;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer);
+      if (bytesRead === 0) break;
+      sizeBytes += bytesRead;
+      if (BigInt(sizeBytes) > before.size) throw new HighlightsRunError("Media changed during integrity verification");
+      digest.update(buffer.subarray(0, bytesRead));
+    }
+    const identity = fingerprint(before);
+    if (identity !== fingerprint(await handle.stat({ bigint: true })) ||
+        identity !== fingerprint(lstatSync(path, { bigint: true })) || BigInt(sizeBytes) !== before.size) {
+      throw new HighlightsRunError("Media changed during integrity verification");
+    }
+    return { sha256: digest.digest("hex"), sizeBytes, identity };
+  } finally {
+    await handle.close();
   }
 }
 
@@ -95,7 +130,8 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     throw new HighlightsRunError(`outputDir resolves to an existing non-directory target: ${req.outputDir}`);
   }
 
-  const sourceEvidence = await probeEvidence(req.source.path, "source video");
+  const sourceIntegrity = await fileIntegrity(sourceReal);
+  const sourceEvidence = await probeEvidence(sourceReal, "source video");
   const windows = planCandidateWindows(req, sourceEvidence.durationSec);
   if (windows.length === 0) {
     throw new HighlightsRunError(
@@ -152,7 +188,7 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     const file = plannedFiles[i];
     try {
       await extractSegment(
-        req.source.path,
+        sourceReal,
         file,
         w.startSec,
         requestedDurationSec,
@@ -202,7 +238,25 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
         `(remaining output budget: ${remainingBudgetBytes} bytes) — partial clips were removed`
       );
     }
-    clips.push({ ...w, file, durationSec: ffprobe.videoDurationSec, ffprobe });
+    try {
+      const { sha256, sizeBytes } = await fileIntegrity(file);
+      clips.push({ ...w, file, durationSec: ffprobe.videoDurationSec, ffprobe, sha256, sizeBytes });
+    } catch (error) {
+      removePartialOutputs();
+      throw error;
+    }
+  }
+
+  // CLI callers may mutate their source; relay callers use its admission snapshot.
+  // Do not issue a successful receipt if either the bytes or file identity changed.
+  try {
+    const after = await fileIntegrity(sourceReal);
+    if (after.identity !== sourceIntegrity.identity || after.sha256 !== sourceIntegrity.sha256) {
+      throw new HighlightsRunError("Source media changed during extraction — partial clips were removed");
+    }
+  } catch (error) {
+    removePartialOutputs();
+    throw error;
   }
 
   return {
@@ -211,7 +265,7 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     state: "succeeded",
     event: req.event,
     rights: req.rights,
-    source: { ...req.source, ffprobe: sourceEvidence },
+    source: { ...req.source, ffprobe: sourceEvidence, sha256: sourceIntegrity.sha256, sizeBytes: sourceIntegrity.sizeBytes },
     syncAnchor: req.syncAnchor,
     window: req.window ?? DEFAULT_WINDOW_POLICY,
     windows,
