@@ -42,7 +42,16 @@ const GUIDE_PATTERNS = [
  * Returns true if the prompt is a meta/guide query that should be
  * handled by the Guide subagent instead of the main data agent.
  */
-export function isGuideIntent(prompt: string): boolean {
+export function isGuideIntent(prompt: string, context: {
+  historyMode?: "engine" | "caller";
+  hasSystemPrompt?: boolean;
+  hasMcpServers?: boolean;
+} = {}): boolean {
+  // Standalone onboarding is not a capability router. Embedded prompts can
+  // contain quoted onboarding text in caller-owned history. Let the engine
+  // apply caller policy and discover the configured pod, even if a connection
+  // later fails. Never turn an operational query into a guessed upgrade path.
+  if (context.historyMode === "caller" || context.hasSystemPrompt || context.hasMcpServers) return false;
   return GUIDE_PATTERNS.some((p) => p.test(prompt));
 }
 

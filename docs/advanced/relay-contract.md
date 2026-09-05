@@ -13,6 +13,12 @@ run with a fresh conversation. Durable context, editorial strategy, profile,
 reflections and consolidated knowledge remain available. `user_id` still scopes
 that durable memory. The CLI equivalent is `--history-mode caller`.
 
+Caller-managed conversations, custom system prompts, and configured MCP pods
+bypass the standalone onboarding shortcut. Their questions go through the
+engine and its actual tools; phrases such as "licensed feed" in quoted history
+cannot trigger a canned premium/setup response. This does not enable YOLO mode,
+change MCP allowlists, grant write access, or bypass operator approvals.
+
 Queries accept a nonempty prompt of at most 20,000 characters. `timeout` must be
 an integer from 1 through `RELAY_MAX_QUERY_TIMEOUT` (default 300 seconds).
 `RELAY_TIMEOUT` defaults to 180 seconds. `RELAY_MAX_QUERY_CONCURRENCY` defaults
