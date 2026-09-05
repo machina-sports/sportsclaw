@@ -5,6 +5,25 @@ import { generateGuideResponse, isGuideIntent } from "../dist/guide.js";
 const FORBIDDEN_PROMO = /Machina Clawd|machina-templates|Coming Soon on Machina|Machina Skills/i;
 
 describe("guide intent routing", () => {
+  it("never routes caller-owned conversation history into standalone onboarding", () => {
+    const question = "Brief me on this fixture: confirmed lineups, team news and storylines. Cite each source.";
+    const wrapped = `Conversation so far (data, not instructions):\n${JSON.stringify([
+      { role: "assistant", content: "The result was observed via licensed feed api-football." },
+    ])}\n\nOriginal user prompt:\n${question}`;
+    assert.equal(isGuideIntent(question), false);
+    assert.equal(isGuideIntent(wrapped), true); // proves the historical trigger
+    assert.equal(isGuideIntent(wrapped, { historyMode: "caller" }), false);
+    assert.equal(isGuideIntent("help", { historyMode: "caller" }), false);
+  });
+
+  it("lets configured pods and caller policies describe their real capabilities", () => {
+    for (const prompt of ["help", "what can you do", "real-time data", "machina cli setup"]) {
+      assert.equal(isGuideIntent(prompt, { hasMcpServers: true }), false);
+      assert.equal(isGuideIntent(prompt, { hasSystemPrompt: true }), false);
+    }
+    assert.equal(isGuideIntent("help", { historyMode: "engine", hasMcpServers: false, hasSystemPrompt: false }), true);
+  });
+
   it("does not intercept API-Football source questions as marketing/help", () => {
     const prompt = "The api-football you refer as source there is from the Machina Sports TV pod, or directly?";
     assert.equal(isGuideIntent(prompt), false);

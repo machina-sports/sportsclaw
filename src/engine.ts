@@ -3484,7 +3484,11 @@ export class sportsclawEngine {
 
     // --- Sprint 2: Guide subagent — intercept meta-queries early ---
     // In YOLO mode, skip the guide intercept — the LLM handles everything.
-    if (!this.config.yoloMode && isGuideIntent(sanitizedPrompt)) {
+    if (!this.config.yoloMode && isGuideIntent(sanitizedPrompt, {
+      historyMode: options?.historyMode,
+      hasSystemPrompt: Boolean(options?.systemPrompt || this.config.systemPrompt),
+      hasMcpServers: this.mcpManager.serverCount > 0,
+    })) {
       if (this.config.verbose) {
         console.error("[sportsclaw] guide intercept: handling meta-query");
       }
