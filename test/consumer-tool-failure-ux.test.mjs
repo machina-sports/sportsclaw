@@ -4,11 +4,11 @@ import { test } from "node:test";
 
 const source = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8");
 
-test("partial tool failures stay internal, not user-facing", () => {
+test("partial tool failures hide plumbing but preserve editorial coverage gaps", () => {
   assert(!source.includes("⚠️ Partial data: some live tools failed"));
   assert(!source.includes("Treat related sections as unavailable."));
-  assert(source.includes("Do not mention technical failures, tool names, integrations, upstream systems, partial data, or why data was missing."));
-  assert(source.includes("skip missing sections silently"));
+  assert(!source.includes("skip missing sections silently"));
+  assert(source.includes("Keep missing coverage and partial results explicit"));
 });
 
 test("evidence fallback does not leak tool names", () => {
