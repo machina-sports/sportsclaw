@@ -875,6 +875,8 @@ export class sportsclawEngine {
     failedTools: string[];
     succeededTools: string[];
     maxOutputTokens: number;
+    callerSystemPrompt?: string;
+    abortSignal?: AbortSignal;
   }): Promise<string> {
     const { userPrompt, draft, failedTools, succeededTools, maxOutputTokens } = params;
     try {
@@ -883,9 +885,10 @@ export class sportsclawEngine {
         system:
           "You are an evidence gate for a consumer sports chat. Remove or rewrite any claim " +
           "that depends on failed tools. Keep only claims supportable by successful tools or the draft's successful data. " +
-          "Do not mention technical failures, tool names, integrations, upstream systems, partial data, or why data was missing. " +
-          "If some data is missing, just answer the user's question from the available evidence and skip missing sections silently. " +
-          "Be direct, concise, and get to the point.",
+          "Keep missing coverage and partial results explicit in human-readable language. Do not expose credentials or internal tool names. " +
+          "A failed source is not proof that no coverage exists. Never substitute another event or invent sentiment. " +
+          "Preserve source attribution, observation times, language and confirmation boundaries. " +
+          "Be direct, concise, and get to the point.\n\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           `User request: ${userPrompt}`,
           `Failed tools: ${failedTools.join(", ") || "none"}`,
@@ -894,6 +897,8 @@ export class sportsclawEngine {
           draft,
         ].join("\n\n"),
         maxOutputTokens,
+        abortSignal: params.abortSignal,
+        maxRetries: 0,
       });
       const cleaned = res.text?.trim();
       if (cleaned) return cleaned;
@@ -994,6 +999,8 @@ export class sportsclawEngine {
     toolOutputs: Array<{ toolName: string; output: string }>;
     maxOutputTokens: number;
     queryIntent?: string;
+    callerSystemPrompt?: string;
+    abortSignal?: AbortSignal;
   }): Promise<string> {
     const { userPrompt, draft, successfulTools, failedTools, toolOutputs, maxOutputTokens, queryIntent } = params;
     if (toolOutputs.length === 0) return draft;
@@ -1022,6 +1029,7 @@ export class sportsclawEngine {
           "If required data is missing, explicitly mark that section unavailable.",
           "Keep the response concise.",
           ...(intentHint ? [intentHint] : []),
+          params.callerSystemPrompt ?? "",
         ].join(" "),
         prompt: [
           `User request: ${userPrompt}`,
@@ -1032,6 +1040,8 @@ export class sportsclawEngine {
           serialized,
         ].join("\n\n"),
         maxOutputTokens,
+        abortSignal: params.abortSignal,
+        maxRetries: 0,
       });
 
       const synthesized = res.text?.trim();
@@ -1052,9 +1062,14 @@ export class sportsclawEngine {
     userPrompt: string;
     draft: string;
     toolOutputs: Array<{ toolName: string; output: string }>;
+    callerSystemPrompt?: string;
+    abortSignal?: AbortSignal;
+    correctionAttempted?: boolean;
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     if (toolOutputs.length === 0) return draft;
+    const unavailable = "I could not verify a reliable answer from the available evidence.";
+    if (params.abortSignal?.aborted) return unavailable;
 
     // Label sources as internal-only. Tool names are deliberately withheld so
     // the model can never echo them, and the label says so explicitly.
@@ -1074,15 +1089,18 @@ export class sportsclawEngine {
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           "Only consider claims that are relevant to the user's request; ignore source data that is " +
           "unrelated to what the user asked.\n" +
-          "Identify any numerical values (scores, player statistics, dates, or standings) in the draft " +
-          "that DO NOT match or are completely unsupported by the source data.\n" +
+          "Check numerical AND qualitative premises. Scores do not establish tactical containment, control, pressure or causation. " +
+          "Selected history does not establish a complete streak or predict the next match. " +
+          "Research leads must be distinct in their underlying story, not three restatements of the same history. " +
+          "Separate reported claims, sampled sentiment, market expectations and verified facts. " +
+          "Preserve source timestamps, coverage limitations, requested language and caller confirmation policy.\n" +
           "Respond in strict JSON with the following format:\n" +
           "{\n" +
           "  \"isValid\": boolean,\n" +
           "  \"discrepancies\": [\n" +
           "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\" }\n" +
           "  ]\n" +
-          "}",
+          "}\n\nTrusted caller policy (also applies to verification and correction):\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
@@ -1091,27 +1109,35 @@ export class sportsclawEngine {
           draft,
         ].join("\n\n"),
         maxOutputTokens: 2000,
+        abortSignal: params.abortSignal,
+        maxRetries: 0,
       });
 
       let parsed: { isValid: boolean; discrepancies?: Array<{ claim: string; evidence: string; severity: string }> };
       try {
         const text = validationRes.text?.trim() || "{}";
-        const cleanJson = text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1);
+        const cleanJson = text.replace(/^```json\s*\n([\s\S]*?)\n```$/i, "$1");
         parsed = JSON.parse(cleanJson);
+        if (!parsed || typeof parsed.isValid !== "boolean" || !Array.isArray(parsed.discrepancies)
+          || Object.keys(parsed).some((key) => !["isValid", "discrepancies"].includes(key))
+          || parsed.discrepancies.some((item) => !item || typeof item.claim !== "string" || !item.claim.trim()
+            || typeof item.evidence !== "string" || !item.evidence.trim() || !["high", "medium"].includes(item.severity))
+          || parsed.isValid !== (parsed.discrepancies.length === 0)) return unavailable;
       } catch {
-        return draft; // fallback to unverified
+        return unavailable;
       }
 
-      if (parsed.isValid || !parsed.discrepancies || parsed.discrepancies.length === 0) {
+      if (parsed.isValid) {
         return draft; // clean!
       }
+      if (params.correctionAttempted) return unavailable;
 
       // Step 2: Hallucination detected! self-correct!
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] evidence_validation: detected ${parsed.discrepancies.length} fact discrepancies!`
         );
-        for (const d of parsed.discrepancies) {
+        for (const d of parsed.discrepancies!) {
           console.error(`  - Discrepancy: Claim="${d.claim}" vs Evidence="${d.evidence}"`);
         }
       }
@@ -1126,7 +1152,7 @@ export class sportsclawEngine {
           "Do not mention that a correction or verification happened. " +
           "Never expose internal source labels, tool names, or citation markers such as [Internal source N] " +
           "or [Tool N]. Only use human-readable source names (e.g. a league or outlet) if they appear in " +
-          "the data itself.",
+          "the data itself. Keep genuine sources, observation times and coverage gaps. Omit unsupported or repetitive leads; do not fill a quota.\n\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
@@ -1137,11 +1163,13 @@ export class sportsclawEngine {
           JSON.stringify(parsed.discrepancies, null, 2),
         ].join("\n\n"),
         maxOutputTokens: 4000,
+        abortSignal: params.abortSignal,
+        maxRetries: 0,
       });
 
       const corrected = correctionRes.text?.trim();
       if (corrected) {
-        return stripInternalEvidenceArtifacts(corrected);
+        return this.validateResponseEvidence({ ...params, draft: stripInternalEvidenceArtifacts(corrected), correctionAttempted: true });
       }
     } catch (e) {
       if (this.config.verbose) {
@@ -1149,7 +1177,7 @@ export class sportsclawEngine {
       }
     }
 
-    return draft;
+    return unavailable;
   }
 
   /** Build the Vercel AI SDK tool map from our registry */
@@ -3983,15 +4011,28 @@ export class sportsclawEngine {
             system:
               "You are a sports answer synthesizer. Combine the following agent responses into one coherent, " +
               "concise answer. Remove duplicates, merge data, and present a unified response. " +
-              "Do not mention the individual agents. Keep source citations.",
+              "Do not mention the individual agents. Keep source citations, observation times and coverage limitations.\n\n" + (options?.systemPrompt ?? ""),
             prompt: agentTexts.join("\n\n---\n\n"),
             maxOutputTokens: budgets.synthesis,
+            abortSignal: options?.abortSignal,
+            maxRetries: 0,
           });
           this._lastUsage = addUsage(this._lastUsage!, usageOf(synthesisResult));
           responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
         } catch {
           responseText = agentTexts.join("\n\n");
         }
+      }
+
+      // Parallel synthesis must satisfy the same caller policy and evidence gate.
+      const parallelToolOutputs = laneResults.flatMap((lane) =>
+        this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
+          new Set(succeededExternalTools.keys())));
+      if (parallelToolOutputs.length > 0) {
+        responseText = await this.validateResponseEvidence({
+          userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
+          callerSystemPrompt: options?.systemPrompt, abortSignal: options?.abortSignal,
+        });
       }
 
       // Append synthesized response to message history (not individual agent messages)
@@ -4285,6 +4326,8 @@ export class sportsclawEngine {
         toolOutputs,
         maxOutputTokens: budgets.synthesis,
         queryIntent,
+        callerSystemPrompt: options?.systemPrompt,
+        abortSignal: options?.abortSignal,
       });
     }
 
@@ -4316,6 +4359,8 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
         maxOutputTokens: budgets.evidenceGate,
+        callerSystemPrompt: options?.systemPrompt,
+        abortSignal: options?.abortSignal,
       });
     }
 
@@ -4336,6 +4381,8 @@ export class sportsclawEngine {
         userPrompt: sanitizedPrompt,
         draft: responseText,
         toolOutputs,
+        callerSystemPrompt: options?.systemPrompt,
+        abortSignal: options?.abortSignal,
       });
     }
 
