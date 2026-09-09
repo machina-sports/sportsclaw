@@ -611,8 +611,10 @@ function compactStructuredJson(raw: string): string {
  * incorrectly dropped the final venue from oversized worldcup-get-schedule
  * payloads (pretty JSON >4000 chars, compact <2500).
  */
-export function summarizeToolOutputForEvidence(output: unknown): string {
-  const MAX_CHARS = 4_000;
+export function summarizeToolOutputForEvidence(output: unknown, maxChars = 4_000): string {
+  // Final verification needs document batches, not just their first/last fields.
+  // Keep ordinary synthesis compact and bound the opt-in verification budget.
+  const limit = Number.isFinite(maxChars) ? Math.min(24_000, Math.max(128, Math.floor(maxChars))) : 4_000;
 
   // Centralized safe extraction: always yields a string, never throws — even
   // for top-level undefined/function/symbol (JSON.stringify returns undefined)
@@ -626,10 +628,10 @@ export function summarizeToolOutputForEvidence(output: unknown): string {
 
   const trimmed = trimJsonWhitespace(raw);
   if (!trimmed) return "";
-  if (trimmed.length <= MAX_CHARS) return trimmed;
+  if (trimmed.length <= limit) return trimmed;
 
   const marker = "\n...[truncated middle]...\n";
-  const budget = MAX_CHARS - marker.length;
+  const budget = limit - marker.length;
   const headLen = Math.floor(budget / 2);
   const tailLen = budget - headLen;
   const head = trimmed.slice(0, headLen);
@@ -885,7 +887,8 @@ export class sportsclawEngine {
         system:
           "You are an evidence gate for a consumer sports chat. Remove or rewrite any claim " +
           "that depends on failed tools. Keep only claims supportable by successful tools or the draft's successful data. " +
-          "Keep missing coverage and partial results explicit in human-readable language. Do not expose credentials or internal tool names. " +
+          "Keep material uncertainty explicit beside affected claims; do not append an empty unavailable section to a useful brief. " +
+          "Give a coverage audit only when requested. Do not expose credentials or internal tool names. " +
           "A failed source is not proof that no coverage exists. Never substitute another event or invent sentiment. " +
           "Preserve source attribution, observation times, language and confirmation boundaries. " +
           "Be direct, concise, and get to the point.\n\n" + (params.callerSystemPrompt ?? ""),
@@ -969,21 +972,22 @@ export class sportsclawEngine {
     return merged.length > 0 ? merged : undefined;
   }
 
-  private summarizeToolOutput(output: unknown): string {
-    return summarizeToolOutputForEvidence(output);
+  private summarizeToolOutput(output: unknown, maxChars = 4_000): string {
+    return summarizeToolOutputForEvidence(output, maxChars);
   }
 
   private collectToolOutputSnippets(
     steps: Array<{
       toolResults?: Array<{ toolCallId: string; toolName: string; output: unknown }>;
     }>,
-    successfulToolCallIds: Set<string>
+    successfulToolCallIds: Set<string>,
+    maxChars = 4_000
   ): Array<{ toolName: string; output: string }> {
     const out: Array<{ toolName: string; output: string }> = [];
     for (const step of steps) {
       for (const result of step.toolResults ?? []) {
         if (!successfulToolCallIds.has(result.toolCallId)) continue;
-        const output = this.summarizeToolOutput(result.output);
+        const output = this.summarizeToolOutput(result.output, maxChars);
         if (!output) continue;
         out.push({ toolName: result.toolName, output });
       }
@@ -1026,7 +1030,7 @@ export class sportsclawEngine {
           "Use only the provided tool outputs.",
           "Answer the user directly with concrete data points.",
           "Do not ask a follow-up question.",
-          "If required data is missing, explicitly mark that section unavailable.",
+          "Use the supported parts of the evidence. Keep uncertainty beside any claim it qualifies; do not add empty unavailable sections unless the caller requests a coverage audit.",
           "Keep the response concise.",
           ...(intentHint ? [intentHint] : []),
           params.callerSystemPrompt ?? "",
@@ -1071,13 +1075,13 @@ export class sportsclawEngine {
     const unavailable = "I could not verify a reliable answer from the available evidence.";
     if (params.abortSignal?.aborted) return unavailable;
 
-    // Label sources as internal-only. Tool names are deliberately withheld so
-    // the model can never echo them, and the label says so explicitly.
+    // Only the wrapper label and tool names are private. Genuine publishers,
+    // article URLs and observation times inside the evidence remain citable.
     const serializedToolOutputs = toolOutputs
       .slice(0, 10)
       .map(
         (item, idx) =>
-          `[Internal source ${idx + 1} — private, never cite, name, or reference this source in your answer]\n${item.output}`
+          `[Internal source ${idx + 1} — wrapper label is private; cite genuine publishers and URLs in the data below]\n${item.output}`
       )
       .join("\n\n");
 
@@ -1100,7 +1104,15 @@ export class sportsclawEngine {
           "  \"discrepancies\": [\n" +
           "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\" }\n" +
           "  ]\n" +
-          "}\n\nTrusted caller policy (also applies to verification and correction):\n" + (params.callerSystemPrompt ?? ""),
+          "}\n\nTrusted caller policy (criteria for the draft and correction):\n" + (params.callerSystemPrompt ?? "") +
+          "\n\nInternal verification task: apply the caller's evidence, permission and language constraints to the draft, " +
+          "but its user-facing prose/format instructions do not change this internal JSON contract. " +
+          "Missing optional coverage does not invalidate independently supported reporting. " +
+          "Dated, attributed reporting is usable as background, not proof of current availability. " +
+          "Do not require a separate unavailable section when the caller asks for a useful brief. " +
+          "Headline-only evidence supports only its explicit claim, not medical clearance, tactical attributes, a full lineup or officiating tendencies. " +
+          "Questions and conditional analysis are allowed, but their factual premises must be supported. " +
+          "Return only the JSON verdict with isValid and discrepancies; no user-facing answer, markdown, tools or proposals.",
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
@@ -1152,7 +1164,9 @@ export class sportsclawEngine {
           "Do not mention that a correction or verification happened. " +
           "Never expose internal source labels, tool names, or citation markers such as [Internal source N] " +
           "or [Tool N]. Only use human-readable source names (e.g. a league or outlet) if they appear in " +
-          "the data itself. Keep genuine sources, observation times and coverage gaps. Omit unsupported or repetitive leads; do not fill a quota.\n\n" + (params.callerSystemPrompt ?? ""),
+          "the data itself. Keep genuine source links and observation times. Keep material uncertainty beside the claim it qualifies, " +
+          "not in an empty unavailable section. A missing lineup must not suppress supported team news. " +
+          "Omit unsupported or repetitive leads; do not fill a quota. Avoid adding factual premises to make a headline sound more exciting.\n\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
@@ -4027,7 +4041,7 @@ export class sportsclawEngine {
       // Parallel synthesis must satisfy the same caller policy and evidence gate.
       const parallelToolOutputs = laneResults.flatMap((lane) =>
         this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
-          new Set(succeededExternalTools.keys())));
+          new Set(succeededExternalTools.keys()), 24_000));
       if (parallelToolOutputs.length > 0) {
         responseText = await this.validateResponseEvidence({
           userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
@@ -4375,7 +4389,8 @@ export class sportsclawEngine {
             output: unknown;
           }>;
         }>,
-        successIds
+        successIds,
+        24_000
       );
       responseText = await this.validateResponseEvidence({
         userPrompt: sanitizedPrompt,

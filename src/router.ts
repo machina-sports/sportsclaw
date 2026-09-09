@@ -95,6 +95,12 @@ function isMcpIntent(normalizedPrompt: string): boolean {
   return MCP_INTENT_PATTERNS.some((p) => p.test(normalizedPrompt));
 }
 
+// Editorial language often asks for "stories" rather than literally "news".
+// A pod mention scopes the research; it must not hide installed news tools.
+function isEditorialResearchIntent(prompt: string): boolean {
+  return /\b(storylines?|stories|story leads?|team news|brief me|match brief|notícias|noticias|pautas)\b/i.test(prompt);
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -131,7 +137,7 @@ function inferHelperSkills(prompt: string, installed: Set<string>): Set<string> 
   const out = new Set<string>();
   if (
     installed.has("news") &&
-    /\b(news|headline|headlines|rumor|rumours|report|latest)\b/.test(p)
+    (/\b(news|headline|headlines|rumor|rumours|report|latest)\b/.test(p) || isEditorialResearchIntent(p))
   ) {
     out.add("news");
   }
@@ -339,7 +345,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
   // This skips the expensive LLM router call for non-sport queries like
   // "list my workflows", "what documents are stored?", or "execute agent X".
   const hasMcpTools = input.toolSpecs.some((s) => s.name.startsWith("mcp__"));
-  if (hasMcpTools && isMcpIntent(promptNorm)) {
+  if (hasMcpTools && isMcpIntent(promptNorm) && !isEditorialResearchIntent(promptNorm)) {
     return {
       decision: {
         selectedSkills: [],

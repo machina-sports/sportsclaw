@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MockLanguageModelV3 } from "ai/test";
-import { sportsclawEngine } from "../dist/engine.js";
+import { sportsclawEngine, summarizeToolOutputForEvidence } from "../dist/engine.js";
 
 function fixture(replies) {
   const model = new MockLanguageModelV3({ doGenerate: async () => ({
@@ -19,6 +19,43 @@ const input = { userPrompt: "Research up to three distinct leads", draft: "Low s
   callerSystemPrompt: "Keep coverage gaps explicit. Do not generate or publish content. Use Portuguese." };
 
 describe("research verification preserves caller policy", () => {
+  it("preserves cited reporting in the middle of a bounded document batch", () => {
+    const { engine } = fixture([]);
+    const raw = JSON.stringify({ metadata: { context: "a".repeat(7000) },
+      news: { headline: "Example defender available for the derby", source_url: "https://example.test/team-news", published_at: "2026-09-08T20:13:00Z" },
+      inventory: "z".repeat(7000) });
+    assert.doesNotMatch(summarizeToolOutputForEvidence(raw), /Example defender/);
+    const snippets = engine.collectToolOutputSnippets([{ toolResults: [{ toolCallId: "news-1", toolName: "mcp__pod__search_documents", output: raw }] }], new Set(["news-1"]), 24000);
+    assert.match(snippets[0].output, /Example defender/);
+    assert.match(snippets[0].output, /https:\/\/example.test\/team-news/);
+    assert.match(snippets[0].output, /2026-09-08T20:13:00Z/);
+    assert.ok(snippets[0].output.length <= 24000);
+  });
+  it("bounds the larger verification context and excludes unsuccessful outputs", () => {
+    const { engine } = fixture([]);
+    const raw = "start-" + "x".repeat(30_000) + "-end";
+    for (const maxChars of [24_000, 100_000]) {
+      const output = summarizeToolOutputForEvidence(raw, maxChars);
+      assert.equal(output.length, 24_000);
+      assert.ok(output.startsWith("start-") && output.endsWith("-end"));
+      assert.match(output, /truncated middle/);
+    }
+    assert.equal(summarizeToolOutputForEvidence(raw, NaN).length, 4_000);
+    assert.deepEqual(engine.collectToolOutputSnippets([{ toolResults: [
+      { toolCallId: "failed-news", toolName: "news", output: raw },
+    ] }], new Set(), 24_000), []);
+  });
+  it("keeps the internal JSON verdict contract after caller-facing prose instructions", async () => {
+    const { engine, model } = fixture(['{"isValid":true,"discrepancies":[]}']);
+    await engine.validateResponseEvidence({ ...input, callerSystemPrompt: "Answer in Portuguese prose. End after the useful brief." });
+    const system = model.doGenerateCalls[0].prompt.find((entry) => entry.role === "system").content;
+    assert.ok(system.lastIndexOf("Return only the JSON verdict") > system.indexOf("End after the useful brief."));
+    assert.match(system, /Missing optional coverage does not invalidate/);
+    assert.match(system, /Headline-only evidence supports only its explicit claim/);
+    const prompt = JSON.stringify(model.doGenerateCalls[0].prompt);
+    assert.match(prompt, /cite genuine publishers and URLs/);
+    assert.doesNotMatch(prompt, /never cite, name, or reference this source/);
+  });
   for (const reply of ["not JSON", "{}", '{"isValid":"true","discrepancies":[]}', '{"isValid":false,"discrepancies":[]}', '{"isValid":true,"discrepancies":[{"claim":"x","evidence":"y","severity":"high"}]}']) {
     it(`does not return unverified claims for ${reply}`, async () => {
       const { engine } = fixture([reply]);
@@ -46,6 +83,7 @@ describe("research verification preserves caller policy", () => {
     const prompt = JSON.stringify(model.doGenerateCalls[0].prompt);
     assert.match(prompt, /Keep coverage gaps explicit/);
     assert.doesNotMatch(prompt, /skip missing sections silently/);
+    assert.match(prompt, /beside affected claims/);
   });
   it("retains a valid supported answer", async () => {
     const { engine } = fixture(['{"isValid":true,"discrepancies":[]}']);
