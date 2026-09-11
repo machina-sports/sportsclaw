@@ -590,11 +590,25 @@ export class ToolRegistry {
         const failure = classifyFailure(combined, toolName);
         hint = failure.userMessage || result.error || classified.hint;
       }
+      // An uncaught error inside a skill prints its message on stdout and
+      // nothing on stderr, so without this the model only saw Node's generic
+      // "Command failed" and repeated the same broken call.
+      let detail: string | undefined;
+      try {
+        const payload = JSON.parse((result.stdout ?? "").trim() || "{}");
+        if (payload && typeof payload.message === "string" && payload.message.trim()) {
+          detail = payload.message.trim().slice(0, 500);
+        }
+      } catch {
+        // Unparseable stdout is not a message. A tool that floods stdout would
+        // otherwise have its flood reported to the model as the error.
+      }
       return {
         content: JSON.stringify({
-          error: result.error,
+          error: detail ?? result.error,
           error_code: classified.errorCode,
           stderr: result.stderr,
+          ...(detail && detail !== result.error ? { command_error: result.error } : {}),
           hint,
         }),
         isError: true,

@@ -1073,6 +1073,19 @@ export class sportsclawEngine {
     const { userPrompt, draft, toolOutputs } = params;
     if (toolOutputs.length === 0) return draft;
     const unavailable = "I could not verify a reliable answer from the available evidence.";
+    // A draft assembled from real tool output is only thrown away when the
+    // check ran and found it unsupported. When the check itself cannot run —
+    // aborted, provider error, a verdict that will not parse — the answer
+    // stands. Discarding grounded work over an infrastructure hiccup left the
+    // user with nothing after a dozen successful tool calls.
+    const unverified = (reason: string) => {
+      if (this.config.verbose) {
+        console.error(`[sportsclaw] evidence validation did not complete (${reason}); returning the drafted answer`);
+      }
+      return draft;
+    };
+    // A caller deadline is different: the answer was never checked and the
+    // caller has stopped waiting, so it must not ship as if it had been.
     if (params.abortSignal?.aborted) return unavailable;
 
     // Only the wrapper label and tool names are private. Genuine publishers,
@@ -1085,6 +1098,24 @@ export class sportsclawEngine {
       )
       .join("\n\n");
 
+    let discrepanciesFound = false;
+    type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string }> };
+    // A verdict that will not parse is the checker misbehaving, not a finding
+    // about the draft. Ask once more before deciding the check cannot run.
+    const readVerdict = (text: string | undefined): Verdict | null => {
+      try {
+        const cleanJson = (text?.trim() || "{}").replace(/^```json\s*\n([\s\S]*?)\n```$/i, "$1");
+        const parsed = JSON.parse(cleanJson);
+        if (!parsed || typeof parsed.isValid !== "boolean" || !Array.isArray(parsed.discrepancies)
+          || Object.keys(parsed).some((key) => !["isValid", "discrepancies"].includes(key))
+          || parsed.discrepancies.some((item: any) => !item || typeof item.claim !== "string" || !item.claim.trim()
+            || typeof item.evidence !== "string" || !item.evidence.trim() || !["high", "medium"].includes(item.severity))
+          || parsed.isValid !== (parsed.discrepancies.length === 0)) return null;
+        return parsed as Verdict;
+      } catch {
+        return null;
+      }
+    };
     try {
       // Step 1: LLM-driven verification pass to detect conflicts
       const validationRes = await generateText({
@@ -1122,22 +1153,30 @@ export class sportsclawEngine {
         ].join("\n\n"),
         maxOutputTokens: 2000,
         abortSignal: params.abortSignal,
-        maxRetries: 0,
+        maxRetries: 1,
       });
 
-      let parsed: { isValid: boolean; discrepancies?: Array<{ claim: string; evidence: string; severity: string }> };
-      try {
-        const text = validationRes.text?.trim() || "{}";
-        const cleanJson = text.replace(/^```json\s*\n([\s\S]*?)\n```$/i, "$1");
-        parsed = JSON.parse(cleanJson);
-        if (!parsed || typeof parsed.isValid !== "boolean" || !Array.isArray(parsed.discrepancies)
-          || Object.keys(parsed).some((key) => !["isValid", "discrepancies"].includes(key))
-          || parsed.discrepancies.some((item) => !item || typeof item.claim !== "string" || !item.claim.trim()
-            || typeof item.evidence !== "string" || !item.evidence.trim() || !["high", "medium"].includes(item.severity))
-          || parsed.isValid !== (parsed.discrepancies.length === 0)) return unavailable;
-      } catch {
-        return unavailable;
+      let parsed = readVerdict(validationRes.text);
+      if (!parsed) {
+        const retryRes = await generateText({
+          model: this.mainModel,
+          system: "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+            + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\"}]}. "
+            + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
+          prompt: [
+            `User request: ${userPrompt}`,
+            `Raw source data (Source of Truth):`,
+            serializedToolOutputs,
+            `Draft response to check:`,
+            draft,
+          ].join("\n\n"),
+          maxOutputTokens: 2000,
+          abortSignal: params.abortSignal,
+          maxRetries: 1,
+        });
+        parsed = readVerdict(retryRes.text);
       }
+      if (!parsed) return unverified("the checker did not return a usable verdict twice");
 
       if (parsed.isValid) {
         return draft; // clean!
@@ -1154,6 +1193,9 @@ export class sportsclawEngine {
         }
       }
 
+      // Past this point the check has run and named real discrepancies, so the
+      // draft is known to be wrong. A failure from here on must not ship it.
+      discrepanciesFound = true;
       const correctionRes = await generateText({
         model: this.mainModel,
         system:
@@ -1189,6 +1231,7 @@ export class sportsclawEngine {
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation failed: ${e}`);
       }
+      if (!discrepanciesFound) return unverified(`validator error: ${e}`);
     }
 
     return unavailable;

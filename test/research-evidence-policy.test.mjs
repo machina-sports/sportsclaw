@@ -57,11 +57,24 @@ describe("research verification preserves caller policy", () => {
     assert.doesNotMatch(prompt, /never cite, name, or reference this source/);
   });
   for (const reply of ["not JSON", "{}", '{"isValid":"true","discrepancies":[]}', '{"isValid":false,"discrepancies":[]}', '{"isValid":true,"discrepancies":[{"claim":"x","evidence":"y","severity":"high"}]}']) {
-    it(`does not return unverified claims for ${reply}`, async () => {
-      const { engine } = fixture([reply]);
+    it(`asks again for an unusable verdict, then keeps the grounded draft for ${reply}`, async () => {
+      const { engine, model } = fixture([reply, reply]);
+      assert.equal(await engine.validateResponseEvidence(input), input.draft);
+      assert.equal(model.doGenerateCalls.length, 2);
+    });
+    it(`accepts a usable verdict on the second ask for ${reply}`, async () => {
+      const invalid = JSON.stringify({ isValid: false, discrepancies: [{ claim: "tactics", evidence: "scores only", severity: "high" }] });
+      const { engine, model } = fixture([reply, invalid, "A corrected brief grounded in the two 0-0 results.", invalid]);
       assert.notEqual(await engine.validateResponseEvidence(input), input.draft);
+      assert.ok(model.doGenerateCalls.length >= 3);
     });
   }
+  it("keeps the grounded draft when the checker itself errors", async () => {
+    const engine = Object.create(sportsclawEngine.prototype);
+    engine.mainModel = new MockLanguageModelV3({ doGenerate: async () => { throw new Error("upstream 503"); } });
+    engine.config = { verbose: false };
+    assert.equal(await engine.validateResponseEvidence(input), input.draft);
+  });
   it("checks qualitative premises and preserves caller constraints in the verification pass", async () => {
     const { engine, model } = fixture(['{"isValid":true,"discrepancies":[]}']);
     await engine.validateResponseEvidence(input);
