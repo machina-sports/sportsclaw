@@ -122,7 +122,7 @@ import {
 import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
 import { cmdMachina } from "./machina.js";
-import { cmdPlays } from "./plays.js";
+import { cmdGames } from "./games.js";
 import { cmdPremierLeagueRecap } from "./premier-league-recap.js";
 import { runSetup } from "./setup.js";
 import {
@@ -265,9 +265,9 @@ export type {
 export {
   buildFactoryArgv,
   parseFactoryJobId,
-  preparePlaysBuild,
-  submitPlaysBuild,
-} from "./plays.js";
+  prepareGamesBuild,
+  submitGamesBuild,
+} from "./games.js";
 export {
   createTask,
   listTasks,
@@ -2926,8 +2926,8 @@ function printHelp(): void {
   console.log("  sportsclaw mcp remove <name>       Disconnect an MCP server");
   console.log("  sportsclaw mcp list                List configured MCP servers");
   console.log("  sportsclaw machina connect [proj]  Connect a Machina premium pod (via machina-cli)");
-  console.log("  sportsclaw plays prepare ...       Validate a versioned game build brief");
-  console.log("  sportsclaw plays submit ... --yes  Submit the pinned brief to Factory");
+  console.log("  sportsclaw games prepare ...       Validate a versioned game build brief");
+  console.log("  sportsclaw games submit ... --yes  Submit the pinned brief to Factory");
   console.log("  sportsclaw recap premier-league   Build a gated Monday recap review package");
   console.log("  sportsclaw watch <sport> <command>  Watch an endpoint for realtime changes");
   console.log("  sportsclaw watch --config=<path>   Run multiple watchers from config file");
@@ -3131,9 +3131,9 @@ function cmdAnalytics(args: string[], _opts?: { fromChat?: boolean }): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  // PLAYS brief validation must not load user profile or credential files.
-  if (args[0] === "plays") {
-    return cmdPlays(args.slice(1));
+  // Game brief validation must not load user profile or credential files.
+  if (args[0] === "games") {
+    return cmdGames(args.slice(1));
   }
 
   // Load ~/.sportsclaw/.env and persisted config into process.env before any

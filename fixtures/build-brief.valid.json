@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "kind": "sports-game",
   "project": {
-    "id": "plays-demo",
-    "repository": "machina-sports/plays-demo",
+    "id": "games-demo",
+    "repository": "machina-sports/games-demo",
     "podUrl": "https://demo.org.machina.gg"
   },
   "selection": {
     "capabilities": ["search_documents", "search_workflow"],
-    "skills": ["plays-game-builder"]
+    "skills": ["game-builder"]
   },
   "game": {
     "name": "Match Pulse",
@@ -18,7 +18,7 @@
     "mode": "frozen",
     "provenance": [
       {
-        "source": "plays-read-only-fixture",
+        "source": "games-read-only-fixture",
         "observedAt": "2026-09-13T12:00:00.000Z",
         "verification": "sample"
       }
@@ -80,7 +80,7 @@
   },
   "resources": {
     "existing": ["search_documents"],
-    "missing": ["plays-game-ui"]
+    "missing": ["game-ui"]
   },
   "acceptanceChecks": [
     {

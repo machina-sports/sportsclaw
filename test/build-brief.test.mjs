@@ -19,9 +19,9 @@ const validBrief = () => structuredClone(fixture);
 describe("portable build brief contract", () => {
   it("parses and renders the shared valid fixture", () => {
     const brief = parseBuildBrief(JSON.stringify(validBrief()), {
-      allowedSkills: ["plays-game-builder"],
-      expectedProjectId: "plays-demo",
-      expectedRepository: "machina-sports/plays-demo",
+      allowedSkills: ["game-builder"],
+      expectedProjectId: "games-demo",
+      expectedRepository: "machina-sports/games-demo",
     });
     assert.equal(brief.data.provenance[0].verification, "sample");
     assert.match(renderBuildBrief(brief), /not independently verified/i);
@@ -61,7 +61,7 @@ describe("portable build brief contract", () => {
       mutate(brief);
       assert.throws(() =>
         parseBuildBrief(JSON.stringify(brief), {
-          allowedSkills: ["plays-game-builder"],
+          allowedSkills: ["game-builder"],
         }),
       );
     });
@@ -148,7 +148,7 @@ describe("portable build brief contract", () => {
   it("rejects the shared invalid fixture", () => {
     assert.throws(() =>
       parseBuildBrief(invalidFixture, {
-        allowedSkills: ["plays-game-builder"],
+        allowedSkills: ["game-builder"],
       }),
     );
   });

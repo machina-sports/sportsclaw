@@ -29,7 +29,7 @@ const FORBIDDEN_NORMALIZED_KEYS = new Set([
 const SOURCE_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-const SOURCE_BINDING_PREFIX = "PLAYS_SOURCE_BINDING=";
+const SOURCE_BINDING_PREFIX = "BUILD_SOURCE_BINDING=";
 
 type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
@@ -582,7 +582,7 @@ export function renderBuildBrief(brief: BuildBrief): string {
   ].join("\n");
 }
 
-export interface PlaysSourceBinding {
+export interface BuildSourceBinding {
   version: 1;
   repository: string;
   ref: string;
@@ -601,7 +601,7 @@ function assertSourceRef(ref: string): void {
     ref.endsWith(".lock") ||
     ref.split("/").some((part) => part.startsWith("."))
   ) {
-    throw new Error("Invalid PLAYS source binding ref");
+    throw new Error("Invalid build source binding ref");
   }
 }
 
@@ -609,18 +609,18 @@ export function buildBriefDigest(brief: BuildBrief): string {
   return createHash("sha256").update(JSON.stringify(brief)).digest("hex");
 }
 
-export function createPlaysSourceBinding(input: {
+export function createBuildSourceBinding(input: {
   brief: BuildBrief;
   repository: string;
   ref: string;
   commit: string;
-}): PlaysSourceBinding {
+}): BuildSourceBinding {
   if (!REPOSITORY_PATTERN.test(input.repository)) {
-    throw new Error("Invalid PLAYS source binding repository");
+    throw new Error("Invalid build source binding repository");
   }
   assertSourceRef(input.ref);
   if (!COMMIT_PATTERN.test(input.commit)) {
-    throw new Error("Invalid PLAYS source binding commit");
+    throw new Error("Invalid build source binding commit");
   }
   return {
     version: 1,
@@ -631,9 +631,9 @@ export function createPlaysSourceBinding(input: {
   };
 }
 
-export function renderPlaysFactoryTask(
+export function renderFactoryBuildTask(
   sourceRef: string,
-  binding?: PlaysSourceBinding,
+  binding?: BuildSourceBinding,
 ): string {
   assertSourceRef(sourceRef);
   return [
@@ -642,65 +642,65 @@ export function renderPlaysFactoryTask(
   ].join("\n");
 }
 
-export function parsePlaysSourceBinding(task: string): PlaysSourceBinding {
+export function parseBuildSourceBinding(task: string): BuildSourceBinding {
   const markerLines = task
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.startsWith(SOURCE_BINDING_PREFIX));
   if (markerLines.length !== 1) {
-    throw new Error("PLAYS source binding must appear exactly once");
+    throw new Error("Build source binding must appear exactly once");
   }
   let value: unknown;
   try {
     value = JSON.parse(markerLines[0]!.slice(SOURCE_BINDING_PREFIX.length));
   } catch {
-    throw new Error("Malformed PLAYS source binding");
+    throw new Error("Malformed build source binding");
   }
-  const binding = objectAt(value, "PLAYS source binding");
+  const binding = objectAt(value, "build source binding");
   exactKeys(
     binding,
     ["version", "repository", "ref", "commit", "briefSha256"],
-    "PLAYS source binding",
+    "build source binding",
   );
   if (binding.version !== 1) {
-    throw new Error("Invalid PLAYS source binding version");
+    throw new Error("Invalid build source binding version");
   }
   const repository = stringAt(
     binding.repository,
-    "PLAYS source binding.repository",
+    "build source binding.repository",
     { max: 201, pattern: REPOSITORY_PATTERN },
   );
-  const ref = stringAt(binding.ref, "PLAYS source binding.ref", { max: 200 });
+  const ref = stringAt(binding.ref, "build source binding.ref", { max: 200 });
   assertSourceRef(ref);
-  const commit = stringAt(binding.commit, "PLAYS source binding.commit", {
+  const commit = stringAt(binding.commit, "build source binding.commit", {
     max: 40,
     pattern: COMMIT_PATTERN,
   });
   const briefSha256 = stringAt(
     binding.briefSha256,
-    "PLAYS source binding.briefSha256",
+    "build source binding.briefSha256",
     { max: 64, pattern: DIGEST_PATTERN },
   );
   return { version: 1, repository, ref, commit, briefSha256 };
 }
 
-export function verifyPlaysSourceBinding(
+export function verifyBuildSourceBinding(
   task: string,
   brief: BuildBrief,
   expected: { repository: string; ref: string; commit: string },
-): PlaysSourceBinding {
-  const binding = parsePlaysSourceBinding(task);
+): BuildSourceBinding {
+  const binding = parseBuildSourceBinding(task);
   if (binding.repository.toLowerCase() !== expected.repository.toLowerCase()) {
-    throw new Error("PLAYS source binding repository mismatch");
+    throw new Error("Build source binding repository mismatch");
   }
   if (binding.ref !== expected.ref) {
-    throw new Error("PLAYS source binding ref mismatch");
+    throw new Error("Build source binding ref mismatch");
   }
   if (binding.commit !== expected.commit) {
-    throw new Error("PLAYS source binding commit mismatch");
+    throw new Error("Build source binding commit mismatch");
   }
   if (binding.briefSha256 !== buildBriefDigest(brief)) {
-    throw new Error("PLAYS source binding brief digest mismatch");
+    throw new Error("Build source binding brief digest mismatch");
   }
   return binding;
 }

@@ -3,19 +3,19 @@ import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import {
-  createPlaysSourceBinding,
+  createBuildSourceBinding,
   parseBuildBrief,
-  renderPlaysFactoryTask,
+  renderFactoryBuildTask,
   type BuildBrief,
-  type PlaysSourceBinding,
+  type BuildSourceBinding,
 } from "./build-brief.js";
 
-export const PLAYS_BUILD_BRIEF_PATH = ".machina/build-brief.json";
+export const GAME_BUILD_BRIEF_PATH = ".machina/build-brief.json";
 const SOURCE_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const execFileAsync = promisify(execFile);
 
-export interface PlaysBuildInput {
+export interface GamesBuildInput {
   targetDirectory: string;
   repository: string;
   projectId: string;
@@ -29,7 +29,7 @@ export interface ProcessResult {
   stderr: string;
 }
 
-export interface PlaysDependencies {
+export interface GamesDependencies {
   readBrief(path: string): Promise<string>;
   inspectPath(path: string): Promise<{
     isFile: boolean;
@@ -38,13 +38,13 @@ export interface PlaysDependencies {
   run(file: string, args: string[]): Promise<ProcessResult>;
 }
 
-export interface PreparedPlaysBuild {
+export interface PreparedGamesBuild {
   brief: BuildBrief;
   briefPath: string;
   argv: string[];
 }
 
-const defaultDependencies: PlaysDependencies = {
+const defaultDependencies: GamesDependencies = {
   readBrief: (path) => readFile(path, "utf-8"),
   inspectPath: async (path) => {
     const stats = await lstat(path);
@@ -90,13 +90,13 @@ function assertSourceRef(sourceRef: string): void {
 export function buildFactoryArgv(
   brief: BuildBrief,
   sourceRef: string,
-  binding?: PlaysSourceBinding,
+  binding?: BuildSourceBinding,
 ): string[] {
   assertSourceRef(sourceRef);
   return [
     "factory",
     "run",
-    renderPlaysFactoryTask(sourceRef, binding),
+    renderFactoryBuildTask(sourceRef, binding),
     "--repo",
     brief.project.repository,
     "--project",
@@ -105,14 +105,14 @@ export function buildFactoryArgv(
   ];
 }
 
-export async function preparePlaysBuild(
-  input: PlaysBuildInput,
-  dependencies: PlaysDependencies = defaultDependencies,
-): Promise<PreparedPlaysBuild> {
+export async function prepareGamesBuild(
+  input: GamesBuildInput,
+  dependencies: GamesDependencies = defaultDependencies,
+): Promise<PreparedGamesBuild> {
   assertSourceRef(input.sourceRef);
   const targetDirectory = resolve(input.targetDirectory);
   const machinaDirectory = resolve(targetDirectory, ".machina");
-  const briefPath = resolve(targetDirectory, PLAYS_BUILD_BRIEF_PATH);
+  const briefPath = resolve(targetDirectory, GAME_BUILD_BRIEF_PATH);
   if (!briefPath.startsWith(`${targetDirectory}/`)) {
     throw new Error("Build brief path is outside the target repository");
   }
@@ -132,7 +132,7 @@ export async function preparePlaysBuild(
   if (!fileInfo.isFile) throw new Error(`Build brief not found: ${briefPath}`);
 
   const brief = parseBuildBrief(await dependencies.readBrief(briefPath), {
-    allowedSkills: ["plays-game-builder"],
+    allowedSkills: ["game-builder"],
     expectedProjectId: input.projectId,
     expectedRepository: input.repository,
   });
@@ -230,10 +230,10 @@ function commandFailure(operation: string, result: ProcessResult): Error {
 }
 
 async function verifyRemoteTrackingBrief(
-  prepared: PreparedPlaysBuild,
-  input: PlaysBuildInput,
-  dependencies: PlaysDependencies,
-): Promise<PlaysSourceBinding> {
+  prepared: PreparedGamesBuild,
+  input: GamesBuildInput,
+  dependencies: GamesDependencies,
+): Promise<BuildSourceBinding> {
   const targetDirectory = resolve(input.targetDirectory);
   const origin = await dependencies.run("git", [
     "-C",
@@ -259,7 +259,7 @@ async function verifyRemoteTrackingBrief(
   ]);
   if (fetchResult.exitCode !== 0) throw commandFailure("Git branch fetch", fetchResult);
 
-  const objectName = `refs/remotes/origin/${input.sourceRef}:${PLAYS_BUILD_BRIEF_PATH}`;
+  const objectName = `refs/remotes/origin/${input.sourceRef}:${GAME_BUILD_BRIEF_PATH}`;
   const result = await dependencies.run("git", [
     "-C",
     targetDirectory,
@@ -270,13 +270,13 @@ async function verifyRemoteTrackingBrief(
     throw commandFailure("Remote build brief verification", result);
   }
   const remoteBrief = parseBuildBrief(result.stdout, {
-    allowedSkills: ["plays-game-builder"],
+    allowedSkills: ["game-builder"],
     expectedProjectId: input.projectId,
     expectedRepository: input.repository,
   });
   if (JSON.stringify(remoteBrief) !== JSON.stringify(prepared.brief)) {
     throw new Error(
-      `Local ${PLAYS_BUILD_BRIEF_PATH} differs from refs/remotes/origin/${input.sourceRef}`,
+      `Local ${GAME_BUILD_BRIEF_PATH} differs from refs/remotes/origin/${input.sourceRef}`,
     );
   }
   const commitResult = await dependencies.run("git", [
@@ -289,7 +289,7 @@ async function verifyRemoteTrackingBrief(
   if (commitResult.exitCode !== 0) {
     throw commandFailure("Remote commit verification", commitResult);
   }
-  return createPlaysSourceBinding({
+  return createBuildSourceBinding({
     brief: remoteBrief,
     repository: input.repository,
     ref: input.sourceRef,
@@ -297,14 +297,14 @@ async function verifyRemoteTrackingBrief(
   });
 }
 
-export async function submitPlaysBuild(
-  input: PlaysBuildInput,
-  dependencies: PlaysDependencies = defaultDependencies,
+export async function submitGamesBuild(
+  input: GamesBuildInput,
+  dependencies: GamesDependencies = defaultDependencies,
 ): Promise<{ jobId: string; argv: string[] }> {
   if (input.consent !== true) {
     throw new Error("Explicit caller consent is required to submit a Factory job");
   }
-  const prepared = await preparePlaysBuild(input, dependencies);
+  const prepared = await prepareGamesBuild(input, dependencies);
   const binding = await verifyRemoteTrackingBrief(prepared, input, dependencies);
   const identity = await dependencies.run("machina", [
     "factory",
@@ -335,11 +335,11 @@ function option(args: string[], name: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-export async function cmdPlays(args: string[]): Promise<void> {
+export async function cmdGames(args: string[]): Promise<void> {
   const command = args[0];
   if (!(command === "prepare" || command === "submit")) {
     throw new Error(
-      "Usage: sportsclaw plays <prepare|submit> --target <dir> --repo <owner/name> --project <id> --ref <branch> [--yes]",
+      "Usage: sportsclaw games <prepare|submit> --target <dir> --repo <owner/name> --project <id> --ref <branch> [--yes]",
     );
   }
   const targetDirectory = option(args, "--target");
@@ -347,9 +347,9 @@ export async function cmdPlays(args: string[]): Promise<void> {
   const projectId = option(args, "--project");
   const sourceRef = option(args, "--ref");
   if (!(targetDirectory && repository && projectId && sourceRef)) {
-    throw new Error("plays requires --target, --repo, --project, and --ref");
+    throw new Error("games requires --target, --repo, --project, and --ref");
   }
-  const input: PlaysBuildInput = {
+  const input: GamesBuildInput = {
     targetDirectory,
     repository,
     projectId,
@@ -357,11 +357,11 @@ export async function cmdPlays(args: string[]): Promise<void> {
     consent: args.includes("--yes"),
   };
   if (command === "prepare") {
-    const prepared = await preparePlaysBuild(input);
+    const prepared = await prepareGamesBuild(input);
     console.log(JSON.stringify({ brief: prepared.brief, command: "machina", argv: prepared.argv }, null, 2));
     return;
   }
-  const result = await submitPlaysBuild(input);
+  const result = await submitGamesBuild(input);
   console.log(JSON.stringify({
     jobId: result.jobId,
     status: ["machina", "factory", "status", result.jobId],

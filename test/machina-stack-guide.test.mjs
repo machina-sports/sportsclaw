@@ -80,6 +80,6 @@ describe("Machina stack guide", () => {
     const files = packed[0].files.map((entry) => entry.path);
     assert.ok(files.includes("dist/prompts/built-in-guides.js"));
     assert.ok(files.includes("dist/build-brief.js"));
-    assert.ok(files.includes("dist/plays.js"));
+    assert.ok(files.includes("dist/games.js"));
   });
 });

@@ -1,28 +1,78 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildFactoryArgv,
   parseFactoryJobId,
   parseWhoamiProjectId,
-  preparePlaysBuild,
-  submitPlaysBuild,
-} from "../dist/plays.js";
+  prepareGamesBuild,
+  submitGamesBuild,
+} from "../dist/games.js";
 
 const validBriefText = readFileSync(
   new URL("../fixtures/build-brief.valid.json", import.meta.url),
   "utf-8",
 );
 
-describe("PLAYS Factory handoff", () => {
+describe("games Factory handoff", () => {
+  it("documents and routes games prepare without credentials or external commands", () => {
+    const help = execFileSync("node", ["dist/index.js", "--help"], {
+      encoding: "utf-8",
+    });
+    assert.match(help, /sportsclaw games prepare/);
+    assert.match(help, /sportsclaw games submit/);
+    assert.doesNotMatch(help, /sportsclaw plays/);
+
+    const targetDirectory = mkdtempSync(join(tmpdir(), "sportsclaw-games-"));
+    try {
+      mkdirSync(join(targetDirectory, ".machina"));
+      writeFileSync(
+        join(targetDirectory, ".machina", "build-brief.json"),
+        validBriefText,
+      );
+      const output = execFileSync(
+        "node",
+        [
+          "dist/index.js",
+          "games",
+          "prepare",
+          "--target",
+          targetDirectory,
+          "--repo",
+          "machina-sports/games-demo",
+          "--project",
+          "games-demo",
+          "--ref",
+          "feature/games",
+        ],
+        { encoding: "utf-8" },
+      );
+      const prepared = JSON.parse(output);
+      assert.equal(prepared.command, "machina");
+      assert.match(prepared.argv[2], /Base branch: feature\/games/);
+      assert.doesNotMatch(prepared.argv[2], /BUILD_SOURCE_BINDING=/);
+    } finally {
+      rmSync(targetDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("prepares validated argv with no subprocess or shell interpolation", async () => {
     let calls = 0;
-    const prepared = await preparePlaysBuild(
+    const prepared = await prepareGamesBuild(
       {
         targetDirectory: "/target",
-        repository: "machina-sports/plays-demo",
-        projectId: "plays-demo",
-        sourceRef: "feature/plays",
+        repository: "machina-sports/games-demo",
+        projectId: "games-demo",
+        sourceRef: "feature/games",
       },
       {
         readBrief: async () => validBriefText,
@@ -35,12 +85,12 @@ describe("PLAYS Factory handoff", () => {
     );
 
     assert.equal(calls, 0);
-    assert.deepEqual(prepared.argv, buildFactoryArgv(prepared.brief, "feature/plays"));
+    assert.deepEqual(prepared.argv, buildFactoryArgv(prepared.brief, "feature/games"));
     assert.ok(
       prepared.argv.some((argument) => argument.includes(".machina/build-brief.json")),
     );
     assert.equal(prepared.argv.includes("--branch"), false);
-    assert.ok(prepared.argv.some((argument) => argument.includes("Base branch: feature/plays")));
+    assert.ok(prepared.argv.some((argument) => argument.includes("Base branch: feature/games")));
   });
 
   it("requires consent, verifies origin and fetched source, then binds submission", async () => {
@@ -53,7 +103,7 @@ describe("PLAYS Factory handoff", () => {
         if (file === "git" && args.includes("get-url")) {
           return {
             exitCode: 0,
-            stdout: "git@github.com:machina-sports/plays-demo.git\n",
+            stdout: "git@github.com:machina-sports/games-demo.git\n",
             stderr: "",
           };
         }
@@ -73,7 +123,7 @@ describe("PLAYS Factory handoff", () => {
         if (file === "machina" && args.includes("whoami")) {
           return {
             exitCode: 0,
-            stdout: '{\n  "projectId": "plays-demo",\n  "uid": "user-1"\n}\n',
+            stdout: '{\n  "projectId": "games-demo",\n  "uid": "user-1"\n}\n',
             stderr: "",
           };
         }
@@ -86,23 +136,23 @@ describe("PLAYS Factory handoff", () => {
     };
     const input = {
       targetDirectory: "/target",
-      repository: "machina-sports/plays-demo",
-      projectId: "plays-demo",
-      sourceRef: "feature/plays",
+      repository: "machina-sports/games-demo",
+      projectId: "games-demo",
+      sourceRef: "feature/games",
     };
 
-    await assert.rejects(() => submitPlaysBuild(input, dependencies), /consent/i);
+    await assert.rejects(() => submitGamesBuild(input, dependencies), /consent/i);
     assert.equal(calls.length, 0);
 
-    const result = await submitPlaysBuild(
+    const result = await submitGamesBuild(
       { ...input, consent: true },
       dependencies,
     );
     assert.equal(result.jobId, "job_123");
     assert.equal(calls.at(-1).file, "machina");
     assert.equal(result.argv.includes("--branch"), false);
-    assert.ok(result.argv[2].includes("Base branch: feature/plays"));
-    assert.ok(result.argv[2].includes("PLAYS_SOURCE_BINDING="));
+    assert.ok(result.argv[2].includes("Base branch: feature/games"));
+    assert.ok(result.argv[2].includes("BUILD_SOURCE_BINDING="));
     assert.deepEqual(calls[0], {
       file: "git",
       args: ["-C", "/target", "remote", "get-url", "origin"],
@@ -114,13 +164,13 @@ describe("PLAYS Factory handoff", () => {
         "/target",
         "fetch",
         "--no-tags",
-        "git@github.com:machina-sports/plays-demo.git",
-        "+refs/heads/feature/plays:refs/remotes/origin/feature/plays",
+        "git@github.com:machina-sports/games-demo.git",
+        "+refs/heads/feature/games:refs/remotes/origin/feature/games",
       ],
     });
     assert.deepEqual(calls.at(-2), {
       file: "machina",
-      args: ["factory", "whoami", "--project", "plays-demo", "--json"],
+      args: ["factory", "whoami", "--project", "games-demo", "--json"],
     });
   });
 
@@ -140,12 +190,12 @@ describe("PLAYS Factory handoff", () => {
 
     await assert.rejects(
       () =>
-        submitPlaysBuild(
+        submitGamesBuild(
           {
             targetDirectory: "/target",
-            repository: "machina-sports/plays-demo",
-            projectId: "plays-demo",
-            sourceRef: "feature/plays",
+            repository: "machina-sports/games-demo",
+            projectId: "games-demo",
+            sourceRef: "feature/games",
             consent: true,
           },
           dependencies,
@@ -183,12 +233,12 @@ describe("PLAYS Factory handoff", () => {
 
   it("accepts only the requested projectId from whoami", () => {
     assert.equal(
-      parseWhoamiProjectId('{\n  "projectId": "plays-demo"\n}'),
-      "plays-demo",
+      parseWhoamiProjectId('{\n  "projectId": "games-demo"\n}'),
+      "games-demo",
     );
-    assert.throws(() => parseWhoamiProjectId('{"uid":"plays-demo"}'), /project/i);
+    assert.throws(() => parseWhoamiProjectId('{"uid":"games-demo"}'), /project/i);
     assert.throws(
-      () => parseWhoamiProjectId('{"projectId":"other"}', "plays-demo"),
+      () => parseWhoamiProjectId('{"projectId":"other"}', "games-demo"),
       /project/i,
     );
   });
@@ -198,7 +248,7 @@ describe("PLAYS Factory handoff", () => {
       origin: "https://github.com/other/repository.git",
     });
     await assert.rejects(
-      () => submitPlaysBuild(validInput(), dependencies),
+      () => submitGamesBuild(validInput(), dependencies),
       /origin/i,
     );
     assert.equal(dependencies.calls.some((call) => call.file === "machina"), false);
@@ -210,7 +260,7 @@ describe("PLAYS Factory handoff", () => {
       fetch: { exitCode: 9, stdout: secret, stderr: secret },
     });
     await assert.rejects(
-      () => submitPlaysBuild(validInput(), dependencies),
+      () => submitGamesBuild(validInput(), dependencies),
       (error) => {
         assert.match(error.message, /fetch/i);
         assert.match(error.message, /exit code 9/i);
@@ -224,9 +274,9 @@ describe("PLAYS Factory handoff", () => {
 function validInput() {
   return {
     targetDirectory: "/target",
-    repository: "machina-sports/plays-demo",
-    projectId: "plays-demo",
-    sourceRef: "feature/plays",
+    repository: "machina-sports/games-demo",
+    projectId: "games-demo",
+    sourceRef: "feature/games",
     consent: true,
   };
 }
@@ -235,7 +285,7 @@ function syntheticTransport(file, args, overrides = {}) {
   if (file === "git" && args.includes("get-url")) {
     return {
       exitCode: 0,
-      stdout: `${overrides.origin ?? "https://github.com/machina-sports/plays-demo.git"}\n`,
+      stdout: `${overrides.origin ?? "https://github.com/machina-sports/games-demo.git"}\n`,
       stderr: "",
     };
   }
@@ -255,7 +305,7 @@ function syntheticTransport(file, args, overrides = {}) {
   if (file === "machina" && args.includes("whoami")) {
     return {
       exitCode: 0,
-      stdout: '{"projectId":"plays-demo"}',
+      stdout: '{"projectId":"games-demo"}',
       stderr: "",
     };
   }

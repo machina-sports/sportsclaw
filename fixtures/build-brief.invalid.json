@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "kind": "sports-game",
   "project": {
-    "id": "plays-demo",
-    "repository": "machina-sports/plays-demo",
+    "id": "games-demo",
+    "repository": "machina-sports/games-demo",
     "podUrl": "https://user:secret@demo.org.machina.gg?token=secret"
   },
   "selection": {
