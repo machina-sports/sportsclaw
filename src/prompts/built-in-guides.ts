@@ -96,6 +96,23 @@ const PLAYER_LOOKUP_GENERAL: BuiltInSkillGuide = {
   ].join("\n"),
 };
 
+const MACHINA_STACK: BuiltInSkillGuide = {
+  id: "machina-stack",
+  name: "Machina sports-game stack",
+  description: "Build and operate a project-scoped sports game without widening access",
+  triggerSkills: ["machina"],
+  body: [
+    "For a Machina-backed sports game:",
+    "",
+    "- Local SportsClaw agents reason and coordinate; pod agents are separate persistent resources. Never imply that a local agent was installed or scheduled in the pod.",
+    "- Require live tool schema discovery before a pod call. Use the exact discovered input schema instead of remembered argument shapes.",
+    "- Prefer deterministic sync workflows for data preparation and repeatable game state. Use an agent only where reasoning is actually required.",
+    "- Keep one scheduler owner in Machina. Do not create a second SportsClaw watcher, cron, queue, or background daemon for the same sync.",
+    "- Treat selected capabilities as an allowlist. Existing project resources are availability, not permission to use or expand them.",
+    "- Keep pod access server-side, preserve provenance and freshness, and distinguish frozen samples from verified live data.",
+  ].join("\n"),
+};
+
 const SELF_UPGRADE: BuiltInSkillGuide = {
   id: "self-upgrade",
   name: "Sports skills self-upgrade",
@@ -131,6 +148,7 @@ const ALL_BUILT_IN: ReadonlyArray<BuiltInSkillGuide> = [
   BRACKET_SIMULATION,
   FOOTBALL_PLAYER_LOOKUPS,
   PLAYER_LOOKUP_GENERAL,
+  MACHINA_STACK,
   SELF_UPGRADE,
   SELF_IMPROVEMENT,
 ];

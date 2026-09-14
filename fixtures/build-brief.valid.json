@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "kind": "sports-game",
+  "project": {
+    "id": "plays-demo",
+    "repository": "machina-sports/plays-demo",
+    "podUrl": "https://demo.org.machina.gg"
+  },
+  "selection": {
+    "capabilities": ["search_documents", "search_workflow"],
+    "skills": ["plays-game-builder"]
+  },
+  "game": {
+    "name": "Match Pulse",
+    "request": "Build a source-backed match prediction game."
+  },
+  "data": {
+    "mode": "frozen",
+    "provenance": [
+      {
+        "source": "plays-read-only-fixture",
+        "observedAt": "2026-09-13T12:00:00.000Z",
+        "verification": "sample"
+      }
+    ],
+    "freshness": {
+      "asOf": "2026-09-13T12:00:00.000Z",
+      "maxAgeSeconds": 3600
+    },
+    "interfaces": [
+      {
+        "name": "search_documents",
+        "kind": "tool",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filters": { "type": "object" }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "data": { "type": "array" }
+          }
+        },
+        "representativeRecords": [
+          {
+            "fixtureId": "fixture-123",
+            "homeTeam": "North City",
+            "awayTeam": "South United",
+            "status": "scheduled"
+          }
+        ]
+      },
+      {
+        "name": "search_workflow",
+        "kind": "tool",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filters": { "type": "object" }
+          }
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "data": { "type": "object" }
+          }
+        },
+        "representativeRecords": [
+          {
+            "data": {
+              "name": "match-pulse-feed",
+              "status": "active"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "resources": {
+    "existing": ["search_documents"],
+    "missing": ["plays-game-ui"]
+  },
+  "acceptanceChecks": [
+    {
+      "id": "frozen-render",
+      "description": "The frozen fixture renders source attribution and standard loading, empty, error, and success states."
+    }
+  ],
+  "mutations": {
+    "credentials": false,
+    "deployment": false,
+    "podWrites": false
+  }
+}
