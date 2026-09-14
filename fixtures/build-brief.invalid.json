@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "kind": "sports-game",
+  "project": {
+    "id": "games-demo",
+    "repository": "machina-sports/games-demo",
+    "podUrl": "https://user:secret@demo.org.machina.gg?token=secret"
+  },
+  "selection": {
+    "capabilities": ["search_documents"],
+    "skills": ["unknown-builder"]
+  },
+  "game": {
+    "name": "Match Pulse",
+    "request": "Build a game."
+  },
+  "data": {
+    "mode": "frozen",
+    "provenance": [],
+    "freshness": {
+      "asOf": "not-a-date",
+      "maxAgeSeconds": 0
+    },
+    "interfaces": []
+  },
+  "resources": {
+    "existing": [],
+    "missing": []
+  },
+  "acceptanceChecks": [],
+  "mutations": {
+    "credentials": false,
+    "deployment": false,
+    "podWrites": false
+  },
+  "apiKey": "must-never-be-accepted"
+}

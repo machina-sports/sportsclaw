@@ -287,7 +287,7 @@ function capabilitiesSection(ctx: SystemPromptContext): string | null {
     parts.push(
       "",
       "### Pod strategy",
-      "1. CHECK POD FIRST — `search_documents`, `search_agents`, `search_workflows` to discover stored data and capabilities.",
+      "1. CHECK POD FIRST — `search_documents`, `search_agents`, `search_workflow` to discover stored data and capabilities.",
       "2. USE PYTHON SKILLS for live data — scores, standings, odds, schedules change constantly.",
       "3. COMBINE BOTH for rich answers — pod context (analyses, research) alongside live Python data.",
       "4. SAVE TO POD — `create_document` to persist valuable insights for future queries.",
@@ -425,6 +425,9 @@ function resolveSkillGuides(ctx: SystemPromptContext): SkillGuide[] {
     ...ctx.selectedSkills,
     ...ctx.installedSports,
   ]);
+  const hasMachinaScope =
+    activeSkills.has("machina") || Boolean(ctx.mcpManager.getMachinaServerName());
+  if (hasMachinaScope) activeSkills.add("machina");
 
   // Disk guides win on id collision (user customizations override built-ins).
   const byId = new Map<string, SkillGuide>();
@@ -433,6 +436,7 @@ function resolveSkillGuides(ctx: SystemPromptContext): SkillGuide[] {
     byId.set(g.id, g);
   }
   for (const g of ctx.diskSkillGuides) {
+    if (g.id === "machina-stack" && !hasMachinaScope) continue;
     byId.set(g.id, g);
   }
 
