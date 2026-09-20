@@ -84,6 +84,7 @@ RUN node dist/index.js init --all --verbose
 # --- Relay server & entrypoint ------------------------------------------------
 COPY docker/relay/relay_server.py /opt/sportsclaw/relay_server.py
 COPY docker/relay/query_runtime.py /opt/sportsclaw/query_runtime.py
+COPY docker/relay/decision_api.py /opt/sportsclaw/decision_api.py
 COPY docker/relay/skills_catalog.py /opt/sportsclaw/skills_catalog.py
 COPY docker/relay/highlights_jobs.py /opt/sportsclaw/highlights_jobs.py
 COPY docker/relay/entrypoint.sh /opt/sportsclaw/entrypoint.sh

@@ -25,6 +25,7 @@ Endpoints:
     GET  /api/agents/{id}  → Get a native agent
     PATCH /api/agents/{id} → Update or inactivate a native agent
     POST /api/agents/delegate → One-hop query delegated to another native agent
+    POST /api/decide       → Typed decision passthrough (no engine, opt-in)
     POST /api/highlights/jobs                     → Create a typed highlights job
     GET  /api/highlights/jobs/{job_id}            → Job status
     POST /api/highlights/jobs/{job_id}/cancel     → Cancel a job (terminal state)
@@ -54,6 +55,12 @@ from aiohttp import web
 
 from skills_catalog import parse_catalog
 from query_runtime import buffered, process, MAX_OUTPUT_BYTES
+from decision_api import (
+    DECISION_ROUTE,
+    data_policy as decision_data_policy,
+    decision_enabled,
+    register_decision_routes,
+)
 from highlights_jobs import (
     DEFAULT_JOB_TTL_SEC,
     DEFAULT_MAX_JOB_OUTPUT_BYTES,
@@ -211,6 +218,10 @@ async def capabilities(request):
                       "max_concurrency": MAX_QUERY_CONCURRENCY,
                       "max_prompt_characters": MAX_PROMPT_CHARS,
                       "max_output_bytes": MAX_OUTPUT_BYTES},
+            # Readiness only: the decision credential itself is never disclosed.
+            "decision": {"protocol_version": "1.0", "path": DECISION_ROUTE,
+                         "data_policy": decision_data_policy(),
+                         "enabled": decision_enabled()},
         })
     except Exception:
         return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
@@ -858,6 +869,11 @@ def create_app() -> web.Application:
     app.router.add_get("/api/capabilities", capabilities)
     app.router.add_post("/api/query", query_stream)
     app.router.add_post("/api/query/sync", query_sync)
+    register_decision_routes(
+        app, auth_error=_agents_auth_error, node_bin=SPORTSCLAW_BIN,
+        entry=SPORTSCLAW_ENTRY, build_env=_build_env,
+        max_concurrency=MAX_QUERY_CONCURRENCY,
+    )
     app.router.add_get("/api/agents", agents_list)
     app.router.add_post("/api/agents", agents_create)
     app.router.add_post("/api/agents/delegate", agents_delegate)
