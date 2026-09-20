@@ -6,16 +6,28 @@
  * TypeSafe's System One endpoint that judges the complete draft against the
  * same evidence and caller constraints using a fixed set of `choice` questions.
  *
+ * Networking, request/response validation and receipts are not implemented
+ * here: this module is one consumer of the generic `JevDecisionClient` in
+ * `decision-client.ts`, which owns the transport and the schema.
+ *
  * Deliberate limits:
  *   - Jev never appears as an `LLMProvider`; it cannot answer a user.
- *   - Only the `choice` primitive is implemented. No score/general question
- *     types, no Machina platform client.
+ *   - Only the `choice` primitive is used, with a fixed set of criteria. The
+ *     generic client also implements score/noul; this verifier does not use
+ *     them, and there is no Machina platform client.
  *   - No claim extraction pass. Several atomic criteria share one state; this
  *     is not, and does not claim to be, complete atomic-claim extraction.
  *   - Source content inside the state is untrusted data, never instructions.
  *   - Unknown, low-confidence or malformed data can never become "verified".
  */
 
+import {
+  DEFAULT_JEV_MODEL,
+  JEV_ENDPOINT,
+  JevDecisionClient,
+  type ChoiceQuestion,
+  type DecisionTransport,
+} from "./decision-client.js";
 import type {
   EvidenceChoiceLabel,
   EvidenceCriterionKey,
@@ -25,10 +37,8 @@ import type {
   ResolvedEvidenceVerifierSettings,
 } from "./types.js";
 
-/** Fixed HTTPS endpoint. Callers cannot point this anywhere else. */
-export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-/** Pinned default decision model. */
-export const DEFAULT_JEV_MODEL = "jev-1.13.0";
+export { DEFAULT_JEV_MODEL, JEV_ENDPOINT };
+
 /** Atomic criteria judged in one request against one shared state. */
 export const EVIDENCE_CRITERIA = [
   "factual_support",
@@ -47,10 +57,6 @@ const MIN_TIMEOUT_MS = 250;
 const MAX_TIMEOUT_MS = 60_000;
 const DEFAULT_CONFIDENCE = 0.9;
 const MIN_CONFIDENCE = 0.5;
-const MAX_STATE_CHARS = 32_000;
-const MAX_REQUEST_BYTES = 128 * 1024;
-const MAX_RESPONSE_BYTES = 256 * 1024;
-const PROBABILITY_SUM_TOLERANCE = 0.02;
 const MODEL_PATTERN = /^jev-\d+\.\d+\.\d+$/;
 
 // ---------------------------------------------------------------------------
@@ -165,8 +171,8 @@ const UNKNOWN_CRITERION =
   "The state does not contain enough information to decide this criterion either way.";
 
 /** The `questions` map sent to the endpoint. Identical on every request. */
-export function buildChoiceQuestions(): Record<string, unknown> {
-  const questions: Record<string, unknown> = {};
+export function buildChoiceQuestions(): Record<string, ChoiceQuestion> {
+  const questions: Record<string, ChoiceQuestion> = {};
   for (const key of EVIDENCE_CRITERIA) {
     const spec = CRITERION_SPECS[key];
     questions[key] = {
@@ -241,15 +247,10 @@ export const NO_FALLBACK_REASONS: ReadonlySet<string> = new Set([
   "request_too_large",
 ]);
 
-class DecisionError extends Error {
-  constructor(readonly reasonCode: string) {
-    super(reasonCode);
-  }
-}
-
 /**
- * One bounded attempt against the Jev endpoint. Never retries, never throws:
- * every failure becomes an `unavailable` decision with a sanitized reason code.
+ * One bounded attempt against the Jev endpoint, through the generic decision
+ * client. Never retries, never throws: every failure becomes an `unavailable`
+ * decision with a sanitized reason code.
  */
 export async function runJevDecision(params: {
   settings: ResolvedEvidenceVerifierSettings;
@@ -282,184 +283,71 @@ export async function runJevDecision(params: {
     },
   });
 
-  // This function is exported, so every gate the engine applies is enforced
-  // here too: a disabled verifier, a spent caller deadline or an oversized
-  // state stops before any credential read or network access.
+  // This function is exported, so the gates the engine applies are enforced
+  // here too. A disabled verifier stops before the client is even built; the
+  // client itself refuses a spent deadline or an oversized state before any
+  // credential read or network access.
   if (!settings.enabled) return receipt("unavailable", settings.reasonCode ?? "disabled");
-  if (params.abortSignal?.aborted) return receipt("unavailable", "aborted");
-  if (state.length > MAX_STATE_CHARS) return receipt("unavailable", "request_too_large");
 
-  const body = JSON.stringify({ model: settings.model, state, questions: buildChoiceQuestions() });
-  if (Buffer.byteLength(body, "utf8") > MAX_REQUEST_BYTES) return receipt("unavailable", "request_too_large");
-
-  // Resolved at call time and never persisted or logged.
-  const apiKey = (params.env ?? process.env).TYPESAFE_API_KEY?.trim();
-  if (!apiKey) return receipt("unavailable", "missing_credential");
-
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, settings.timeoutMs);
-  const onCallerAbort = () => controller.abort();
-  params.abortSignal?.addEventListener("abort", onCallerAbort, { once: true });
-
-  let res: Response | undefined;
+  let client: JevDecisionClient;
   try {
-    const send = params.transport ?? ((url: string, init: RequestInit) => fetch(url, init));
-    res = await send(JEV_ENDPOINT, {
-      method: "POST",
-      redirect: "manual",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body,
-      signal: controller.signal,
+    client = new JevDecisionClient({
+      dataPolicy: settings.dataPolicy,
+      model: settings.model,
+      timeoutMs: settings.timeoutMs,
+      transport: params.transport,
+      env: params.env,
     });
-
-    if (res.status >= 300 && res.status < 400) throw new DecisionError("redirect_refused");
-    if (res.status === 401 || res.status === 403) throw new DecisionError("auth_denied");
-    if (res.status === 429) throw new DecisionError("rate_limited");
-    if (!res.ok) throw new DecisionError("upstream_error");
-
-    const answers = validateJevBody(await readBounded(res), settings.model);
-    const decision = aggregate(answers, settings.confidenceThreshold);
-    return {
-      ...receipt(decision.status, decision.reasonCode, {
-        model: answers.model,
-        usage: answers.usage,
-        checks: answers.checks,
-      }),
-      contradicted: decision.contradicted,
-    };
-  } catch (err) {
-    if (params.abortSignal?.aborted) return receipt("unavailable", "aborted");
-    if (timedOut) return receipt("unavailable", "timeout");
-    if (err instanceof DecisionError) return receipt("unavailable", err.reasonCode);
-    return receipt("unavailable", "network_error");
-  } finally {
-    clearTimeout(timer);
-    params.abortSignal?.removeEventListener("abort", onCallerAbort);
-    // A status or size exit leaves the body unread; release it rather than
-    // holding a response stream open until collection.
-    if (res?.body && !res.bodyUsed && !res.body.locked) void res.body.cancel().catch(() => {});
-  }
-}
-
-export type EvidenceTransport = (url: string, init: RequestInit) => Promise<Response>;
-
-/** Read a response body with a hard byte cap so a hostile size cannot land. */
-async function readBounded(res: Response): Promise<string> {
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new DecisionError("response_too_large");
-  if (!res.body) throw new DecisionError("malformed_response");
-  const reader = res.body.getReader();
-  try {
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) throw new DecisionError("response_too_large");
-      chunks.push(value);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  } finally {
-    // Also covers the oversize exit: the rest of the stream is dropped.
-    await reader.cancel().catch(() => {});
-  }
-}
-
-interface ValidatedAnswers {
-  /** The model the provider reported, already checked against the request. */
-  model: string;
-  checks: EvidenceVerificationCheck[];
-  usage?: { inputTokens: number; outputTokens: number };
-}
-
-/**
- * Structural validation of the decision payload. Anything unexpected raises,
- * which the caller turns into `unavailable` — never into a verified draft.
- */
-function validateJevBody(text: string, expectedModel: string): ValidatedAnswers {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(text);
   } catch {
-    throw new DecisionError("malformed_response");
+    // Only reachable when hand-built settings bypass the resolver.
+    return receipt("unavailable", "invalid_settings");
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new DecisionError("malformed_response");
-  if (typeof parsed.model !== "string") throw new DecisionError("malformed_response");
-  if (parsed.model !== expectedModel) throw new DecisionError("model_mismatch");
-  const answers = parsed.answers;
-  if (!answers || typeof answers !== "object" || Array.isArray(answers)) throw new DecisionError("malformed_response");
 
-  const keys = Object.keys(answers).sort();
-  if (keys.length !== EVIDENCE_CRITERIA.length || keys.some((key, i) => key !== [...EVIDENCE_CRITERIA].sort()[i])) {
-    throw new DecisionError("question_set_mismatch");
-  }
+  const result = await client.decide(
+    { state, questions: buildChoiceQuestions() },
+    { abortSignal: params.abortSignal }
+  );
+  if (!result.ok) return receipt("unavailable", result.reasonCode);
 
   const checks: EvidenceVerificationCheck[] = [];
-  for (const key of EVIDENCE_CRITERIA) {
-    const answer = answers[key];
-    if (!answer || typeof answer !== "object") throw new DecisionError("malformed_response");
-    if (answer.type !== "choice") throw new DecisionError("answer_type_mismatch");
-    if (!(CHOICE_OPTIONS as readonly string[]).includes(answer.choice)) throw new DecisionError("option_set_mismatch");
-
-    const probabilities = answer.probabilities;
-    if (!probabilities || typeof probabilities !== "object") throw new DecisionError("malformed_response");
-    const options = Object.keys(probabilities).sort();
-    if (options.length !== CHOICE_OPTIONS.length || options.some((o, i) => o !== [...CHOICE_OPTIONS].sort()[i])) {
-      throw new DecisionError("option_set_mismatch");
-    }
-    const distribution = {} as Record<ChoiceLabel, number>;
-    let sum = 0;
-    let best: ChoiceLabel | undefined;
-    for (const option of CHOICE_OPTIONS) {
-      const p = probabilities[option];
-      if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) throw new DecisionError("probability_invalid");
-      distribution[option] = p;
-      sum += p;
-      if (best === undefined || p > distribution[best]) best = option;
-    }
-    if (Math.abs(sum - 1) > PROBABILITY_SUM_TOLERANCE) throw new DecisionError("probability_sum_invalid");
-    if (best !== answer.choice) throw new DecisionError("argmax_mismatch");
-    // Confidence is derived from the whole distribution, not a copy of the
-    // winning probability: the published example pairs a top probability of
-    // 0.88 with a confidence of 0.81. Only the range is ours to enforce.
-    if (typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)
-      || answer.confidence < 0 || answer.confidence > 1) {
-      throw new DecisionError("confidence_invalid");
-    }
+  for (const criterion of EVIDENCE_CRITERIA) {
+    const answer = result.answers[criterion];
+    // The client already matched the answer set to the questions sent; this
+    // narrows the union without trusting it twice.
+    if (!answer || answer.type !== "choice") return receipt("unavailable", "answer_type_mismatch");
+    const probabilities = {} as Record<ChoiceLabel, number>;
+    for (const option of CHOICE_OPTIONS) probabilities[option] = answer.probabilities[option];
     checks.push({
-      criterion: key,
+      criterion,
       choice: answer.choice as ChoiceLabel,
       confidence: answer.confidence,
-      probabilities: distribution,
+      probabilities,
     });
   }
 
-  return { model: parsed.model, checks, usage: readUsage(parsed.usage) };
+  const decision = aggregate(checks, settings.confidenceThreshold);
+  return {
+    ...receipt(decision.status, decision.reasonCode, {
+      model: result.model,
+      usage: result.receipt.usage,
+      checks,
+    }),
+    contradicted: decision.contradicted,
+  };
 }
 
-/** Token counts are only recorded when they are plain nonnegative integers. */
-function readUsage(usage: any): { inputTokens: number; outputTokens: number } | undefined {
-  const count = (value: unknown): number | undefined =>
-    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-  const inputTokens = count(usage?.input_tokens);
-  const outputTokens = count(usage?.output_tokens);
-  return inputTokens === undefined || outputTokens === undefined ? undefined : { inputTokens, outputTokens };
-}
+/** The verifier's HTTP seam is the generic client's seam. */
+export type EvidenceTransport = DecisionTransport;
 
 /** Only a confident, fully supported set verifies; everything else defers. */
 function aggregate(
-  answers: ValidatedAnswers,
+  checks: readonly EvidenceVerificationCheck[],
   threshold: number
 ): { status: EvidenceDecisionStatus; reasonCode: string; contradicted: EvidenceCriterion[] } {
   const contradicted: EvidenceCriterion[] = [];
   let unknown = false;
   let lowConfidence = false;
-  for (const { criterion, choice, confidence } of answers.checks) {
+  for (const { criterion, choice, confidence } of checks) {
     if (choice === "unknown") unknown = true;
     else if (confidence < threshold) lowConfidence = true;
     else if (choice === "contradicted") contradicted.push(criterion);

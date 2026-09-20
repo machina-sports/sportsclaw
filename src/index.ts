@@ -455,6 +455,38 @@ export type {
   GuardrailDetail,
 } from "./guardrails.js";
 
+// Generic Jev decision client — typed Choice/Score/Noul questions over one
+// shared state. Standalone: no engine, no generative key, no network on import.
+export {
+  JevDecisionClient,
+  DECISION_LIMITS,
+  DEFAULT_JEV_MODEL,
+  JEV_ENDPOINT,
+} from "./decision-client.js";
+export type {
+  ChoiceAnswer,
+  ChoiceQuestion,
+  DecisionAnswer,
+  DecisionCallOptions,
+  DecisionDataPolicy,
+  DecisionFailure,
+  DecisionJsonValue,
+  DecisionKindCounts,
+  DecisionQuestion,
+  DecisionReasonCode,
+  DecisionReceipt,
+  DecisionRequest,
+  DecisionResult,
+  DecisionState,
+  DecisionSuccess,
+  DecisionTransport,
+  JevDecisionClientConfig,
+  NoulAnswer,
+  NoulQuestion,
+  ScoreAnswer,
+  ScoreQuestion,
+} from "./decision-client.js";
+
 // Operator Daemon (autonomous tick loop)
 export { createOperatorDaemon } from "./operator-daemon.js";
 export type {

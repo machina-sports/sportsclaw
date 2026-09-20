@@ -2,7 +2,9 @@
 
 SportsClaw can use TypeSafe Jev for its final evidence-verification pass. Jev is a **decision provider**, not a chat model: the configured generative model still writes answers and corrections. Existing generative verification remains the default.
 
-This integration sends one text state to the pinned `jev-1.13.0` model with four fixed Choice questions: factual support, qualitative premises, coverage/freshness, and caller constraints. It does not implement arbitrary decision questions, Score/Noul, or a Machina platform client.
+This integration sends one text state to the pinned `jev-1.13.0` model with four fixed Choice questions: factual support, qualitative premises, coverage/freshness, and caller constraints. It chooses those criteria, thresholds them and drives corrections; it does not own the wire.
+
+Transport, request/response validation and generic receipts live in the reusable [`JevDecisionClient`](./decision-client.md), which this verifier calls like any other consumer. Use that client directly for arbitrary Choice/Score/Noul questions; this page is only about the fixed evidence check. Nothing here runs unless you opt in below.
 
 ## Enable explicitly
 
@@ -87,7 +89,7 @@ Enabling `cloud_allowed` authorizes sending the verification state to TypeSafe. 
 
 ```bash
 npm run build
-node --test test/jev-evidence-verifier.test.mjs test/research-evidence-policy.test.mjs test/evidence-artifact-cleanup.test.mjs
+node --test test/jev-evidence-verifier.test.mjs test/decision-client.test.mjs test/research-evidence-policy.test.mjs test/evidence-artifact-cleanup.test.mjs
 ```
 
 These tests use injected HTTP responses and mock language models, require no credentials, and cover opt-in behavior, refusal gates, malformed answers, distinct probability/confidence values, correction rechecks and receipt sanitization. They do not measure live accuracy or latency.
