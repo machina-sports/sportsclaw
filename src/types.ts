@@ -335,6 +335,79 @@ export interface sportsclawConfig {
    * existing generative verification path. See `evidence-verifier.ts`.
    */
   evidenceVerifier?: EvidenceVerifierConfig;
+  /**
+   * Opt-in skill routing settings. Omitted (the default) keeps the existing
+   * generative router untouched. See `routing/skill-routing.ts`.
+   */
+  routing?: SkillRoutingConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Skill routing (decision provider — see src/routing/skill-routing.ts)
+// ---------------------------------------------------------------------------
+
+/** Routing providers are separate from LLMProvider: they never answer a user. */
+export type SkillRoutingProvider = "generative" | "jev";
+
+/** Trusted, caller-authored routing settings. Never model-authored. */
+export interface SkillRoutingConfig {
+  /** Which router to use. Default: "generative" (unchanged behavior). */
+  provider?: SkillRoutingProvider;
+  /** Cloud consent. "jev" requires an explicit "cloud_allowed". Default: "local_only". */
+  dataPolicy?: "local_only" | "cloud_allowed";
+  /** Pinned decision model. Default: "jev-1.13.0". */
+  model?: string;
+  /** Bounded per-request deadline in ms (250–60000). Default: 8000. */
+  timeoutMs?: number;
+  /** Minimum answer confidence to act on a decision (0.5–1). Default: 0.9. */
+  confidenceThreshold?: number;
+  /** Minimum gap between the top two option probabilities (0–1). Default: 0.15. */
+  marginThreshold?: number;
+  /** Maximum skills one decision may select (1–30). Default: 3. */
+  maxSelected?: number;
+  /** Send the recent conversation turns to the decision provider. Default: false. */
+  includeRecentContext?: boolean;
+  /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
+  transport?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Environment source for opt-in and credential lookup. Defaults to process.env. */
+  env?: Record<string, string | undefined>;
+}
+
+/** Validated settings produced by resolveSkillRoutingSettings(). */
+export interface ResolvedSkillRoutingSettings {
+  provider: SkillRoutingProvider;
+  dataPolicy: "local_only" | "cloud_allowed";
+  model: string;
+  timeoutMs: number;
+  confidenceThreshold: number;
+  marginThreshold: number;
+  maxSelected: number;
+  includeRecentContext: boolean;
+  transport?: (url: string, init: RequestInit) => Promise<Response>;
+  env?: Record<string, string | undefined>;
+  /** Sanitized codes for rejected settings, e.g. "invalid_timeoutMs". */
+  diagnostics: string[];
+}
+
+/** Outcome of an opt-in routing decision. Mirrors the generic router. */
+export type SkillRoutingStatus = "selected" | "clarify" | "unsupported" | "unavailable";
+
+/**
+ * Typed routing telemetry. Kept beside the legacy RouteMeta fields rather than
+ * folded into them: a Jev decision is never reported as a generative attempt.
+ */
+export interface SkillRoutingMeta {
+  status: SkillRoutingStatus;
+  /** Which layer produced the outcome. */
+  source: "deterministic" | "jev";
+  /** Enumerated code — never provider text. */
+  reasonCode: string;
+  /** Model reported by a validated response. Absent for a rule decision. */
+  model?: string;
+  /** Present only when a model answered: never fabricated for a rule decision. */
+  confidence?: number;
+  margin?: number;
+  latencyMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +522,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   contextPruneThreshold: 80,
   dailyTokenBudget: 0,
   evidenceVerifier: {},
+  routing: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -680,6 +754,8 @@ export interface RouteMeta {
   llmAttempted: boolean;
   llmSucceeded: boolean;
   llmDurationMs: number;
+  /** Present only on the opt-in routing path. Absent keeps old telemetry exact. */
+  routing?: SkillRoutingMeta;
 }
 
 export interface RouteOutcome {

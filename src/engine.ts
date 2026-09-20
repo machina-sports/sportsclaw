@@ -35,6 +35,7 @@ import {
   type GeneratedVideo,
   type TokenBudgets,
   type EvidenceVerificationReceipt,
+  type SkillRoutingMeta,
 } from "./types.js";
 import {
   NO_FALLBACK_REASONS,
@@ -651,6 +652,13 @@ export function summarizeToolOutputForEvidence(output: unknown, maxChars = 4_000
 // Engine class
 // ---------------------------------------------------------------------------
 
+function routingRefusalMessage(outcome: SkillRoutingMeta): string {
+  if (outcome.reasonCode === "aborted") return "Request cancelled.";
+  if (outcome.status === "clarify") return "Which sport or data source should I use? Please narrow the request.";
+  if (outcome.status === "unsupported") return "The available sports capabilities do not support that request.";
+  return "I could not route this request. Please check the routing configuration or try again later.";
+}
+
 export class sportsclawEngine {
   private mainModel: ResolvedModel;
   private mainModelId: string;
@@ -818,7 +826,8 @@ export class sportsclawEngine {
   private async resolveActiveToolsForPrompt(
     userPrompt: string,
     toolNames: string[],
-    memoryBlock?: string
+    memoryBlock?: string,
+    abortSignal?: AbortSignal
   ): Promise<{ activeTools?: string[]; decision?: RouteDecision; routeMeta?: RouteMeta }> {
     const installedSkills = this.registry.getInstalledSkills();
     if (installedSkills.length === 0) {
@@ -857,12 +866,14 @@ export class sportsclawEngine {
       model: this.mainModel,
       modelId: this.mainModelId,
       provider: this.config.provider,
+      ...(abortSignal ? { abortSignal } : {}),
       config: {
         routingMode: this.config.routingMode,
         routingMaxSkills: this.config.routingMaxSkills,
         routingAllowSpillover: this.config.routingAllowSpillover,
         thinkingBudget: this.config.thinkingBudget,
         tokenBudgets: this.config.tokenBudgets,
+        routing: this.config.routing,
       },
     });
     const decision = routed.decision;
@@ -3886,8 +3897,28 @@ export class sportsclawEngine {
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,
       Object.keys(tools),
-      memoryBlock
+      memoryBlock,
+      options?.abortSignal
     );
+
+    // --- Opt-in routing refusal -------------------------------------------
+    // A decision route that did not select is final: no widening from history,
+    // no second model, no tool call. YOLO and follow-up turns do not override
+    // it — the router did not fail to be confident, it declined to guess.
+    const routingOutcome = routing.routeMeta?.routing;
+    if (routingOutcome && routingOutcome.status !== "selected") {
+      if (this.config.verbose) {
+        console.error(
+          `[sportsclaw] route status=${routingOutcome.status} source=${routingOutcome.source} reason=${routingOutcome.reasonCode} ms=${routingOutcome.latencyMs}`
+        );
+      }
+      const refusal = routingRefusalMessage(routingOutcome);
+      // Keep local history coherent: an orphaned user message corrupts the
+      // next turn's LLM call.
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: refusal }] });
+      return refusal;
+    }
+
     // When session history contains tool-call messages from prior turns, the
     // Vercel AI SDK only sends tool definitions in `activeTools` to the provider.
     // If the current routing selects different tools, the provider rejects the
