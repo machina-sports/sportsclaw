@@ -34,7 +34,15 @@ import {
   type GeneratedImage,
   type GeneratedVideo,
   type TokenBudgets,
+  type EvidenceVerificationReceipt,
 } from "./types.js";
+import {
+  NO_FALLBACK_REASONS,
+  buildVerificationState,
+  correctionDiscrepancies,
+  resolveEvidenceVerifierSettings,
+  runJevDecision,
+} from "./evidence-verifier.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { DurableStateStore } from "./durability.js";
 import { execFile } from "node:child_process";
@@ -659,6 +667,12 @@ export class sportsclawEngine {
   private _conversationNamespace?: string;
   private _loggedMemoryBackend?: string;
   private _lastUsage: TokenUsage | null = null;
+  private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
+
+  /** Sanitized evidence-verification receipts from the last run(). */
+  get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
+    return [...(this._evidenceReceipts ?? [])];
+  }
 
   /** Images produced by the generate_image tool during the last run. */
   get generatedImages(): readonly GeneratedImage[] {
@@ -1100,6 +1114,58 @@ export class sportsclawEngine {
 
     let discrepanciesFound = false;
     type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string }> };
+
+    // --- Optional decision verifier (opt-in; default path is untouched) ---
+    const verifierConfig = this.config.evidenceVerifier;
+    const settings = resolveEvidenceVerifierSettings(verifierConfig);
+    let jevDiscrepancies: Verdict["discrepancies"] | null = null;
+    if (settings.provider === "jev") {
+      if (!settings.enabled) {
+        this.recordEvidenceReceipt({
+          provider: "jev", requestedModel: settings.model, status: "blocked",
+          reasonCode: settings.reasonCode ?? "disabled", latencyMs: 0,
+          questionCount: 0, fallbackUsed: false, recheck: params.correctionAttempted === true,
+        });
+        // The caller asked for Jev and withheld cloud consent. Quietly checking
+        // the same draft and evidence with the generative verifier would send
+        // that material to a provider anyway, so the requested verification
+        // simply does not happen here.
+        return params.correctionAttempted ? unavailable : unverified(settings.reasonCode ?? "disabled");
+      } else {
+        const decision = await runJevDecision({
+          settings,
+          state: buildVerificationState({ userPrompt, serializedToolOutputs, draft, callerSystemPrompt: params.callerSystemPrompt }),
+          transport: verifierConfig?.transport,
+          env: verifierConfig?.env,
+          abortSignal: params.abortSignal,
+          recheck: params.correctionAttempted === true,
+        });
+        // Ambiguous or unavailable decisions only reach the generative verifier
+        // when the caller asked for that fallback — and never after an auth
+        // refusal, a missing credential or a caller abort.
+        const mayFallback = settings.fallbackToGenerative && !NO_FALLBACK_REASONS.has(decision.reasonCode);
+        const decisive = decision.status === "supported" || decision.status === "contradicted";
+        this.recordEvidenceReceipt({ ...decision.receipt, fallbackUsed: !decisive && mayFallback });
+        if (decision.status === "supported") return draft;
+        if (decision.status === "contradicted") jevDiscrepancies = correctionDiscrepancies(decision.contradicted);
+        else if (!mayFallback) {
+          if (decision.reasonCode === "aborted") return unavailable;
+          // A chain that already confirmed a contradiction must not ship an
+          // unchecked correction just because the recheck could not run.
+          return params.correctionAttempted ? unavailable : unverified(decision.reasonCode);
+        }
+      }
+    }
+    if (jevDiscrepancies) {
+      if (params.correctionAttempted) return unavailable;
+      discrepanciesFound = true;
+      const corrected = await this.correctAgainstEvidence({
+        ...params, draft, serializedToolOutputs, discrepancies: jevDiscrepancies,
+      });
+      if (!corrected) return unavailable;
+      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
+    }
+
     // A verdict that will not parse is the checker misbehaving, not a finding
     // about the draft. Ask once more before deciding the check cannot run.
     const readVerdict = (text: string | undefined): Verdict | null => {
@@ -1196,6 +1262,36 @@ export class sportsclawEngine {
       // Past this point the check has run and named real discrepancies, so the
       // draft is known to be wrong. A failure from here on must not ship it.
       discrepanciesFound = true;
+      const corrected = await this.correctAgainstEvidence({
+        ...params, draft, serializedToolOutputs, discrepancies: parsed.discrepancies,
+      });
+      if (corrected) {
+        return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
+      }
+    } catch (e) {
+      if (this.config.verbose) {
+        console.error(`[sportsclaw] evidence validation failed: ${e}`);
+      }
+      if (!discrepanciesFound) return unverified(`validator error: ${e}`);
+    }
+
+    return unavailable;
+  }
+
+  /**
+   * Rewrite a draft the evidence check found unsupported. Correction always
+   * runs on the main model; the caller must recheck the result.
+   */
+  private async correctAgainstEvidence(params: {
+    userPrompt: string;
+    draft: string;
+    serializedToolOutputs: string;
+    discrepancies: Array<{ claim: string; evidence: string; severity: string }>;
+    callerSystemPrompt?: string;
+    abortSignal?: AbortSignal;
+  }): Promise<string | undefined> {
+    const { userPrompt, draft, serializedToolOutputs } = params;
+    try {
       const correctionRes = await generateText({
         model: this.mainModel,
         system:
@@ -1216,7 +1312,7 @@ export class sportsclawEngine {
           `Original draft response with errors:`,
           draft,
           `Identified discrepancies to resolve:`,
-          JSON.stringify(parsed.discrepancies, null, 2),
+          JSON.stringify(params.discrepancies, null, 2),
         ].join("\n\n"),
         maxOutputTokens: 4000,
         abortSignal: params.abortSignal,
@@ -1224,17 +1320,19 @@ export class sportsclawEngine {
       });
 
       const corrected = correctionRes.text?.trim();
-      if (corrected) {
-        return this.validateResponseEvidence({ ...params, draft: stripInternalEvidenceArtifacts(corrected), correctionAttempted: true });
-      }
+      return corrected ? stripInternalEvidenceArtifacts(corrected) : undefined;
     } catch (e) {
       if (this.config.verbose) {
-        console.error(`[sportsclaw] evidence validation failed: ${e}`);
+        console.error(`[sportsclaw] evidence correction failed: ${e}`);
       }
-      if (!discrepanciesFound) return unverified(`validator error: ${e}`);
+      return undefined;
     }
+  }
 
-    return unavailable;
+  /** Append a sanitized verification receipt for tests and measurement. */
+  private recordEvidenceReceipt(receipt: EvidenceVerificationReceipt): void {
+    if (!this._evidenceReceipts) this._evidenceReceipts = [];
+    this._evidenceReceipts.push(receipt);
   }
 
   /** Build the Vercel AI SDK tool map from our registry */
@@ -3516,6 +3614,7 @@ export class sportsclawEngine {
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
+    this._evidenceReceipts = [];
 
     this.agents = listAgents({ includeInactive: true });
     const explicitAgents = options?.agentIds

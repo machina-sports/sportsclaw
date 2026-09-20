@@ -117,6 +117,10 @@ sportsclaw is built for:
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
+### Optional: Jev evidence verification
+
+Keep your existing generative model and opt into TypeSafe Jev for the final evidence check. Jev returns typed decisions, not user-facing answers; high-confidence support skips the generative verification pass, while confirmed problems still require a correction and recheck. Explicit cloud consent is required, and generative fallback is separately configurable. Existing verification remains the default. See [Jev evidence verification](docs/guide/jev-evidence-verifier.md) for configuration, privacy boundaries and sanitized receipts.
+
 ### Optional: Pluggable memory backends
 
 Without a connected Machina pod, memory is stored in local files (`~/.sportsclaw/memory/`) — zero setup. Existing pod-enabled deployments keep selecting Machina documents automatically, and semantic, long-horizon memory can be explicitly routed through a [Vectorize Hindsight](https://github.com/vectorize-io/hindsight) server:

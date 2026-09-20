@@ -330,6 +330,97 @@ export interface sportsclawConfig {
    * 0 disables the gate. Default: 0.
    */
   dailyTokenBudget?: number;
+  /**
+   * Opt-in evidence verifier settings. Omitted (the default) keeps the
+   * existing generative verification path. See `evidence-verifier.ts`.
+   */
+  evidenceVerifier?: EvidenceVerifierConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence verification (decision provider — see src/evidence-verifier.ts)
+// ---------------------------------------------------------------------------
+
+/** Decision providers are separate from LLMProvider: they never answer a user. */
+export type EvidenceVerifierProvider = "generative" | "jev";
+
+/** Opt-in settings for the evidence verifier. Every field has a safe default. */
+export interface EvidenceVerifierConfig {
+  /** Which verifier to use. Default: "generative" (unchanged behavior). */
+  provider?: EvidenceVerifierProvider;
+  /** Cloud consent. "jev" requires an explicit "cloud_allowed". Default: "local_only". */
+  dataPolicy?: "local_only" | "cloud_allowed";
+  /** Pinned decision model. Default: "jev-1.13.0". */
+  model?: string;
+  /** Bounded per-request deadline in ms (250–60000). Default: 8000. */
+  timeoutMs?: number;
+  /** Minimum per-criterion confidence to act on a decision (0.5–1). Default: 0.9. */
+  confidenceThreshold?: number;
+  /** Use the generative verifier when a decision is ambiguous. Default: false. */
+  fallbackToGenerative?: boolean;
+  /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
+  transport?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Environment source for opt-in and credential lookup. Defaults to process.env. */
+  env?: Record<string, string | undefined>;
+}
+
+/** Validated settings produced by resolveEvidenceVerifierSettings(). */
+export interface ResolvedEvidenceVerifierSettings {
+  provider: EvidenceVerifierProvider;
+  dataPolicy: "local_only" | "cloud_allowed";
+  model: string;
+  timeoutMs: number;
+  confidenceThreshold: number;
+  fallbackToGenerative: boolean;
+  /** True only when the Jev verifier may run. Never carries the credential. */
+  enabled: boolean;
+  /** Why a requested verifier is not enabled, e.g. "local_only". */
+  reasonCode?: string;
+  /** Sanitized codes for rejected settings, e.g. "invalid_timeoutMs". */
+  diagnostics: string[];
+}
+
+/** Fixed criteria judged by the decision verifier (see evidence-verifier.ts). */
+export type EvidenceCriterionKey =
+  | "factual_support"
+  | "qualitative_premises"
+  | "coverage_freshness"
+  | "caller_constraints";
+
+/** The only accepted choice labels. */
+export type EvidenceChoiceLabel = "supported" | "contradicted" | "unknown";
+
+/**
+ * One validated per-criterion decision. Fixed criterion and option values only:
+ * no source, draft or provider text.
+ */
+export interface EvidenceVerificationCheck {
+  criterion: EvidenceCriterionKey;
+  choice: EvidenceChoiceLabel;
+  /** Distribution-derived confidence in [0,1]; not the winning probability. */
+  confidence: number;
+  probabilities: Record<EvidenceChoiceLabel, number>;
+}
+
+/** Sanitized measurement record. Never reaches the user-facing answer. */
+export interface EvidenceVerificationReceipt {
+  provider: EvidenceVerifierProvider;
+  /** Model asked for, recorded even when the request never left the process. */
+  requestedModel?: string;
+  /** Model reported by a validated response that matched the request. */
+  model?: string;
+  status: "supported" | "contradicted" | "inconclusive" | "unavailable" | "blocked";
+  /** Enumerated code — never a provider message or draft text. */
+  reasonCode: string;
+  latencyMs: number;
+  questionCount: number;
+  usage?: { inputTokens: number; outputTokens: number };
+  /** Per-criterion decisions from a validated response. */
+  checks?: EvidenceVerificationCheck[];
+  /** True when the generative verifier ran after this decision. */
+  fallbackUsed: boolean;
+  /** True when this decision judged a corrected draft. */
+  recheck: boolean;
 }
 
 export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
@@ -357,6 +448,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   yoloMode: false,
   contextPruneThreshold: 80,
   dailyTokenBudget: 0,
+  evidenceVerifier: {},
 };
 
 // ---------------------------------------------------------------------------
