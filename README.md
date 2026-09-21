@@ -117,6 +117,19 @@ sportsclaw is built for:
 - **Prototyping sports AI products** — Test whether an AI sports feature is viable before building infrastructure. sportsclaw gives you the agent loop and data access so you can focus on the product idea.
 - **Learning how agents work** — The core loop is ~220 lines on the Vercel AI SDK. Read it, modify it, extend it.
 
+### Optional: Jev decisions
+
+`JevDecisionClient` is a standalone, typed client for TypeSafe Jev — a decision provider, not a chat model. Ask your own Choice, Score and Noul questions about one shared state in a single call; question IDs, options and rubrics are yours, and the client validates them and the answers without interpreting either. Importing it boots no engine, needs no generative API key and makes no network call; cloud consent is explicit and nothing calls it automatically. See [Jev decision client](docs/guide/decision-client.md).
+
+```typescript
+import { JevDecisionClient } from "sportsclaw-engine-core";
+
+const client = new JevDecisionClient({ dataPolicy: "cloud_allowed" });
+const result = await client.decide({ state, questions });
+```
+
+Its one in-repo consumer is the opt-in evidence verifier: keep your existing generative model and opt into Jev for the final evidence check. High-confidence support skips the generative verification pass, while confirmed problems still require a correction and recheck. Explicit cloud consent is required, and generative fallback is separately configurable. Existing verification remains the default. See [Jev evidence verification](docs/guide/jev-evidence-verifier.md) for configuration, privacy boundaries and sanitized receipts.
+
 ### Optional: Pluggable memory backends
 
 Without a connected Machina pod, memory is stored in local files (`~/.sportsclaw/memory/`) — zero setup. Existing pod-enabled deployments keep selecting Machina documents automatically, and semantic, long-horizon memory can be explicitly routed through a [Vectorize Hindsight](https://github.com/vectorize-io/hindsight) server:
