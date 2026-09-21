@@ -3,12 +3,14 @@ import type {
   LLMProvider,
   RouteDecision,
   RouteOutcome,
+  SkillRoutingConfig,
   ToolSpec,
   sportsclawConfig,
 } from "./types.js";
 import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
 import type { AgentDef } from "./agents.js";
 import { planSkillCaps } from "./routing/complexity.js";
+import { resolveSkillRoutingSettings, routeSkillsWithJev } from "./routing/skill-routing.js";
 
 type ModelType = Parameters<typeof generateText>[0]["model"];
 
@@ -25,7 +27,10 @@ interface RouteInput {
   config: Pick<
     Required<sportsclawConfig>,
     "routingMode" | "routingMaxSkills" | "routingAllowSpillover" | "thinkingBudget" | "tokenBudgets"
-  >;
+  > & {
+    /** Opt-in decision routing. Omitted keeps the generative router. */
+    routing?: SkillRoutingConfig;
+  };
 }
 
 interface LlmRouteAttempt {
@@ -363,6 +368,25 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
   }
 
   const helperSkills = new Set([...inferHelperSkills(promptNorm, installedSet), ...seededSkills]);
+
+  // --- Opt-in decision routing -------------------------------------------
+  // Replaces the generative router call entirely: one decision, no fallback,
+  // and no fan-profile affinity feeding the route. Off unless configured.
+  const routingSettings = resolveSkillRoutingSettings(input.config.routing);
+  if (routingSettings.provider === "jev" || routingSettings.diagnostics.length > 0) {
+    return routeSkillsWithJev(
+      {
+        prompt: input.prompt,
+        installedSkills: input.installedSkills,
+        toolSpecs: input.toolSpecs,
+        helperSkills: Array.from(helperSkills),
+        ...(input.recentContext ? { recentContext: input.recentContext } : {}),
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      },
+      routingSettings
+    );
+  }
+
   const fanProfile = extractFanProfileSection(input.memoryBlock);
   const toolTokens = buildToolTokensBySkill(input.installedSkills, input.toolSpecs);
 

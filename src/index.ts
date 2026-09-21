@@ -487,6 +487,34 @@ export type {
   ScoreQuestion,
 } from "./decision-client.js";
 
+// Capability routing primitive — deterministic by default, Jev decisions
+// opt-in. Standalone: not wired into the engine, no network on import.
+export { CapabilityRouter, ROUTING_LIMITS } from "./routing/capability-router.js";
+export type {
+  CapabilityCandidate,
+  CapabilityRouterConfig,
+  RoutingClarify,
+  RoutingLocalReasonCode,
+  RoutingOptions,
+  RoutingOutcome,
+  RoutingProvider,
+  RoutingReasonCode,
+  RoutingRequest,
+  RoutingSelected,
+  RoutingUnavailable,
+  RoutingUnsupported,
+} from "./routing/capability-router.js";
+
+// Opt-in skill routing settings and telemetry. Types only: the routing
+// functions stay internal to the router, which owns when they run.
+export type {
+  ResolvedSkillRoutingSettings,
+  SkillRoutingConfig,
+  SkillRoutingMeta,
+  SkillRoutingProvider,
+  SkillRoutingStatus,
+} from "./types.js";
+
 // Operator Daemon (autonomous tick loop)
 export { createOperatorDaemon } from "./operator-daemon.js";
 export type {
