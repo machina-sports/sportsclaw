@@ -346,6 +346,13 @@ export interface sportsclawConfig {
    * `run-manifest.ts`.
    */
   sampling?: SamplingConfig;
+  /**
+   * Restrict the tools offered to the model to exactly these names. `null`
+   * (the default) applies no restriction. Unknown names are ignored here;
+   * callers that need a fixed surface should validate with
+   * `engine.listToolNames()` first (the bench runner does).
+   */
+  toolAllowlist?: string[] | null;
 }
 
 /**
@@ -542,6 +549,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   evidenceVerifier: {},
   routing: {},
   sampling: {},
+  toolAllowlist: null,
 };
 
 // ---------------------------------------------------------------------------

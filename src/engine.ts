@@ -719,6 +719,7 @@ export class sportsclawEngine {
     maxOutputTokens: number;
     maxTurns: number;
     thinkingBudget: number;
+    toolAllowlist: string[] | null;
   } {
     return {
       provider: this.config.provider,
@@ -726,7 +727,34 @@ export class sportsclawEngine {
       maxOutputTokens: this.config.tokenBudgets?.main ?? this.config.maxTokens,
       maxTurns: this.config.maxTurns,
       thinkingBudget: this.config.thinkingBudget,
+      toolAllowlist: this.config.toolAllowlist ? [...this.config.toolAllowlist].sort() : null,
     };
+  }
+
+  /**
+   * Names of every tool the engine would offer, before routing and before any
+   * allowlist. Includes built-in tools and installed sport/MCP tools.
+   */
+  listToolNames(): string[] {
+    return Object.keys(this.buildTools()).sort();
+  }
+
+  /**
+   * Names of data tools only: installed sport schemas plus MCP tools, i.e. the
+   * registry's tools, without the engine's built-in side-effecting tools.
+   */
+  listDataToolNames(): string[] {
+    const available = new Set(Object.keys(this.buildTools()));
+    return this.registry
+      .getAllToolSpecs()
+      .map((spec) => spec.name)
+      .filter((name) => available.has(name))
+      .sort();
+  }
+
+  /** Replace the tool allowlist (`null` removes it). Applies from the next run(). */
+  setToolAllowlist(names: readonly string[] | null): void {
+    this.config.toolAllowlist = names ? [...new Set(names)].sort() : null;
   }
 
   /** sportsclaw package version. */
@@ -3960,6 +3988,12 @@ export class sportsclawEngine {
       delete tools.spawn_subagent;
       delete tools.list_subagents;
     }
+    if (this.config.toolAllowlist) {
+      const allowed = new Set(this.config.toolAllowlist);
+      for (const name of Object.keys(tools)) {
+        if (!allowed.has(name)) delete tools[name];
+      }
+    }
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,
@@ -4048,6 +4082,10 @@ export class sportsclawEngine {
           ceiling: providerToolCeiling(this.config.provider),
         });
       }
+    }
+
+    if (this.config.toolAllowlist && activeTools) {
+      activeTools = activeTools.filter((name) => name in tools);
     }
 
     if (this.config.verbose && routing.decision) {

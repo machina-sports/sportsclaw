@@ -46,7 +46,7 @@
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createWriteStream, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
@@ -56,6 +56,7 @@ import { formatResponse } from "./formatters/index.js";
 import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
 import { buildRunManifest, readSportsSkillsVersion, takeSamplingArgs } from "./run-manifest.js";
+import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools } from "./bench.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
   fetchSportSchema,
@@ -2325,6 +2326,110 @@ export function takeOneShotUserId(args: string[]): string | undefined {
   return userId;
 }
 
+// ---------------------------------------------------------------------------
+// bench — run a JSONL dataset headlessly, one JSON line per case
+// ---------------------------------------------------------------------------
+
+async function cmdBench(argv: string[]): Promise<void> {
+  const fail = (msg: string): never => {
+    console.error(`[sportsclaw bench] ${msg}`);
+    process.exit(1);
+  };
+
+  let opts;
+  try {
+    opts = parseBenchArgs(argv, takeSamplingArgs);
+  } catch (err) {
+    fail(`${err instanceof Error ? err.message : String(err)}\n${BENCH_USAGE}`);
+    return;
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(opts.datasetPath, "utf-8");
+  } catch (err) {
+    fail(`cannot read dataset ${opts.datasetPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  const dataset = parseDataset(text);
+  if (dataset.lineCount === 0) fail(`dataset ${opts.datasetPath} has no cases`);
+
+  let resolved = applyConfigToEnv();
+  if (!hasUsableAuth(resolved)) {
+    fail("No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first.");
+  }
+  const venvResult = ensureVenv(resolved.pythonPath);
+  if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
+    resolved = { ...resolved, pythonPath: venvResult.pythonPath };
+    process.env.PYTHON_PATH = venvResult.pythonPath;
+  }
+  await ensureDefaultSchemas();
+
+  const engine = new sportsclawEngine({
+    provider: resolved.provider,
+    ...(resolved.model && { model: resolved.model }),
+    pythonPath: resolved.pythonPath,
+    routingMode: resolved.routingMode,
+    routingMaxSkills: resolved.routingMaxSkills,
+    routingAllowSpillover: resolved.routingAllowSpillover,
+    verbose: opts.verbose,
+    // A benchmark never trades, and never bypasses approval gates.
+    allowTrading: false,
+    yoloMode: false,
+    sampling: opts.sampling,
+  });
+  await engine.initAsync();
+
+  // Fix the tool surface before any case runs. Default: data tools only.
+  if (opts.allTools) {
+    console.error("[sportsclaw bench] --all-tools: built-in tools (files, commands, installs) are offered to the model");
+  } else if (opts.tools) {
+    const missing = unknownTools(opts.tools, engine.listToolNames());
+    if (missing.length > 0) fail(`unknown tools in --tools: ${missing.join(", ")}`);
+    engine.setToolAllowlist(opts.tools);
+  } else {
+    const dataTools = engine.listDataToolNames();
+    if (dataTools.length === 0) {
+      fail("no data tools available. Install sports first (`sportsclaw init --all`), or pass --tools / --all-tools.");
+    }
+    if (dataTools.includes("sports_query")) {
+      console.error(
+        "[sportsclaw bench] warning: no sport schemas installed, so the generic sports_query tool is offered. " +
+          "Results will not be comparable with machines that have sports installed. Run `sportsclaw init --all` " +
+          "or pin the surface with --tools.",
+      );
+    }
+    engine.setToolAllowlist(dataTools);
+  }
+
+  const out = opts.out ? createWriteStream(opts.out, { encoding: "utf-8" }) : null;
+  const write = (line: Record<string, unknown>) =>
+    new Promise<void>((resolve, reject) => {
+      const data = JSON.stringify(line) + "\n";
+      const target = out ?? process.stdout;
+      target.write(data, (err) => (err ? reject(err) : resolve()));
+    });
+
+  const summary = await runBench({
+    engine,
+    dataset,
+    datasetPath: opts.datasetPath,
+    sportsSkillsVersion: await readSportsSkillsVersion(resolved.pythonPath),
+    ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+    emit: write,
+  });
+  if (out) await new Promise<void>((resolve) => out.end(resolve));
+
+  console.error(
+    `[sportsclaw bench] ${summary.expected} lines: ${summary.ok} ok, ${summary.halted} halted, ` +
+      `${summary.errored} error, ${summary.invalid} invalid, ${summary.duplicate} duplicate, ` +
+      `${summary.not_run} not run · ${summary.tokens.total} tokens · ${summary.wall_ms} ms` +
+      (opts.out ? ` → ${opts.out}` : ""),
+  );
+  process.exit(0);
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
@@ -2444,6 +2549,7 @@ async function cmdQuery(args: string[]): Promise<void> {
           maxOutputTokens: cfg.maxOutputTokens,
           maxTurns: cfg.maxTurns,
           thinkingBudget: cfg.thinkingBudget,
+          toolAllowlist: cfg.toolAllowlist,
           callerSystemPrompt: systemPrompt,
           trace: engine.lastRunTrace,
         }),
@@ -3009,6 +3115,7 @@ function printHelp(): void {
   console.log("  sportsclaw add <sport>             Add a sport schema (e.g. nfl-data, nba-data)");
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list [--json]           List all installed schemas and support modules");
+  console.log("  sportsclaw bench <dataset.jsonl> [--out f] [--limit n] [--tools a,b|--all-tools]  Run a dataset, one JSON line per case");
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
@@ -3282,6 +3389,8 @@ async function main(): Promise<void> {
       return cmdHealth(subArgs);
     case "selftest":
       return cmdSelftest(subArgs);
+    case "bench":
+      return cmdBench(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":

@@ -158,6 +158,7 @@ export interface RunManifestConfig {
   thinking_budget: number;
   caller_system_prompt_sha256: string | null;
   replay_mode: string;
+  tool_allowlist: string[] | null;
 }
 
 export interface RunManifest {
@@ -184,6 +185,7 @@ export interface BuildRunManifestInput {
   maxTurns: number;
   thinkingBudget: number;
   callerSystemPrompt?: string;
+  toolAllowlist?: string[] | null;
   env?: Record<string, string | undefined>;
   trace?: RunTrace | null;
 }
@@ -201,6 +203,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
     thinking_budget: input.thinkingBudget,
     caller_system_prompt_sha256: input.callerSystemPrompt ? sha256(input.callerSystemPrompt) : null,
     replay_mode: (env.SPORTS_SKILLS_REPLAY ?? "off").trim().toLowerCase() || "off",
+    tool_allowlist: input.toolAllowlist ? [...new Set(input.toolAllowlist)].sort() : null,
   };
   const trace = input.trace;
   return {
