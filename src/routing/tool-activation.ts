@@ -15,7 +15,7 @@ import type { LLMProvider } from "../types.js";
 
 /** Return the provider's tool ceiling, or `undefined` for unlimited legacy behavior. */
 export function providerToolCeiling(provider: LLMProvider): number | undefined {
-  return provider === "openai" || provider === "azure-foundry"
+  return provider === "openai" || provider === "azure-foundry" || provider === "openai-compatible"
     ? PROVIDER_TOOL_CEILING
     : undefined;
 }

@@ -167,6 +167,12 @@ function makeExplainer({ gen, checker, maxAttempts = 2, mode = "mock", pythonPat
 describe("produceCard loop (injected generator + semantic checker)", () => {
   it("keeps default evaluator models distinct from default generator models", () => {
     for (const provider of Object.keys(DEFAULT_MODELS)) {
+      // Providers with server-defined model ids (openai-compatible) ship no
+      // default for either role; both must then be configured explicitly.
+      if (DEFAULT_MODELS[provider] === "") {
+        assert.equal(DEFAULT_EVALUATOR_MODELS[provider], "", `${provider} has no generator default, so no evaluator default`);
+        continue;
+      }
       assert.notEqual(
         DEFAULT_EVALUATOR_MODELS[provider],
         DEFAULT_MODELS[provider],

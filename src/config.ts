@@ -114,6 +114,7 @@ export const PROVIDER_ENV: Record<LLMProvider, string> = {
   openai: "OPENAI_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
   "azure-foundry": "AZURE_FOUNDRY_API_KEY",
+  "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
 };
 
 export const ASCII_LOGO = `

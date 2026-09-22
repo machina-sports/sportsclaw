@@ -31,6 +31,7 @@ import {
   type ClaudeCodeOAuthTokens,
 } from "./anthropic-oauth.js";
 import { resolveAnthropicAuth } from "./credentials.js";
+import { resolveOpenAICompatibleSettings } from "./openai-compatible.js";
 import {
   azureFoundryApiStyle,
   azureFoundryOpenAISubmode,
@@ -374,6 +375,10 @@ export function defaultOpenShellBaseUrl(provider: LLMProvider): string {
       throw new Error(
         "OpenShell does not support the \"azure-foundry\" provider — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
       );
+    case "openai-compatible":
+      throw new Error(
+        "OpenShell does not support the \"openai-compatible\" provider — it targets its own OPENAI_COMPATIBLE_BASE_URL, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
+      );
   }
 }
 
@@ -432,6 +437,7 @@ export function resolveModel(
         }).chat(modelId);
       case "google":
       case "azure-foundry":
+      case "openai-compatible":
         throw new Error(
           `OpenShell mode does not support provider "${provider}".`,
         );
@@ -475,9 +481,18 @@ export function resolveModel(
       return google(modelId);
     case "azure-foundry":
       return resolveAzureFoundryModel(modelId);
+    case "openai-compatible": {
+      // Own env vars (never OPENAI_*), always /chat/completions.
+      const settings = resolveOpenAICompatibleSettings(modelId);
+      return createOpenAI({
+        baseURL: settings.baseURL,
+        apiKey: settings.apiKey,
+        name: "openai-compatible",
+      }).chat(settings.modelId);
+    }
     default:
       throw new Error(
-        `Unsupported provider: "${provider}". Use "anthropic", "openai", "google", or "azure-foundry".`,
+        `Unsupported provider: "${provider}". Use "anthropic", "openai", "google", "azure-foundry", or "openai-compatible".`,
       );
   }
 }

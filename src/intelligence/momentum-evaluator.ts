@@ -61,6 +61,8 @@ export const DEFAULT_EVALUATOR_MODELS: Record<LLMProvider, string> = {
   openai: "gpt-5.4",
   google: "gemini-3.7-flash",
   "azure-foundry": "gpt-5.4-mini",
+  // Server-defined model ids: an explicit evaluatorModel is required.
+  "openai-compatible": "",
 };
 
 export interface EvaluatorConfig {

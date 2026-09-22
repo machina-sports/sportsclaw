@@ -1314,8 +1314,17 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
  * Claude Code OAuth). Other providers still need an API key — only Anthropic
  * has the OAuth opt-in today.
  */
+function missingAuthMessage(resolved: ReturnType<typeof resolveConfig>): string {
+  if (resolved.provider === "openai-compatible") {
+    return "provider openai-compatible needs OPENAI_COMPATIBLE_BASE_URL (e.g. http://localhost:8000/v1); OPENAI_COMPATIBLE_API_KEY is optional.";
+  }
+  return "No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first.";
+}
+
 function hasUsableAuth(resolved: ReturnType<typeof resolveConfig>): boolean {
   if (resolved.apiKey) return true;
+  // Local compatible servers (vLLM, Ollama, ...) often need no key: the base URL is the credential.
+  if (resolved.provider === "openai-compatible") return Boolean(process.env.OPENAI_COMPATIBLE_BASE_URL?.trim());
   if (resolved.provider === "azure-foundry") {
     const authMode = (process.env.AZURE_FOUNDRY_AUTH_MODE || "api_key").trim() || "api_key";
     return authMode === "entra_id" && Boolean(process.env.AZURE_FOUNDRY_BASE_URL);
@@ -2355,9 +2364,7 @@ async function cmdBench(argv: string[]): Promise<void> {
   if (dataset.lineCount === 0) fail(`dataset ${opts.datasetPath} has no cases`);
 
   let resolved = applyConfigToEnv();
-  if (!hasUsableAuth(resolved)) {
-    fail("No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first.");
-  }
+  if (!hasUsableAuth(resolved)) fail(missingAuthMessage(resolved));
   const venvResult = ensureVenv(resolved.pythonPath);
   if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
     resolved = { ...resolved, pythonPath: venvResult.pythonPath };
@@ -2365,19 +2372,25 @@ async function cmdBench(argv: string[]): Promise<void> {
   }
   await ensureDefaultSchemas();
 
-  const engine = new sportsclawEngine({
-    provider: resolved.provider,
-    ...(resolved.model && { model: resolved.model }),
-    pythonPath: resolved.pythonPath,
-    routingMode: resolved.routingMode,
-    routingMaxSkills: resolved.routingMaxSkills,
-    routingAllowSpillover: resolved.routingAllowSpillover,
-    verbose: opts.verbose,
-    // A benchmark never trades, and never bypasses approval gates.
-    allowTrading: false,
-    yoloMode: false,
-    sampling: opts.sampling,
-  });
+  let engine: sportsclawEngine;
+  try {
+    engine = new sportsclawEngine({
+      provider: resolved.provider,
+      ...(resolved.model && { model: resolved.model }),
+      pythonPath: resolved.pythonPath,
+      routingMode: resolved.routingMode,
+      routingMaxSkills: resolved.routingMaxSkills,
+      routingAllowSpillover: resolved.routingAllowSpillover,
+      verbose: opts.verbose,
+      // A benchmark never trades, and never bypasses approval gates.
+      allowTrading: false,
+      yoloMode: false,
+      sampling: opts.sampling,
+    });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+    return;
+  }
   await engine.initAsync();
 
   // Fix the tool surface before any case runs. Default: data tools only.
@@ -2500,7 +2513,7 @@ async function cmdQuery(args: string[]): Promise<void> {
   // No usable credentials anywhere → interactive setup (skip in headless mode)
   if (!hasUsableAuth(resolved)) {
     if (forceJson || !process.stdout.isTTY) {
-      emitNdjson({ type: "error", error: "No credentials configured. Run `sportsclaw config` or `sportsclaw login claude` first." });
+      emitNdjson({ type: "error", error: missingAuthMessage(resolved) });
       process.exit(1);
     }
     await runConfigFlow();
@@ -2516,18 +2529,30 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   await ensureDefaultSchemas();
 
-  const engine = new sportsclawEngine({
-    provider: resolved.provider,
-    ...(resolved.model && { model: resolved.model }),
-    pythonPath: resolved.pythonPath,
-    routingMode: resolved.routingMode,
-    routingMaxSkills: resolved.routingMaxSkills,
-    routingAllowSpillover: resolved.routingAllowSpillover,
-    verbose,
-    allowTrading: true,
-    yoloMode,
-    sampling,
-  });
+  let engine: sportsclawEngine;
+  try {
+    engine = new sportsclawEngine({
+      provider: resolved.provider,
+      ...(resolved.model && { model: resolved.model }),
+      pythonPath: resolved.pythonPath,
+      routingMode: resolved.routingMode,
+      routingMaxSkills: resolved.routingMaxSkills,
+      routingAllowSpillover: resolved.routingAllowSpillover,
+      verbose,
+      allowTrading: true,
+      yoloMode,
+      sampling,
+    });
+  } catch (err) {
+    // Model/provider misconfiguration (e.g. openai-compatible without a model).
+    const msg = err instanceof Error ? err.message : String(err);
+    if (forceJson || forcePipe || !process.stdout.isTTY) {
+      emitNdjson({ type: "error", error: msg });
+    } else {
+      console.error(`Error: ${msg}`);
+    }
+    process.exit(1);
+  }
 
   // Headless NDJSON streaming: --json flag, --pipe flag, or non-TTY stdout.
   // Strips all clack/spinners and emits structured NDJSON lines to stdout.
@@ -3163,12 +3188,14 @@ function printHelp(): void {
   console.log("  Environment variables override config file values.");
   console.log("");
   console.log("Environment:");
-  console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, google, or azure-foundry (default: anthropic)");
+  console.log("  sportsclaw_PROVIDER     LLM provider: anthropic, openai, google, azure-foundry, or openai-compatible (default: anthropic)");
   console.log("  sportsclaw_MODEL        Model override (default: depends on provider)");
   console.log("  ANTHROPIC_API_KEY       API key for Anthropic (required when provider=anthropic)");
   console.log("  OPENAI_API_KEY          API key for OpenAI (required when provider=openai)");
   console.log("  GOOGLE_GENERATIVE_AI_API_KEY  API key for Google Gemini (required when provider=google)");
   console.log("  AZURE_FOUNDRY_API_KEY   API key for Azure Foundry (when provider=azure-foundry, auth mode api_key)");
+  console.log("  OPENAI_COMPATIBLE_BASE_URL  Chat Completions endpoint, e.g. http://localhost:8000/v1 (provider=openai-compatible)");
+  console.log("  OPENAI_COMPATIBLE_API_KEY   Optional bearer key for that endpoint");
   console.log("  AZURE_FOUNDRY_BASE_URL  Foundry endpoint, e.g. https://<res>.openai.azure.com/openai/v1");
   console.log("  AZURE_FOUNDRY_API_MODE  auto | chat_completions | responses | codex_responses | anthropic_messages");
   console.log("  AZURE_FOUNDRY_AUTH_MODE api_key (default) | entra_id (DefaultAzureCredential via @azure/identity)");

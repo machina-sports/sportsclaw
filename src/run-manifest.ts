@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { endpointHost } from "./openai-compatible.js";
 import type { LLMProvider, SamplingConfig } from "./types.js";
 
 export const RUN_MANIFEST_VERSION = 1;
@@ -159,6 +160,8 @@ export interface RunManifestConfig {
   caller_system_prompt_sha256: string | null;
   replay_mode: string;
   tool_allowlist: string[] | null;
+  /** Host of a custom provider endpoint, or null for the provider's default. */
+  endpoint_host: string | null;
 }
 
 export interface RunManifest {
@@ -204,6 +207,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
     caller_system_prompt_sha256: input.callerSystemPrompt ? sha256(input.callerSystemPrompt) : null,
     replay_mode: (env.SPORTS_SKILLS_REPLAY ?? "off").trim().toLowerCase() || "off",
     tool_allowlist: input.toolAllowlist ? [...new Set(input.toolAllowlist)].sort() : null,
+    endpoint_host: endpointHost(input.provider, env),
   };
   const trace = input.trace;
   return {
