@@ -340,6 +340,24 @@ export interface sportsclawConfig {
    * generative router untouched. See `routing/skill-routing.ts`.
    */
   routing?: SkillRoutingConfig;
+  /**
+   * Opt-in sampling pins applied to every generation call the engine makes.
+   * Omitted fields are not sent, so provider defaults stay unchanged. See
+   * `run-manifest.ts`.
+   */
+  sampling?: SamplingConfig;
+}
+
+/**
+ * Sampling pins for reproducible runs. Providers may ignore a setting (for
+ * example Anthropic has no seed, and ignores temperature while extended
+ * thinking is on); the run manifest records any such provider warning.
+ */
+export interface SamplingConfig {
+  /** Sampling temperature, 0–2. */
+  temperature?: number;
+  /** Integer seed, 0–2147483647, for providers that support one. */
+  seed?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +541,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   dailyTokenBudget: 0,
   evidenceVerifier: {},
   routing: {},
+  sampling: {},
 };
 
 // ---------------------------------------------------------------------------
