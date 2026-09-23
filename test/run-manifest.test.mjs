@@ -114,6 +114,7 @@ test("config_sha256 is stable for equal configs and changes with any pinned fiel
     { sportsSkillsVersion: "0.34.0" },
     { callerSystemPrompt: "be terse" },
     { env: { SPORTS_SKILLS_REPLAY: "replay" } },
+    { toolAllowlist: ["nba_get_scores"] },
   ]) {
     assert.notEqual(buildRunManifest({ ...baseInput, ...change }).config_sha256, a.config_sha256, JSON.stringify(change));
   }
@@ -153,4 +154,12 @@ test("unset sampling pins are omitted rather than recorded as null", () => {
   const manifest = buildRunManifest({ ...baseInput, sampling: {} });
   assert.deepEqual(manifest.config.sampling, {});
   assert.equal(manifest.config.replay_mode, "off");
+  assert.equal(manifest.config.tool_allowlist, null);
+});
+
+test("tool_allowlist is normalized (sorted, deduped) so order does not change the hash", () => {
+  const a = buildRunManifest({ ...baseInput, toolAllowlist: ["b", "a", "a"] });
+  const b = buildRunManifest({ ...baseInput, toolAllowlist: ["a", "b"] });
+  assert.deepEqual(a.config.tool_allowlist, ["a", "b"]);
+  assert.equal(a.config_sha256, b.config_sha256);
 });

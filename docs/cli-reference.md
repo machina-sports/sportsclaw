@@ -76,3 +76,33 @@ With `--json`, a `manifest` line is emitted before the `result` (and before an `
 - The manifest contains hashes and names only, never prompt text or credentials.
 - Providers may ignore a pin, and `provider_warnings` records it when they do. Anthropic has no seed, and it ignores temperature while extended thinking is on; set the thinking budget to 0 for pinned Claude runs.
 - `replay_mode` reflects `SPORTS_SKILLS_REPLAY` (see sports-skills record/replay).
+
+## Benchmark runs (`sportsclaw bench`)
+
+Run a JSONL dataset headlessly. Each case is one line and one run, and the output is one JSON line per case. The runner produces evidence only; scoring belongs to the evaluator (e.g. Arena).
+
+```bash
+sportsclaw bench cases.jsonl --out results.jsonl --temperature 0 --seed 7
+```
+
+Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", "metadata": {…}}`. Blank lines are ignored.
+
+| Option | Effect |
+| --- | --- |
+| `--out <file>` | Write results to a file (default: stdout) |
+| `--limit <n>` | Run the first *n* valid cases; the rest are counted `not_run` |
+| `--tools <a,b>` | Offer exactly these tools. Unknown names abort before any case runs |
+| `--all-tools` | No allowlist: built-in tools (files, commands, installs) are offered too |
+| `--system-prompt <text>` | Caller prompt for cases without their own `system_prompt` |
+| `--temperature`, `--seed` | Sampling pins, as in a normal query |
+
+**Tool surface.** By default only data tools are offered (installed sport schemas and MCP tools), never the built-in side-effecting tools. Without installed sports this falls back to the generic `sports_query` tool, and the runner warns. Run `sportsclaw init --all` first, or pin the surface with `--tools`. Bench runs never enable trading or `--yolo`.
+
+**Isolation.** Each case starts from an empty conversation, with no user id and therefore no memory.
+
+**Output lines.**
+- `bench_start`: dataset path, SHA-256, line counts, and the run configuration with its `config_sha256` (see the manifest above).
+- `case`: `status` is `ok`, `halted` (the model asked the user a question), `error`, `invalid` or `duplicate`. Each line also carries the answer, error, `latency_ms`, token `usage`, `tool_calls` (name, success, duration), `config_sha256`, the observed `run` trace, and passthrough `metadata`. Dataset problems are emitted first and carry their `line` number.
+- `bench_summary`: counts that add up to the number of dataset lines, wall time, and token totals.
+
+The exit code is 0 when the runner finishes, whatever the per-case outcomes are. It is 1 for setup failures: unreadable dataset, bad options, missing credentials, or unknown tools.
