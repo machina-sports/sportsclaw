@@ -2419,7 +2419,10 @@ async function cmdBench(argv: string[]): Promise<void> {
   // Fix the tool surface before any case runs. Default: data tools only.
   // Baseline arms (direct, raw_tools) scope tools per case instead.
   if (opts.arm !== "routed") {
-    console.error(`[sportsclaw bench] arm ${opts.arm}: minimal loop, ${opts.arm === "direct" ? "no tools" : "each case's skills"}`);
+    const surface = opts.arm === "direct" ? "minimal loop, no tools"
+      : opts.arm === "raw_tools" ? "minimal loop, each case's skills"
+      : "full engine, each case's skills (diagnostic)";
+    console.error(`[sportsclaw bench] arm ${opts.arm}: ${surface}`);
   } else if (opts.allTools) {
     console.error("[sportsclaw bench] --all-tools: built-in tools (files, commands, installs) are offered to the model");
   } else if (opts.tools) {

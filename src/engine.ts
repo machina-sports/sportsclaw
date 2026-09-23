@@ -801,6 +801,15 @@ export class sportsclawEngine {
       .sort();
   }
 
+  /** Registry data tools that belong to the given skills (sorted). */
+  dataToolNamesForSkills(skills: readonly string[]): string[] {
+    const wanted = new Set(skills);
+    return this.listDataToolNames().filter((name) => {
+      const skill = this.registry.getSkillName(name);
+      return skill !== undefined && wanted.has(skill);
+    });
+  }
+
   /** Replace the tool allowlist (`null` removes it). Applies from the next run(). */
   setToolAllowlist(names: readonly string[] | null): void {
     this.config.toolAllowlist = names ? [...new Set(names)].sort() : null;

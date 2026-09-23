@@ -91,7 +91,7 @@ Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", 
 | --- | --- |
 | `--out <file>` | Write results to a file (default: stdout) |
 | `--limit <n>` | Run the first *n* valid cases; the rest are counted `not_run` |
-| `--arm routed\|raw-tools\|direct` | Harness per case (default `routed`, see below) |
+| `--arm routed\|raw-tools\|direct\|routed-oracle` | Harness per case (default `routed`, see below) |
 | `--case-timeout <s>` | Abort a case after *s* seconds and record it as `timeout` (default 300) |
 | `--tools <a,b>` | Routed arm only: offer exactly these tools. Unknown names abort before any case runs |
 | `--all-tools` | Routed arm only: no allowlist, so built-in tools (files, commands, installs) are offered too |
@@ -102,6 +102,7 @@ Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", 
 - `routed`: the full sportsclaw engine (routing, verification, evidence gate).
 - `raw-tools`: a minimal tool loop with a neutral prompt that offers only the data tools of the case's `skills`. It has no routing, memory or verification. A case without `skills` is recorded `invalid`.
 - `direct`: the same minimal loop with no tools.
+- `routed-oracle` (diagnostic): the full engine, offered only the case's `skills` tools. Comparing it with `routed` isolates routing loss; comparing it with `raw-tools` isolates the rest of the pipeline. The allowlist is set per case, so `bench_start` shows none and each case's `config_sha256` covers it.
 
 Every arm uses the same sampling pins, turn and token budgets, case timeout, and 30,000-character tool-output cap, and each has its own `config_sha256`.
 
