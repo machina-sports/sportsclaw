@@ -146,6 +146,11 @@ try {
  */
 export const TOOL_OUTPUT_CHAR_CAP = 30_000;
 
+/** Prefix on a result served again for an identical call in the same turn. */
+export const REPEATED_CALL_NOTE =
+  "[Repeated call: this exact tool call already ran in this turn, so this is the same result again. " +
+  "Answer from it, or call with different arguments (e.g. narrower filters) if you need other data.]\n";
+
 /** Prefix of the notice appended to a data tool's output cut at TOOL_OUTPUT_CHAR_CAP. */
 const TOOL_OUTPUT_TRUNCATED_MARKER = "[... output truncated";
 
@@ -1500,7 +1505,8 @@ export class sportsclawEngine {
     failedToolSignaturesThisTurn?: Map<string, string>,
     runUserId?: string,
     runPlatform?: "telegram" | "discord" | "cli",
-    runChatId?: string
+    runChatId?: string,
+    succeededToolResultsThisTurn?: Map<string, string>,
   ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
@@ -1532,6 +1538,15 @@ export class sportsclawEngine {
               );
             }
             throw new Error(skipReason);
+          }
+
+          // An identical successful call earlier in this turn: hand back that
+          // result instead of re-running the subprocess. The pilot saw agents
+          // repeat the same call 20-40 times until the budget ran out (#175).
+          const priorResult = succeededToolResultsThisTurn?.get(signature);
+          if (priorResult !== undefined) {
+            if (verbose) console.error(`[sportsclaw] tool_repeat: ${spec.name} (served from this turn)`);
+            return REPEATED_CALL_NOTE + priorResult;
           }
 
           // Declarative tool-level approval gate. Interactive CLI prompts the
@@ -1602,12 +1617,15 @@ export class sportsclawEngine {
           const MAX_TOOL_CHARS = TOOL_OUTPUT_CHAR_CAP;
           if (result.content.length > MAX_TOOL_CHARS) {
             const totalChars = result.content.length;
-            return (
+            const capped = (
               result.content.slice(0, MAX_TOOL_CHARS) +
               `\n\n${TOOL_OUTPUT_TRUNCATED_MARKER}: showing ${MAX_TOOL_CHARS.toLocaleString()} of ${totalChars.toLocaleString()} chars. ` +
               `Re-query with more specific filters or pagination to get the remaining data.]`
             );
+            succeededToolResultsThisTurn?.set(signature, capped);
+            return capped;
           }
+          succeededToolResultsThisTurn?.set(signature, result.content);
           return result.content;
         },
       });
@@ -3692,7 +3710,7 @@ export class sportsclawEngine {
 
     const wanted = new Set(options.skills);
     const registryTools = new Set(this.registry.getAllToolSpecs().map((spec) => spec.name));
-    const all = this.buildTools(undefined, new Map());
+    const all = this.buildTools(undefined, new Map(), undefined, undefined, undefined, new Map());
     const tools: ToolSet = {};
     for (const [name, def] of Object.entries(all)) {
       const skill = this.registry.getSkillName(name);
@@ -4113,6 +4131,7 @@ export class sportsclawEngine {
     const failedExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const failedToolSignaturesThisTurn = new Map<string, string>();
+    const succeededToolResultsThisTurn = new Map<string, string>();
 
     // Analytics tracking
     const analyticsStartTime = Date.now();
@@ -4129,6 +4148,7 @@ export class sportsclawEngine {
       options?.userId,
       options?.platform,
       options?.chatId,
+      succeededToolResultsThisTurn,
     );
     if ((options?.delegationDepth ?? 0) > 0) {
       delete tools.spawn_subagent;
