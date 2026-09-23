@@ -85,24 +85,33 @@ Run a JSONL dataset headlessly. Each case is one line and one run, and the outpu
 sportsclaw bench cases.jsonl --out results.jsonl --temperature 0 --seed 7
 ```
 
-Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", "metadata": {…}}`. Blank lines are ignored.
+Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", "skills": ["nba"], "metadata": {…}}`. Blank lines are ignored. `skills` is the tool scope for the `raw-tools` arm.
 
 | Option | Effect |
 | --- | --- |
 | `--out <file>` | Write results to a file (default: stdout) |
 | `--limit <n>` | Run the first *n* valid cases; the rest are counted `not_run` |
-| `--tools <a,b>` | Offer exactly these tools. Unknown names abort before any case runs |
-| `--all-tools` | No allowlist: built-in tools (files, commands, installs) are offered too |
+| `--arm routed\|raw-tools\|direct` | Harness per case (default `routed`, see below) |
+| `--case-timeout <s>` | Abort a case after *s* seconds and record it as `timeout` (default 300) |
+| `--tools <a,b>` | Routed arm only: offer exactly these tools. Unknown names abort before any case runs |
+| `--all-tools` | Routed arm only: no allowlist, so built-in tools (files, commands, installs) are offered too |
 | `--system-prompt <text>` | Caller prompt for cases without their own `system_prompt` |
 | `--temperature`, `--seed` | Sampling pins, as in a normal query |
 
-**Tool surface.** By default only data tools are offered (installed sport schemas and MCP tools), never the built-in side-effecting tools. Without installed sports this falls back to the generic `sports_query` tool, and the runner warns. Run `sportsclaw init --all` first, or pin the surface with `--tools`. Bench runs never enable trading or `--yolo`.
+**Arms.** Compare the same model with and without the harness:
+- `routed`: the full sportsclaw engine (routing, verification, evidence gate).
+- `raw-tools`: a minimal tool loop with a neutral prompt that offers only the data tools of the case's `skills`. It has no routing, memory or verification. A case without `skills` is recorded `invalid`.
+- `direct`: the same minimal loop with no tools.
+
+Every arm uses the same sampling pins, turn and token budgets, case timeout, and 30,000-character tool-output cap, and each has its own `config_sha256`.
+
+**Tool surface.** By default the routed arm offers only data tools (installed sport schemas and MCP tools), never the built-in side-effecting tools. Account and order tools (`polymarket-trading`) are always excluded. Without installed sports this falls back to the generic `sports_query` tool, and the runner warns. Run `sportsclaw init --all` first, or pin the surface with `--tools`. Bench runs never enable trading or `--yolo`.
 
 **Isolation.** Each case starts from an empty conversation, with no user id and therefore no memory.
 
 **Output lines.**
 - `bench_start`: dataset path, SHA-256, line counts, and the run configuration with its `config_sha256` (see the manifest above).
-- `case`: `status` is `ok`, `halted` (the model asked the user a question), `error`, `invalid` or `duplicate`. Each line also carries the answer, error, `latency_ms`, token `usage`, `tool_calls` (name, success, duration), `config_sha256`, the observed `run` trace, and passthrough `metadata`. Dataset problems are emitted first and carry their `line` number.
+- `case`: `status` is `ok`, `halted` (the model asked the user a question), `error`, `timeout`, `invalid` or `duplicate`. Each line also carries the `arm`, answer, error, `latency_ms`, `cold` (true for the first executed case), `timing` (`total_ms`, `tool_ms_sum`, `phases`), token `usage`, `tool_calls` (name, success, duration), `config_sha256`, the observed `run` trace, and passthrough `metadata`. Dataset problems are emitted first and carry their `line` number.
 - `bench_summary`: counts that add up to the number of dataset lines, wall time, and token totals.
 
 The exit code is 0 when the runner finishes, whatever the per-case outcomes are. It is 1 for setup failures: unreadable dataset, bad options, missing credentials, or unknown tools.
