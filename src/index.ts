@@ -55,7 +55,7 @@ import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
 import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
-import { buildRunManifest, readSportsSkillsVersion, takeSamplingArgs } from "./run-manifest.js";
+import { buildRunManifest, pythonSupportsReplay, readSportsSkillsVersion, takeSamplingArgs } from "./run-manifest.js";
 import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools, withoutExcludedSkills } from "./bench.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
@@ -2363,12 +2363,29 @@ async function cmdBench(argv: string[]): Promise<void> {
   const dataset = parseDataset(text);
   if (dataset.lineCount === 0) fail(`dataset ${opts.datasetPath} has no cases`);
 
+  // A benchmark must be able to pin the exact sports-skills build, so an
+  // explicit PYTHON_PATH wins over the managed venv here.
+  const pinnedPython = process.env.PYTHON_PATH?.trim() || undefined;
   let resolved = applyConfigToEnv();
   if (!hasUsableAuth(resolved)) fail(missingAuthMessage(resolved));
-  const venvResult = ensureVenv(resolved.pythonPath);
-  if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
-    resolved = { ...resolved, pythonPath: venvResult.pythonPath };
-    process.env.PYTHON_PATH = venvResult.pythonPath;
+  if (pinnedPython) {
+    resolved = { ...resolved, pythonPath: pinnedPython };
+    process.env.PYTHON_PATH = pinnedPython;
+  } else {
+    const venvResult = ensureVenv(resolved.pythonPath);
+    if (venvResult.ok && resolved.pythonPath !== venvResult.pythonPath) {
+      resolved = { ...resolved, pythonPath: venvResult.pythonPath };
+      process.env.PYTHON_PATH = venvResult.pythonPath;
+    }
+  }
+  // Fail closed: a sports-skills build without record/replay ignores
+  // SPORTS_SKILLS_REPLAY and fetches live, while the manifest reports replay.
+  const replayMode = (process.env.SPORTS_SKILLS_REPLAY ?? "off").trim().toLowerCase() || "off";
+  if (replayMode !== "off" && !(await pythonSupportsReplay(resolved.pythonPath))) {
+    fail(
+      `SPORTS_SKILLS_REPLAY=${replayMode} but the sports-skills at ${resolved.pythonPath} has no record/replay support. ` +
+        "Point PYTHON_PATH at an environment with a sports-skills build that includes it.",
+    );
   }
   await ensureDefaultSchemas();
 

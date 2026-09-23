@@ -68,6 +68,11 @@ export const SAFE_ENV_KEYS = [
   "PYTHONIOENCODING",
   "NODE_ENV",
   "XDG_CACHE_HOME", // sports_skills cricket cache dir (falls back to ~/.cache)
+  // sports-skills record/replay mode and directory. Not credentials. Without
+  // them a "replay" run silently fetches live while the run manifest (which
+  // reads the parent env) still reports replay_mode "replay".
+  "SPORTS_SKILLS_REPLAY",
+  "SPORTS_SKILLS_REPLAY_DIR",
   // Egress proxy + TLS CA bundle. In a network-isolated sandbox (e.g. OpenShell)
   // ALL outbound traffic must go through the egress proxy, and the proxy MITMs
   // TLS so the child needs its CA. Without these the sandboxed sports_skills

@@ -273,6 +273,18 @@ export function readSportsSkillsVersion(pythonPath: string, timeoutMs = 10_000):
   });
 }
 
+/** Whether the interpreter's sports-skills has record/replay (`sports_skills._replay`). */
+export function pythonSupportsReplay(pythonPath: string, timeoutMs = 10_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      pythonPath,
+      ["-c", "import sports_skills._replay"],
+      { encoding: "utf-8", timeout: timeoutMs },
+      (error) => resolve(!error),
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
 // CLI flags
 // ---------------------------------------------------------------------------
