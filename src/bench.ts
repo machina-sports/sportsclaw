@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { isHalt, TOOL_OUTPUT_CHAR_CAP, type TokenUsage } from "./engine.js";
-import { buildRunManifest, type RunManifest, type RunTrace } from "./run-manifest.js";
+import { buildRunManifest, type RunManifest, type RunTrace, type SportsSkillsSource } from "./run-manifest.js";
 import type { LLMProvider, SamplingConfig, ToolProgressEvent } from "./types.js";
 
 export const BENCH_OUTPUT_VERSION = 1;
@@ -195,6 +195,31 @@ export interface ToolCallRecord {
   name: string;
   success: boolean | null;
   duration_ms: number | null;
+  /** JSON of the model-provided arguments, capped at TRACE_TEXT_CAP chars. */
+  args: string | null;
+  /** Error text of a failed call, capped at TRACE_TEXT_CAP chars. */
+  error: string | null;
+  /** Length of the output handed back to the model. */
+  output_chars: number | null;
+  /** Whether the output was cut at TOOL_OUTPUT_CHAR_CAP. */
+  truncated: boolean | null;
+}
+
+/** Cap for per-call args and error text in case lines. */
+export const TRACE_TEXT_CAP = 300;
+
+function capText(text: string): string {
+  return text.length > TRACE_TEXT_CAP ? `${text.slice(0, TRACE_TEXT_CAP - 1)}…` : text;
+}
+
+function argsText(input: unknown): string | null {
+  if (input === undefined) return null;
+  try {
+    const json = JSON.stringify(input);
+    return json === undefined ? null : capText(json);
+  } catch {
+    return null;
+  }
 }
 
 export interface BenchRunOptions {
@@ -202,6 +227,7 @@ export interface BenchRunOptions {
   dataset: ParsedDataset;
   datasetPath: string;
   sportsSkillsVersion: string | null;
+  sportsSkillsSource?: SportsSkillsSource | null;
   /** Caller system prompt applied to cases that do not set their own. */
   systemPrompt?: string;
   /** Run at most this many valid cases; the rest are counted `not_run`. */
@@ -260,6 +286,7 @@ function manifestFor(
     },
     sportsclawVersion: opts.engine.packageVersion,
     sportsSkillsVersion: opts.sportsSkillsVersion,
+    sportsSkillsSource: opts.sportsSkillsSource,
     provider: cfg.provider,
     model: opts.engine.modelId,
     sampling: cfg.sampling,
@@ -324,17 +351,26 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
     const pending = new Map<string, ToolCallRecord>();
     const onProgress = (event: ToolProgressEvent) => {
       if (event.type === "tool_start") {
-        const record: ToolCallRecord = { name: event.toolName, success: null, duration_ms: null };
+        const record: ToolCallRecord = {
+          name: event.toolName, success: null, duration_ms: null, args: null, error: null, output_chars: null, truncated: null,
+        };
         toolCalls.push(record);
         pending.set(event.toolCallId, record);
       } else if (event.type === "tool_finish") {
+        const finished = {
+          success: event.success ?? null,
+          duration_ms: event.durationMs ?? null,
+          args: argsText(event.input),
+          error: event.error !== undefined ? capText(event.error) : null,
+          output_chars: event.outputChars ?? null,
+          truncated: event.truncated ?? null,
+        };
         const record = pending.get(event.toolCallId);
         if (record) {
-          record.success = event.success ?? null;
-          record.duration_ms = event.durationMs ?? null;
+          Object.assign(record, finished);
           pending.delete(event.toolCallId);
         } else {
-          toolCalls.push({ name: event.toolName, success: event.success ?? null, duration_ms: event.durationMs ?? null });
+          toolCalls.push({ name: event.toolName, ...finished });
         }
       }
     };

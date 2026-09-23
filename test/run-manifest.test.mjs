@@ -140,7 +140,38 @@ test("run trace is reported but excluded from config_sha256", () => {
     tool_surface_sha256: "abc",
     provider_warnings: ["unsupported seed"],
     parallel_agents: false,
+    routed_skills: null,
   });
+});
+
+test("routed_skills is reported in run and excluded from config_sha256", () => {
+  const trace = {
+    offeredTools: ["nba_scores"], toolSurfaceSha256: "abc", providerWarnings: [], parallelAgents: false,
+    routedSkills: ["nba", "betting"],
+  };
+  const routed = buildRunManifest({ ...baseInput, trace });
+  const unrouted = buildRunManifest({ ...baseInput, trace: { ...trace, routedSkills: undefined } });
+  assert.deepEqual(routed.run.routed_skills, ["nba", "betting"]);
+  assert.equal(unrouted.run.routed_skills, null);
+  assert.equal(routed.config_sha256, unrouted.config_sha256);
+  assert.equal(routed.config_sha256, buildRunManifest(baseInput).config_sha256);
+  assert.equal("routed_skills" in routed.config, false);
+});
+
+test("sports_skills_source is config: absent leaves the hash unchanged, present changes it", () => {
+  // config_sha256 of baseInput before sports_skills_source existed.
+  const before = "bf5e96178218b7a785d08e3e6fea857beee6f3983dbc4c509fce585241418c5f";
+  const absent = buildRunManifest(baseInput);
+  assert.equal(absent.config_sha256, before);
+  assert.equal("sports_skills_source" in absent.config, false);
+  assert.equal(buildRunManifest({ ...baseInput, sportsSkillsSource: null }).config_sha256, before);
+
+  const git = { url: "git+https://github.com/machina-sports/sports-skills@53e949e5d23070c6af5c51396af4df1a0d724983" };
+  const withGit = buildRunManifest({ ...baseInput, sportsSkillsSource: git });
+  assert.deepEqual(withGit.config.sports_skills_source, git);
+  assert.notEqual(withGit.config_sha256, before);
+  const otherCommit = buildRunManifest({ ...baseInput, sportsSkillsSource: { url: git.url.replace(/@.*$/, "@deadbeef") } });
+  assert.notEqual(otherCommit.config_sha256, withGit.config_sha256);
 });
 
 test("manifest carries hashes, never prompt text", () => {

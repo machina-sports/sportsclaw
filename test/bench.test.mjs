@@ -114,7 +114,7 @@ function fakeEngine(script) {
       if (step.tools) {
         for (const [i, t] of step.tools.entries()) {
           options.onProgress({ type: "tool_start", toolName: t.name, toolCallId: `c${i}` });
-          options.onProgress({ type: "tool_finish", toolName: t.name, toolCallId: `c${i}`, durationMs: t.ms, success: t.ok });
+          options.onProgress({ type: "tool_finish", toolName: t.name, toolCallId: `c${i}`, durationMs: t.ms, success: t.ok, ...t.finish });
         }
       }
       if (step.throws) throw step.throws;
@@ -163,7 +163,9 @@ test("runBench emits a header, one line per dataset line, and a closing summary"
 
   const ok = byId["ok-1"];
   assert.equal(ok.answer, "Knicks 110-104");
-  assert.deepEqual(ok.tool_calls, [{ name: "nba_get_scores", success: true, duration_ms: 42 }]);
+  assert.deepEqual(ok.tool_calls, [
+    { name: "nba_get_scores", success: true, duration_ms: 42, args: null, error: null, output_chars: null, truncated: null },
+  ]);
   assert.deepEqual(ok.usage, { input: 10, output: 5, total: 15 });
   assert.deepEqual(ok.metadata, { sport: "nba" });
   assert.equal(ok.config_sha256, start.config_sha256);
@@ -173,7 +175,9 @@ test("runBench emits a header, one line per dataset line, and a closing summary"
   assert.match(byId["ask-1"].error, /Which team\?/);
   assert.equal(byId["ask-1"].answer, null);
   assert.equal(byId["err-1"].error, "provider exploded");
-  assert.deepEqual(byId["err-1"].tool_calls, [{ name: "nba_get_scores", success: false, duration_ms: 7 }]);
+  assert.deepEqual(byId["err-1"].tool_calls, [
+    { name: "nba_get_scores", success: false, duration_ms: 7, args: null, error: null, output_chars: null, truncated: null },
+  ]);
   assert.equal(byId["err-1"].run, null, "a failed run leaves no trace");
 
   assert.equal(end.type, "bench_summary");
@@ -185,6 +189,33 @@ test("runBench emits a header, one line per dataset line, and a closing summary"
   assert.equal(summary.ok + summary.halted + summary.errored + summary.invalid + summary.duplicate + summary.not_run, summary.expected);
 
   assert.equal(engine.resets, 3, "conversation reset before every case");
+});
+
+test("tool_calls carry capped args and error, output size and truncation", async () => {
+  const dataset = parseDataset([JSON.stringify({ id: "t1", prompt: "p-trace" })].join("\n"));
+  const longArg = "x".repeat(1000);
+  const engine = fakeEngine({
+    "p-trace": {
+      answer: "done",
+      tools: [
+        { name: "nba_get_scores", ms: 5, ok: true, finish: { input: { date: "2026-01-01" }, outputChars: 30120, truncated: true } },
+        { name: "nba_get_scores", ms: 6, ok: false, finish: { input: { q: longArg }, error: "E".repeat(1000) } },
+      ],
+    },
+  });
+  const { lines } = await collect({ engine, dataset, datasetPath: "d.jsonl", sportsSkillsVersion: null });
+  const [first, second] = lines.find((l) => l.id === "t1").tool_calls;
+  assert.deepEqual(first, {
+    name: "nba_get_scores", success: true, duration_ms: 5,
+    args: '{"date":"2026-01-01"}', error: null, output_chars: 30120, truncated: true,
+  });
+  assert.equal(second.success, false);
+  assert.equal(second.args.length, 300);
+  assert.ok(second.args.startsWith('{"q":"xxx') && second.args.endsWith("…"));
+  assert.equal(second.error.length, 300);
+  assert.ok(second.error.endsWith("…"));
+  assert.equal(second.output_chars, null);
+  assert.equal(second.truncated, null);
 });
 
 test("--limit runs the first cases and counts the rest as not_run", async () => {
