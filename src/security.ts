@@ -22,7 +22,8 @@
 const BLOCKED_TOOL_PATTERNS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /create[_-]?order/i, reason: "order creation" },
   { pattern: /place[_-]?order/i, reason: "order placement" },
-  { pattern: /market[_-]?order/i, reason: "market order" },
+  // Not `market_orderbook`: reading a book (e.g. kalshi_get_market_orderbook) is data, not trading.
+  { pattern: /market[_-]?order(?![_-]?book)/i, reason: "market order" },
   { pattern: /limit[_-]?order/i, reason: "limit order" },
   { pattern: /cancel[_-]?order/i, reason: "order cancellation" },
   { pattern: /cancel[_-]?all/i, reason: "bulk cancellation" },
