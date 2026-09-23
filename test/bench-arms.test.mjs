@@ -165,3 +165,33 @@ test("one-shot query manifests carry no bench block, so their config_sha256 is u
   assert.deepEqual(bench.config.bench.skills, ["nba", "nfl"]);
   assert.notEqual(bench.config_sha256, query.config_sha256);
 });
+
+test("routed_oracle runs the full engine over the case's skills tools only", async () => {
+  const engine = fakeEngine();
+  const allowlists = [];
+  engine.dataToolNamesForSkills = (skills) => skills.flatMap((s) => [`${s}_a`, `${s}_b`]);
+  engine.setToolAllowlist = (names) => { allowlists.push(names); engine.manifestConfig.toolAllowlist = names; };
+  const { cases, lines } = await collect({
+    engine,
+    arm: "routed_oracle",
+    dataset: ds([
+      { id: "a", prompt: "p1", skills: ["nba"] },
+      { id: "b", prompt: "p2", skills: ["nfl", "polymarket-trading"] },
+      { id: "c", prompt: "p3" },
+    ]),
+  });
+  assert.deepEqual(cases.map((c) => [c.id, c.status]), [["a", "ok"], ["b", "invalid"], ["c", "invalid"]]);
+  assert.equal(cases[0].answer, "routed:p1", "the full engine answered, not the minimal loop");
+  assert.deepEqual(allowlists, [["nba_a", "nba_b"]]);
+  assert.deepEqual(cases[0].arm, "routed_oracle");
+  assert.equal(lines[0].config.bench.arm, "routed_oracle");
+  assert.match(cases[2].error, /routed_oracle arm needs a "skills" array/);
+});
+
+test("routed_oracle requires the allowlist hooks, and --arm routed-oracle parses", async () => {
+  await assert.rejects(
+    collect({ engine: fakeEngine(), arm: "routed_oracle", dataset: ds([{ id: "a", prompt: "x", skills: ["nba"] }]) }),
+    /needs an engine with dataToolNamesForSkills/,
+  );
+  assert.equal(parseBenchArgs(["d.jsonl", "--arm", "routed-oracle"], takeSamplingArgs).arm, "routed_oracle");
+});

@@ -152,6 +152,10 @@ export interface BenchEngine {
     onProgress?: (event: ToolProgressEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<string>;
+  /** Registry data tools of the given skills; required for the routed_oracle arm. */
+  dataToolNamesForSkills?(skills: readonly string[]): string[];
+  /** Restrict the offered tools (null removes the restriction); required for routed_oracle. */
+  setToolAllowlist?(names: readonly string[] | null): void;
   reset(): void;
   readonly lastRunTrace: RunTrace | null;
   readonly lastTokenUsage: TokenUsage | null;
@@ -173,10 +177,15 @@ export type CaseStatus = "ok" | "halted" | "error" | "timeout" | "invalid" | "du
  * Which harness answers each case:
  *   - `routed`: the full sportsclaw engine (routing, verification, evidence gate);
  *   - `raw_tools`: a minimal tool loop over the case's `skills` data tools;
- *   - `direct`: the same minimal loop with no tools.
+ *   - `direct`: the same minimal loop with no tools;
+ *   - `routed_oracle` (diagnostic): the full engine, but offered only the case's
+ *     `skills` tools, so routing loss and pipeline loss can be told apart.
  */
-export type BenchArm = "routed" | "raw_tools" | "direct";
-export const BENCH_ARMS: readonly BenchArm[] = ["routed", "raw_tools", "direct"];
+export type BenchArm = "routed" | "raw_tools" | "direct" | "routed_oracle";
+export const BENCH_ARMS: readonly BenchArm[] = ["routed", "raw_tools", "direct", "routed_oracle"];
+
+/** Arms whose tool surface comes from each case's `skills`. */
+const SKILL_SCOPED_ARMS: readonly BenchArm[] = ["raw_tools", "direct", "routed_oracle"];
 
 export const DEFAULT_CASE_TIMEOUT_S = 300;
 
@@ -293,7 +302,8 @@ function manifestFor(
     maxOutputTokens: cfg.maxOutputTokens,
     maxTurns: cfg.maxTurns,
     thinkingBudget: cfg.thinkingBudget,
-    toolAllowlist: arm === "routed" ? cfg.toolAllowlist : null,
+    // routed_oracle sets the engine allowlist per case, so it is recorded as such.
+    toolAllowlist: arm === "routed" || arm === "routed_oracle" ? cfg.toolAllowlist : null,
     callerSystemPrompt: systemPrompt,
     env: opts.env,
     trace,
@@ -309,7 +319,12 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
   const arm = opts.arm ?? "routed";
   const caseTimeoutS = opts.caseTimeoutS ?? DEFAULT_CASE_TIMEOUT_S;
   if (!(caseTimeoutS > 0)) throw new Error(`caseTimeoutS must be positive (got ${caseTimeoutS})`);
-  if (arm !== "routed" && !opts.engine.runDirect) throw new Error(`the ${arm} arm needs an engine with runDirect()`);
+  if ((arm === "raw_tools" || arm === "direct") && !opts.engine.runDirect) {
+    throw new Error(`the ${arm} arm needs an engine with runDirect()`);
+  }
+  if (arm === "routed_oracle" && !(opts.engine.dataToolNamesForSkills && opts.engine.setToolAllowlist)) {
+    throw new Error("the routed_oracle arm needs an engine with dataToolNamesForSkills() and setToolAllowlist()");
+  }
 
   const base = manifestFor(opts, opts.systemPrompt, null);
   await opts.emit({
@@ -375,7 +390,7 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
       }
     };
 
-    const skills = arm === "direct" ? [] : arm === "raw_tools" ? (c.skills ?? null) : undefined;
+    const skills = arm === "direct" ? [] : SKILL_SCOPED_ARMS.includes(arm) ? (c.skills ?? null) : undefined;
     const excluded = skills?.filter((s) => BENCH_EXCLUDED_SKILLS.includes(s)) ?? [];
     if (skills === null || excluded.length > 0) {
       // raw_tools needs a declared tool scope; never guess one, never widen it.
@@ -386,7 +401,7 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
         line: c.line,
         status: "invalid" satisfies CaseStatus,
         error: skills === null
-          ? "raw_tools arm needs a \"skills\" array on the case"
+          ? `${arm} arm needs a "skills" array on the case`
           : `skills not allowed in a benchmark: ${excluded.join(", ")}`,
       });
       continue;
@@ -422,7 +437,11 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
         onProgress: observe,
         abortSignal: controller.signal,
       };
-      running = skills === undefined
+      if (arm === "routed_oracle") {
+        // Full engine (routing, verification, evidence gate) over the gold surface.
+        opts.engine.setToolAllowlist!(withoutExcludedSkills(opts.engine.dataToolNamesForSkills!(skills ?? [])));
+      }
+      running = skills === undefined || arm === "routed_oracle"
         ? opts.engine.run(c.prompt, common)
         : opts.engine.runDirect!(c.prompt, { ...common, skills });
       // Abort is best effort (a tool subprocess may ignore it), so the
@@ -525,7 +544,7 @@ export interface BenchArgs {
 
 export const BENCH_USAGE =
   "Usage: sportsclaw bench <dataset.jsonl> [--out <results.jsonl>] [--limit <n>] " +
-  "[--arm routed|raw-tools|direct] [--case-timeout <seconds>] " +
+  "[--arm routed|raw-tools|direct|routed-oracle] [--case-timeout <seconds>] " +
   "[--tools <a,b,...> | --all-tools] [--system-prompt <text>] [--temperature <n>] [--seed <n>] [--verbose]";
 
 function takeValue(args: string[], flag: string): string | undefined {
@@ -572,7 +591,9 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
   const verbose = takeSwitch(args, "--verbose", "-v");
 
   const arm = (armRaw ?? "routed").replace(/-/g, "_") as BenchArm;
-  if (!BENCH_ARMS.includes(arm)) throw new Error(`--arm must be one of routed, raw-tools, direct (got ${JSON.stringify(armRaw)})`);
+  if (!BENCH_ARMS.includes(arm)) {
+    throw new Error(`--arm must be one of routed, raw-tools, direct, routed-oracle (got ${JSON.stringify(armRaw)})`);
+  }
   let caseTimeoutS = DEFAULT_CASE_TIMEOUT_S;
   if (timeoutRaw !== undefined) {
     caseTimeoutS = Number(timeoutRaw);
