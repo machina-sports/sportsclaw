@@ -7,9 +7,17 @@ export interface SkillCapPlan {
   reason: string;
 }
 
-const BETTING_KW = ["bet", "bets", "odds", "line", "spread", "total", "over", "under", "market", "price", "edge", "kelly"];
+// Unambiguous betting vocabulary only. "line", "total", "over", "under", "price"
+// and "edge" also appear in plain stat questions ("total rushing yards", "won by
+// over 10", "edge rusher", "end with one line") and pulled ~50 market tools
+// into non-betting routes.
+const BETTING_KW = [
+  "bet", "bets", "betting", "wager", "odds", "moneyline", "point spread", "spread", "over/under", "o/u",
+  "parlay", "sportsbook", "prop bet", "player props", "market", "markets", "kelly", "vig", "implied probability",
+];
 const LIVE_KW = ["live", "right now", "winning", "quarter", "period", "inning"];
-const NEWS_KW = ["injury", "injuries", "out", "questionable", "news", "report"];
+// Not bare "out": it matched "figure out", "hold out", "shut out".
+const NEWS_KW = ["injury", "injuries", "injured", "ruled out", "out for", "questionable", "news", "report"];
 const MULTISPORT_KW = ["across sports", "what's happening", "whats happening", "everything", "all sports", "tonight across"];
 const RESEARCH_KW = ["audit", "deep dive", "analyze", "research", "compare", "breakdown"];
 
