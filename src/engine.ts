@@ -37,6 +37,7 @@ import {
   type EvidenceVerificationReceipt,
   type SkillRoutingMeta,
   type SamplingConfig,
+  type ToolProgressEvent,
 } from "./types.js";
 import {
   NO_FALLBACK_REASONS,
@@ -138,6 +139,12 @@ try {
 // ---------------------------------------------------------------------------
 // Token usage helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Max characters of a data tool's result handed back to the model (≈8k tokens).
+ * Applies to every arm that uses registry tools; benchmarks disclose it.
+ */
+export const TOOL_OUTPUT_CHAR_CAP = 30_000;
 
 /** Normalized token usage extracted from a generateText result. */
 export interface TokenUsage {
@@ -1538,8 +1545,7 @@ export class sportsclawEngine {
           }
 
           // Cap tool output to prevent context window overflow on follow-ups.
-          // 30 000 chars ≈ ~8 000 tokens — plenty for any single tool result.
-          const MAX_TOOL_CHARS = 30_000;
+          const MAX_TOOL_CHARS = TOOL_OUTPUT_CHAR_CAP;
           if (result.content.length > MAX_TOOL_CHARS) {
             const totalChars = result.content.length;
             return (
@@ -3608,6 +3614,90 @@ export class sportsclawEngine {
   /** Reset conversation history */
   reset(): void {
     this.messages = [];
+  }
+
+  /**
+   * Minimal generic tool loop for benchmark baselines: one model, a neutral
+   * system prompt, and either no tools (`skills: []`) or the registry data
+   * tools of the given skills. No routing, memory, verification, or evidence
+   * gate — that is what separates it from run(). Tools execute through the
+   * same registry dispatch and output cap as run(), so data access is equal.
+   */
+  async runDirect(
+    userPrompt: string,
+    options: {
+      skills: readonly string[];
+      systemPrompt?: string;
+      onProgress?: (event: ToolProgressEvent) => void;
+      abortSignal?: AbortSignal;
+    },
+  ): Promise<string> {
+    this._lastUsage = null;
+    this._lastRunTrace = null;
+    await this.initAsync();
+
+    const wanted = new Set(options.skills);
+    const registryTools = new Set(this.registry.getAllToolSpecs().map((spec) => spec.name));
+    const all = this.buildTools(undefined, new Map());
+    const tools: ToolSet = {};
+    for (const [name, def] of Object.entries(all)) {
+      const skill = this.registry.getSkillName(name);
+      if (registryTools.has(name) && skill && wanted.has(skill)) tools[name] = def;
+    }
+    const offered = Object.keys(tools).sort();
+
+    const system = [
+      "You answer sports questions.",
+      offered.length > 0
+        ? "Use the available tools to get the data you need. Base your answer only on tool results."
+        : "You have no tools. Answer from your own knowledge.",
+      "If the answer cannot be determined, say so instead of guessing.",
+      ...(options.systemPrompt ? [options.systemPrompt] : []),
+    ].join("\n");
+
+    let mainSystemPromptSha256: string | undefined;
+    const result = await generateText({
+      model: this.mainModel,
+      ...this.samplingOptions(),
+      system: (mainSystemPromptSha256 = sha256(system), system),
+      prompt: userPrompt,
+      ...(offered.length > 0 ? { tools, stopWhen: stepCountIs(this.config.maxTurns) } : {}),
+      abortSignal: options.abortSignal,
+      maxOutputTokens: this.config.tokenBudgets?.main ?? this.config.maxTokens,
+      ...(() => {
+        const opts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
+        return opts ? { providerOptions: opts } : {};
+      })(),
+      experimental_onToolCallStart: ({ toolCall }) => {
+        options.onProgress?.({
+          type: "tool_start",
+          toolName: toolCall.toolName,
+          toolCallId: toolCall.toolCallId,
+          skillName: this.registry.getSkillName(toolCall.toolName),
+        });
+      },
+      experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+        options.onProgress?.({
+          type: "tool_finish",
+          toolName: toolCall.toolName,
+          toolCallId: toolCall.toolCallId,
+          durationMs,
+          success,
+          skillName: this.registry.getSkillName(toolCall.toolName),
+        });
+      },
+    });
+
+    this._lastRunTrace = {
+      servedModelId: result.response?.modelId,
+      mainSystemPromptSha256,
+      offeredTools: offered,
+      toolSurfaceSha256: hashToolSurface(tools, offered),
+      providerWarnings: formatProviderWarnings(result.steps),
+      parallelAgents: false,
+    };
+    this._lastUsage = usageOf(result);
+    return result.text;
   }
 
   /** Get current message count (for compact eligibility checks) */
