@@ -128,9 +128,20 @@ function detectGuessedId(sport: string, input: Record<string, unknown>): string 
 
 
 
+/** US-sport skills whose season params take a plain year ("2025" or "2025-26"). */
+const PLAIN_YEAR_SEASON_SPORTS = new Set(["mlb", "nfl", "nba", "nhl", "wnba", "cfb", "cbb"]);
+
 /**
- * Sanitize bare year values to fully qualified ESPN / League slugs
- * (e.g., season_id="2026" -> "espn.mlb.2026")
+ * Normalize season arguments before dispatch.
+ *
+ * - US sports (mlb/nfl/nba/nhl/wnba/cfb/cbb): every sports-skills season param
+ *   takes a plain year. An ESPN-style slug a model may produce
+ *   ("espn.nba.2025") is reduced back to the year. (An earlier version rewrote
+ *   bare years *into* such slugs; ESPN, NBA stats, MLB Stats and nflverse all
+ *   reject that form, so every season-scoped call failed — found by the Sports
+ *   Agent Bench pilot.)
+ * - football: a bare year in `season_id` (which expects a slug) becomes
+ *   "premier-league-<year>". `season` / `season_year` are left alone.
  */
 export function sanitizeToolInput(toolName: string, input: ToolCallInput): void {
   let sport = "";
@@ -147,49 +158,22 @@ export function sanitizeToolInput(toolName: string, input: ToolCallInput): void 
     sport = sportMatch[1].toLowerCase();
   }
 
-  const seasonKeys = ["season", "season_id", "season_year"];
-  for (const key of seasonKeys) {
-    if (targetObj[key] !== undefined && targetObj[key] !== null) {
-      const originalValue = String(targetObj[key]).trim();
-      
-      const isBareYear = /^\d{4}$/.test(originalValue) || /^\d{4}-\d{2,4}$/.test(originalValue);
-      if (isBareYear) {
-        let mappedValue: string | null = null;
-        
-        switch (sport) {
-          case "mlb":
-            mappedValue = `espn.mlb.${originalValue}`;
-            break;
-          case "nfl":
-            mappedValue = `espn.nfl.${originalValue}`;
-            break;
-          case "nba":
-            mappedValue = `espn.nba.${originalValue}`;
-            break;
-          case "nhl":
-            mappedValue = `espn.nhl.${originalValue}`;
-            break;
-          case "wnba":
-            mappedValue = `espn.wnba.${originalValue}`;
-            break;
-          case "cfb":
-            mappedValue = `espn.cfb.${originalValue}`;
-            break;
-          case "cbb":
-            mappedValue = `espn.cbb.${originalValue}`;
-            break;
-          case "football":
-            if (/^\d{4}$/.test(originalValue)) {
-              mappedValue = `premier-league-${originalValue}`;
-            }
-            break;
-        }
+  for (const key of ["season", "season_id", "season_year"]) {
+    const raw = targetObj[key];
+    if (raw === undefined || raw === null) continue;
+    const originalValue = String(raw).trim();
+    let mappedValue: string | null = null;
 
-        if (mappedValue) {
-          console.error(`[sportsclaw] Sanitized bare year for ${toolName}: ${key}="${originalValue}" -> "${mappedValue}"`);
-          targetObj[key] = mappedValue;
-        }
-      }
+    if (PLAIN_YEAR_SEASON_SPORTS.has(sport)) {
+      const slug = originalValue.match(new RegExp(`^espn\\.${sport}\\.(\\d{4}(?:-\\d{2,4})?)$`, "i"));
+      if (slug) mappedValue = slug[1];
+    } else if (sport === "football" && key === "season_id" && /^\d{4}$/.test(originalValue)) {
+      mappedValue = `premier-league-${originalValue}`;
+    }
+
+    if (mappedValue !== null && mappedValue !== originalValue) {
+      console.error(`[sportsclaw] Normalized season for ${toolName}: ${key}="${originalValue}" -> "${mappedValue}"`);
+      targetObj[key] = mappedValue;
     }
   }
 }
