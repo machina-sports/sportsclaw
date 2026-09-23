@@ -636,6 +636,18 @@ function compactStructuredJson(raw: string): string {
  * incorrectly dropped the final venue from oversized worldcup-get-schedule
  * payloads (pretty JSON >4000 chars, compact <2500).
  */
+const EVIDENCE_TRUNCATION_MARKERS = ["\n...[truncated middle]...\n", "[... output truncated"];
+
+/**
+ * Whether an evidence snippet is only part of what the tool returned: cut by
+ * summarizeToolOutputForEvidence (middle dropped) or already capped by the
+ * tool wrapper before the model saw it. A fact missing from such a snippet is
+ * not evidence against a claim.
+ */
+export function isTruncatedEvidence(snippet: string): boolean {
+  return EVIDENCE_TRUNCATION_MARKERS.some((marker) => snippet.includes(marker));
+}
+
 export function summarizeToolOutputForEvidence(output: unknown, maxChars = 4_000): string {
   // Final verification needs document batches, not just their first/last fields.
   // Keep ordinary synthesis compact and bound the opt-in verification budget.
@@ -1097,14 +1109,14 @@ export class sportsclawEngine {
     }>,
     successfulToolCallIds: Set<string>,
     maxChars = 4_000
-  ): Array<{ toolName: string; output: string }> {
-    const out: Array<{ toolName: string; output: string }> = [];
+  ): Array<{ toolName: string; output: string; truncated: boolean }> {
+    const out: Array<{ toolName: string; output: string; truncated: boolean }> = [];
     for (const step of steps) {
       for (const result of step.toolResults ?? []) {
         if (!successfulToolCallIds.has(result.toolCallId)) continue;
         const output = this.summarizeToolOutput(result.output, maxChars);
         if (!output) continue;
-        out.push({ toolName: result.toolName, output });
+        out.push({ toolName: result.toolName, output, truncated: isTruncatedEvidence(output) });
       }
     }
     return out;
@@ -1181,7 +1193,7 @@ export class sportsclawEngine {
   private async validateResponseEvidence(params: {
     userPrompt: string;
     draft: string;
-    toolOutputs: Array<{ toolName: string; output: string }>;
+    toolOutputs: Array<{ toolName: string; output: string; truncated?: boolean }>;
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
     correctionAttempted?: boolean;
@@ -1206,13 +1218,29 @@ export class sportsclawEngine {
 
     // Only the wrapper label and tool names are private. Genuine publishers,
     // article URLs and observation times inside the evidence remain citable.
-    const serializedToolOutputs = toolOutputs
-      .slice(0, 10)
-      .map(
-        (item, idx) =>
-          `[Internal source ${idx + 1} — wrapper label is private; cite genuine publishers and URLs in the data below]\n${item.output}`
-      )
-      .join("\n\n");
+    const MAX_SOURCES = 10;
+    const shown = toolOutputs.slice(0, MAX_SOURCES);
+    const omittedSources = toolOutputs.length - shown.length;
+    const partialView = omittedSources > 0 || shown.some((item) => item.truncated ?? isTruncatedEvidence(item.output));
+    const serializedToolOutputs = [
+      ...shown.map((item, idx) => {
+        const partial = item.truncated ?? isTruncatedEvidence(item.output);
+        return (
+          `[Internal source ${idx + 1} — wrapper label is private; cite genuine publishers and URLs in the data below` +
+          (partial ? "; TRUNCATED: part of this output is omitted here" : "") +
+          `]\n${item.output}`
+        );
+      }),
+      ...(omittedSources > 0 ? [`[${omittedSources} further source(s) were fetched but are not shown here]`] : []),
+    ].join("\n\n");
+    // The drafter saw more than this checker does. Absence from a partial view
+    // is not a contradiction: flagging it replaced correct answers with
+    // "unavailable" (e.g. a season game log whose middle was omitted, #172).
+    const partialViewRule = partialView
+      ? "Some sources are marked TRUNCATED or were not shown, so you see only part of the data the draft was written from. " +
+        "A claim that is merely not visible in that partial data is NOT a discrepancy. " +
+        "Flag a claim only when the data you can see contradicts it.\n"
+      : "";
 
     let discrepanciesFound = false;
     type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string }> };
@@ -1291,6 +1319,7 @@ export class sportsclawEngine {
         ...this.samplingOptions(),
         system:
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
+          partialViewRule +
           "Only consider claims that are relevant to the user's request; ignore source data that is " +
           "unrelated to what the user asked.\n" +
           "Check numerical AND qualitative premises. Scores do not establish tactical containment, control, pressure or causation. " +
@@ -1330,7 +1359,7 @@ export class sportsclawEngine {
         const retryRes = await generateText({
           model: this.mainModel,
           ...this.samplingOptions(),
-          system: "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+          system: partialViewRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
           prompt: [
