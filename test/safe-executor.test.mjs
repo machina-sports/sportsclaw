@@ -7,12 +7,12 @@ describe("executeToolSafely", () => {
   it("returns ok with data on success and reports normalized args", async () => {
     const res = await executeToolSafely(
       "nba_get_standings",
-      { season: "2026" }, // bare year → sanitizeToolInput normalizes to espn.nba.2026
+      { season: "espn.nba.2026" }, // ESPN-style slug → sanitizeToolInput reduces it to the plain year
       async (_n, a) => ({ content: JSON.stringify({ season: a.season }) }),
     );
     assert.equal(res.ok, true);
     assert.equal(res.normalized, true);
-    assert.ok(String(res.data).includes("espn.nba.2026"));
+    assert.equal(JSON.parse(String(res.data)).season, "2026");
   });
 
   it("classifies a failing run into a structured failure", async () => {
@@ -27,17 +27,17 @@ describe("executeToolSafely", () => {
   });
 
   it("does not mutate caller's original args (deep copy isolation)", async () => {
-    const original = { sport: "nba", args: { season: "2026" } };
+    const original = { sport: "nba", args: { season: "espn.nba.2026" } };
     const res = await executeToolSafely(
       "sports_query",
       original,
       async (_n, a) => ({ content: JSON.stringify(a) }),
     );
     // Verify the caller's original is NOT mutated
-    assert.equal(original.args.season, "2026");
+    assert.equal(original.args.season, "espn.nba.2026");
     // Verify the copy WAS normalized
     assert.equal(res.normalized, true);
-    assert.ok(String(res.data).includes("espn.nba.2026"));
+    assert.equal(JSON.parse(String(res.data)).args.season, "2026");
   });
 
   it("catches thrown exceptions and classifies them", async () => {
