@@ -121,6 +121,14 @@ import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";
 import { getSportDisplayName } from "./buttons.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
+import {
+  buildResultOverview,
+  hasQueryableRows,
+  QUERY_TOOL_RESULT_TOOL,
+  queryToolResult,
+  TOOL_OUTPUT_TRUNCATED_MARKER,
+  ToolResultStore,
+} from "./tool-results.js";
 
 // ---------------------------------------------------------------------------
 // Package version (read once at import time)
@@ -151,8 +159,91 @@ export const REPEATED_CALL_NOTE =
   "[Repeated call: this exact tool call already ran in this turn, so this is the same result again. " +
   "Answer from it, or call with different arguments (e.g. narrower filters) if you need other data.]\n";
 
-/** Prefix of the notice appended to a data tool's output cut at TOOL_OUTPUT_CHAR_CAP. */
-const TOOL_OUTPUT_TRUNCATED_MARKER = "[... output truncated";
+/**
+ * A data tool's result over TOOL_OUTPUT_CHAR_CAP that parses as JSON with rows:
+ * stored in `store`, and the model gets an overview (marker, result_id, shape,
+ * first rows). Undefined when it is not JSON, has no array, or is too big to
+ * store; the caller then falls back to the head slice.
+ */
+function storeOversizedJson(store: ToolResultStore, toolName: string, content: string): string | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (!hasQueryableRows(value)) return undefined;
+  const id = store.put(toolName, value, content.length);
+  if (id === undefined) return undefined;
+  return (
+    `${TOOL_OUTPUT_TRUNCATED_MARKER}: this result is ${content.length.toLocaleString()} chars, over the ` +
+    `${TOOL_OUTPUT_CHAR_CAP.toLocaleString()}-char limit, so only an overview is shown. The full result is stored ` +
+    `for this turn as result_id "${id}". Call ${QUERY_TOOL_RESULT_TOOL} with result_id "${id}" to filter, sort, ` +
+    `or aggregate its rows instead of calling this tool again.]\n` +
+    buildResultOverview(id, value, content.length)
+  );
+}
+
+const QUERY_TOOL_RESULT_DESCRIPTION =
+  "Query a large data-tool result that was too big to show. When a tool output says it was truncated and gives " +
+  "a result_id, call this with that result_id to get exactly the rows you need: filter with where, order with " +
+  "sort_by/descending, cap with limit, keep columns with fields, or compute count/sum/mean/min/max (optionally " +
+  "group_by). Comparisons are numeric when both sides are numbers. Results exist only for the current turn.";
+
+const SCALAR_VALUE_SCHEMA = { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] };
+
+const QUERY_TOOL_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    result_id: { type: "string", description: "The result_id from the truncated tool output, e.g. \"r1\"." },
+    path: {
+      type: "string",
+      description: "Dot path of the array to query (from the overview's arrays list). Default: the largest array.",
+    },
+    where: {
+      type: "array",
+      description: "Row filters, all must match.",
+      items: {
+        type: "object",
+        properties: {
+          field: { type: "string", description: "Column name; dots read nested fields, e.g. \"stats.yards\"." },
+          op: { type: "string", enum: ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"] },
+          value: {
+            anyOf: [...SCALAR_VALUE_SCHEMA.anyOf, { type: "array", items: SCALAR_VALUE_SCHEMA }],
+            description: "Value to compare with; an array for op \"in\".",
+          },
+        },
+        required: ["field", "op", "value"],
+      },
+    },
+    sort_by: { type: "string", description: "Column to sort by. Missing values sort last." },
+    descending: { type: "boolean", description: "Sort order. Default true (largest first)." },
+    limit: { type: "number", description: "Max rows or groups returned. Default 20, max 200." },
+    fields: { type: "array", items: { type: "string" }, description: "Columns to keep in returned rows." },
+    aggregate: {
+      type: "object",
+      description: "Compute instead of listing rows. Groups are sorted by value (descending unless descending=false).",
+      properties: {
+        op: { type: "string", enum: ["count", "sum", "mean", "min", "max"] },
+        field: { type: "string", description: "Numeric column (not needed for count)." },
+        group_by: { type: "string", description: "Column to group by." },
+      },
+      required: ["op"],
+    },
+  },
+  required: ["result_id"],
+};
+
+/**
+ * Data tool names plus query_tool_result when it is available and there is at
+ * least one data tool, sorted. Every data-tool surface (bench allowlists,
+ * baseline arms) carries it: without it, an oversized result is unreachable.
+ */
+function withResultQueryTool(names: readonly string[], queryToolAvailable: boolean): string[] {
+  const out = names.filter((name) => name !== QUERY_TOOL_RESULT_TOOL);
+  if (queryToolAvailable && out.length > 0) out.push(QUERY_TOOL_RESULT_TOOL);
+  return out.sort();
+}
 
 /** Trace fields for a tool_finish progress event, from the AI SDK tool-call-finish event. */
 function toolFinishDetails(event: {
@@ -790,24 +881,27 @@ export class sportsclawEngine {
 
   /**
    * Names of data tools only: installed sport schemas plus MCP tools, i.e. the
-   * registry's tools, without the engine's built-in side-effecting tools.
+   * registry's tools, without the engine's built-in side-effecting tools, plus
+   * query_tool_result (read-only; the only way to reach an oversized result).
    */
   listDataToolNames(): string[] {
     const available = new Set(Object.keys(this.buildTools()));
-    return this.registry
+    const names = this.registry
       .getAllToolSpecs()
       .map((spec) => spec.name)
-      .filter((name) => available.has(name))
-      .sort();
+      .filter((name) => available.has(name));
+    return withResultQueryTool(names, available.has(QUERY_TOOL_RESULT_TOOL));
   }
 
-  /** Registry data tools that belong to the given skills (sorted). */
+  /** Registry data tools that belong to the given skills, plus query_tool_result when there are any (sorted). */
   dataToolNamesForSkills(skills: readonly string[]): string[] {
     const wanted = new Set(skills);
-    return this.listDataToolNames().filter((name) => {
+    const all = this.listDataToolNames();
+    const names = all.filter((name) => {
       const skill = this.registry.getSkillName(name);
       return skill !== undefined && wanted.has(skill);
     });
+    return withResultQueryTool(names, all.includes(QUERY_TOOL_RESULT_TOOL));
   }
 
   /** Replace the tool allowlist (`null` removes it). Applies from the next run(). */
@@ -1521,6 +1615,9 @@ export class sportsclawEngine {
     const config = this.config;
     const registry = this.registry;
     const verbose = this.config.verbose;
+    // Oversized JSON results of this buildTools() call (one per turn in run()
+    // and runDirect()), queryable through query_tool_result (#176).
+    const resultStore = new ToolResultStore();
 
     // Interactive approval prompting is only safe on an interactive CLI terminal.
     // Everywhere else (operator daemon, piped input, Discord/Telegram) the gate
@@ -1626,6 +1723,13 @@ export class sportsclawEngine {
           const MAX_TOOL_CHARS = TOOL_OUTPUT_CHAR_CAP;
           if (result.content.length > MAX_TOOL_CHARS) {
             const totalChars = result.content.length;
+            // JSON with rows: keep it whole harness-side and show an overview
+            // the model can follow up on with query_tool_result (#176).
+            const overview = storeOversizedJson(resultStore, spec.name, result.content);
+            if (overview !== undefined) {
+              succeededToolResultsThisTurn?.set(signature, overview);
+              return overview;
+            }
             const capped = (
               result.content.slice(0, MAX_TOOL_CHARS) +
               `\n\n${TOOL_OUTPUT_TRUNCATED_MARKER}: showing ${MAX_TOOL_CHARS.toLocaleString()} of ${totalChars.toLocaleString()} chars. ` +
@@ -1637,6 +1741,15 @@ export class sportsclawEngine {
           succeededToolResultsThisTurn?.set(signature, result.content);
           return result.content;
         },
+      });
+    }
+
+    // Query an oversized result stored above. Offered whenever a registry tool is.
+    if (registry.getAllToolSpecs().length > 0) {
+      toolMap[QUERY_TOOL_RESULT_TOOL] = defineTool({
+        description: QUERY_TOOL_RESULT_DESCRIPTION,
+        inputSchema: jsonSchema(QUERY_TOOL_RESULT_SCHEMA),
+        execute: async (args: Record<string, unknown>) => queryToolResult(resultStore, args, TOOL_OUTPUT_CHAR_CAP),
       });
     }
 
@@ -3725,6 +3838,9 @@ export class sportsclawEngine {
       const skill = this.registry.getSkillName(name);
       if (registryTools.has(name) && skill && wanted.has(skill)) tools[name] = def;
     }
+    // Data tools' oversized results are only reachable through query_tool_result.
+    const queryTool = all[QUERY_TOOL_RESULT_TOOL];
+    if (queryTool && Object.keys(tools).length > 0) tools[QUERY_TOOL_RESULT_TOOL] = queryTool;
     const offered = Object.keys(tools).sort();
 
     const system = [
