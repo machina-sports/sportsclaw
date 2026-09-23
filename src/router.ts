@@ -12,6 +12,7 @@ import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
 import { samplingCallOptions } from "./run-manifest.js";
 import type { AgentDef } from "./agents.js";
 import { planSkillCaps } from "./routing/complexity.js";
+import { TEAM_ALIASES } from "./routing/team-aliases.js";
 import { resolveSkillRoutingSettings, routeSkillsWithJev } from "./routing/skill-routing.js";
 
 type ModelType = Parameters<typeof generateText>[0]["model"];
@@ -65,7 +66,7 @@ const TOOL_TOKEN_STOP_WORDS = new Set([
   "all",
 ]);
 
-const SKILL_ALIASES: Record<string, string[]> = {
+const BASE_SKILL_ALIASES: Record<string, string[]> = {
   football: [
     "soccer",
     "premier league",
@@ -80,6 +81,11 @@ const SKILL_ALIASES: Record<string, string[]> = {
   cfb: ["college football", "ncaaf"],
   cbb: ["college basketball", "march madness", "ncaab"],
 };
+
+const SKILL_ALIASES: Record<string, string[]> = { ...BASE_SKILL_ALIASES };
+for (const [skill, teams] of Object.entries(TEAM_ALIASES)) {
+  SKILL_ALIASES[skill] = [...(SKILL_ALIASES[skill] ?? []), ...teams];
+}
 
 /** MCP/pod intent patterns — matches queries targeting pod entities, not sports.
  *  Patterns use word boundaries and require MCP-specific entity nouns to avoid
