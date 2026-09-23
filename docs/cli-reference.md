@@ -106,6 +106,8 @@ Dataset lines: `{"id": "nba-001", "prompt": "…", "system_prompt": "optional", 
 
 Every arm uses the same sampling pins, turn and token budgets, case timeout, and 30,000-character tool-output cap, and each has its own `config_sha256`.
 
+A data-tool result over the cap that is JSON with rows is not cut: the model gets an overview (result id, arrays with row counts and columns, first rows) and queries the full result with `query_tool_result` (filter, sort, limit, fields, aggregate). Results live for the current turn only. `query_tool_result` is part of every data-tool surface (the default `routed` allowlist, `raw-tools`, `routed-oracle`) whenever at least one data tool is offered; `direct` has no tools, so no query tool. Non-JSON output over the cap is still cut at 30,000 characters.
+
 **Tool surface.** By default the routed arm offers only data tools (installed sport schemas and MCP tools), never the built-in side-effecting tools. Account and order tools (`polymarket-trading`) are always excluded. Without installed sports this falls back to the generic `sports_query` tool, and the runner warns. Run `sportsclaw init --all` first, or pin the surface with `--tools`. Bench runs never enable trading or `--yolo`.
 
 **Isolation.** Each case starts from an empty conversation, with no user id and therefore no memory.
