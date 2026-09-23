@@ -841,6 +841,7 @@ def _build_env(body: dict | None = None) -> dict[str, str]:
                 "openai": "OPENAI_API_KEY",
                 "google": "GOOGLE_GENERATIVE_AI_API_KEY",
                 "azure-foundry": "AZURE_FOUNDRY_API_KEY",
+                "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
             }
             env_var = key_map.get(provider)
             if env_var is None:

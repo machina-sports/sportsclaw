@@ -67,6 +67,23 @@ export OPENAI_BASE_URL=https://inference.local/v1
 
 For sandboxed, policy-routed inference, see [NVIDIA OpenShell](../deployment/openshell).
 
+### OpenAI-compatible servers (`openai-compatible` provider)
+
+For open-weight and self-hosted models (NVIDIA NIM, vLLM, SGLang, Ollama, LM Studio, Groq, Cerebras, Together, Fireworks, OpenRouter), use the dedicated `openai-compatible` provider. It has its own env vars, so it never touches a real `OPENAI_API_KEY` or `OPENAI_BASE_URL`, and it always calls `POST {base}/chat/completions`.
+
+```bash
+export SPORTSCLAW_PROVIDER=openai-compatible
+export OPENAI_COMPATIBLE_BASE_URL=http://localhost:8000/v1   # required
+export OPENAI_COMPATIBLE_API_KEY=<key>                       # optional; local servers often need none
+export SPORTSCLAW_MODEL=meta/llama-3.3-70b-instruct          # required: the id your server serves
+```
+
+- There is no default model: model ids are server-defined.
+- No reasoning options are sent (they are not portable across servers), so the thinking budget has no effect.
+- The base URL must not embed credentials, a query string, or a fragment.
+- Run manifests record the endpoint host as `endpoint_host`, so runs against different servers never share a `config_sha256`. The same applies to `openai` pointed at a custom `OPENAI_BASE_URL`.
+- Not available under OpenShell.
+
 ### Azure Foundry (first-class provider)
 
 The `OPENAI_BASE_URL` trick above works, but the dedicated **`azure-foundry`** provider is the

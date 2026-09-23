@@ -10,7 +10,7 @@ import type { ModelMessage } from "ai";
 // Supported LLM providers
 // ---------------------------------------------------------------------------
 
-export type LLMProvider = "anthropic" | "openai" | "google" | "azure-foundry";
+export type LLMProvider = "anthropic" | "openai" | "google" | "azure-foundry" | "openai-compatible";
 
 // ---------------------------------------------------------------------------
 // Azure Foundry (Microsoft Foundry / Azure OpenAI) — provider modes
@@ -233,6 +233,13 @@ export const PROVIDER_MODEL_PROFILES: Record<LLMProvider, ProviderModelProfile> 
       },
     ],
   },
+  "openai-compatible": {
+    // Any OpenAI Chat Completions server (NIM, vLLM, Ollama, Groq, ...). Model
+    // ids are server-defined, so there is no default: SPORTSCLAW_MODEL must be
+    // set. See `openai-compatible.ts`.
+    defaultModel: "",
+    selectableModels: [],
+  },
 };
 
 export const DEFAULT_MODELS: Record<LLMProvider, string> = {
@@ -240,6 +247,7 @@ export const DEFAULT_MODELS: Record<LLMProvider, string> = {
   openai: PROVIDER_MODEL_PROFILES.openai.defaultModel,
   google: PROVIDER_MODEL_PROFILES.google.defaultModel,
   "azure-foundry": PROVIDER_MODEL_PROFILES["azure-foundry"].defaultModel,
+  "openai-compatible": PROVIDER_MODEL_PROFILES["openai-compatible"].defaultModel,
 };
 
 // ---------------------------------------------------------------------------
@@ -587,6 +595,10 @@ export function buildProviderOptions(
       const effort = budget <= 4096 ? "low" : budget <= 16384 ? "medium" : "high";
       return { openai: { reasoningEffort: effort } };
     }
+    case "openai-compatible":
+      // Reasoning controls are not portable across compatible servers, so none
+      // are sent; the thinking budget has no effect for this provider.
+      return undefined;
     default:
       return undefined;
   }

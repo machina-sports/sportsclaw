@@ -624,6 +624,7 @@ function applyOpenShellEnv(
       break;
     case "google":
     case "azure-foundry":
+    case "openai-compatible":
       // Never reached — config validator + resolveOpenShell both reject.
       break;
   }
@@ -775,6 +776,9 @@ function defaultModelFor(provider: LLMProvider): string {
       return "gemini-2.5-flash";
     case "azure-foundry":
       return "gpt-5.2";
+    case "openai-compatible":
+      // Server-defined model ids; the job config must name one.
+      return "";
   }
 }
 
