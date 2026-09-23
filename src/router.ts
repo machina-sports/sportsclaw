@@ -3,11 +3,13 @@ import type {
   LLMProvider,
   RouteDecision,
   RouteOutcome,
+  SamplingConfig,
   SkillRoutingConfig,
   ToolSpec,
   sportsclawConfig,
 } from "./types.js";
 import { buildProviderOptions, DEFAULT_TOKEN_BUDGETS } from "./types.js";
+import { samplingCallOptions } from "./run-manifest.js";
 import type { AgentDef } from "./agents.js";
 import { planSkillCaps } from "./routing/complexity.js";
 import { resolveSkillRoutingSettings, routeSkillsWithJev } from "./routing/skill-routing.js";
@@ -30,6 +32,8 @@ interface RouteInput {
   > & {
     /** Opt-in decision routing. Omitted keeps the generative router. */
     routing?: SkillRoutingConfig;
+    /** Sampling pins for the LLM router call. Omitted sends none. */
+    sampling?: SamplingConfig;
   };
 }
 
@@ -274,6 +278,7 @@ async function runLlmRouter(
   try {
     const result = await generateText({
       model,
+      ...samplingCallOptions(input.config.sampling ?? {}),
       system: [
         "You route sports queries to tool skill domains.",
         "Return STRICT JSON only. No markdown, no prose.",

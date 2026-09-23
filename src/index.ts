@@ -55,6 +55,7 @@ import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
 import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
+import { buildRunManifest, readSportsSkillsVersion, takeSamplingArgs } from "./run-manifest.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
   fetchSportSchema,
@@ -2353,6 +2354,20 @@ async function cmdQuery(args: string[]): Promise<void> {
     args.splice(systemPromptIdx, 2);
   }
 
+  // Sampling pins (--temperature, --seed); invalid values fail before any call.
+  let sampling;
+  try {
+    sampling = takeSamplingArgs(args);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (forceJson || forcePipe || !process.stdout.isTTY) {
+      emitNdjson({ type: "error", error: msg });
+    } else {
+      console.error(`Error: ${msg}`);
+    }
+    process.exit(1);
+  }
+
   const agentIds: string[] = [];
   while (args.includes("--agent")) {
     const agentIdx = args.indexOf("--agent");
@@ -2406,6 +2421,7 @@ async function cmdQuery(args: string[]): Promise<void> {
     verbose,
     allowTrading: true,
     yoloMode,
+    sampling,
   });
 
   // Headless NDJSON streaming: --json flag, --pipe flag, or non-TTY stdout.
@@ -2414,6 +2430,25 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   if (headlessMode) {
     emitNdjson({ type: "start", timestamp: new Date().toISOString(), yolo: yoloMode });
+    const sportsSkillsVersion = readSportsSkillsVersion(resolved.pythonPath);
+    const emitManifest = async () => {
+      const cfg = engine.manifestConfig;
+      emitNdjson({
+        type: "manifest",
+        ...buildRunManifest({
+          sportsclawVersion: engine.packageVersion,
+          sportsSkillsVersion: await sportsSkillsVersion,
+          provider: cfg.provider,
+          model: engine.modelId,
+          sampling: cfg.sampling,
+          maxOutputTokens: cfg.maxOutputTokens,
+          maxTurns: cfg.maxTurns,
+          thinkingBudget: cfg.thinkingBudget,
+          callerSystemPrompt: systemPrompt,
+          trace: engine.lastRunTrace,
+        }),
+      });
+    };
     try {
       let inboundImages: any[] | undefined;
       if (process.env.SPORTSCLAW_INBOUND_IMAGES) {
@@ -2439,6 +2474,7 @@ async function cmdQuery(args: string[]): Promise<void> {
       for (const vid of engine.generatedVideos) {
         emitNdjson({ type: "video", data: vid.data, mimeType: vid.mimeType, prompt: vid.prompt });
       }
+      await emitManifest();
       emitNdjson({ type: "result", text: formatted.text });
       // Wait for stdout to drain before exiting — process.stdout.write() to
       // a pipe is async and process.exit() would truncate unflushed data
@@ -2453,6 +2489,11 @@ async function cmdQuery(args: string[]): Promise<void> {
       process.exit(0);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
+      try {
+        await emitManifest();
+      } catch {
+        // the error line below is what matters
+      }
       emitNdjson({ type: "error", error: msg });
       process.exit(1);
     }
@@ -3006,6 +3047,8 @@ function printHelp(): void {
   console.log("  --json           Force headless NDJSON output (no spinners/clack)");
   console.log("  --pipe           Alias for --json (legacy)");
   console.log("  --agent <id>     Select exactly one active native agent");
+  console.log("  --temperature <n> Pin sampling temperature (0-2) for every model call");
+  console.log("  --seed <n>       Pin the sampling seed where the provider supports one");
   console.log("  --help, -h       Show this help message");
   console.log("");
   console.log("Configuration:");

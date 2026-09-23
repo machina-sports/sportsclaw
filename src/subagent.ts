@@ -21,6 +21,7 @@
  */
 
 import { generateText, tool as defineTool, jsonSchema, stepCountIs, type ToolSet } from "ai";
+import { samplingCallOptions } from "./run-manifest.js";
 import type { sportsclawConfig, LLMProvider } from "./types.js";
 import { buildProviderOptions, DEFAULT_CONFIG } from "./types.js";
 import { ToolRegistry, type ToolCallInput } from "./tools.js";
@@ -294,6 +295,7 @@ export class SubagentManager {
             params.config.routingAllowSpillover ?? DEFAULT_CONFIG.routingAllowSpillover,
           thinkingBudget: params.thinkingBudget ?? DEFAULT_CONFIG.thinkingBudget,
           tokenBudgets: params.config.tokenBudgets ?? DEFAULT_CONFIG.tokenBudgets,
+          sampling: params.config.sampling,
         },
       });
       const activeTools = resolveSubagentActiveTools({
@@ -311,6 +313,7 @@ export class SubagentManager {
 
       const result = await generateText({
         model: params.model as Parameters<typeof generateText>[0]["model"],
+        ...samplingCallOptions(params.config.sampling ?? {}),
         system: systemPrompt,
         prompt: task.prompt,
         tools,

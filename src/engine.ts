@@ -36,6 +36,7 @@ import {
   type TokenBudgets,
   type EvidenceVerificationReceipt,
   type SkillRoutingMeta,
+  type SamplingConfig,
 } from "./types.js";
 import {
   NO_FALLBACK_REASONS,
@@ -44,6 +45,14 @@ import {
   resolveEvidenceVerifierSettings,
   runJevDecision,
 } from "./evidence-verifier.js";
+import {
+  formatProviderWarnings,
+  hashToolSurface,
+  samplingCallOptions,
+  sha256,
+  validateSampling,
+  type RunTrace,
+} from "./run-manifest.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { DurableStateStore } from "./durability.js";
 import { execFile } from "node:child_process";
@@ -676,10 +685,53 @@ export class sportsclawEngine {
   private _loggedMemoryBackend?: string;
   private _lastUsage: TokenUsage | null = null;
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
+  private _lastRunTrace: RunTrace | null = null;
 
   /** Sanitized evidence-verification receipts from the last run(). */
   get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
     return [...(this._evidenceReceipts ?? [])];
+  }
+
+  /**
+   * What the last run() observed: served model, main system prompt hash, tools
+   * offered, provider warnings. Null before the first run or when run() exited
+   * before the main loop (e.g. a routing refusal). See `run-manifest.ts`.
+   */
+  get lastRunTrace(): RunTrace | null {
+    return this._lastRunTrace
+      ? {
+          ...this._lastRunTrace,
+          offeredTools: [...this._lastRunTrace.offeredTools],
+          providerWarnings: [...this._lastRunTrace.providerWarnings],
+        }
+      : null;
+  }
+
+  /** Resolved main model id. */
+  get modelId(): string {
+    return this.mainModelId;
+  }
+
+  /** The configuration fields a run manifest records. */
+  get manifestConfig(): {
+    provider: LLMProvider;
+    sampling: SamplingConfig;
+    maxOutputTokens: number;
+    maxTurns: number;
+    thinkingBudget: number;
+  } {
+    return {
+      provider: this.config.provider,
+      sampling: { ...(this.config.sampling ?? {}) },
+      maxOutputTokens: this.config.tokenBudgets?.main ?? this.config.maxTokens,
+      maxTurns: this.config.maxTurns,
+      thinkingBudget: this.config.thinkingBudget,
+    };
+  }
+
+  /** sportsclaw package version. */
+  get packageVersion(): string {
+    return _packageVersion;
   }
 
   /** Images produced by the generate_image tool during the last run. */
@@ -705,6 +757,7 @@ export class sportsclawEngine {
       merged.model = DEFAULT_MODELS[merged.provider] ?? DEFAULT_CONFIG.model;
     }
 
+    merged.sampling = validateSampling(merged.sampling);
     this.config = merged;
     this.mainModel = resolveModel(
       this.config.provider,
@@ -874,6 +927,7 @@ export class sportsclawEngine {
         thinkingBudget: this.config.thinkingBudget,
         tokenBudgets: this.config.tokenBudgets,
         routing: this.config.routing,
+        sampling: this.config.sampling,
       },
     });
     const decision = routed.decision;
@@ -909,6 +963,7 @@ export class sportsclawEngine {
     try {
       const res = await generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         system:
           "You are an evidence gate for a consumer sports chat. Remove or rewrite any claim " +
           "that depends on failed tools. Keep only claims supportable by successful tools or the draft's successful data. " +
@@ -1050,6 +1105,7 @@ export class sportsclawEngine {
     try {
       const res = await generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         system: [
           "You are a sports answer synthesizer.",
           "Use only the provided tool outputs.",
@@ -1197,6 +1253,7 @@ export class sportsclawEngine {
       // Step 1: LLM-driven verification pass to detect conflicts
       const validationRes = await generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         system:
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           "Only consider claims that are relevant to the user's request; ignore source data that is " +
@@ -1237,6 +1294,7 @@ export class sportsclawEngine {
       if (!parsed) {
         const retryRes = await generateText({
           model: this.mainModel,
+          ...this.samplingOptions(),
           system: "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
@@ -1305,6 +1363,7 @@ export class sportsclawEngine {
     try {
       const correctionRes = await generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         system:
           "You are an expert sports editor. Rewrite the draft response so it stays focused on the " +
           "user's request and correct any factual inaccuracies, mismatched scores, or unsupported claims. " +
@@ -2509,6 +2568,7 @@ export class sportsclawEngine {
           const summarize = async (content: string, existing: string): Promise<string> => {
             const res = await generateText({
               model,
+              ...this.samplingOptions(),
               system: [
                 "You are a memory consolidation agent for a sports AI assistant.",
                 "Your job is to compress old conversation logs into concise,",
@@ -3579,6 +3639,7 @@ export class sportsclawEngine {
     try {
       const result = await generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         system:
           "Summarize the following conversation history into a concise context " +
           "block (3-5 bullet points). Preserve key facts: teams discussed, scores " +
@@ -3621,11 +3682,17 @@ export class sportsclawEngine {
    * @param options     Optional run options (userId for memory isolation)
    * @returns The final assistant text.
    */
+  /** Sampling pins to spread into every generateText call (empty when unset). */
+  private samplingOptions(): { temperature?: number; seed?: number } {
+    return samplingCallOptions(this.config.sampling ?? {});
+  }
+
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
     this._evidenceReceipts = [];
+    this._lastRunTrace = null;
 
     this.agents = listAgents({ includeInactive: true });
     const explicitAgents = options?.agentIds
@@ -4124,6 +4191,7 @@ export class sportsclawEngine {
 
         return generateText({
           model: this.mainModel,
+          ...this.samplingOptions(),
           system: this.buildSystemPrompt({
             hasMemory: !!memory,
             userPrompt: sanitizedPrompt,
@@ -4168,6 +4236,16 @@ export class sportsclawEngine {
       });
 
       const laneResults = await Promise.all(lanePromises);
+      {
+        const offered = activeTools ?? Object.keys(tools);
+        this._lastRunTrace = {
+          servedModelId: laneResults.find((lane) => lane.response?.modelId)?.response?.modelId,
+          offeredTools: [...new Set(offered)].sort(),
+          toolSurfaceSha256: hashToolSurface(tools, offered),
+          providerWarnings: formatProviderWarnings(laneResults.flatMap((lane) => lane.steps ?? [])),
+          parallelAgents: true,
+        };
+      }
       this._lastUsage = laneResults
         .map(usageOf)
         .reduce(addUsage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
@@ -4195,6 +4273,7 @@ export class sportsclawEngine {
         try {
           const synthesisResult = await generateText({
             model: this.mainModel,
+            ...this.samplingOptions(),
             system:
               "You are a sports answer synthesizer. Combine the following agent responses into one coherent, " +
               "concise answer. Remove duplicates, merge data, and present a unified response. " +
@@ -4265,12 +4344,18 @@ export class sportsclawEngine {
       return responseText;
     }
 
+    let mainSystemPromptSha256: string | undefined;
+    const recordSystemPrompt = (system: string): string => {
+      mainSystemPromptSha256 = sha256(system);
+      return system;
+    };
     const callLLM = (messagesOverride?: Message[]) =>
       generateText({
         model: this.mainModel,
+        ...this.samplingOptions(),
         // Composed fresh on each call so per-turn context (user prompt,
         // routed skills, intent, recent conversation) is injected every time.
-        system: this.buildSystemPrompt({
+        system: recordSystemPrompt(this.buildSystemPrompt({
           hasMemory: !!memory,
           userPrompt: sanitizedPrompt,
           selectedSkills: routing.decision?.selectedSkills ?? [],
@@ -4279,7 +4364,7 @@ export class sportsclawEngine {
           agents: activeAgents.length > 0 ? activeAgents : undefined,
           strategyContent,
           callerSystemPrompt: options?.systemPrompt,
-        }),
+        })),
         messages: messagesOverride ?? this.messages,
         tools,
         ...(activeTools ? { activeTools } : {}),
@@ -4422,6 +4507,18 @@ export class sportsclawEngine {
       } catch {
         // keep the original result path
       }
+    }
+
+    {
+      const offered = activeTools ?? Object.keys(tools);
+      this._lastRunTrace = {
+        servedModelId: result.response?.modelId,
+        mainSystemPromptSha256,
+        offeredTools: [...new Set(offered)].sort(),
+        toolSurfaceSha256: hashToolSurface(tools, offered),
+        providerWarnings: formatProviderWarnings(result.steps),
+        parallelAgents: false,
+      };
     }
 
     this._lastUsage = usageOf(result);

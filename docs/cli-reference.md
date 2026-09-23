@@ -57,4 +57,22 @@ Every `sportsclaw` command, grouped by what you'll reach for most.
 | `--verbose`, `-v` | Show detailed logs |
 | `--json` | Emit structured NDJSON (for scripting) |
 | `--yolo` | Skip approval prompts |
+| `--temperature <n>` | Pin sampling temperature (0–2) on every model call of a query |
+| `--seed <n>` | Pin the sampling seed (integer) where the provider supports one |
 | `--help`, `-h` | Show help |
+
+## Reproducible runs
+
+`--temperature` and `--seed` are applied to every model call in a query: skill routing, the main loop, validation/correction passes, and subagents. Without them, nothing is sent and provider defaults apply.
+
+With `--json`, a `manifest` line is emitted before the `result` (and before an `error`):
+
+```json
+{"type":"manifest","manifest_version":1,"config_sha256":"…","config":{"sportsclaw_version":"0.29.4","sports_skills_version":"0.33.0","provider":"openai","model":"gpt-4o-mini","sampling":{"temperature":0,"seed":7},"max_output_tokens":16384,"max_turns":25,"thinking_budget":8192,"caller_system_prompt_sha256":null,"replay_mode":"off"},"run":{"served_model_id":"…","main_system_prompt_sha256":"…","offered_tools":["…"],"tool_surface_sha256":"…","provider_warnings":[],"parallel_agents":false}}
+```
+
+- `config` holds what is fixed before the run. `config_sha256` hashes exactly this block, so equal hashes mean comparable configurations.
+- `run` holds what was observed. The main system prompt carries per-query context and the date, so its hash is reported but kept out of `config_sha256`. `run` is `null` if the query ended before the main loop.
+- The manifest contains hashes and names only, never prompt text or credentials.
+- Providers may ignore a pin, and `provider_warnings` records it when they do. Anthropic has no seed, and it ignores temperature while extended thinking is on; set the thinking budget to 0 for pinned Claude runs.
+- `replay_mode` reflects `SPORTS_SKILLS_REPLAY` (see sports-skills record/replay).
