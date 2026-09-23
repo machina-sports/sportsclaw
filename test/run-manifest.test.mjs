@@ -141,6 +141,7 @@ test("run trace is reported but excluded from config_sha256", () => {
     provider_warnings: ["unsupported seed"],
     parallel_agents: false,
     routed_skills: null,
+    pass_tokens: null,
   });
 });
 

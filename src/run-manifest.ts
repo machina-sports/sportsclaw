@@ -144,6 +144,8 @@ export interface RunTrace {
   parallelAgents: boolean;
   /** Skills the router selected for this prompt, sorted. Absent when the run was not routed. */
   routedSkills?: string[];
+  /** Total tokens per model pass in this run (router, main, verification, ...). */
+  passTokens?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +191,7 @@ export interface RunManifest {
     provider_warnings: string[];
     parallel_agents: boolean;
     routed_skills: string[] | null;
+    pass_tokens: Record<string, number> | null;
   } | null;
 }
 
@@ -257,6 +260,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
           provider_warnings: [...trace.providerWarnings],
           parallel_agents: trace.parallelAgents,
           routed_skills: trace.routedSkills ? [...trace.routedSkills] : null,
+          pass_tokens: trace.passTokens ? { ...trace.passTokens } : null,
         }
       : null,
   };

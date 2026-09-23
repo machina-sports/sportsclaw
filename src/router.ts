@@ -42,6 +42,7 @@ interface LlmRouteAttempt {
   decision: Partial<RouteDecision> | null;
   durationMs: number;
   succeeded: boolean;
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 }
 
 const HELPER_SKILLS = new Set(["news", "kalshi", "polymarket", "betting", "markets"]);
@@ -312,10 +313,14 @@ async function runLlmRouter(
       })(),
     });
     const parsed = parseRouterJson(result.text ?? "");
+    const u = result.totalUsage ?? result.usage;
+    const inputTokens = u?.inputTokens ?? 0;
+    const outputTokens = u?.outputTokens ?? 0;
     return {
       decision: parsed,
       durationMs: Date.now() - startedAt,
       succeeded: Boolean(parsed),
+      usage: { inputTokens, outputTokens, totalTokens: u?.totalTokens ?? inputTokens + outputTokens },
     };
   } catch {
     return {
@@ -564,6 +569,7 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       llmAttempted: true,
       llmSucceeded,
       llmDurationMs,
+      ...(primaryAttempt.usage ? { llmUsage: primaryAttempt.usage } : {}),
     },
   };
 }
