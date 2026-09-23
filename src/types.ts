@@ -710,7 +710,22 @@ export interface GeneratedVideo {
 export type ToolProgressEvent =
   | { type: "phase"; label: string }
   | { type: "tool_start"; toolName: string; toolCallId: string; skillName?: string }
-  | { type: "tool_finish"; toolName: string; toolCallId: string; durationMs: number; success: boolean; skillName?: string }
+  | {
+      type: "tool_finish";
+      toolName: string;
+      toolCallId: string;
+      durationMs: number;
+      success: boolean;
+      skillName?: string;
+      /** Model-provided tool arguments. */
+      input?: unknown;
+      /** Error text when the call failed. */
+      error?: string;
+      /** Length of the string output handed back to the model. */
+      outputChars?: number;
+      /** Whether the output was cut at TOOL_OUTPUT_CHAR_CAP. */
+      truncated?: boolean;
+    }
   | { type: "synthesizing" };
 
 export interface RunOptions {

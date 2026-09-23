@@ -142,6 +142,8 @@ export interface RunTrace {
   providerWarnings: string[];
   /** Whether the parallel-agents path produced the response. */
   parallelAgents: boolean;
+  /** Skills the router selected for this prompt, sorted. Absent when the run was not routed. */
+  routedSkills?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,12 @@ export interface RunTrace {
 export interface RunManifestConfig {
   sportsclaw_version: string;
   sports_skills_version: string | null;
+  /**
+   * Where the installed sports-skills came from (PEP 610 direct_url.json):
+   * a VCS commit or a local path. Absent for an index install, so those
+   * config_sha256 values are unchanged.
+   */
+  sports_skills_source?: SportsSkillsSource;
   provider: LLMProvider;
   model: string;
   sampling: SamplingConfig;
@@ -180,6 +188,7 @@ export interface RunManifest {
     tool_surface_sha256: string | null;
     provider_warnings: string[];
     parallel_agents: boolean;
+    routed_skills: string[] | null;
   } | null;
 }
 
@@ -193,6 +202,7 @@ export interface BenchManifestConfig {
 export interface BuildRunManifestInput {
   sportsclawVersion: string;
   sportsSkillsVersion?: string | null;
+  sportsSkillsSource?: SportsSkillsSource | null;
   provider: LLMProvider;
   model: string;
   sampling: SamplingConfig;
@@ -211,6 +221,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
   const config: RunManifestConfig = {
     sportsclaw_version: input.sportsclawVersion,
     sports_skills_version: input.sportsSkillsVersion ?? null,
+    ...(input.sportsSkillsSource ? { sports_skills_source: { ...input.sportsSkillsSource } } : {}),
     provider: input.provider,
     model: input.model,
     sampling: samplingCallOptions(input.sampling),
@@ -245,6 +256,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
           tool_surface_sha256: trace.toolSurfaceSha256 ?? null,
           provider_warnings: [...trace.providerWarnings],
           parallel_agents: trace.parallelAgents,
+          routed_skills: trace.routedSkills ? [...trace.routedSkills] : null,
         }
       : null,
   };
@@ -271,6 +283,61 @@ export function readSportsSkillsVersion(pythonPath: string, timeoutMs = 10_000):
       },
     );
   });
+}
+
+export interface SportsSkillsSource {
+  /** `<vcs>+<url>@<commit>` for a VCS install, otherwise the recorded URL (e.g. `file://<path>`). */
+  url: string;
+  /** Present (true) for an editable install. */
+  editable?: true;
+}
+
+const DIRECT_URL_SCRIPT = [
+  "import importlib.metadata as m",
+  'print(m.distribution("sports-skills").read_text("direct_url.json") or "")',
+].join("\n");
+
+/**
+ * Where the interpreter's sports-skills was installed from, read from its
+ * PEP 610 `direct_url.json`. Null for an index install, a missing package, or
+ * unreadable metadata. Credentials in the URL are dropped.
+ */
+export function readSportsSkillsSource(pythonPath: string, timeoutMs = 10_000): Promise<SportsSkillsSource | null> {
+  return new Promise((resolve) => {
+    execFile(pythonPath, ["-c", DIRECT_URL_SCRIPT], { encoding: "utf-8", timeout: timeoutMs }, (error, stdout) => {
+      resolve(error ? null : parseDirectUrl((stdout ?? "").trim()));
+    });
+  });
+}
+
+function parseDirectUrl(text: string): SportsSkillsSource | null {
+  if (!text) return null;
+  let data: { url?: unknown; vcs_info?: { vcs?: unknown; commit_id?: unknown }; dir_info?: { editable?: unknown } };
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data.url !== "string" || !data.url) return null;
+  const url = withoutCredentials(data.url);
+  const vcs = data.vcs_info;
+  if (vcs && typeof vcs.vcs === "string" && typeof vcs.commit_id === "string") {
+    const base = url.startsWith(`${vcs.vcs}+`) ? url : `${vcs.vcs}+${url}`;
+    return { url: `${base}@${vcs.commit_id}` };
+  }
+  return { url, ...(data.dir_info?.editable === true ? { editable: true as const } : {}) };
+}
+
+function withoutCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 /** Whether the interpreter's sports-skills has record/replay (`sports_skills._replay`). */

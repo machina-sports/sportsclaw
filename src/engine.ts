@@ -146,6 +146,30 @@ try {
  */
 export const TOOL_OUTPUT_CHAR_CAP = 30_000;
 
+/** Prefix of the notice appended to a data tool's output cut at TOOL_OUTPUT_CHAR_CAP. */
+const TOOL_OUTPUT_TRUNCATED_MARKER = "[... output truncated";
+
+/** Trace fields for a tool_finish progress event, from the AI SDK tool-call-finish event. */
+function toolFinishDetails(event: {
+  toolCall: { input?: unknown };
+  output?: unknown;
+  error?: unknown;
+}): { input?: unknown; error?: string; outputChars?: number; truncated?: boolean } {
+  const { output, error } = event;
+  return {
+    input: event.toolCall.input,
+    ...(error !== undefined ? { error: error instanceof Error ? error.message : String(error) } : {}),
+    ...(typeof output === "string"
+      ? { outputChars: output.length, truncated: output.includes(TOOL_OUTPUT_TRUNCATED_MARKER) }
+      : {}),
+  };
+}
+
+/** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+function routedSkillsOf(decision: { selectedSkills: ReadonlyArray<string> } | null | undefined): { routedSkills?: string[] } {
+  return decision ? { routedSkills: [...decision.selectedSkills].sort() } : {};
+}
+
 /** Normalized token usage extracted from a generateText result. */
 export interface TokenUsage {
   inputTokens: number;
@@ -722,6 +746,7 @@ export class sportsclawEngine {
           ...this._lastRunTrace,
           offeredTools: [...this._lastRunTrace.offeredTools],
           providerWarnings: [...this._lastRunTrace.providerWarnings],
+          ...(this._lastRunTrace.routedSkills ? { routedSkills: [...this._lastRunTrace.routedSkills] } : {}),
         }
       : null;
   }
@@ -1579,7 +1604,7 @@ export class sportsclawEngine {
             const totalChars = result.content.length;
             return (
               result.content.slice(0, MAX_TOOL_CHARS) +
-              `\n\n[... output truncated: showing ${MAX_TOOL_CHARS.toLocaleString()} of ${totalChars.toLocaleString()} chars. ` +
+              `\n\n${TOOL_OUTPUT_TRUNCATED_MARKER}: showing ${MAX_TOOL_CHARS.toLocaleString()} of ${totalChars.toLocaleString()} chars. ` +
               `Re-query with more specific filters or pagination to get the remaining data.]`
             );
           }
@@ -3705,7 +3730,8 @@ export class sportsclawEngine {
           skillName: this.registry.getSkillName(toolCall.toolName),
         });
       },
-      experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+      experimental_onToolCallFinish: (event) => {
+        const { toolCall, durationMs, success } = event;
         options.onProgress?.({
           type: "tool_finish",
           toolName: toolCall.toolName,
@@ -3713,6 +3739,7 @@ export class sportsclawEngine {
           durationMs,
           success,
           skillName: this.registry.getSkillName(toolCall.toolName),
+          ...toolFinishDetails(event),
         });
       },
     });
@@ -4366,7 +4393,8 @@ export class sportsclawEngine {
           stopWhen: stepCountIs(parallelMaxTurns),
           maxOutputTokens: budgets.main,
           ...(providerOpts ? { providerOptions: providerOpts } : {}),
-          experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+          experimental_onToolCallFinish: (event) => {
+            const { toolCall, durationMs, success } = event;
             const skillName = this.registry.getSkillName(toolCall.toolName);
             emitProgress?.({
               type: "tool_finish",
@@ -4375,6 +4403,7 @@ export class sportsclawEngine {
               durationMs,
               success,
               skillName,
+              ...toolFinishDetails(event),
             });
             // Track tool call analytics
             if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
@@ -4401,6 +4430,7 @@ export class sportsclawEngine {
           toolSurfaceSha256: hashToolSurface(tools, offered),
           providerWarnings: formatProviderWarnings(laneResults.flatMap((lane) => lane.steps ?? [])),
           parallelAgents: true,
+          ...routedSkillsOf(routing.decision),
         };
       }
       this._lastUsage = laneResults
@@ -4542,7 +4572,8 @@ export class sportsclawEngine {
           });
           legacyUpdate?.(`Running ${toolCall.toolName}`);
         },
-        experimental_onToolCallFinish: ({ toolCall, durationMs, success }) => {
+        experimental_onToolCallFinish: (event) => {
+          const { toolCall, durationMs, success } = event;
           const skillName = this.registry.getSkillName(toolCall.toolName);
           emitProgress?.({
             type: "tool_finish",
@@ -4551,6 +4582,7 @@ export class sportsclawEngine {
             durationMs,
             success,
             skillName,
+            ...toolFinishDetails(event),
           });
 
           // Analytics: record tool call metrics (skip internal tools)
@@ -4675,6 +4707,7 @@ export class sportsclawEngine {
         toolSurfaceSha256: hashToolSurface(tools, offered),
         providerWarnings: formatProviderWarnings(result.steps),
         parallelAgents: false,
+        ...routedSkillsOf(routing.decision),
       };
     }
 

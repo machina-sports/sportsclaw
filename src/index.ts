@@ -55,7 +55,13 @@ import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
 import { saveImageToDisk, saveVideoToDisk } from "./utils.js";
 import { sportsclawEngine } from "./engine.js";
-import { buildRunManifest, pythonSupportsReplay, readSportsSkillsVersion, takeSamplingArgs } from "./run-manifest.js";
+import {
+  buildRunManifest,
+  pythonSupportsReplay,
+  readSportsSkillsSource,
+  readSportsSkillsVersion,
+  takeSamplingArgs,
+} from "./run-manifest.js";
 import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools, withoutExcludedSkills } from "./bench.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
@@ -2448,6 +2454,7 @@ async function cmdBench(argv: string[]): Promise<void> {
     dataset,
     datasetPath: opts.datasetPath,
     sportsSkillsVersion: await readSportsSkillsVersion(resolved.pythonPath),
+    sportsSkillsSource: await readSportsSkillsSource(resolved.pythonPath),
     ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     arm: opts.arm,
@@ -2583,6 +2590,7 @@ async function cmdQuery(args: string[]): Promise<void> {
   if (headlessMode) {
     emitNdjson({ type: "start", timestamp: new Date().toISOString(), yolo: yoloMode });
     const sportsSkillsVersion = readSportsSkillsVersion(resolved.pythonPath);
+    const sportsSkillsSource = readSportsSkillsSource(resolved.pythonPath);
     const emitManifest = async () => {
       const cfg = engine.manifestConfig;
       emitNdjson({
@@ -2590,6 +2598,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         ...buildRunManifest({
           sportsclawVersion: engine.packageVersion,
           sportsSkillsVersion: await sportsSkillsVersion,
+          sportsSkillsSource: await sportsSkillsSource,
           provider: cfg.provider,
           model: engine.modelId,
           sampling: cfg.sampling,

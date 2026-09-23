@@ -47,3 +47,48 @@ test("pythonSupportsReplay reports whether the interpreter's sports-skills has r
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("readSportsSkillsSource reads PEP 610 direct_url.json from the interpreter", async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { readSportsSkillsSource } = await import("../dist/run-manifest.js");
+  const dir = mkdtempSync(join(tmpdir(), "fake-python-"));
+  const fake = (name, body) => {
+    const path = join(dir, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const printing = (name, json) => fake(name, `cat <<'JSON'\n${JSON.stringify(json)}\nJSON`);
+  try {
+    const git = printing("git", {
+      url: "https://github.com/machina-sports/sports-skills",
+      vcs_info: { vcs: "git", commit_id: "53e949e5d23070c6af5c51396af4df1a0d724983", requested_revision: "53e949e5d" },
+    });
+    assert.deepEqual(await readSportsSkillsSource(git), {
+      url: "git+https://github.com/machina-sports/sports-skills@53e949e5d23070c6af5c51396af4df1a0d724983",
+    });
+
+    const editable = printing("editable", { url: "file:///src/sports-skills", dir_info: { editable: true } });
+    assert.deepEqual(await readSportsSkillsSource(editable), { url: "file:///src/sports-skills", editable: true });
+
+    const local = printing("local", { url: "file:///src/sports-skills", dir_info: {} });
+    assert.deepEqual(await readSportsSkillsSource(local), { url: "file:///src/sports-skills" });
+
+    const secret = printing("secret", {
+      url: "https://user:tok3n@github.com/machina-sports/sports-skills",
+      vcs_info: { vcs: "git", commit_id: "abc123" },
+    });
+    const redacted = await readSportsSkillsSource(secret);
+    assert.equal(redacted.url, "git+https://github.com/machina-sports/sports-skills@abc123");
+
+    // Index install: read_text returns None, the script prints an empty line.
+    assert.equal(await readSportsSkillsSource(fake("index", "echo")), null);
+    assert.equal(await readSportsSkillsSource(fake("garbage", "echo 'not json'")), null);
+    assert.equal(await readSportsSkillsSource(fake("broken", "echo 'PackageNotFoundError' >&2; exit 1")), null);
+    assert.equal(await readSportsSkillsSource(join(dir, "missing")), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
