@@ -601,9 +601,18 @@ export class ToolRegistry {
 
     return {
       content: JSON.stringify(result.data),
-      isError: false,
+      // sports-skills reports most failures in-band ({"status": false,
+      // "message": ...}) with exit code 0 — replay misses, "no leaders for
+      // category", upstream 4xx. Counting those as successes hid them from the
+      // repeated-failure skip, the evidence gate and bench traces (#187).
+      isError: isSkillFailurePayload(result.data),
     };
   }
+}
+
+/** A sports-skills response envelope that reports a failure (`status: false`). */
+export function isSkillFailurePayload(data: unknown): boolean {
+  return !!data && typeof data === "object" && !Array.isArray(data) && (data as { status?: unknown }).status === false;
 }
 
 
