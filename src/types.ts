@@ -808,6 +808,8 @@ export interface RouteMeta {
   llmAttempted: boolean;
   llmSucceeded: boolean;
   llmDurationMs: number;
+  /** Tokens spent by the LLM router call, when it ran. */
+  llmUsage?: { inputTokens: number; outputTokens: number; totalTokens: number };
   /** Present only on the opt-in routing path. Absent keeps old telemetry exact. */
   routing?: SkillRoutingMeta;
 }

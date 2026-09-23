@@ -823,6 +823,14 @@ export class sportsclawEngine {
   private _conversationNamespace?: string;
   private _loggedMemoryBackend?: string;
   private _lastUsage: TokenUsage | null = null;
+  /** Tokens per model pass of the current/last run (router, main, verification, ...). */
+  private _passUsage: Record<string, TokenUsage> = {};
+
+  private notePass(pass: string, usage: TokenUsage): void {
+    // `??=`: engines built without the constructor (tests, embedders) have no field yet.
+    const passes = (this._passUsage ??= {});
+    passes[pass] = passes[pass] ? addUsage(passes[pass], usage) : usage;
+  }
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
   private _lastRunTrace: RunTrace | null = null;
 
@@ -842,6 +850,9 @@ export class sportsclawEngine {
           ...this._lastRunTrace,
           offeredTools: [...this._lastRunTrace.offeredTools],
           providerWarnings: [...this._lastRunTrace.providerWarnings],
+          ...(Object.keys(this._passUsage ?? {}).length > 0
+            ? { passTokens: Object.fromEntries(Object.entries(this._passUsage).map(([k, u]) => [k, u.totalTokens])) }
+            : {}),
           ...(this._lastRunTrace.routedSkills ? { routedSkills: [...this._lastRunTrace.routedSkills] } : {}),
         }
       : null;
@@ -920,8 +931,20 @@ export class sportsclawEngine {
   }
 
   /** Token usage of the most recent run() (main loop only). Null before first run. */
+  /**
+   * Tokens of the last run across **every** model pass (router, main loop,
+   * synthesis, evidence gate, verification, correction). Before #174 this was
+   * the main loop only, which understated the harness's cost.
+   */
   get lastTokenUsage(): TokenUsage | null {
-    return this._lastUsage;
+    const passes = Object.values(this._passUsage ?? {});
+    if (passes.length === 0) return this._lastUsage;
+    return passes.reduce(addUsage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+  }
+
+  /** Per-pass token totals of the last run. */
+  get lastPassUsage(): Record<string, TokenUsage> {
+    return { ...(this._passUsage ?? {}) };
   }
 
   /** Videos produced by the generate_video tool during the last run. */
@@ -1163,6 +1186,7 @@ export class sportsclawEngine {
         abortSignal: params.abortSignal,
         maxRetries: 0,
       });
+      this.notePass("evidence_gate", usageOf(res));
       const cleaned = res.text?.trim();
       if (cleaned) return cleaned;
     } catch {
@@ -1309,6 +1333,7 @@ export class sportsclawEngine {
         maxRetries: 0,
       });
 
+      this.notePass("synthesis", usageOf(res));
       const synthesized = res.text?.trim();
       if (synthesized) return synthesized;
     } catch {
@@ -1487,6 +1512,7 @@ export class sportsclawEngine {
         maxRetries: 1,
       });
 
+      this.notePass("verification", usageOf(validationRes));
       let parsed = readVerdict(validationRes.text);
       if (!parsed) {
         const retryRes = await generateText({
@@ -1506,6 +1532,7 @@ export class sportsclawEngine {
           abortSignal: params.abortSignal,
           maxRetries: 1,
         });
+        this.notePass("verification", usageOf(retryRes));
         parsed = readVerdict(retryRes.text);
       }
       if (!parsed) return unverified("the checker did not return a usable verdict twice");
@@ -1586,6 +1613,7 @@ export class sportsclawEngine {
         maxRetries: 0,
       });
 
+      this.notePass("correction", usageOf(correctionRes));
       const corrected = correctionRes.text?.trim();
       return corrected ? stripInternalEvidenceArtifacts(corrected) : undefined;
     } catch (e) {
@@ -3827,6 +3855,7 @@ export class sportsclawEngine {
     },
   ): Promise<string> {
     this._lastUsage = null;
+    this._passUsage = {};
     this._lastRunTrace = null;
     await this.initAsync();
 
@@ -3896,6 +3925,7 @@ export class sportsclawEngine {
       parallelAgents: false,
     };
     this._lastUsage = usageOf(result);
+    this.notePass("main", this._lastUsage);
     return result.text;
   }
 
@@ -4008,6 +4038,7 @@ export class sportsclawEngine {
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
+    this._passUsage = {};
     this._evidenceReceipts = [];
     this._lastRunTrace = null;
 
@@ -4292,6 +4323,7 @@ export class sportsclawEngine {
       memoryBlock,
       options?.abortSignal
     );
+    if (routing.routeMeta?.llmUsage) this.notePass("router", routing.routeMeta.llmUsage);
 
     // --- Opt-in routing refusal -------------------------------------------
     // A decision route that did not select is final: no widening from history,
@@ -4581,6 +4613,7 @@ export class sportsclawEngine {
       this._lastUsage = laneResults
         .map(usageOf)
         .reduce(addUsage, { inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+      this.notePass("main", this._lastUsage);
 
       // Collect text from each agent lane
       const agentTexts: string[] = [];
@@ -4616,6 +4649,7 @@ export class sportsclawEngine {
             maxRetries: 0,
           });
           this._lastUsage = addUsage(this._lastUsage!, usageOf(synthesisResult));
+          this.notePass("lane_synthesis", usageOf(synthesisResult));
           responseText = synthesisResult.text?.trim() || agentTexts.join("\n\n");
         } catch {
           responseText = agentTexts.join("\n\n");
@@ -4857,6 +4891,7 @@ export class sportsclawEngine {
     }
 
     this._lastUsage = usageOf(result);
+    this.notePass("main", this._lastUsage);
     if (this.config.verbose) {
       console.error(
         `[sportsclaw] tokens input=${this._lastUsage.inputTokens} ` +
