@@ -160,6 +160,11 @@ export interface RunManifestConfig {
   caller_system_prompt_sha256: string | null;
   replay_mode: string;
   tool_allowlist: string[] | null;
+  /**
+   * Bench-only harness settings (arm, per-case timeout, baseline tool scope).
+   * Absent for one-shot queries, so their config_sha256 is unchanged.
+   */
+  bench?: BenchManifestConfig;
   /** Host of a custom provider endpoint, or null for the provider's default. */
   endpoint_host: string | null;
 }
@@ -178,6 +183,13 @@ export interface RunManifest {
   } | null;
 }
 
+export interface BenchManifestConfig {
+  arm: string;
+  case_timeout_s: number;
+  tool_output_char_cap: number;
+  skills?: string[];
+}
+
 export interface BuildRunManifestInput {
   sportsclawVersion: string;
   sportsSkillsVersion?: string | null;
@@ -189,6 +201,7 @@ export interface BuildRunManifestInput {
   thinkingBudget: number;
   callerSystemPrompt?: string;
   toolAllowlist?: string[] | null;
+  bench?: BenchManifestConfig;
   env?: Record<string, string | undefined>;
   trace?: RunTrace | null;
 }
@@ -208,6 +221,16 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
     replay_mode: (env.SPORTS_SKILLS_REPLAY ?? "off").trim().toLowerCase() || "off",
     tool_allowlist: input.toolAllowlist ? [...new Set(input.toolAllowlist)].sort() : null,
     endpoint_host: endpointHost(input.provider, env),
+    ...(input.bench
+      ? {
+          bench: {
+            arm: input.bench.arm,
+            case_timeout_s: input.bench.case_timeout_s,
+            tool_output_char_cap: input.bench.tool_output_char_cap,
+            ...(input.bench.skills ? { skills: [...new Set(input.bench.skills)].sort() } : {}),
+          },
+        }
+      : {}),
   };
   const trace = input.trace;
   return {

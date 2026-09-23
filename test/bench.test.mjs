@@ -64,6 +64,7 @@ test("parseBenchArgs reads every option", () => {
   assert.deepEqual(args, {
     datasetPath: "data.jsonl", out: "r.jsonl", limit: 5, tools: ["a", "b"], allTools: false,
     systemPrompt: "be terse", verbose: true, sampling: { temperature: 0, seed: 3 },
+    arm: "routed", caseTimeoutS: 300,
   });
   assert.deepEqual(parseBenchArgs(["d.jsonl", "--all-tools"], takeSamplingArgs).allTools, true);
 });
@@ -178,7 +179,7 @@ test("runBench emits a header, one line per dataset line, and a closing summary"
   assert.equal(end.type, "bench_summary");
   assert.deepEqual(
     { ...summary, wall_ms: 0 },
-    { type: "bench_summary", expected: 5, ok: 1, halted: 1, errored: 1, invalid: 1, duplicate: 1, not_run: 0,
+    { type: "bench_summary", expected: 5, ok: 1, halted: 1, errored: 1, timed_out: 0, invalid: 1, duplicate: 1, not_run: 0,
       wall_ms: 0, tokens: { input: 30, output: 15, total: 45 } },
   );
   assert.equal(summary.ok + summary.halted + summary.errored + summary.invalid + summary.duplicate + summary.not_run, summary.expected);

@@ -8,16 +8,18 @@
  * Dataset format — one JSON object per line, blank lines ignored:
  *   {"id": "nba-001", "prompt": "Who won Knicks vs Celtics on 2026-01-01?",
  *    "system_prompt": "optional per-case caller prompt",
+ *    "skills": ["nba"],  // tool scope for the raw-tools arm
  *    "metadata": {"any": "passthrough"}}
  *
  * Every non-blank line is accounted for in the output: `ok`, `halted` (the
- * model asked the user a question), `error`, `invalid` (unparseable or missing
- * fields) or `duplicate` (repeated id; only the first occurrence runs). Cases
- * past `--limit` are counted as `not_run`. Nothing is silently dropped.
+ * model asked the user a question), `error`, `timeout` (exceeded the per-case
+ * limit), `invalid` (unparseable or missing fields) or `duplicate` (repeated
+ * id; only the first occurrence runs). Cases past `--limit` are counted as
+ * `not_run`. Nothing is silently dropped.
  */
 
 import { createHash } from "node:crypto";
-import { isHalt, type TokenUsage } from "./engine.js";
+import { isHalt, TOOL_OUTPUT_CHAR_CAP, type TokenUsage } from "./engine.js";
 import { buildRunManifest, type RunManifest, type RunTrace } from "./run-manifest.js";
 import type { LLMProvider, SamplingConfig, ToolProgressEvent } from "./types.js";
 
@@ -31,6 +33,8 @@ export interface BenchCase {
   id: string;
   prompt: string;
   systemPrompt?: string;
+  /** Skills whose data tools the raw-tools arm offers for this case. */
+  skills?: string[];
   metadata?: Record<string, unknown>;
   /** 1-based line number in the dataset file. */
   line: number;
@@ -90,6 +94,13 @@ export function parseDataset(text: string): ParsedDataset {
       problems.push({ line, kind: "invalid", id, message: "\"metadata\" must be an object" });
       return;
     }
+    if (
+      obj.skills !== undefined &&
+      (!Array.isArray(obj.skills) || obj.skills.some((s) => typeof s !== "string" || s.trim() === ""))
+    ) {
+      problems.push({ line, kind: "invalid", id, message: "\"skills\" must be an array of non-empty strings" });
+      return;
+    }
     if (seen.has(id)) {
       problems.push({ line, kind: "duplicate", id, message: `duplicate id; first occurrence runs, this one does not` });
       return;
@@ -99,6 +110,7 @@ export function parseDataset(text: string): ParsedDataset {
       id,
       prompt: obj.prompt,
       ...(obj.system_prompt !== undefined ? { systemPrompt: obj.system_prompt as string } : {}),
+      ...(obj.skills !== undefined ? { skills: [...new Set(obj.skills as string[])].sort() } : {}),
       ...(obj.metadata !== undefined ? { metadata: obj.metadata as Record<string, unknown> } : {}),
       line,
     });
@@ -131,6 +143,14 @@ export interface BenchEngine {
   run(prompt: string, options?: {
     systemPrompt?: string;
     onProgress?: (event: ToolProgressEvent) => void;
+    abortSignal?: AbortSignal;
+  }): Promise<string>;
+  /** Minimal baseline loop (no routing/verification); required for the direct and raw-tools arms. */
+  runDirect?(prompt: string, options: {
+    skills: readonly string[];
+    systemPrompt?: string;
+    onProgress?: (event: ToolProgressEvent) => void;
+    abortSignal?: AbortSignal;
   }): Promise<string>;
   reset(): void;
   readonly lastRunTrace: RunTrace | null;
@@ -147,7 +167,29 @@ export interface BenchEngine {
   };
 }
 
-export type CaseStatus = "ok" | "halted" | "error" | "invalid" | "duplicate";
+export type CaseStatus = "ok" | "halted" | "error" | "timeout" | "invalid" | "duplicate";
+
+/**
+ * Which harness answers each case:
+ *   - `routed`: the full sportsclaw engine (routing, verification, evidence gate);
+ *   - `raw_tools`: a minimal tool loop over the case's `skills` data tools;
+ *   - `direct`: the same minimal loop with no tools.
+ */
+export type BenchArm = "routed" | "raw_tools" | "direct";
+export const BENCH_ARMS: readonly BenchArm[] = ["routed", "raw_tools", "direct"];
+
+export const DEFAULT_CASE_TIMEOUT_S = 300;
+
+/**
+ * Skills never offered in a benchmark: account/order tools that need
+ * credentials, move money, and return no sports data.
+ */
+export const BENCH_EXCLUDED_SKILLS: readonly string[] = ["polymarket-trading"];
+
+/** Drop tools that belong to an excluded skill (tool names are `<skill>_<command>`). */
+export function withoutExcludedSkills(toolNames: readonly string[]): string[] {
+  return toolNames.filter((name) => !BENCH_EXCLUDED_SKILLS.some((skill) => name.startsWith(`${skill}_`)));
+}
 
 export interface ToolCallRecord {
   name: string;
@@ -164,6 +206,12 @@ export interface BenchRunOptions {
   systemPrompt?: string;
   /** Run at most this many valid cases; the rest are counted `not_run`. */
   limit?: number;
+  /** Harness per case. Defaults to `routed`. */
+  arm?: BenchArm;
+  /** Per-case wall-clock limit; the case is aborted and recorded as `timeout`. */
+  caseTimeoutS?: number;
+  /** How long a timed-out run gets to unwind before the next case (default 5 s). */
+  abortGraceMs?: number;
   /** Receives each output line as an object; the caller serializes it. */
   emit: (line: Record<string, unknown>) => void | Promise<void>;
   now?: () => number;
@@ -176,6 +224,7 @@ export interface BenchSummary {
   ok: number;
   halted: number;
   errored: number;
+  timed_out: number;
   invalid: number;
   duplicate: number;
   not_run: number;
@@ -183,9 +232,32 @@ export interface BenchSummary {
   tokens: { input: number; output: number; total: number };
 }
 
-function manifestFor(opts: BenchRunOptions, systemPrompt: string | undefined, trace: RunTrace | null): RunManifest {
+/** How long an aborted (timed-out) run gets to unwind before the next case starts. */
+const ABORT_GRACE_MS = 5_000;
+
+class CaseTimeout extends Error {
+  constructor(seconds: number) {
+    super(`case exceeded the ${seconds}s timeout and was aborted`);
+    this.name = "CaseTimeout";
+  }
+}
+
+function manifestFor(
+  opts: BenchRunOptions,
+  systemPrompt: string | undefined,
+  trace: RunTrace | null,
+  skills?: readonly string[],
+): RunManifest {
   const cfg = opts.engine.manifestConfig;
+  const arm = opts.arm ?? "routed";
   return buildRunManifest({
+    bench: {
+      arm,
+      case_timeout_s: opts.caseTimeoutS ?? DEFAULT_CASE_TIMEOUT_S,
+      tool_output_char_cap: TOOL_OUTPUT_CHAR_CAP,
+      // The baseline arms don't use the engine allowlist; their surface is the case's skills.
+      ...(arm !== "routed" && skills !== undefined ? { skills: [...skills] } : {}),
+    },
     sportsclawVersion: opts.engine.packageVersion,
     sportsSkillsVersion: opts.sportsSkillsVersion,
     provider: cfg.provider,
@@ -194,7 +266,7 @@ function manifestFor(opts: BenchRunOptions, systemPrompt: string | undefined, tr
     maxOutputTokens: cfg.maxOutputTokens,
     maxTurns: cfg.maxTurns,
     thinkingBudget: cfg.thinkingBudget,
-    toolAllowlist: cfg.toolAllowlist,
+    toolAllowlist: arm === "routed" ? cfg.toolAllowlist : null,
     callerSystemPrompt: systemPrompt,
     env: opts.env,
     trace,
@@ -207,6 +279,10 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
   const { dataset } = opts;
   const limit = opts.limit !== undefined ? Math.max(0, Math.floor(opts.limit)) : dataset.cases.length;
   const toRun = dataset.cases.slice(0, limit);
+  const arm = opts.arm ?? "routed";
+  const caseTimeoutS = opts.caseTimeoutS ?? DEFAULT_CASE_TIMEOUT_S;
+  if (!(caseTimeoutS > 0)) throw new Error(`caseTimeoutS must be positive (got ${caseTimeoutS})`);
+  if (arm !== "routed" && !opts.engine.runDirect) throw new Error(`the ${arm} arm needs an engine with runDirect()`);
 
   const base = manifestFor(opts, opts.systemPrompt, null);
   await opts.emit({
@@ -221,13 +297,16 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
       problems: dataset.problems.length,
     },
     limit: opts.limit ?? null,
+    arm,
+    case_timeout_s: caseTimeoutS,
     manifest_version: base.manifest_version,
     config_sha256: base.config_sha256,
     config: base.config,
   });
 
-  const counts = { ok: 0, halted: 0, errored: 0 };
+  const counts = { ok: 0, halted: 0, errored: 0, timedOut: 0, invalid: 0 };
   const tokens = { input: 0, output: 0, total: 0 };
+  let executed = 0;
 
   for (const problem of dataset.problems) {
     await opts.emit({
@@ -260,28 +339,83 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
       }
     };
 
+    const skills = arm === "direct" ? [] : arm === "raw_tools" ? (c.skills ?? null) : undefined;
+    const excluded = skills?.filter((s) => BENCH_EXCLUDED_SKILLS.includes(s)) ?? [];
+    if (skills === null || excluded.length > 0) {
+      // raw_tools needs a declared tool scope; never guess one, never widen it.
+      counts.invalid++;
+      await opts.emit({
+        type: "case",
+        id: c.id,
+        line: c.line,
+        status: "invalid" satisfies CaseStatus,
+        error: skills === null
+          ? "raw_tools arm needs a \"skills\" array on the case"
+          : `skills not allowed in a benchmark: ${excluded.join(", ")}`,
+      });
+      continue;
+    }
+
     // Each case starts from an empty conversation; no userId, so no memory.
     opts.engine.reset();
     const caseStart = now();
+    const phases: Array<{ label: string; at_ms: number }> = [];
+    const observe = (event: ToolProgressEvent) => {
+      if (event.type === "phase") phases.push({ label: event.label, at_ms: now() - caseStart });
+      onProgress(event);
+    };
     let status: CaseStatus = "ok";
     let answer: string | null = null;
     let error: string | null = null;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        // Flag first: a run that honours the signal rejects as soon as we abort,
+        // and that rejection must still be recorded as a timeout, not an error.
+        timedOut = true;
+        reject(new CaseTimeout(caseTimeoutS));
+        controller.abort();
+      }, caseTimeoutS * 1000);
+    });
+    let running: Promise<string> | undefined;
     try {
-      answer = await opts.engine.run(c.prompt, {
+      const common = {
         ...(systemPrompt !== undefined ? { systemPrompt } : {}),
-        onProgress,
-      });
+        onProgress: observe,
+        abortSignal: controller.signal,
+      };
+      running = skills === undefined
+        ? opts.engine.run(c.prompt, common)
+        : opts.engine.runDirect!(c.prompt, { ...common, skills });
+      // Abort is best effort (a tool subprocess may ignore it), so the
+      // deadline also races the run: a hung case can never stall the bench.
+      running.catch(() => {});
+      answer = await Promise.race([running, deadline]);
     } catch (err) {
-      if (isHalt(err)) {
+      if (timedOut || err instanceof CaseTimeout) {
+        status = "timeout";
+        error = new CaseTimeout(caseTimeoutS).message;
+        // Give the aborted run a moment to unwind so it can't write into the next case.
+        let grace: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          running?.catch(() => {}),
+          new Promise((r) => { grace = setTimeout(r, opts.abortGraceMs ?? ABORT_GRACE_MS); }),
+        ]);
+        clearTimeout(grace);
+      } else if (isHalt(err)) {
         status = "halted";
         error = `run halted: ${err instanceof Error ? err.message : String(err)}`;
       } else {
         status = "error";
         error = err instanceof Error ? err.message : String(err);
       }
+    } finally {
+      clearTimeout(timer);
     }
     const latency = now() - caseStart;
-    const usage = opts.engine.lastTokenUsage;
+    const usage = status === "timeout" ? null : opts.engine.lastTokenUsage;
     if (usage) {
       tokens.input += usage.inputTokens ?? 0;
       tokens.output += usage.outputTokens ?? 0;
@@ -289,17 +423,23 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
     }
     if (status === "ok") counts.ok++;
     else if (status === "halted") counts.halted++;
+    else if (status === "timeout") counts.timedOut++;
     else counts.errored++;
 
-    const manifest = manifestFor(opts, systemPrompt, opts.engine.lastRunTrace);
+    const toolMs = toolCalls.reduce((sum, t) => sum + (t.duration_ms ?? 0), 0);
+    const manifest = manifestFor(opts, systemPrompt, status === "timeout" ? null : opts.engine.lastRunTrace, skills);
     await opts.emit({
       type: "case",
       id: c.id,
       line: c.line,
       status,
+      arm,
       answer,
       error,
       latency_ms: latency,
+      // First executed case is cold (process start, first provider/data loads).
+      cold: executed === 0,
+      timing: { total_ms: latency, tool_ms_sum: toolMs, phases },
       usage: usage
         ? { input: usage.inputTokens ?? 0, output: usage.outputTokens ?? 0, total: usage.totalTokens ?? 0 }
         : null,
@@ -308,6 +448,7 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
       run: manifest.run,
       ...(c.metadata !== undefined ? { metadata: c.metadata } : {}),
     });
+    executed++;
   }
 
   const summary: BenchSummary = {
@@ -316,7 +457,8 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
     ok: counts.ok,
     halted: counts.halted,
     errored: counts.errored,
-    invalid: dataset.problems.filter((p) => p.kind === "invalid").length,
+    timed_out: counts.timedOut,
+    invalid: dataset.problems.filter((p) => p.kind === "invalid").length + counts.invalid,
     duplicate: dataset.problems.filter((p) => p.kind === "duplicate").length,
     not_run: dataset.cases.length - toRun.length,
     wall_ms: now() - started,
@@ -341,10 +483,13 @@ export interface BenchArgs {
   systemPrompt?: string;
   verbose: boolean;
   sampling: SamplingConfig;
+  arm: BenchArm;
+  caseTimeoutS: number;
 }
 
 export const BENCH_USAGE =
   "Usage: sportsclaw bench <dataset.jsonl> [--out <results.jsonl>] [--limit <n>] " +
+  "[--arm routed|raw-tools|direct] [--case-timeout <seconds>] " +
   "[--tools <a,b,...> | --all-tools] [--system-prompt <text>] [--temperature <n>] [--seed <n>] [--verbose]";
 
 function takeValue(args: string[], flag: string): string | undefined {
@@ -385,8 +530,20 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
   const limitRaw = takeValue(args, "--limit");
   const toolsRaw = takeValue(args, "--tools");
   const systemPrompt = takeValue(args, "--system-prompt");
+  const armRaw = takeValue(args, "--arm");
+  const timeoutRaw = takeValue(args, "--case-timeout");
   const allTools = takeSwitch(args, "--all-tools");
   const verbose = takeSwitch(args, "--verbose", "-v");
+
+  const arm = (armRaw ?? "routed").replace(/-/g, "_") as BenchArm;
+  if (!BENCH_ARMS.includes(arm)) throw new Error(`--arm must be one of routed, raw-tools, direct (got ${JSON.stringify(armRaw)})`);
+  let caseTimeoutS = DEFAULT_CASE_TIMEOUT_S;
+  if (timeoutRaw !== undefined) {
+    caseTimeoutS = Number(timeoutRaw);
+    if (!Number.isFinite(caseTimeoutS) || caseTimeoutS <= 0) {
+      throw new Error(`--case-timeout must be a positive number of seconds (got ${JSON.stringify(timeoutRaw)})`);
+    }
+  }
 
   let limit: number | undefined;
   if (limitRaw !== undefined) {
@@ -396,6 +553,9 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
   if (toolsRaw !== undefined && allTools) throw new Error("--tools and --all-tools cannot be combined");
   const tools = toolsRaw !== undefined ? parseToolList(toolsRaw) : undefined;
   if (tools && tools.length === 0) throw new Error("--tools needs at least one tool name");
+  if (arm !== "routed" && (tools || allTools)) {
+    throw new Error("--tools/--all-tools apply to the routed arm only; baseline arms use each case's \"skills\"");
+  }
 
   const unknownFlag = args.find((a) => a.startsWith("-"));
   if (unknownFlag) throw new Error(`unknown option ${unknownFlag}`);
@@ -411,5 +571,7 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
     ...(systemPrompt !== undefined ? { systemPrompt } : {}),
     verbose,
     sampling,
+    arm,
+    caseTimeoutS,
   };
 }
