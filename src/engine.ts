@@ -262,6 +262,11 @@ function toolFinishDetails(event: {
 }
 
 /** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+/** A number, or a capitalised name after the first word: the reply states a fact. */
+function carriesData(text: string): boolean {
+  return /\d/.test(text) || /\s\p{Lu}/u.test(text);
+}
+
 function routedSkillsOf(decision: { selectedSkills: ReadonlyArray<string> } | null | undefined): { routedSkills?: string[] } {
   return decision ? { routedSkills: [...decision.selectedSkills].sort() } : {};
 }
@@ -1158,11 +1163,17 @@ export class sportsclawEngine {
     draft: string;
     failedTools: string[];
     succeededTools: string[];
+    /** Outputs of the successful tools, so supported claims can be told apart. */
+    toolOutputs?: Array<{ toolName: string; output: string }>;
     maxOutputTokens: number;
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
   }): Promise<string> {
     const { userPrompt, draft, failedTools, succeededTools, maxOutputTokens } = params;
+    const evidence = (params.toolOutputs ?? [])
+      .slice(0, 6)
+      .map((item, idx) => `Successful source ${idx + 1} output:\n${item.output}`)
+      .join("\n\n");
     try {
       const res = await generateText({
         model: this.mainModel,
@@ -1170,6 +1181,7 @@ export class sportsclawEngine {
         system:
           "You are an evidence gate for a consumer sports chat. Remove or rewrite any claim " +
           "that depends on failed tools. Keep only claims supportable by successful tools or the draft's successful data. " +
+          "A claim the successful outputs support stays unchanged, whichever other tool failed. " +
           "Keep material uncertainty explicit beside affected claims; do not append an empty unavailable section to a useful brief. " +
           "Give a coverage audit only when requested. Do not expose credentials or internal tool names. " +
           "A failed source is not proof that no coverage exists. Never substitute another event or invent sentiment. " +
@@ -1179,6 +1191,7 @@ export class sportsclawEngine {
           `User request: ${userPrompt}`,
           `Failed tools: ${failedTools.join(", ") || "none"}`,
           `Successful tools: ${succeededTools.join(", ") || "none"}`,
+          ...(evidence ? ["Successful tool outputs:", evidence] : []),
           "Draft response:",
           draft,
         ].join("\n\n"),
@@ -1203,7 +1216,10 @@ export class sportsclawEngine {
   private isLowSignalResponse(text: string): boolean {
     const trimmed = text.trim();
     if (!trimmed) return true;
-    if (trimmed.length < 90) return true;
+    // Short is not low-signal on its own: "Nottingham Forest." or "They won 7
+    // home games." is a complete answer. Treating it as filler replaced correct
+    // answers with an earlier step's narration or a re-synthesis (bench v1).
+    if (trimmed.length < 90 && !carriesData(trimmed)) return true;
     if (/^_?source:/i.test(trimmed)) return true;
     // Conversational filler without data
     if (
@@ -4956,8 +4972,10 @@ export class sportsclawEngine {
     // subsequent call (e.g. a retry or parallel duplicate). If the data
     // is available from a successful call, the failure doesn't matter.
     const succeededToolNames = new Set(successes.map((s) => s.toolName));
+    // A failed query_tool_result is a malformed filter over a result that was
+    // fetched successfully, not missing data; it must not trigger the gate.
     const netFailures = failures.filter(
-      (f) => !succeededToolNames.has(f.toolName)
+      (f) => !succeededToolNames.has(f.toolName) && f.toolName !== QUERY_TOOL_RESULT_TOOL
     );
 
     if (successes.length > 0 && this.isLowSignalResponse(responseText)) {
@@ -5012,6 +5030,10 @@ export class sportsclawEngine {
         draft: responseText,
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
+        toolOutputs: this.collectToolOutputSnippets(
+          result.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
+          new Set(succeededExternalTools.keys())
+        ),
         maxOutputTokens: budgets.evidenceGate,
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
