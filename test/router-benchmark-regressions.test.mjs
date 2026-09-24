@@ -100,3 +100,69 @@ describe("team names route to their league", () => {
     assert.ok(result.decision.selectedSkills.includes("nhl"));
   });
 });
+
+// Sports Agent Bench v1: when the router's JSON did not come back (Gemini's
+// thinking tokens count against a 220-token cap), the tool-name fallback
+// sent tennis and volleyball questions to cbb.
+describe("a failed LLM route is retried and named events route to their sport", () => {
+  const OK_USAGE = { inputTokens: { total: 10 }, outputTokens: { total: 5 }, totalTokens: { total: 15 }, reasoningTokens: { total: undefined } };
+  function flakyModel(answers) {
+    let call = 0;
+    return {
+      model: new MockLanguageModelV3({
+        doGenerate: async () => ({
+          content: [{ type: "text", text: answers[Math.min(call++, answers.length - 1)] }],
+          finishReason: { unified: "stop", raw: undefined },
+          usage: OK_USAGE,
+          warnings: [],
+        }),
+      }),
+      calls: () => call,
+    };
+  }
+  const INSTALLED = ["cbb", "cfb", "tennis", "golf", "volleyball", "nhl", "cricket", "metadata", "xctf", "nba"];
+  const routeWith = (prompt, model) => routePromptToSkills({
+    prompt, installedSkills: INSTALLED, toolSpecs: [], model, modelId: "mock", provider: "anthropic",
+    config: { routingMode: "soft_lock", routingMaxSkills: 2, routingAllowSpillover: 1, thinkingBudget: 0, tokenBudgets: DEFAULT_TOKEN_BUDGETS },
+  });
+
+  it("the router budget leaves room for thinking tokens", () => {
+    assert.ok(DEFAULT_TOKEN_BUDGETS.router >= 1024);
+  });
+
+  it("retries once and uses the second answer", async () => {
+    const m = flakyModel(['{"selected_skills":["tennis"', '{"selected_skills":["cfb"],"mode":"focused","confidence":0.9,"reason":"r"}']);
+    const result = await routeWith("How many touchdown passes did James Madison throw at Texas State on 2025-10-28?", m.model);
+    assert.equal(m.calls(), 2);
+    assert.deepEqual(result.decision.selectedSkills, ["cfb"]);
+    assert.equal(result.meta.llmSucceeded, true);
+    assert.equal(result.meta.llmUsage.totalTokens, 30, "both attempts are counted");
+  });
+
+  it("does not retry a decision that parsed", async () => {
+    const m = flakyModel(['{"selected_skills":["cfb"],"mode":"focused","confidence":0.9,"reason":"r"}']);
+    await routeWith("How many touchdown passes did James Madison throw at Texas State on 2025-10-28?", m.model);
+    assert.equal(m.calls(), 1);
+  });
+
+  it("names of events and providers select their skill even when the router fails", async () => {
+    for (const [q, skill] of [
+      ["In the 2025 US Open men's singles final, how many games did the runner-up win?", "tennis"],
+      ["How many sets did the 2025 Wimbledon champion lose?", "tennis"],
+      ["According to Nevobo's club registry, when was DES founded?", "volleyball"],
+      ["In the men's Olympic ice hockey game between Canada and France, how many goals did Canada score?", "nhl"],
+      ["What is the listed capacity of the IPL 2026 final venue?", "cricket"],
+      ["Per TFRRS, what was Jane Hedengren's 800 m time?", "xctf"],
+      ["Which stadium does TheSportsDB list as the home ground of the IPL 2026 champion?", "metadata"],
+    ]) {
+      const result = await route(q, INSTALLED);
+      assert.ok(result.decision.selectedSkills.includes(skill), `${q} -> ${result.decision.selectedSkills}`);
+      assert.ok(!result.decision.selectedSkills.includes("cbb"), q);
+    }
+  });
+
+  it("'US Open' alone does not pick a sport, since tennis and golf both have one", async () => {
+    const result = await route("Who won the 2025 US Open?", INSTALLED);
+    assert.ok(!result.decision.reason.startsWith("Explicit intent detected for: tennis"));
+  });
+});
