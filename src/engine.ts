@@ -262,8 +262,16 @@ function toolFinishDetails(event: {
 }
 
 /** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
-function routedSkillsOf(decision: { selectedSkills: ReadonlyArray<string> } | null | undefined): { routedSkills?: string[] } {
-  return decision ? { routedSkills: [...decision.selectedSkills].sort() } : {};
+function routedSkillsOf(routing: {
+  decision?: { selectedSkills: ReadonlyArray<string> } | null;
+  routeMeta?: { llmAttempted: boolean; llmSucceeded: boolean };
+}): { routedSkills?: string[]; routeLlmSucceeded?: boolean } {
+  const { decision, routeMeta } = routing;
+  if (!decision) return {};
+  return {
+    routedSkills: [...decision.selectedSkills].sort(),
+    ...(routeMeta?.llmAttempted ? { routeLlmSucceeded: routeMeta.llmSucceeded } : {}),
+  };
 }
 
 /** Normalized token usage extracted from a generateText result. */
@@ -4607,7 +4615,7 @@ export class sportsclawEngine {
           toolSurfaceSha256: hashToolSurface(tools, offered),
           providerWarnings: formatProviderWarnings(laneResults.flatMap((lane) => lane.steps ?? [])),
           parallelAgents: true,
-          ...routedSkillsOf(routing.decision),
+          ...routedSkillsOf(routing),
         };
       }
       this._lastUsage = laneResults
@@ -4886,7 +4894,7 @@ export class sportsclawEngine {
         toolSurfaceSha256: hashToolSurface(tools, offered),
         providerWarnings: formatProviderWarnings(result.steps),
         parallelAgents: false,
-        ...routedSkillsOf(routing.decision),
+        ...routedSkillsOf(routing),
       };
     }
 

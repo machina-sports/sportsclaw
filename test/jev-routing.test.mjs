@@ -139,7 +139,8 @@ describe("routePromptToSkills opt-in boundary", () => {
         installedSkills: ["nba", "nfl"],
         config: { ...(routing === undefined ? {} : { routing }) },
       });
-      assert.equal(model.doGenerateCalls.length, 1, "the generative router must still be called");
+      // The mock returns no JSON, so the generative router is retried once.
+      assert.equal(model.doGenerateCalls.length, 2, "the generative router must still be called");
       assert.equal(result.meta.llmAttempted, true);
       assert.equal(result.meta.routing, undefined, "legacy routes carry no routing telemetry");
     }
@@ -548,7 +549,7 @@ describe("engine routing boundary", () => {
     const engine = engineStub({ routing: { env: {} } });
     const result = await engine.resolveActiveToolsForPrompt("who is winning tonight", ["nba_get_scores"]);
     assert.equal(result.routeMeta.routing, undefined);
-    assert.equal(engine.mainModel.doGenerateCalls.length, 1);
+    assert.equal(engine.mainModel.doGenerateCalls.length, 2, "one route attempt plus one retry of its unparseable answer");
   });
 
   /**
