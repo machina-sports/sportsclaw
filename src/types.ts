@@ -258,14 +258,14 @@ export interface TokenBudgets {
   main: number;          // Main agentic loop (default: 16384)
   synthesis: number;     // synthesizeFromToolOutputs (default: 2048)
   evidenceGate: number;  // applyEvidenceGate (default: 4096)
-  router: number;        // runLlmRouter (default: 220)
+  router: number;        // runLlmRouter (default: 1024; thinking tokens count against it)
 }
 
 export const DEFAULT_TOKEN_BUDGETS: TokenBudgets = {
   main: 16_384,
   synthesis: 2_048,
   evidenceGate: 4_096,
-  router: 220,
+  router: 1_024,
 };
 
 // ---------------------------------------------------------------------------

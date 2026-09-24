@@ -81,6 +81,16 @@ const BASE_SKILL_ALIASES: Record<string, string[]> = {
   f1: ["formula 1", "formula one", "grand prix"],
   cfb: ["college football", "ncaaf"],
   cbb: ["college basketball", "march madness", "ncaab"],
+  // Names that belong to one installed skill only. "US Open" is left out:
+  // tennis and golf both have one.
+  tennis: ["wimbledon", "roland garros", "australian open", "atp", "wta", "men's singles", "women's singles"],
+  nhl: ["stanley cup", "ice hockey"],
+  nfl: ["super bowl", "afc championship", "nfc championship"],
+  cricket: ["ipl", "indian premier league", "big bash", "t20", "odi"],
+  golf: ["pga tour", "lpga", "ryder cup"],
+  volleyball: ["nevobo"],
+  xctf: ["tfrrs"],
+  metadata: ["thesportsdb"],
 };
 
 const SKILL_ALIASES: Record<string, string[]> = { ...BASE_SKILL_ALIASES };
@@ -455,14 +465,23 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
     new Set([...rankedDeterministic.slice(0, 4), ...seededSkills])
   ).slice(0, effectiveMaxSkills);
 
-  const primaryAttempt = await runLlmRouter(
+  let primaryAttempt = await runLlmRouter(
     input,
     input.model,
     deterministicCandidates,
     rankedMemory.slice(0, 4)
   );
+  // A failed route falls back to tool-name word overlap, which favours the
+  // skill with the most tools (cbb) over the sport the prompt is about. One
+  // retry is cheaper than answering from the wrong sport's tools.
+  let llmDurationMs = primaryAttempt.durationMs;
+  let retryUsage: LlmRouteAttempt["usage"];
+  if (!primaryAttempt.succeeded && explicitSkills.size === 0 && !input.abortSignal?.aborted) {
+    retryUsage = primaryAttempt.usage;
+    primaryAttempt = await runLlmRouter(input, input.model, deterministicCandidates, rankedMemory.slice(0, 4));
+    llmDurationMs += primaryAttempt.durationMs;
+  }
   const llmDecision = primaryAttempt.decision;
-  const llmDurationMs = primaryAttempt.durationMs;
   const llmSucceeded = primaryAttempt.succeeded;
   const modelUsed: string | null = llmSucceeded ? input.modelId : null;
 
@@ -569,7 +588,13 @@ export async function routePromptToSkills(input: RouteInput): Promise<RouteOutco
       llmAttempted: true,
       llmSucceeded,
       llmDurationMs,
-      ...(primaryAttempt.usage ? { llmUsage: primaryAttempt.usage } : {}),
+      ...(() => {
+        const a = retryUsage, b = primaryAttempt.usage;
+        const usage = a && b
+          ? { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, totalTokens: a.totalTokens + b.totalTokens }
+          : a ?? b;
+        return usage ? { llmUsage: usage } : {};
+      })(),
     },
   };
 }

@@ -158,7 +158,8 @@ describe("router complexity integration contract", () => {
       config: baseConfig,
     });
 
-    assert.equal(mockModel.doGenerateCalls.length, 1);
-    assert.equal(mockModel.doGenerateCalls[0].abortSignal, controller.signal);
+    // The mock's answer does not parse, so the route is retried once.
+    assert.equal(mockModel.doGenerateCalls.length, 2);
+    for (const call of mockModel.doGenerateCalls) assert.equal(call.abortSignal, controller.signal);
   });
 });
