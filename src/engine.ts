@@ -1383,6 +1383,8 @@ export class sportsclawEngine {
     userPrompt: string;
     draft: string;
     toolOutputs: Array<{ toolName: string; output: string; truncated?: boolean }>;
+    /** Tools that failed this turn and never succeeded; their data is absent. */
+    failedTools?: string[];
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
     correctionAttempted?: boolean;
@@ -1429,6 +1431,11 @@ export class sportsclawEngine {
       ? "Some sources are marked TRUNCATED or were not shown, so you see only part of the data the draft was written from. " +
         "A claim that is merely not visible in that partial data is NOT a discrepancy. " +
         "Flag a claim only when the data you can see contradicts it.\n"
+      : "";
+    const failedTools = [...new Set(params.failedTools ?? [])];
+    const failedToolsRule = failedTools.length > 0
+      ? `These tools failed this turn, so their data is not available: ${failedTools.join(", ")}. ` +
+        "A specific value or result the data shown does not contain, and that could only have come from one of them, is unsupported: flag it, even when the view is partial.\n"
       : "";
 
     let discrepanciesFound = false;
@@ -1509,6 +1516,7 @@ export class sportsclawEngine {
         system:
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           partialViewRule +
+          failedToolsRule +
           "Judge the draft's claims, not whether the question could be answered: never flag a draft for answering " +
           "instead of declining. A value computed from the data (a count, sum, rate, or a player's team from a roster) " +
           "is supported when its inputs are in the data.\n" +
@@ -1552,7 +1560,7 @@ export class sportsclawEngine {
         const retryRes = await generateText({
           model: this.mainModel,
           ...this.samplingOptions(),
-          system: partialViewRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+          system: partialViewRule + failedToolsRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
           prompt: [
@@ -5049,7 +5057,15 @@ export class sportsclawEngine {
       }
     }
 
-    if (netFailures.length > 0) {
+    // When tools succeeded, the default fact-checker below sees their data and
+    // is told which tools failed, so it covers what this gate did in one pass.
+    // The gate stayed blind to most of the data and turned supported answers
+    // into UNKNOWN after a rejected argument (bench v1-fix: 6 of 22 losses).
+    // It still runs when nothing succeeded, or when the opt-in Jev verifier
+    // (which can decline to check) is configured.
+    const checkerCoversFailures =
+      successes.length > 0 && resolveEvidenceVerifierSettings(this.config.evidenceVerifier).provider !== "jev";
+    if (netFailures.length > 0 && !checkerCoversFailures) {
       responseText = await this.applyEvidenceGate({
         userPrompt: sanitizedPrompt,
         draft: responseText,
@@ -5083,6 +5099,7 @@ export class sportsclawEngine {
         userPrompt: sanitizedPrompt,
         draft: responseText,
         toolOutputs,
+        failedTools: netFailures.map((f) => f.toolName),
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
       });
