@@ -421,12 +421,15 @@ function currentTurnSection(ctx: SystemPromptContext): string {
 // ---------------------------------------------------------------------------
 
 function resolveSkillGuides(ctx: SystemPromptContext): SkillGuide[] {
-  const activeSkills = new Set<string>([
-    ...ctx.selectedSkills,
-    ...ctx.installedSports,
-  ]);
+  // Routed turns get the guides of their skills only; an unrouted turn keeps
+  // every installed skill's guides.
+  const activeSkills = new Set<string>(
+    ctx.selectedSkills.length > 0 ? ctx.selectedSkills : ctx.installedSports
+  );
   const hasMachinaScope =
-    activeSkills.has("machina") || Boolean(ctx.mcpManager.getMachinaServerName());
+    activeSkills.has("machina") ||
+    ctx.installedSports.includes("machina") ||
+    Boolean(ctx.mcpManager.getMachinaServerName());
   if (hasMachinaScope) activeSkills.add("machina");
 
   // Disk guides win on id collision (user customizations override built-ins).

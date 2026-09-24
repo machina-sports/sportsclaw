@@ -1046,6 +1046,8 @@ export class sportsclawEngine {
     agents?: AgentDef[];
     strategyContent?: string;
     callerSystemPrompt?: string;
+    /** Tools offered this turn; the prompt lists only these. Omitted lists all. */
+    activeToolNames?: ReadonlyArray<string>;
   }): string {
     const { installed, available } = getInstalledVsAvailable();
     const discordCfg = loadConfig().chatIntegrations?.discord;
@@ -1060,7 +1062,12 @@ export class sportsclawEngine {
       skipFanProfile: this.config.skipFanProfile,
       installedSports: installed,
       availableSports: available,
-      toolSpecs: this.registry.getAllToolSpecs(),
+      toolSpecs: (() => {
+        const specs = this.registry.getAllToolSpecs();
+        if (!args.activeToolNames) return specs;
+        const offered = new Set(args.activeToolNames);
+        return specs.filter((spec) => spec.name.startsWith("mcp__") || offered.has(spec.name));
+      })(),
       mcpManager: this.mcpManager,
       discordConfigured: Boolean(discordCfg?.botToken),
       discordPrefix: discordCfg?.prefix || "!sportsclaw",
@@ -4562,6 +4569,7 @@ export class sportsclawEngine {
             agents: [agent],
             strategyContent,
             callerSystemPrompt: options?.systemPrompt,
+            ...(agentActiveTools !== undefined ? { activeToolNames: agentActiveTools } : {}),
           }),
           messages: this.messages,
           tools,
@@ -4730,6 +4738,7 @@ export class sportsclawEngine {
           agents: activeAgents.length > 0 ? activeAgents : undefined,
           strategyContent,
           callerSystemPrompt: options?.systemPrompt,
+          ...(activeTools ? { activeToolNames: activeTools } : {}),
         })),
         messages: messagesOverride ?? this.messages,
         tools,
