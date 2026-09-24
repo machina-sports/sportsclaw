@@ -261,14 +261,22 @@ function toolFinishDetails(event: {
   };
 }
 
-/** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
 /** A number, or a capitalised name after the first word: the reply states a fact. */
 function carriesData(text: string): boolean {
   return /\d/.test(text) || /\s\p{Lu}/u.test(text);
 }
 
-function routedSkillsOf(decision: { selectedSkills: ReadonlyArray<string> } | null | undefined): { routedSkills?: string[] } {
-  return decision ? { routedSkills: [...decision.selectedSkills].sort() } : {};
+/** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+function routedSkillsOf(routing: {
+  decision?: { selectedSkills: ReadonlyArray<string> } | null;
+  routeMeta?: { llmAttempted: boolean; llmSucceeded: boolean };
+}): { routedSkills?: string[]; routeLlmSucceeded?: boolean } {
+  const { decision, routeMeta } = routing;
+  if (!decision) return {};
+  return {
+    routedSkills: [...decision.selectedSkills].sort(),
+    ...(routeMeta?.llmAttempted ? { routeLlmSucceeded: routeMeta.llmSucceeded } : {}),
+  };
 }
 
 /** Normalized token usage extracted from a generateText result. */
@@ -4623,7 +4631,7 @@ export class sportsclawEngine {
           toolSurfaceSha256: hashToolSurface(tools, offered),
           providerWarnings: formatProviderWarnings(laneResults.flatMap((lane) => lane.steps ?? [])),
           parallelAgents: true,
-          ...routedSkillsOf(routing.decision),
+          ...routedSkillsOf(routing),
         };
       }
       this._lastUsage = laneResults
@@ -4902,7 +4910,7 @@ export class sportsclawEngine {
         toolSurfaceSha256: hashToolSurface(tools, offered),
         providerWarnings: formatProviderWarnings(result.steps),
         parallelAgents: false,
-        ...routedSkillsOf(routing.decision),
+        ...routedSkillsOf(routing),
       };
     }
 
