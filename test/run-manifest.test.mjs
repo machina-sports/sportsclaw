@@ -141,6 +141,7 @@ test("run trace is reported but excluded from config_sha256", () => {
     provider_warnings: ["unsupported seed"],
     parallel_agents: false,
     routed_skills: null,
+    route_llm_ok: null,
     pass_tokens: null,
   });
 });
@@ -157,6 +158,12 @@ test("routed_skills is reported in run and excluded from config_sha256", () => {
   assert.equal(routed.config_sha256, unrouted.config_sha256);
   assert.equal(routed.config_sha256, buildRunManifest(baseInput).config_sha256);
   assert.equal("routed_skills" in routed.config, false);
+});
+
+test("route_llm_ok reports whether the LLM router returned a decision", () => {
+  const trace = { offeredTools: [], toolSurfaceSha256: "abc", providerWarnings: [], parallelAgents: false };
+  assert.equal(buildRunManifest({ ...baseInput, trace: { ...trace, routeLlmSucceeded: false } }).run.route_llm_ok, false);
+  assert.equal(buildRunManifest({ ...baseInput, trace }).run.route_llm_ok, null);
 });
 
 test("sports_skills_source is config: absent leaves the hash unchanged, present changes it", () => {
