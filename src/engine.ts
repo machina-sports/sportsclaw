@@ -781,6 +781,68 @@ export function isTruncatedEvidence(snippet: string): boolean {
   return EVIDENCE_TRUNCATION_MARKERS.some((marker) => snippet.includes(marker));
 }
 
+/**
+ * Per-source evidence budget for the fact-checker. Its cost is almost all
+ * evidence input (bench v1-fix: 8–37k input tokens per check, <1k thinking);
+ * 24k head + tail per source was the largest share of routed tokens.
+ */
+const VERIFICATION_EVIDENCE_CHARS = 8_000;
+
+const CLAIM_STOP_WORDS = new Set(["FINAL", "UNKNOWN"]);
+
+/** Names and multi-digit numbers in a draft: what its claims are about. */
+export function draftClaimTerms(draft: string): string[] {
+  const terms = new Set<string>();
+  for (const m of draft.matchAll(/\d+(?:\.\d+)?/g)) if (m[0].length >= 2) terms.add(m[0]);
+  for (const m of draft.matchAll(/\p{Lu}[\p{L}'’-]{2,}/gu)) {
+    if (!CLAIM_STOP_WORDS.has(m[0].toUpperCase())) terms.add(m[0]);
+  }
+  return [...terms];
+}
+
+/**
+ * Evidence for the fact-checker from a large output: its head plus windows
+ * around the draft's names and numbers, rarest terms first, within `budget`.
+ * Claims are about those terms, so the rows that support or contradict them
+ * sit next to them; a head + tail cut kept the ends and dropped those rows.
+ * The result carries the truncation marker, so the partial-view rule applies.
+ */
+export function focusEvidenceOnClaims(text: string, terms: string[], budget = 8_000): string {
+  if (text.length <= budget) return text;
+  const marker = "\n...[truncated middle]...\n";
+  const window = 400;
+  const lower = text.toLowerCase();
+  const positions = terms
+    .map((term) => {
+      const needle = term.toLowerCase();
+      const found: number[] = [];
+      for (let i = lower.indexOf(needle); i >= 0; i = lower.indexOf(needle, i + needle.length)) found.push(i);
+      return { needle, found };
+    })
+    .filter((t) => t.found.length > 0)
+    .sort((a, b) => a.found.length - b.found.length);
+  const spans: Array<[number, number]> = [[0, Math.min(1_500, budget)]];
+  let used = spans[0][1];
+  outer: for (const { needle, found } of positions) {
+    for (const at of found.slice(0, 3)) {
+      const span: [number, number] = [Math.max(0, at - window), Math.min(text.length, at + needle.length + window)];
+      if (used + span[1] - span[0] > budget) break outer;
+      spans.push(span);
+      used += span[1] - span[0];
+    }
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([...span]);
+  }
+  const pieces = merged.map(([a, b]) => text.slice(a, b));
+  const tail = merged[merged.length - 1][1] < text.length ? marker : "";
+  return pieces.join(marker) + tail;
+}
+
 export function summarizeToolOutputForEvidence(output: unknown, maxChars = 4_000): string {
   // Final verification needs document batches, not just their first/last fields.
   // Keep ordinary synthesis compact and bound the opt-in verification budget.
@@ -1296,13 +1358,17 @@ export class sportsclawEngine {
       toolResults?: Array<{ toolCallId: string; toolName: string; output: unknown }>;
     }>,
     successfulToolCallIds: Set<string>,
-    maxChars = 4_000
+    maxChars = 4_000,
+    /** Draft terms: large outputs are cut to the windows around them (see focusEvidenceOnClaims). */
+    focusTerms?: string[]
   ): Array<{ toolName: string; output: string; truncated: boolean }> {
     const out: Array<{ toolName: string; output: string; truncated: boolean }> = [];
     for (const step of steps) {
       for (const result of step.toolResults ?? []) {
         if (!successfulToolCallIds.has(result.toolCallId)) continue;
-        const output = this.summarizeToolOutput(result.output, maxChars);
+        const output = focusTerms
+          ? focusEvidenceOnClaims(trimJsonWhitespace(compactStructuredJson(extractEvidenceString(result.output))), focusTerms, maxChars)
+          : this.summarizeToolOutput(result.output, maxChars);
         if (!output) continue;
         out.push({ toolName: result.toolName, output, truncated: isTruncatedEvidence(output) });
       }
@@ -4707,7 +4773,7 @@ export class sportsclawEngine {
       // Parallel synthesis must satisfy the same caller policy and evidence gate.
       const parallelToolOutputs = laneResults.flatMap((lane) =>
         this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
-          new Set(succeededExternalTools.keys()), 24_000));
+          new Set(succeededExternalTools.keys()), VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText)));
       if (parallelToolOutputs.length > 0) {
         responseText = await this.validateResponseEvidence({
           userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
@@ -5093,7 +5159,8 @@ export class sportsclawEngine {
           }>;
         }>,
         successIds,
-        24_000
+        VERIFICATION_EVIDENCE_CHARS,
+        draftClaimTerms(responseText)
       );
       responseText = await this.validateResponseEvidence({
         userPrompt: sanitizedPrompt,
