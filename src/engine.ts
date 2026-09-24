@@ -267,6 +267,26 @@ function carriesData(text: string): boolean {
 }
 
 /** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+/** Most data calls after which a give-up draft still gets one more round. */
+const KEEP_SEARCHING_MAX_CALLS = 6;
+
+const GIVE_UP_RE =
+  /\bFINAL:\s*UNKNOWN\b|\b(?:data|information|record|records) (?:is|are) (?:not |un)available\b|\b(?:does|do|did) not (?:contain|include|provide|list|show|have)\b|\b(?:could|can)(?:not|n't| not) (?:find|determine|locate|verify|confirm)\b|\bunable to (?:find|determine|locate|verify|confirm)\b|\bno (?:record|data|information) (?:of|for|about|on)\b/i;
+
+/** A draft that declines for lack of data (as opposed to answering). */
+export function isGiveUpDraft(text: string): boolean {
+  return GIVE_UP_RE.test(text);
+}
+
+export function keepSearchingNote(dataCalls: number): string {
+  return (
+    `Before concluding the data is unavailable: you made ${dataCalls} data call(s). ` +
+    "Check whether another offered tool covers what the question names (the event, date, season, team or player): " +
+    "a scoreboard, schedule, box score, game log, standings, leaders or history endpoint, or a different provider for the same sport. Try it. " +
+    "If the data still is not there, or the question's premise is false, decline exactly as before, in the same format."
+  );
+}
+
 function routedSkillsOf(routing: {
   decision?: { selectedSkills: ReadonlyArray<string> } | null;
   routeMeta?: { llmAttempted: boolean; llmSucceeded: boolean };
@@ -4992,6 +5012,37 @@ export class sportsclawEngine {
       }
     }
 
+    // Keep-searching pass: a draft that gives up after a few data calls gets
+    // one more round before it is accepted. The routed arm answered UNKNOWN
+    // after 1-4 calls where a bare loop found the data in 4-21 (bench v1-fix2).
+    // A premise that is false or data that does not exist is still declined.
+    let priorSteps: typeof result.steps = [];
+    let priorMessages: Message[] = [];
+    let priorUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    const dataCalls = failedExternalTools.size + succeededExternalTools.size;
+    if (
+      isGiveUpDraft(result.text ?? "") &&
+      dataCalls <= KEEP_SEARCHING_MAX_CALLS &&
+      stepCount < this.config.maxTurns - 2 &&
+      !options?.abortSignal?.aborted
+    ) {
+      const nudge: Message = { role: "user", content: keepSearchingNote(dataCalls) };
+      const firstMessages = result.response.messages as Message[];
+      try {
+        const retried = await callLLM([...this.messages, ...firstMessages, nudge]);
+        if (retried.text?.trim()) {
+          priorSteps = result.steps;
+          priorMessages = [...firstMessages, nudge];
+          priorUsage = usageOf(result);
+          result = retried;
+          this.notePass("keep_searching", usageOf(retried));
+        }
+      } catch {
+        // keep the first answer
+      }
+    }
+    const allSteps = [...priorSteps, ...result.steps];
+
     {
       const offered = activeTools ?? Object.keys(tools);
       this._lastRunTrace = {
@@ -4999,14 +5050,14 @@ export class sportsclawEngine {
         mainSystemPromptSha256,
         offeredTools: [...new Set(offered)].sort(),
         toolSurfaceSha256: hashToolSurface(tools, offered),
-        providerWarnings: formatProviderWarnings(result.steps),
+        providerWarnings: formatProviderWarnings(allSteps),
         parallelAgents: false,
         ...routedSkillsOf(routing),
       };
     }
 
-    this._lastUsage = usageOf(result);
-    this.notePass("main", this._lastUsage);
+    this._lastUsage = addUsage(priorUsage, usageOf(result));
+    this.notePass("main", priorSteps.length > 0 ? priorUsage : this._lastUsage);
     if (this.config.verbose) {
       console.error(
         `[sportsclaw] tokens input=${this._lastUsage.inputTokens} ` +
@@ -5016,8 +5067,8 @@ export class sportsclawEngine {
     recordTokens(this._lastUsage.totalTokens);
 
     // Append the full response messages to our history for multi-turn support
-    for (const msg of result.response.messages) {
-      this.messages.push(msg as Message);
+    for (const msg of [...priorMessages, ...(result.response.messages as Message[])]) {
+      this.messages.push(msg);
     }
 
     if (this.config.verbose) {
@@ -5080,7 +5131,7 @@ export class sportsclawEngine {
     if (successes.length > 0 && this.isLowSignalResponse(responseText)) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
-        result.steps as Array<{
+        allSteps as Array<{
           toolResults?: Array<{
             toolCallId: string;
             toolName: string;
@@ -5138,7 +5189,7 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
         toolOutputs: this.collectToolOutputSnippets(
-          result.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
+          allSteps as Parameters<typeof this.collectToolOutputSnippets>[0],
           new Set(succeededExternalTools.keys())
         ),
         maxOutputTokens: budgets.evidenceGate,
@@ -5151,7 +5202,7 @@ export class sportsclawEngine {
     if (successes.length > 0) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
-        result.steps as Array<{
+        allSteps as Array<{
           toolResults?: Array<{
             toolCallId: string;
             toolName: string;
