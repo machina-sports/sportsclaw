@@ -1448,7 +1448,7 @@ export class sportsclawEngine {
       if (params.correctionAttempted) return unavailable;
       discrepanciesFound = true;
       const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, discrepancies: jevDiscrepancies,
+        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: jevDiscrepancies,
       });
       if (!corrected) return unavailable;
       return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
@@ -1478,6 +1478,9 @@ export class sportsclawEngine {
         system:
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           partialViewRule +
+          "Judge the draft's claims, not whether the question could be answered: never flag a draft for answering " +
+          "instead of declining. A value computed from the data (a count, sum, rate, or a player's team from a roster) " +
+          "is supported when its inputs are in the data.\n" +
           "Only consider claims that are relevant to the user's request; ignore source data that is " +
           "unrelated to what the user asked.\n" +
           "Check numerical AND qualitative premises. Scores do not establish tactical containment, control, pressure or causation. " +
@@ -1556,7 +1559,7 @@ export class sportsclawEngine {
       // draft is known to be wrong. A failure from here on must not ship it.
       discrepanciesFound = true;
       const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, discrepancies: parsed.discrepancies,
+        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: parsed.discrepancies,
       });
       if (corrected) {
         return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
@@ -1580,6 +1583,8 @@ export class sportsclawEngine {
     draft: string;
     serializedToolOutputs: string;
     discrepancies: Array<{ claim: string; evidence: string; severity: string }>;
+    /** Same rule the checker got when it saw only part of the data. */
+    partialViewRule?: string;
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
   }): Promise<string | undefined> {
@@ -1598,7 +1603,10 @@ export class sportsclawEngine {
           "or [Tool N]. Only use human-readable source names (e.g. a league or outlet) if they appear in " +
           "the data itself. Keep genuine source links and observation times. Keep material uncertainty beside the claim it qualifies, " +
           "not in an empty unavailable section. A missing lineup must not suppress supported team news. " +
-          "Omit unsupported or repetitive leads; do not fill a quota. Avoid adding factual premises to make a headline sound more exciting.\n\n" + (params.callerSystemPrompt ?? ""),
+          "Omit unsupported or repetitive leads; do not fill a quota. Avoid adding factual premises to make a headline sound more exciting. " +
+          "Fix only the listed discrepancies: keep every other value and the answer itself unless a discrepancy is about it.\n" +
+          (params.partialViewRule ?? "") +
+          "\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
