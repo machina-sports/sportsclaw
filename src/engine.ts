@@ -292,6 +292,11 @@ function carriesData(text: string): boolean {
 }
 
 /** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+/** Visible-output room for a fact-check verdict or correction, on top of its thinking budget. */
+const CHECKER_OUTPUT_TOKENS = 4_000;
+/** Most thinking tokens a fact-check or correction may use. */
+const CHECKER_THINKING_BUDGET = 2_048;
+
 /** What the fact-checker returns when it withholds an answer. */
 const VERIFY_UNAVAILABLE = "I could not verify a reliable answer from the available evidence.";
 
@@ -1494,6 +1499,19 @@ export class sportsclawEngine {
   }
 
   /**
+   * Output budget for the fact-check and correction calls. Thinking tokens count
+   * against maxOutputTokens: with 2000 and no thinking bound, gemini-3.5-flash
+   * spent the budget thinking and the verdict ended mid-text (finishReason
+   * "length"), so 30 of 487 bench answers shipped unchecked. The thinking share
+   * is bounded and the visible answer keeps room of its own.
+   */
+  private checkerCallOptions(): { maxOutputTokens: number; providerOptions?: ReturnType<typeof buildProviderOptions> } {
+    const thinking = this.config.thinkingBudget > 0 ? Math.min(this.config.thinkingBudget, CHECKER_THINKING_BUDGET) : 0;
+    const opts = buildProviderOptions(this.config.provider, thinking);
+    return { maxOutputTokens: CHECKER_OUTPUT_TOKENS + thinking, ...(opts ? { providerOptions: opts } : {}) };
+  }
+
+  /**
    * validateResponseEvidence, plus what it did in the run trace: kept the
    * draft, corrected it, withheld it, or could not check it; with the draft
    * from before a correction, so the effect of corrections can be measured.
@@ -1696,7 +1714,7 @@ export class sportsclawEngine {
           `Draft response to check:`,
           draft,
         ].join("\n\n"),
-        maxOutputTokens: 2000,
+        ...this.checkerCallOptions(),
         abortSignal: params.abortSignal,
         maxRetries: 1,
       });
@@ -1717,7 +1735,7 @@ export class sportsclawEngine {
             `Draft response to check:`,
             draft,
           ].join("\n\n"),
-          maxOutputTokens: 2000,
+          ...this.checkerCallOptions(),
           abortSignal: params.abortSignal,
           maxRetries: 1,
         });
@@ -1812,7 +1830,7 @@ export class sportsclawEngine {
           `Identified discrepancies to resolve:`,
           JSON.stringify(params.discrepancies, null, 2),
         ].join("\n\n"),
-        maxOutputTokens: 4000,
+        ...this.checkerCallOptions(),
         abortSignal: params.abortSignal,
         maxRetries: 0,
       });
