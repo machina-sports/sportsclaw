@@ -204,6 +204,7 @@ const AGGREGATE_OPS: readonly AggregateOp[] = ["count", "sum", "mean", "min", "m
 
 export interface ToolResultQuery {
   result_id?: unknown;
+  result_ids?: unknown;
   path?: unknown;
   where?: unknown;
   sort_by?: unknown;
@@ -231,11 +232,55 @@ function resolvePath(value: unknown, path: string): unknown {
   return node;
 }
 
-/** Field of a row; a dotted field reads nested objects (e.g. "stats.yards"). Scalar rows expose `value`. */
+/**
+ * Values read through a nested list (`competitors.team.abbreviation` on an
+ * event with two competitors): a condition matches when any of them does.
+ */
+class FanOut {
+  constructor(readonly values: unknown[]) {}
+}
+
+function resolveAcross(node: unknown, segments: string[]): unknown {
+  let nodes: unknown[] = [node];
+  let fanned = false;
+  for (const segment of segments) {
+    const next: unknown[] = [];
+    for (const n of nodes) {
+      if (Array.isArray(n)) {
+        if (/^\d+$/.test(segment)) {
+          if (n[Number(segment)] !== undefined) next.push(n[Number(segment)]);
+        } else {
+          fanned = true;
+          for (const item of n) if (isPlainObject(item) && Object.hasOwn(item, segment)) next.push(item[segment]);
+        }
+      } else if (isPlainObject(n) && Object.hasOwn(n, segment)) {
+        next.push(n[segment]);
+      }
+    }
+    nodes = next;
+  }
+  if (!fanned) return nodes[0];
+  return nodes.length > 0 ? new FanOut(nodes) : undefined;
+}
+
+/**
+ * Field of a row; a dotted field reads nested objects (e.g. "stats.yards") and
+ * reads through nested lists (a FanOut of every value). Scalar rows expose `value`.
+ */
 function fieldOf(row: unknown, field: string): unknown {
   if (!isPlainObject(row)) return field === "value" ? row : undefined;
   if (Object.hasOwn(row, field)) return row[field];
-  return resolvePath(row, field);
+  return resolveAcross(row, field.split("."));
+}
+
+/** The values a field holds: every one of a FanOut, else the single value. */
+function valuesOf(v: unknown): unknown[] {
+  return v instanceof FanOut ? v.values : [v];
+}
+
+/** JSON form of a field value (a FanOut becomes its list of values). */
+function plain(v: unknown): unknown {
+  return v instanceof FanOut ? v.values : v;
 }
 
 function isMissing(v: unknown): boolean {
@@ -264,6 +309,12 @@ function compareValues(a: unknown, b: unknown): number {
 }
 
 function matches(actual: unknown, op: WhereOp, expected: unknown): boolean {
+  // Through a nested list: "ne" holds when no value equals, every other op when any value matches.
+  if (actual instanceof FanOut) {
+    return op === "ne"
+      ? actual.values.every((v) => matches(v, "ne", expected))
+      : actual.values.some((v) => matches(v, op, expected));
+  }
   if (op === "ne") return isMissing(actual) || compareValues(actual, expected) !== 0;
   if (isMissing(actual)) return false;
   switch (op) {
@@ -319,7 +370,7 @@ function checkField(rows: readonly unknown[], columns: readonly string[], field:
 
 function project(row: unknown, fields: readonly string[] | undefined): unknown {
   if (!fields) return row;
-  return Object.fromEntries(fields.map((f) => [f, fieldOf(row, f) ?? null]));
+  return Object.fromEntries(fields.map((f) => [f, plain(fieldOf(row, f)) ?? null]));
 }
 
 /** Sort key order: present values by comparator (desc/asc), missing values always last. */
@@ -338,7 +389,9 @@ function sortRows<T>(rows: T[], key: (row: T) => unknown, descending: boolean): 
 
 function aggregateValues(op: AggregateOp, rows: readonly unknown[], field: string | undefined): { value: number | null; n: number } {
   if (op === "count") return { value: rows.length, n: rows.length };
-  const nums = rows.map((row) => asNumber(fieldOf(row, field!))).filter((n): n is number => n !== undefined);
+  const nums = rows
+    .flatMap((row) => valuesOf(fieldOf(row, field!)).map(asNumber))
+    .filter((n): n is number => n !== undefined);
   if (nums.length === 0) return { value: null, n: 0 };
   const sum = nums.reduce((a, b) => a + b, 0);
   const value =
@@ -353,30 +406,52 @@ function aggregateValues(op: AggregateOp, rows: readonly unknown[], field: strin
  * ToolResultQueryError with a model-readable message on a bad query.
  */
 export function queryToolResult(store: ToolResultStore, query: ToolResultQuery, maxChars = 30_000): string {
-  const id = typeof query.result_id === "string" ? query.result_id.trim() : "";
-  if (!id) fail("result_id is required (e.g. \"r1\", from the truncated tool output).");
-  const stored = store.get(id);
-  if (!stored) {
-    fail(
-      `Unknown result_id "${id}". Stored results live only within the current turn ` +
-        "(and the oldest are evicted); call the data tool again to get a new result_id.",
-    );
-  }
+  // One result (result_id) or the same path across several (result_ids): a season
+  // built from one box score per game is then summed in one query, not by hand.
+  const many = Array.isArray(query.result_ids) && query.result_ids.length > 0;
+  const ids = many
+    ? (query.result_ids as unknown[]).map((v) => (typeof v === "string" ? v.trim() : ""))
+    : [typeof query.result_id === "string" ? query.result_id.trim() : ""];
+  if (ids.some((id) => !id)) fail("result_id is required (e.g. \"r1\", from the tool output), or result_ids: [\"r1\", \"r2\"].");
+  const storedAll = ids.map((id) => {
+    const stored = store.get(id);
+    if (!stored) {
+      fail(
+        `Unknown result_id "${id}". Stored results live only within the current turn ` +
+          "(and the oldest are evicted); call the data tool again to get a new result_id.",
+      );
+    }
+    return stored;
+  });
+  const id = ids.join(",");
 
-  const arrays = findArrays(stored.value).filter((a) => a.rows > 0);
-  let path: string;
-  if (query.path === undefined || query.path === null || query.path === "") {
-    if (arrays.length === 0) fail("This result has no non-empty arrays to query.");
-    path = arrays[0].path;
-  } else {
-    if (typeof query.path !== "string") fail("path must be a dot path string, e.g. \"data.players\".");
-    path = query.path === "$" ? "" : query.path.replace(/^\$\./, "");
+  if (query.path !== undefined && query.path !== null && query.path !== "" && typeof query.path !== "string") {
+    fail("path must be a dot path string, e.g. \"data.players\".");
   }
-  const target = resolvePath(stored.value, path);
-  if (!Array.isArray(target)) {
-    fail(`path "${showPath(path)}" is ${target === undefined ? "not found" : "not an array"}. ${validPathsHint(stored.value)}`);
+  const explicit = typeof query.path === "string" && query.path !== "" ? (query.path === "$" ? "" : query.path.replace(/^\$\./, "")) : undefined;
+  const rows: unknown[] = [];
+  let path = explicit ?? "";
+  for (const stored of storedAll) {
+    const arrays = findArrays(stored.value).filter((a) => a.rows > 0);
+    let own = explicit;
+    if (own === undefined) {
+      if (arrays.length === 0) fail(`Result "${stored.id}" has no non-empty arrays to query.`);
+      own = arrays[0].path;
+    }
+    path = own;
+    const target = resolvePath(stored.value, own);
+    if (!Array.isArray(target)) {
+      if (target !== undefined && !many && explicit !== undefined) {
+        // An object (a box score's game_info, a summary header): return it as is.
+        const text = JSON.stringify({ result_id: stored.id, path: showPath(own), value: target });
+        return text.length <= maxChars
+          ? text
+          : `${text.slice(0, maxChars)}\n\n${TOOL_OUTPUT_TRUNCATED_MARKER}: showing ${maxChars.toLocaleString()} of ${text.length.toLocaleString()} chars. Query a narrower path.]`;
+      }
+      fail(`path "${showPath(own)}" in result "${stored.id}" is ${target === undefined ? "not found" : "not an array"}. ${validPathsHint(stored.value)}`);
+    }
+    for (const row of target) rows.push(many && isPlainObject(row) ? { _result_id: stored.id, ...row } : row);
   }
-  const rows: unknown[] = target;
   const columns = columnsOf(rows);
 
   const conditions = parseWhere(query.where);
@@ -421,7 +496,7 @@ export function queryToolResult(store: ToolResultStore, query: ToolResultQuery, 
     checkField(rows, columns, groupBy, "aggregate group_by");
     const groups = new Map<string, { key: unknown; rows: unknown[] }>();
     for (const row of matched) {
-      const key = fieldOf(row, groupBy) ?? null;
+      const key = plain(fieldOf(row, groupBy)) ?? null;
       const k = JSON.stringify(key);
       const g = groups.get(k) ?? { key, rows: [] };
       g.rows.push(row);
@@ -437,7 +512,9 @@ export function queryToolResult(store: ToolResultStore, query: ToolResultQuery, 
   }
 
   if (typeof sortBy === "string" && sortBy !== "") checkField(rows, columns, sortBy, "sort_by");
-  const ordered = typeof sortBy === "string" && sortBy !== "" ? sortRows(matched, (row) => fieldOf(row, sortBy), descending) : matched;
+  const ordered = typeof sortBy === "string" && sortBy !== ""
+    ? sortRows(matched, (row) => valuesOf(fieldOf(row, sortBy))[0], descending)
+    : matched;
   const selected = ordered.slice(0, limit).map((row) => project(row, fields));
   return capOutput({ ...base, returned_rows: selected.length, rows: selected }, "rows", maxChars);
 }

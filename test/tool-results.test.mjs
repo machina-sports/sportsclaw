@@ -164,7 +164,8 @@ test("errors name the problem and list valid paths/columns", () => {
     return true;
   });
   err({ path: "data.nope" }, /not found\. Valid array paths: data\.players \(6 rows\), data\.meta \(1 rows\)/);
-  err({ path: "data" }, /not an array/);
+  assert.deepEqual(JSON.parse(queryToolResult(store, { result_id: id, path: "data.meta.0" })).value, doc.data.meta[0],
+    "a path to an object returns the object");
   err({ sort_by: "yards" }, /sort_by "yards" is not a column.*passing_yards/);
   err({ where: [{ field: "yds", op: "gt", value: 1 }] }, /where field "yds"/);
   err({ where: [{ field: "team", op: "like", value: 1 }] }, /op must be one of: eq, ne/);

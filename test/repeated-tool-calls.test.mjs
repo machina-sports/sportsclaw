@@ -31,9 +31,10 @@ test("identical successful calls in one turn run once; the repeat is served with
   const first = await tools.nfl_get_stats.execute({ week: 5, season: 2025 }, opts);
   const again = await tools.nfl_get_stats.execute({ season: 2025, week: 5 }, opts); // same args, different key order
   const other = await tools.nfl_get_stats.execute({ week: 6, season: 2025 }, opts);
-  assert.equal(first, '{"rows":[1,2,3]}');
-  assert.equal(again, REPEATED_CALL_NOTE + '{"rows":[1,2,3]}');
-  assert.equal(other, '{"rows":[1,2,3]}');
+  const tagged = (id) => `{"rows":[1,2,3]}\n[result_id "${id}": query_tool_result can filter, sort or aggregate these rows, alone or together with other results (result_ids).]`;
+  assert.equal(first, tagged("r1"));
+  assert.equal(again, REPEATED_CALL_NOTE + tagged("r1"), "the repeat is served as the model first saw it");
+  assert.equal(other, tagged("r2"));
   assert.equal(dispatched.length, 2, "the repeat never reached the registry");
 });
 

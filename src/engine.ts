@@ -53,6 +53,7 @@ import {
   sha256,
   validateSampling,
   type RunTrace,
+  type VerificationOutcome,
 } from "./run-manifest.js";
 import { ToolRegistry, type ToolCallInput, buildSubprocessEnv } from "./tools.js";
 import { DurableStateStore } from "./durability.js";
@@ -184,21 +185,46 @@ function storeOversizedJson(store: ToolResultStore, toolName: string, content: s
   );
 }
 
+/**
+ * A JSON result with rows, within the cap: stored and returned with a one-line
+ * result_id footer. Anything else is returned unchanged.
+ */
+function tagQueryableJson(store: ToolResultStore, toolName: string, content: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return content;
+  }
+  if (!hasQueryableRows(value)) return content;
+  const id = store.put(toolName, value, content.length);
+  if (id === undefined) return content;
+  return `${content}\n[result_id "${id}": ${QUERY_TOOL_RESULT_TOOL} can filter, sort or aggregate these rows, alone or together with other results (result_ids).]`;
+}
+
 const QUERY_TOOL_RESULT_DESCRIPTION =
-  "Query a large data-tool result that was too big to show. When a tool output says it was truncated and gives " +
-  "a result_id, call this with that result_id to get exactly the rows you need: filter with where, order with " +
-  "sort_by/descending, cap with limit, keep columns with fields, or compute count/sum/mean/min/max (optionally " +
-  "group_by). Comparisons are numeric when both sides are numbers. Results exist only for the current turn.";
+  "Query data-tool results by result_id (each tool output with rows ends with one; a truncated output gives one " +
+  "too). Get exactly the rows you need: filter with where, order with sort_by/descending, cap with limit, keep " +
+  "columns with fields, or compute count/sum/mean/min/max (optionally group_by). Pass result_ids to query the same " +
+  "path across several results at once (e.g. one box score per game; rows carry _result_id). Prefer this to adding " +
+  "numbers up by hand. Dotted fields read nested objects and lists (competitors.team.abbreviation matches if any " +
+  "competitor does); a path to an object returns that object. Comparisons are numeric when both sides are numbers. " +
+  "Results exist only for the current turn.";
 
 const SCALAR_VALUE_SCHEMA = { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] };
 
 const QUERY_TOOL_RESULT_SCHEMA = {
   type: "object",
   properties: {
-    result_id: { type: "string", description: "The result_id from the truncated tool output, e.g. \"r1\"." },
+    result_id: { type: "string", description: "The result_id from a tool output, e.g. \"r1\"." },
+    result_ids: {
+      type: "array",
+      items: { type: "string" },
+      description: "Several result_ids: their rows at path are combined (each row gets _result_id). Use instead of result_id.",
+    },
     path: {
       type: "string",
-      description: "Dot path of the array to query (from the overview's arrays list). Default: the largest array.",
+      description: "Dot path of the array to query (from the overview's arrays list), or of an object to return. Default: the largest array.",
     },
     where: {
       type: "array",
@@ -206,7 +232,7 @@ const QUERY_TOOL_RESULT_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          field: { type: "string", description: "Column name; dots read nested fields, e.g. \"stats.yards\"." },
+          field: { type: "string", description: "Column name; dots read nested fields and lists, e.g. \"stats.yards\", \"competitors.team.abbreviation\"." },
           op: { type: "string", enum: ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"] },
           value: {
             anyOf: [...SCALAR_VALUE_SCHEMA.anyOf, { type: "array", items: SCALAR_VALUE_SCHEMA }],
@@ -231,7 +257,6 @@ const QUERY_TOOL_RESULT_SCHEMA = {
       required: ["op"],
     },
   },
-  required: ["result_id"],
 };
 
 /**
@@ -267,6 +292,32 @@ function carriesData(text: string): boolean {
 }
 
 /** The router's selected skills, sorted, for the run trace; omitted when there was no routing decision. */
+/** What the fact-checker returns when it withholds an answer. */
+const VERIFY_UNAVAILABLE = "I could not verify a reliable answer from the available evidence.";
+
+/**
+ * Near the turn limit, tell the model to finish; on the last step, take the
+ * tools away so it answers. Long loops otherwise ended with no reply at the
+ * limit (Sports Agent Bench v1.1: 18 of a bare loop's 25 misses on 3.8-flash).
+ */
+export function wrapUpStep(
+  stepNumber: number,
+  maxTurns: number,
+  system: string
+): { system: string; toolChoice?: "none" } | undefined {
+  if (maxTurns < 4 || stepNumber < maxTurns - 2) return undefined;
+  const last = stepNumber >= maxTurns - 1;
+  return {
+    system:
+      system +
+      "\n\n## Turn limit\n\n" +
+      (last
+        ? "This is your last step and tools are off: answer now from the data you already have, in the requested format. Say briefly what could not be checked."
+        : "You have one tool step left after this one. Make only the calls you still need, then answer in the requested format."),
+    ...(last ? { toolChoice: "none" as const } : {}),
+  };
+}
+
 function routedSkillsOf(routing: {
   decision?: { selectedSkills: ReadonlyArray<string> } | null;
   routeMeta?: { llmAttempted: boolean; llmSucceeded: boolean };
@@ -907,6 +958,8 @@ export class sportsclawEngine {
     passes[pass] = passes[pass] ? addUsage(passes[pass], usage) : usage;
   }
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
+  /** Set while verifyWithTrace runs: whether the check could not run, and the draft before any correction. */
+  private _verifyNotes?: { unverified?: boolean; firstDraft?: string };
   private _lastRunTrace: RunTrace | null = null;
 
   /** Sanitized evidence-verification receipts from the last run(). */
@@ -1441,6 +1494,31 @@ export class sportsclawEngine {
   }
 
   /**
+   * validateResponseEvidence, plus what it did in the run trace: kept the
+   * draft, corrected it, withheld it, or could not check it; with the draft
+   * from before a correction, so the effect of corrections can be measured.
+   */
+  private async verifyWithTrace(params: Parameters<sportsclawEngine["validateResponseEvidence"]>[0]): Promise<string> {
+    const notes: { unverified?: boolean; firstDraft?: string } = {};
+    this._verifyNotes = notes;
+    let out: string;
+    try {
+      out = await this.validateResponseEvidence(params);
+    } finally {
+      this._verifyNotes = undefined;
+    }
+    const outcome: VerificationOutcome =
+      out === VERIFY_UNAVAILABLE ? "withheld" : out !== params.draft ? "corrected" : notes.unverified ? "unverified" : "kept";
+    if (this._lastRunTrace) {
+      this._lastRunTrace.verification = {
+        outcome,
+        ...(notes.firstDraft !== undefined ? { draftBeforeCorrection: notes.firstDraft.slice(0, 4_000) } : {}),
+      };
+    }
+    return out;
+  }
+
+  /**
    * Validate the final response text against raw tool outputs.
    * If a hallucination is detected (e.g. mismatched scores, dates, stats),
    * trigger self-correction or return a corrected version.
@@ -1457,13 +1535,14 @@ export class sportsclawEngine {
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     if (toolOutputs.length === 0) return draft;
-    const unavailable = "I could not verify a reliable answer from the available evidence.";
+    const unavailable = VERIFY_UNAVAILABLE;
     // A draft assembled from real tool output is only thrown away when the
     // check ran and found it unsupported. When the check itself cannot run —
     // aborted, provider error, a verdict that will not parse — the answer
     // stands. Discarding grounded work over an infrastructure hiccup left the
     // user with nothing after a dozen successful tool calls.
     const unverified = (reason: string) => {
+      if (this._verifyNotes) this._verifyNotes.unverified = true;
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation did not complete (${reason}); returning the drafted answer`);
       }
@@ -1551,6 +1630,7 @@ export class sportsclawEngine {
     if (jevDiscrepancies) {
       if (params.correctionAttempted) return unavailable;
       discrepanciesFound = true;
+      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
       const corrected = await this.correctAgainstEvidence({
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: jevDiscrepancies,
       });
@@ -1673,6 +1753,7 @@ export class sportsclawEngine {
       // Past this point the check has run and named real discrepancies, so the
       // draft is known to be wrong. A failure from here on must not ship it.
       discrepanciesFound = true;
+      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
       const corrected = await this.correctAgainstEvidence({
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: actionable,
       });
@@ -1768,7 +1849,7 @@ export class sportsclawEngine {
     const verbose = this.config.verbose;
     // Oversized JSON results of this buildTools() call (one per turn in run()
     // and runDirect()), queryable through query_tool_result (#176).
-    const resultStore = new ToolResultStore();
+    const resultStore = new ToolResultStore(100);
 
     // Interactive approval prompting is only safe on an interactive CLI terminal.
     // Everywhere else (operator daemon, piped input, Discord/Telegram) the gate
@@ -1889,8 +1970,12 @@ export class sportsclawEngine {
             succeededToolResultsThisTurn?.set(signature, capped);
             return capped;
           }
-          succeededToolResultsThisTurn?.set(signature, result.content);
-          return result.content;
+          // Every JSON result with rows gets an id too, so rows spread over many calls
+          // (one box score per game) can be filtered and summed together with
+          // query_tool_result instead of by hand (Sports Agent Bench v1.1).
+          const tagged = tagQueryableJson(resultStore, spec.name, result.content);
+          succeededToolResultsThisTurn?.set(signature, tagged);
+          return tagged;
         },
       });
     }
@@ -4785,7 +4870,7 @@ export class sportsclawEngine {
         this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
           new Set(succeededExternalTools.keys()), VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText)));
       if (parallelToolOutputs.length > 0) {
-        responseText = await this.validateResponseEvidence({
+        responseText = await this.verifyWithTrace({
           userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
           callerSystemPrompt: options?.systemPrompt, abortSignal: options?.abortSignal,
         });
@@ -4835,8 +4920,10 @@ export class sportsclawEngine {
     }
 
     let mainSystemPromptSha256: string | undefined;
+    let mainSystem = "";
     const recordSystemPrompt = (system: string): string => {
       mainSystemPromptSha256 = sha256(system);
+      mainSystem = system;
       return system;
     };
     const callLLM = (messagesOverride?: Message[]) =>
@@ -4861,6 +4948,7 @@ export class sportsclawEngine {
         ...(activeTools ? { activeTools } : {}),
         abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
+        prepareStep: ({ stepNumber }) => wrapUpStep(stepNumber, this.config.maxTurns, mainSystem),
         maxOutputTokens: budgets.main,
         ...(() => {
           const opts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
@@ -5172,7 +5260,7 @@ export class sportsclawEngine {
         VERIFICATION_EVIDENCE_CHARS,
         draftClaimTerms(responseText)
       );
-      responseText = await this.validateResponseEvidence({
+      responseText = await this.verifyWithTrace({
         userPrompt: sanitizedPrompt,
         draft: responseText,
         toolOutputs,
