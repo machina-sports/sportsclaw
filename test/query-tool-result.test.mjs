@@ -112,10 +112,18 @@ test("a repeated oversized call is served the same overview, and its id still re
   assert.equal(out.aggregate.value, 400);
 });
 
-test("small outputs are unchanged byte-for-byte", async () => {
+test("small outputs keep their content byte-for-byte; ones with rows get a queryable result_id footer", async () => {
   const small = '{"data": {"players": [ {"a": 1} ]},\n "x": "é"}';
   const { engine } = engineWithRegistry(() => ({ isError: false, content: small }));
-  assert.equal(await turnTools(engine).nfl_get_stats.execute({}, opts), small);
+  const tools = turnTools(engine);
+  const out = await tools.nfl_get_stats.execute({}, opts);
+  assert.ok(out.startsWith(small + "\n[result_id \"r1\": query_tool_result can filter"), out);
+  const q = JSON.parse(await tools.query_tool_result.execute({ result_id: "r1", aggregate: { op: "sum", field: "a" } }, opts));
+  assert.equal(q.aggregate.value, 1);
+  for (const noRows of ['{"x": 1}', "plain text"]) {
+    const { engine: e } = engineWithRegistry(() => ({ isError: false, content: noRows }));
+    assert.equal(await turnTools(e).nfl_get_stats.execute({}, opts), noRows);
+  }
 });
 
 test("oversized non-JSON, or JSON without rows, keeps the head-slice behaviour", async () => {

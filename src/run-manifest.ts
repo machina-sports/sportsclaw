@@ -148,7 +148,12 @@ export interface RunTrace {
   routeLlmSucceeded?: boolean;
   /** Total tokens per model pass in this run (router, main, verification, ...). */
   passTokens?: Record<string, number>;
+  /** What the evidence check did to the answer. Absent when it did not run. */
+  verification?: { outcome: VerificationOutcome; draftBeforeCorrection?: string };
 }
+
+/** kept: checked and unchanged; corrected: rewritten; withheld: replaced by "could not verify"; unverified: the check could not run. */
+export type VerificationOutcome = "kept" | "corrected" | "withheld" | "unverified";
 
 // ---------------------------------------------------------------------------
 // Manifest
@@ -195,6 +200,7 @@ export interface RunManifest {
     routed_skills: string[] | null;
     route_llm_ok: boolean | null;
     pass_tokens: Record<string, number> | null;
+    verification: { outcome: VerificationOutcome; draft_before_correction: string | null } | null;
   } | null;
 }
 
@@ -265,6 +271,9 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
           routed_skills: trace.routedSkills ? [...trace.routedSkills] : null,
           route_llm_ok: trace.routeLlmSucceeded ?? null,
           pass_tokens: trace.passTokens ? { ...trace.passTokens } : null,
+          verification: trace.verification
+            ? { outcome: trace.verification.outcome, draft_before_correction: trace.verification.draftBeforeCorrection ?? null }
+            : null,
         }
       : null,
   };
