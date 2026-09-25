@@ -1505,7 +1505,7 @@ export class sportsclawEngine {
       : "";
 
     let discrepanciesFound = false;
-    type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string }> };
+    type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string; kind?: string }> };
 
     // --- Optional decision verifier (opt-in; default path is untouched) ---
     const verifierConfig = this.config.evidenceVerifier;
@@ -1597,9 +1597,10 @@ export class sportsclawEngine {
           "{\n" +
           "  \"isValid\": boolean,\n" +
           "  \"discrepancies\": [\n" +
-          "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\" }\n" +
+          "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\" }\n" +
           "  ]\n" +
-          "}\n\nTrusted caller policy (criteria for the draft and correction):\n" + (params.callerSystemPrompt ?? "") +
+          "}\n" +
+          "kind is \"contradicted\" when the data shows a different value or result, \"unsupported\" when the data shown does not contain it.\n\nTrusted caller policy (criteria for the draft and correction):\n" + (params.callerSystemPrompt ?? "") +
           "\n\nInternal verification task: apply the caller's evidence, permission and language constraints to the draft, " +
           "but its user-facing prose/format instructions do not change this internal JSON contract. " +
           "Missing optional coverage does not invalidate independently supported reporting. " +
@@ -1627,7 +1628,7 @@ export class sportsclawEngine {
           model: this.mainModel,
           ...this.samplingOptions(),
           system: partialViewRule + failedToolsRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
-            + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\"}]}. "
+            + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
           prompt: [
             `User request: ${userPrompt}`,
@@ -1645,7 +1646,16 @@ export class sportsclawEngine {
       }
       if (!parsed) return unverified("the checker did not return a usable verdict twice");
 
-      if (parsed.isValid) {
+      // With a partial view, "not in the data shown" is not a finding (the
+      // drafter saw more), yet checkers still flagged it and the correction
+      // turned right answers into UNKNOWN (bench v1-fix2). Only contradictions
+      // act then, unless a tool failed: a value only it could have supplied
+      // must still be caught (#194). A flag without a kind counts as a
+      // contradiction.
+      const actionable = partialView && failedTools.length === 0
+        ? parsed.discrepancies.filter((d) => d.kind !== "unsupported")
+        : parsed.discrepancies;
+      if (parsed.isValid || actionable.length === 0) {
         return draft; // clean!
       }
       if (params.correctionAttempted) return unavailable;
@@ -1653,10 +1663,10 @@ export class sportsclawEngine {
       // Step 2: Hallucination detected! self-correct!
       if (this.config.verbose) {
         console.error(
-          `[sportsclaw] evidence_validation: detected ${parsed.discrepancies.length} fact discrepancies!`
+          `[sportsclaw] evidence_validation: detected ${actionable.length} fact discrepancies!`
         );
-        for (const d of parsed.discrepancies!) {
-          console.error(`  - Discrepancy: Claim="${d.claim}" vs Evidence="${d.evidence}"`);
+        for (const d of actionable) {
+          console.error(`  - Discrepancy (${d.kind ?? "contradicted"}): Claim="${d.claim}" vs Evidence="${d.evidence}"`);
         }
       }
 
@@ -1664,7 +1674,7 @@ export class sportsclawEngine {
       // draft is known to be wrong. A failure from here on must not ship it.
       discrepanciesFound = true;
       const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: parsed.discrepancies,
+        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: actionable,
       });
       if (corrected) {
         return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
