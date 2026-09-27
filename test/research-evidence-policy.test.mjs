@@ -64,9 +64,11 @@ describe("research verification preserves caller policy", () => {
     });
     it(`accepts a usable verdict on the second ask for ${reply}`, async () => {
       const invalid = JSON.stringify({ isValid: false, discrepancies: [{ claim: "tactics", evidence: "scores only", severity: "high" }] });
-      const { engine, model } = fixture([reply, invalid, "A corrected brief grounded in the two 0-0 results.", invalid]);
-      assert.notEqual(await engine.validateResponseEvidence(input), input.draft);
-      assert.ok(model.doGenerateCalls.length >= 3);
+      const { engine, model } = fixture([reply, invalid]);
+      engine._lastRunTrace = { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false };
+      assert.equal(await engine.verifyWithTrace(input), input.draft, "a flagged draft is kept");
+      assert.equal(engine._lastRunTrace.verification.outcome, "flagged");
+      assert.equal(model.doGenerateCalls.length, 2);
     });
   }
   it("keeps the grounded draft when the checker itself errors", async () => {
@@ -83,12 +85,12 @@ describe("research verification preserves caller policy", () => {
     assert.match(prompt, /causal|tactical/i);
     assert.match(prompt, /distinct|repetiti/i);
   });
-  it("rechecks a correction and refuses it if still unsupported", async () => {
+  it("flags an unsupported draft without rewriting it, under the caller policy", async () => {
     const invalid = JSON.stringify({ isValid: false, discrepancies: [{ claim: "tactics", evidence: "scores only", severity: "high" }] });
-    const { engine, model } = fixture([invalid, input.draft, invalid]);
-    assert.notEqual(await engine.validateResponseEvidence(input), input.draft);
-    assert.equal(model.doGenerateCalls.length, 3);
-    for (const call of model.doGenerateCalls) assert.match(JSON.stringify(call.prompt), /Keep coverage gaps explicit/);
+    const { engine, model } = fixture([invalid]);
+    assert.equal(await engine.validateResponseEvidence(input), input.draft);
+    assert.equal(model.doGenerateCalls.length, 1);
+    assert.match(JSON.stringify(model.doGenerateCalls[0].prompt), /Keep coverage gaps explicit/);
   });
   it("failure cleanup retains missing coverage rather than hiding it", async () => {
     const { engine, model } = fixture(["News is unavailable."]);
@@ -102,12 +104,6 @@ describe("research verification preserves caller policy", () => {
     const { engine } = fixture(['{"isValid":true,"discrepancies":[]}']);
     const supported = { ...input, draft: "Two recorded games finished 0-0." };
     assert.equal(await engine.validateResponseEvidence(supported), supported.draft);
-  });
-  it("returns a correction only after a valid second check", async () => {
-    const invalid = JSON.stringify({ isValid: false, discrepancies: [{ claim: "tactics", evidence: "scores only", severity: "high" }] });
-    const { engine, model } = fixture([invalid, "Two recorded games finished 0-0.", '{"isValid":true,"discrepancies":[]}']);
-    assert.equal(await engine.validateResponseEvidence(input), "Two recorded games finished 0-0.");
-    assert.equal(model.doGenerateCalls.length, 3);
   });
   it("never makes an action receipt up when validation is unavailable", async () => {
     const { engine } = fixture(["invalid"]);

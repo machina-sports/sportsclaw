@@ -81,19 +81,14 @@ function verifier(replies) {
 const input = { userPrompt: "q", draft: "Canada scored 10.\n\nFINAL: 10", toolOutputs: [{ toolName: "t", output: "{}", truncated: false }] };
 const bad = JSON.stringify({ isValid: false, discrepancies: [{ claim: "10", evidence: "9", severity: "high", kind: "contradicted" }] });
 
-test("the run trace records what the fact-check did, with the draft before a correction", async () => {
+test("the run trace records what the fact-check did", async () => {
   let e = verifier([]);
   await e.verifyWithTrace(input);
   assert.deepEqual(e._lastRunTrace.verification, { outcome: "kept" });
 
-  e = verifier([bad, "Canada scored 9.\n\nFINAL: 9", '{"isValid":true,"discrepancies":[]}']);
-  assert.match(await e.verifyWithTrace(input), /FINAL: 9/);
-  assert.deepEqual(e._lastRunTrace.verification, { outcome: "corrected", draftBeforeCorrection: input.draft });
-
-  e = verifier([bad, "still 10", bad]);
-  await e.verifyWithTrace(input);
-  assert.equal(e._lastRunTrace.verification.outcome, "withheld");
-  assert.equal(e._lastRunTrace.verification.draftBeforeCorrection, input.draft);
+  e = verifier([bad]);
+  assert.equal(await e.verifyWithTrace(input), input.draft, "a flagged draft is not rewritten");
+  assert.deepEqual(e._lastRunTrace.verification, { outcome: "flagged", flaggedClaims: ["10"] });
 
   e = verifier(["nope", "nope"]);
   await e.verifyWithTrace(input);
@@ -103,8 +98,8 @@ test("the run trace records what the fact-check did, with the draft before a cor
 test("the manifest reports verification in run and keeps it out of config_sha256", () => {
   const base = { sportsclawVersion: "t", sportsSkillsVersion: null, provider: "google", model: "m", sampling: {}, maxOutputTokens: 1, maxTurns: 1, thinkingBudget: 0, replayMode: "off", toolAllowlist: null, endpointHost: null };
   const trace = { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false };
-  const withV = buildRunManifest({ ...base, trace: { ...trace, verification: { outcome: "corrected", draftBeforeCorrection: "d" } } });
-  assert.deepEqual(withV.run.verification, { outcome: "corrected", draft_before_correction: "d" });
+  const withV = buildRunManifest({ ...base, trace: { ...trace, verification: { outcome: "flagged", flaggedClaims: ["c"] } } });
+  assert.deepEqual(withV.run.verification, { outcome: "flagged", draft_before_correction: null, flagged_claims: ["c"] });
   assert.equal(buildRunManifest({ ...base, trace }).run.verification, null);
   assert.equal(withV.config_sha256, buildRunManifest({ ...base, trace }).config_sha256);
 });

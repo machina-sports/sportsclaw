@@ -79,8 +79,8 @@ test("more sources than the verifier shows also counts as a partial view", async
   assert.match(systemOf(call), /NOT a discrepancy/);
 });
 
-test("visible contradictions on a truncated source still trigger correction", async () => {
-  // First verdict flags a contradiction; correction runs; recheck passes.
+test("visible contradictions on a truncated source are still flagged (the draft is kept)", async () => {
+  // The verdict flags a contradiction the checker can see; the draft stands and the flag goes to the trace.
   const model = new MockLanguageModelV3({
     doGenerate: async ({ prompt }) => {
       const system = prompt.find((m) => m.role === "system")?.content ?? "";
@@ -104,6 +104,6 @@ test("visible contradictions on a truncated source still trigger correction", as
     draft: "Heat 120-112. FINAL: 120-112",
     toolOutputs: [{ toolName: "nba_get_scoreboard", output: '{"home":118}\n...[truncated middle]...\n{}', truncated: true }],
   });
-  assert.equal(out, "Heat 118-112. FINAL: 118-112", "the contradicted draft was corrected, not waved through");
-  assert.ok(model.doGenerateCalls.length >= 3, "verify → correct → recheck");
+  assert.equal(out, "Heat 120-112. FINAL: 120-112", "the draft is not rewritten");
+  assert.equal(model.doGenerateCalls.length, 1, "no correction pass");
 });
