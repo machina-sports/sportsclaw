@@ -21,31 +21,38 @@ const verdict = (kind) => JSON.stringify({ isValid: false, discrepancies: [{ cla
 const partial = { userPrompt: "q", draft: "Canada scored 10.\n\nFINAL: 10", toolOutputs: [{ toolName: "t", output: "{}", truncated: true }] };
 const full = { ...partial, toolOutputs: [{ toolName: "t", output: "{}", truncated: false }] };
 
-describe("correction acts on contradictions when the view is partial", () => {
-  it("an unsupported flag on a partial view keeps the draft, with no correction pass", async () => {
+function traced(engine) {
+  engine._lastRunTrace = { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false };
+  return engine;
+}
+
+describe("what the checker flags, by view (the draft is never rewritten)", () => {
+  it("an unsupported flag on a partial view is dropped: kept", async () => {
     const { engine, model } = fixture([verdict("unsupported")]);
-    assert.equal(await engine.validateResponseEvidence(partial), partial.draft);
+    assert.equal(await traced(engine).verifyWithTrace(partial), partial.draft);
+    assert.equal(engine._lastRunTrace.verification.outcome, "kept");
     assert.equal(model.doGenerateCalls.length, 1);
   });
-  it("a contradiction on a partial view is still corrected", async () => {
-    const { engine, model } = fixture([verdict("contradicted"), "Canada scored 9.\n\nFINAL: 9", '{"isValid":true,"discrepancies":[]}']);
-    assert.equal(await engine.validateResponseEvidence(partial), "Canada scored 9.\n\nFINAL: 9");
-    assert.equal(model.doGenerateCalls.length, 3);
+  it("a contradiction on a partial view is flagged; the draft stands and no correction runs", async () => {
+    const { engine, model } = fixture([verdict("contradicted")]);
+    assert.equal(await traced(engine).verifyWithTrace(partial), partial.draft);
+    assert.deepEqual(engine._lastRunTrace.verification, { outcome: "flagged", flaggedClaims: ["Canada scored 10"] });
+    assert.equal(model.doGenerateCalls.length, 1);
   });
   it("a flag without a kind counts as a contradiction", async () => {
-    const { engine, model } = fixture([verdict(undefined), "fixed", '{"isValid":true,"discrepancies":[]}']);
-    await engine.validateResponseEvidence(partial);
-    assert.equal(model.doGenerateCalls.length, 3);
+    const { engine } = fixture([verdict(undefined)]);
+    await traced(engine).verifyWithTrace(partial);
+    assert.equal(engine._lastRunTrace.verification.outcome, "flagged");
   });
-  it("with the full view, unsupported still acts (traps: values invented from memory)", async () => {
-    const { engine, model } = fixture([verdict("unsupported"), "declined", '{"isValid":true,"discrepancies":[]}']);
-    assert.equal(await engine.validateResponseEvidence(full), "declined");
-    assert.equal(model.doGenerateCalls.length, 3);
+  it("with the full view, unsupported is flagged (traps: values invented from memory)", async () => {
+    const { engine } = fixture([verdict("unsupported")]);
+    assert.equal(await traced(engine).verifyWithTrace(full), full.draft);
+    assert.equal(engine._lastRunTrace.verification.outcome, "flagged");
   });
-  it("after a tool failure, unsupported still acts on a partial view", async () => {
-    const { engine, model } = fixture([verdict("unsupported"), "declined", '{"isValid":true,"discrepancies":[]}']);
-    assert.equal(await engine.validateResponseEvidence({ ...partial, failedTools: ["nhl_get_game_summary"] }), "declined");
-    assert.equal(model.doGenerateCalls.length, 3);
+  it("after a tool failure, unsupported is flagged on a partial view", async () => {
+    const { engine } = fixture([verdict("unsupported")]);
+    await traced(engine).verifyWithTrace({ ...partial, failedTools: ["nhl_get_game_summary"] });
+    assert.equal(engine._lastRunTrace.verification.outcome, "flagged");
   });
   it("the checker is asked for the kind", async () => {
     const { engine, model } = fixture([]);

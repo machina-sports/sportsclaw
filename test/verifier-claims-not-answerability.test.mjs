@@ -29,20 +29,12 @@ describe("fact-checker judges claims, not answerability", () => {
     assert.match(system(model.doGenerateCalls[0]), /supported when its inputs are in the data/);
   });
 
-  it("the correction keeps unflagged values and gets the partial-view rule when the checker had it", async () => {
-    const { engine, model } = fixture([INVALID, "corrected", '{"isValid":true,"discrepancies":[]}']);
+  it("a flagged draft is kept as written: no correction pass", async () => {
+    const { engine, model } = fixture([INVALID]);
     const out = await engine.validateResponseEvidence({
       userPrompt: "q", draft: "d", toolOutputs: [{ toolName: "t", output: "{}", truncated: true }],
     });
-    assert.equal(out, "corrected");
-    const correction = system(model.doGenerateCalls[1]);
-    assert.match(correction, /Fix only the listed discrepancies/);
-    assert.match(correction, /NOT a discrepancy/);
-  });
-
-  it("no partial-view rule for the correction when the checker saw everything", async () => {
-    const { engine, model } = fixture([INVALID, "corrected", '{"isValid":true,"discrepancies":[]}']);
-    await engine.validateResponseEvidence({ userPrompt: "q", draft: "d", toolOutputs: [{ toolName: "t", output: "{}", truncated: false }] });
-    assert.doesNotMatch(system(model.doGenerateCalls[1]), /NOT a discrepancy/);
+    assert.equal(out, "d");
+    assert.equal(model.doGenerateCalls.length, 1);
   });
 });

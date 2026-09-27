@@ -964,7 +964,7 @@ export class sportsclawEngine {
   }
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
   /** Set while verifyWithTrace runs: whether the check could not run, and the draft before any correction. */
-  private _verifyNotes?: { unverified?: boolean; firstDraft?: string };
+  private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[] };
   private _lastRunTrace: RunTrace | null = null;
 
   /** Sanitized evidence-verification receipts from the last run(). */
@@ -1517,7 +1517,7 @@ export class sportsclawEngine {
    * from before a correction, so the effect of corrections can be measured.
    */
   private async verifyWithTrace(params: Parameters<sportsclawEngine["validateResponseEvidence"]>[0]): Promise<string> {
-    const notes: { unverified?: boolean; firstDraft?: string } = {};
+    const notes: { unverified?: boolean; firstDraft?: string; flagged?: string[] } = {};
     this._verifyNotes = notes;
     let out: string;
     try {
@@ -1526,20 +1526,25 @@ export class sportsclawEngine {
       this._verifyNotes = undefined;
     }
     const outcome: VerificationOutcome =
-      out === VERIFY_UNAVAILABLE ? "withheld" : out !== params.draft ? "corrected" : notes.unverified ? "unverified" : "kept";
+      out === VERIFY_UNAVAILABLE ? "withheld"
+      : out !== params.draft ? "corrected"
+      : notes.flagged ? "flagged"
+      : notes.unverified ? "unverified"
+      : "kept";
     if (this._lastRunTrace) {
       this._lastRunTrace.verification = {
         outcome,
         ...(notes.firstDraft !== undefined ? { draftBeforeCorrection: notes.firstDraft.slice(0, 4_000) } : {}),
+        ...(notes.flagged ? { flaggedClaims: notes.flagged } : {}),
       };
     }
     return out;
   }
 
   /**
-   * Validate the final response text against raw tool outputs.
-   * If a hallucination is detected (e.g. mismatched scores, dates, stats),
-   * trigger self-correction or return a corrected version.
+   * Validate the final response text against raw tool outputs. The default
+   * (generative) checker flags discrepancies in the run trace and keeps the
+   * draft; the opt-in Jev verifier still corrects and rechecks.
    */
   private async validateResponseEvidence(params: {
     userPrompt: string;
@@ -1758,26 +1763,23 @@ export class sportsclawEngine {
       }
       if (params.correctionAttempted) return unavailable;
 
-      // Step 2: Hallucination detected! self-correct!
       if (this.config.verbose) {
         console.error(
-          `[sportsclaw] evidence_validation: detected ${actionable.length} fact discrepancies!`
+          `[sportsclaw] evidence_validation: flagged ${actionable.length} discrepancies; keeping the draft`
         );
         for (const d of actionable) {
           console.error(`  - Discrepancy (${d.kind ?? "contradicted"}): Claim="${d.claim}" vs Evidence="${d.evidence}"`);
         }
       }
 
-      // Past this point the check has run and named real discrepancies, so the
-      // draft is known to be wrong. A failure from here on must not ship it.
-      discrepanciesFound = true;
-      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
-      const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: actionable,
-      });
-      if (corrected) {
-        return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
-      }
+      // The draft stands and the flags go to the run trace. Rewriting flagged
+      // drafts was net harmful: in Sports Agent Bench v1.1, 16 of 17 flagged
+      // answerable drafts on gemini-3.5-flash were already correct and 13 of
+      // them broke in the correction (UNKNOWN, a changed value, a lost FINAL
+      // line); on traps corrections fixed 1 hallucination and caused 2 (net -15
+      // answers on 3.5-flash, -4 on 3.8-flash).
+      if (this._verifyNotes) this._verifyNotes.flagged = actionable.map((d) => stripInternalEvidenceArtifacts(d.claim).slice(0, 300));
+      return draft;
     } catch (e) {
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation failed: ${e}`);

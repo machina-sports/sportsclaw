@@ -149,11 +149,14 @@ export interface RunTrace {
   /** Total tokens per model pass in this run (router, main, verification, ...). */
   passTokens?: Record<string, number>;
   /** What the evidence check did to the answer. Absent when it did not run. */
-  verification?: { outcome: VerificationOutcome; draftBeforeCorrection?: string };
+  verification?: { outcome: VerificationOutcome; draftBeforeCorrection?: string; flaggedClaims?: string[] };
 }
 
-/** kept: checked and unchanged; corrected: rewritten; withheld: replaced by "could not verify"; unverified: the check could not run. */
-export type VerificationOutcome = "kept" | "corrected" | "withheld" | "unverified";
+/**
+ * kept: checked, nothing flagged; flagged: discrepancies found, draft kept (default checker); corrected: rewritten
+ * (opt-in Jev verifier); withheld: replaced by "could not verify"; unverified: the check could not run.
+ */
+export type VerificationOutcome = "kept" | "flagged" | "corrected" | "withheld" | "unverified";
 
 // ---------------------------------------------------------------------------
 // Manifest
@@ -200,7 +203,7 @@ export interface RunManifest {
     routed_skills: string[] | null;
     route_llm_ok: boolean | null;
     pass_tokens: Record<string, number> | null;
-    verification: { outcome: VerificationOutcome; draft_before_correction: string | null } | null;
+    verification: { outcome: VerificationOutcome; draft_before_correction: string | null; flagged_claims: string[] | null } | null;
   } | null;
 }
 
@@ -272,7 +275,11 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
           route_llm_ok: trace.routeLlmSucceeded ?? null,
           pass_tokens: trace.passTokens ? { ...trace.passTokens } : null,
           verification: trace.verification
-            ? { outcome: trace.verification.outcome, draft_before_correction: trace.verification.draftBeforeCorrection ?? null }
+            ? {
+                outcome: trace.verification.outcome,
+                draft_before_correction: trace.verification.draftBeforeCorrection ?? null,
+                flagged_claims: trace.verification.flaggedClaims ? [...trace.verification.flaggedClaims] : null,
+              }
             : null,
         }
       : null,
