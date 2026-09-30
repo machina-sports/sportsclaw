@@ -296,12 +296,40 @@ function writeExtrasMarker(): void {
 }
 
 /**
- * Ensure a managed venv exists at ~/.sportsclaw/venv/.
- * If it already exists but was installed with a narrower target (e.g. bare
- * sports-skills or sports-skills[polymarket]), upgrades to sports-skills[all].
- * Otherwise creates one using the provided base Python (or auto-detected).
+ * Probe whether the interpreter runs inside a virtualenv and can import
+ * sports-skills. Such an environment is externally managed (e.g. a container
+ * image with a pinned version), so it must not be pip-upgraded or replaced.
+ */
+function isUsableExternalVenv(pythonPath: string): boolean {
+  try {
+    execFileSync(
+      pythonPath,
+      [
+        "-c",
+        "import sys\nif sys.prefix == sys.base_prefix: sys.exit(1)\nimport sports_skills",
+      ],
+      { timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure a usable Python environment for sports-skills.
+ * An explicitly supplied interpreter that is already a virtualenv with
+ * sports-skills installed is used as-is. Otherwise ensures a managed venv at
+ * ~/.sportsclaw/venv/: if it already exists but was installed with a narrower
+ * target (e.g. bare sports-skills or sports-skills[polymarket]), upgrades to
+ * sports-skills[all]; if missing, creates one using the provided base Python
+ * (or auto-detected).
  */
 export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
+  if (basePythonPath && isUsableExternalVenv(basePythonPath)) {
+    return { ok: true, pythonPath: basePythonPath };
+  }
+
   if (isVenvSetup()) {
     // Venv exists — check if extras need upgrading
     if (!hasCorrectExtras()) {
