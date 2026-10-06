@@ -26,6 +26,14 @@ Those skills are provided by **[sports-skills](https://sports-skills.sh)** — t
 data layer that the installer provisions automatically. It's the source of every sport and
 market sportsclaw can reach; see the full catalog at [sports-skills.sh](https://sports-skills.sh).
 
+## Checked before it's sent
+
+Before an answer goes out, a fact-check compares the draft with the raw tool output. Any
+discrepancy is recorded in the run trace (`verification.outcome`), and when a tool failed, the
+answer is held to the data that actually came back. By default the checker flags rather than
+rewrites — on our benchmark, automatic corrections broke more correct answers than they fixed.
+See [Good to know](./good-to-know#the-fact-check-flags-it-doesn-t-rewrite).
+
 ## Asking about a sport for the first time
 
 sportsclaw ships knowing how to reach 14 sports, but it only installs the ones you use. The

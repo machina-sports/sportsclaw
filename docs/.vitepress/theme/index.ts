@@ -1,89 +1,53 @@
 import DefaultTheme from 'vitepress/theme'
 import type { Theme } from 'vitepress'
-import './custom.css'
-import './reveal.css'
+import Layout from './Layout.vue'
+import HomePage from './components/HomePage.vue'
+import MachinaArchitecture from './components/MachinaArchitecture.vue'
+import Contributors from './components/Contributors.vue'
+import './styles/tokens.css'
+import './styles/base.css'
+import './styles/home.css'
 
+/* Landing-page reveal: elements marked [data-reveal] fade up as they enter
+   the viewport. Docs pages stay static (they are read, not scrolled past).
+   The head script in config.mts adds `sc-reveal-ready` before first paint,
+   so no-JS and reduced-motion visitors always see everything. */
 let observer: IntersectionObserver | undefined
-
-const DOC_SELECTOR = [
-  '.vp-doc > h1',
-  '.vp-doc h2',
-  '.vp-doc h3',
-  '.vp-doc p',
-  '.vp-doc ul',
-  '.vp-doc ol',
-  '.vp-doc blockquote',
-  '.vp-doc table',
-  '.vp-doc .custom-block',
-  '.vp-doc div[class*="language-"]',
-].join(',')
-
-function reveal(el: Element) {
-  el.classList.add('sc-in')
-  // The home grid cards hide their own children via shared CSS; reveal them too.
-  if (el.classList.contains('sc-card')) {
-    el.querySelectorAll('.motif, h3, p').forEach((c) => c.classList.add('sc-in'))
-  }
-}
 
 function setupReveal() {
   if (typeof window === 'undefined') return
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-
+  const root = document.documentElement
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    root.classList.remove('sc-reveal-ready')
+    return
+  }
   try {
-    document.documentElement.classList.add('sc-reveal-ready')
-    if (observer) observer.disconnect()
-
+    observer?.disconnect()
     observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) {
-            reveal(entry.target)
-            observer?.unobserve(entry.target)
-          }
+          if (!entry.isIntersecting) continue
+          entry.target.classList.add('sc-in')
+          observer?.unobserve(entry.target)
         }
       },
-      { threshold: 0.1, rootMargin: '0px 0px -6% 0px' },
+      { threshold: 0.12, rootMargin: '0px 0px -6% 0px' },
     )
-
-    const isHome = !!document.querySelector('.VPHome')
-
-    if (isHome) {
-      const hero = Array.from(
-        document.querySelectorAll(
-          '.VPHomeHero .name, .VPHomeHero .text, .VPHomeHero .tagline, .VPHomeHero .actions',
-        ),
-      )
-      const cards = Array.from(document.querySelectorAll('.sc-grid .sc-card'))
-      hero.forEach((el, i) => {
-        ;(el as HTMLElement).style.transitionDelay = `${i * 90}ms`
-        observer!.observe(el)
-      })
-      cards.forEach((el, i) => {
-        ;(el as HTMLElement).style.transitionDelay = `${(i % 3) * 80}ms`
-        observer!.observe(el)
-      })
-      // The landing sections below the cards (install, agent prompt, capabilities,
-      // pricing) live in the home body (.vp-doc) and are hidden by the reveal CSS
-      // too — observe them so they fade in on scroll. Cards reveal their own children.
-      document.querySelectorAll(DOC_SELECTOR).forEach((el) => {
-        if (el.closest('.sc-grid')) return
-        observer!.observe(el)
-      })
-    } else {
-      document.querySelectorAll(DOC_SELECTOR).forEach((el) => observer!.observe(el))
-    }
+    document.querySelectorAll('[data-reveal]:not(.sc-in)').forEach((el) => observer!.observe(el))
   } catch {
-    document.documentElement.classList.remove('sc-reveal-ready')
+    root.classList.remove('sc-reveal-ready')
   }
 }
 
-const schedule = () =>
-  requestAnimationFrame(() => window.setTimeout(setupReveal, 60))
+const schedule = () => requestAnimationFrame(() => window.setTimeout(setupReveal, 40))
 
 export default {
   extends: DefaultTheme,
-  enhanceApp({ router }) {
+  Layout,
+  enhanceApp({ app, router }) {
+    app.component('HomePage', HomePage)
+    app.component('MachinaArchitecture', MachinaArchitecture)
+    app.component('Contributors', Contributors)
     if (typeof window === 'undefined') return
     const prev = router.onAfterRouteChanged
     router.onAfterRouteChanged = (to) => {

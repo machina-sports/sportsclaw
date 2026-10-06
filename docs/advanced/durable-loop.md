@@ -6,6 +6,11 @@ tasks that should survive a restart. For those, sportsclaw can hand the work to 
 durable loop** running on a connected pod — it dispatches the long-running work and reads the
 result back when it's ready.
 
+::: info Rolling out
+The loop runs on projects that have the `loop-runner` agent installed with machina-cli. It is rolling
+out across Machina projects; the `machina_loop` tool only appears when a connected pod has it.
+:::
+
 ## How it works
 
 When you connect a Machina pod that runs the durable loop (the `loop-runner` agent — see

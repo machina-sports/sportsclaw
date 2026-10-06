@@ -1,0 +1,339 @@
+/* ─────────────────────────────────────────────────────────────────────
+   sportsclaw.gg — v2 base: the VitePress chrome (nav, sidebar, docs).
+   The landing page lives in home.css.
+   ───────────────────────────────────────────────────────────────────── */
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  background: var(--sc-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+::selection {
+  background: var(--sc-volt);
+  color: var(--sc-volt-ink);
+}
+:focus-visible {
+  outline: 2px solid var(--sc-claw);
+  outline-offset: 2px;
+}
+
+/* ── Nav ───────────────────────────────────────────────────────────── */
+.VPNav {
+  -webkit-backdrop-filter: saturate(150%) blur(14px);
+  backdrop-filter: saturate(150%) blur(14px);
+}
+.VPNavBar .title .logo {
+  height: 26px;
+  width: 26px;
+  margin-right: 10px;
+}
+.VPNavBarTitle .title {
+  font-weight: 600;
+  font-size: 16.5px;
+  letter-spacing: -0.02em;
+}
+.VPNavBarMenuLink,
+.VPNavBarMenuGroup .button {
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  color: var(--sc-text-2) !important;
+}
+.VPNavBarMenuLink:hover,
+.VPNavBarMenuLink.active {
+  color: var(--sc-text) !important;
+}
+.VPNavBarMenuLink.active {
+  box-shadow: inset 0 -2px 0 var(--sc-volt);
+}
+.VPNavBarMenuGroup .button .text {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--sc-text-2);
+}
+.VPNavBarMenuGroup:hover .button .text,
+.VPNavBarMenuGroup.active .button .text {
+  color: var(--sc-text);
+}
+.VPNavBarSearch .DocSearch-Button,
+.VPNavBarSearchButton {
+  border-radius: 10px;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────── */
+.VPSidebarItem.level-0 > .item > .text,
+.VPSidebarItem.level-0 > .item > .link > .text {
+  font-family: var(--sc-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sc-text-3);
+}
+.VPSidebarItem.level-1 .text {
+  font-size: 14px;
+  color: var(--sc-text-2);
+}
+.VPSidebarItem.level-1 .link:hover .text {
+  color: var(--sc-text);
+}
+.VPSidebarItem.is-active > .item .text {
+  color: var(--sc-text) !important;
+  font-weight: 600;
+}
+.VPSidebarItem.is-active > .item .indicator {
+  background-color: var(--sc-volt) !important;
+}
+.VPSidebar .group + .group {
+  border-top: 1px solid var(--sc-line) !important;
+}
+.sc-sidebar-star {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  vertical-align: -1px;
+  background: url('/brand/machina-star.svg') no-repeat center / contain;
+}
+.sc-sidebar-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-family: var(--sc-mono);
+  font-size: 10.5px;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  text-transform: none;
+  color: var(--sc-machina);
+  background: var(--sc-machina-a);
+}
+
+/* ── Docs typography ───────────────────────────────────────────────── */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+  font-family: var(--sc-sans);
+  color: var(--sc-text);
+}
+.vp-doc h1 {
+  font-size: clamp(30px, 4vw, 38px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+.vp-doc h2 {
+  margin-top: 56px;
+  padding-top: 0;
+  border-top: 0;
+  font-size: 23px;
+  font-weight: 620;
+  letter-spacing: -0.025em;
+}
+.vp-doc h2::before {
+  content: '';
+  display: block;
+  width: 36px;
+  height: 2px;
+  margin-bottom: 18px;
+  border-radius: 2px;
+  background: var(--sc-volt);
+}
+.vp-doc h3 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.vp-doc p,
+.vp-doc li {
+  color: var(--sc-text-2);
+}
+.vp-doc strong {
+  color: var(--sc-text);
+  font-weight: 600;
+}
+.vp-doc a {
+  color: var(--sc-text);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--sc-line-2);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s ease, color 0.15s ease;
+}
+.vp-doc a:hover {
+  color: var(--sc-claw);
+  text-decoration-color: var(--sc-claw);
+}
+.vp-doc :not(pre) > code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--sc-line);
+  font-size: 0.85em;
+  color: var(--sc-text);
+  background: var(--sc-surface-2);
+}
+.vp-doc a > code {
+  color: inherit;
+}
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r) !important;
+}
+.vp-doc div[class*='language-'] > span.lang {
+  font-family: var(--sc-mono);
+  color: var(--sc-text-3);
+}
+.vp-doc table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  overflow: hidden;
+  font-size: 14px;
+}
+@media (max-width: 720px) {
+  .vp-doc table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+.vp-doc tr {
+  border-top: 0;
+  background: transparent !important;
+}
+.vp-doc th,
+.vp-doc td {
+  border: 0;
+  border-top: 1px solid var(--sc-line);
+  padding: 10px 14px;
+}
+.vp-doc thead th {
+  border-top: 0;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--sc-text-2);
+  background: var(--sc-surface-2);
+}
+.vp-doc td {
+  color: var(--sc-text-2);
+}
+.vp-doc blockquote {
+  border-left: 2px solid var(--sc-volt);
+  padding: 2px 0 2px 16px;
+}
+.vp-doc hr {
+  border-top: 1px solid var(--sc-line);
+}
+
+/* Custom blocks: hairline card, colored rail */
+.vp-doc .custom-block {
+  border: 1px solid var(--sc-line);
+  border-left-width: 3px;
+  border-radius: var(--sc-r);
+  background: var(--sc-surface);
+}
+.vp-doc .custom-block.tip {
+  border-left-color: var(--sc-volt);
+}
+.vp-doc .custom-block.info {
+  border-left-color: var(--sc-text-3);
+}
+.vp-doc .custom-block.warning {
+  border-left-color: var(--sc-amber);
+}
+.vp-doc .custom-block.danger {
+  border-left-color: var(--sc-red);
+}
+.vp-doc .custom-block.machina {
+  border-left-color: var(--sc-machina-fill);
+}
+.vp-doc .custom-block p {
+  color: var(--sc-text-2);
+}
+.vp-doc .custom-block .custom-block-title {
+  font-weight: 600;
+  color: var(--sc-text);
+}
+
+/* Outline + doc footer */
+.VPDocAsideOutline .outline-link.active {
+  color: var(--sc-claw) !important;
+}
+.VPDocAsideOutline .outline-marker {
+  background-color: var(--sc-volt) !important;
+}
+.VPDocFooter .pager-link {
+  border-radius: var(--sc-r);
+  border-color: var(--sc-line-2);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.VPDocFooter .pager-link:hover {
+  border-color: var(--sc-claw);
+  transform: translateY(-1px);
+}
+.VPDocFooter .pager-link .title {
+  color: var(--sc-text);
+}
+
+/* Buttons used inside docs */
+.VPButton {
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+}
+
+/* ── Shared doc components ─────────────────────────────────────────── */
+.sc-lead-doc {
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--sc-text-2);
+}
+.sc-doc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 20px 0 8px;
+}
+@media (max-width: 640px) {
+  .sc-doc-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.sc-doc-card {
+  display: block;
+  padding: 16px 18px;
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  background: var(--sc-surface);
+  text-decoration: none !important;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+a.sc-doc-card:hover {
+  border-color: var(--sc-claw);
+  transform: translateY(-1px);
+}
+.sc-doc-card strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 15px;
+  color: var(--sc-text);
+}
+.sc-doc-card span {
+  display: block;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--sc-text-2);
+}
+.sc-doc-card.is-machina {
+  border-color: color-mix(in srgb, var(--sc-machina-fill) 30%, var(--sc-line));
+}
+a.sc-doc-card.is-machina:hover {
+  border-color: var(--sc-machina-fill);
+}

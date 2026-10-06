@@ -40,7 +40,15 @@ All coverage is powered by **[sports-skills](https://sports-skills.sh)**, the op
 the installer sets up for you. When you need licensed, real-time feeds, there's a premium tier —
 see [Machina](../sports-data/machina).
 
-Bring your own model — Anthropic (Claude), OpenAI, or Google (Gemini).
+Bring your own model — Anthropic (Claude), OpenAI, Google (Gemini), Azure AI Foundry, or any
+OpenAI-compatible endpoint such as NVIDIA NIM or vLLM.
+
+## sportsclaw and Machina
+
+sportsclaw is built by [Machina Sports](https://machina.gg) and is the open-source side of the Machina
+platform. Every Machina project ships with its own sportsclaw relay, wired to the project's licensed
+feeds and tools — so what you build here is what runs there. See
+**[sportsclaw in Machina](/machina/)**.
 
 <div class="tip custom-block"><p class="custom-block-title">Ready in about a minute</p>
 

@@ -5,6 +5,12 @@ open, keyless data layer. It's free and ideal for development and personal use. 
 **licensed data, real-time and zero-latency feeds, production SLAs, or packaged agent
 workflows**, the **[Machina Sports](https://machina.gg)** platform covers that.
 
+::: tip How the two fit together
+This page covers licensed data and connecting from your own install. For how sportsclaw runs *inside*
+every Machina project — the relay, who calls it, memory and status — see
+[sportsclaw in Machina](/machina/).
+:::
+
 ## Open vs. premium
 
 |                | sports-skills (built in)                          | Machina (premium)                                            |

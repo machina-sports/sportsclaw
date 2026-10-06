@@ -1,0 +1,151 @@
+/* ─────────────────────────────────────────────────────────────────────
+   sportsclaw.gg — v2 tokens
+   Dark-first (VitePress puts `.dark` on <html>), light on :root.
+   Same family as sports-skills.sh v2: Geist + Geist Mono, one accent.
+   Voltage green is sportsclaw; Machina orange marks the platform layer;
+   amber is reserved for markets and odds.
+   ───────────────────────────────────────────────────────────────────── */
+
+:root {
+  --sc-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --sc-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace;
+
+  /* Light canvas */
+  --sc-bg: #fbfcfa;
+  --sc-bg-2: #f3f6f2;
+  --sc-surface: #ffffff;
+  --sc-surface-2: #f5f8f4;
+  --sc-surface-3: #ebf0ea;
+  --sc-line: rgba(9, 22, 14, 0.08);
+  --sc-line-2: rgba(9, 22, 14, 0.15);
+  --sc-text: #09110c;
+  --sc-text-2: #47534c;
+  --sc-text-3: #6b7770;
+
+  /* sportsclaw — voltage green. `--sc-claw` is the text-safe shade. */
+  --sc-volt: #2bee4b;
+  --sc-volt-hover: #4af265;
+  --sc-volt-ink: #04140a;
+  --sc-claw: #08782e;
+  --sc-claw-a: rgba(8, 120, 46, 0.09);
+
+  /* Machina — the platform layer (logo star #FF5925). */
+  --sc-machina-fill: #ff5925;
+  --sc-machina: #c2410c;
+  --sc-machina-a: rgba(255, 89, 37, 0.1);
+
+  /* Markets */
+  --sc-amber: #9a5b00;
+  --sc-amber-a: rgba(168, 100, 0, 0.1);
+  --sc-red: #c93636;
+  --sc-red-a: rgba(201, 54, 54, 0.09);
+
+  --sc-glow: rgba(8, 120, 46, 0.12);
+  --sc-glow-2: rgba(255, 89, 37, 0.06);
+  --sc-pitch: rgba(8, 120, 46, 0.2);
+  --sc-shadow: 0 1px 2px rgba(9, 22, 14, 0.04), 0 24px 50px -34px rgba(9, 40, 22, 0.28);
+  --sc-logo-ink: #000000; /* Machina wordmark: black logo on light */
+
+  --sc-r-sm: 8px;
+  --sc-r: 12px;
+  --sc-r-lg: 18px;
+}
+
+.dark {
+  --sc-bg: #050706;
+  --sc-bg-2: #080b09;
+  --sc-surface: #0b0f0d;
+  --sc-surface-2: #101512;
+  --sc-surface-3: #161d19;
+  --sc-line: rgba(255, 255, 255, 0.07);
+  --sc-line-2: rgba(255, 255, 255, 0.13);
+  --sc-text: #eef3f0;
+  --sc-text-2: #a7b1ab;
+  --sc-text-3: #737f78;
+
+  --sc-claw: #4cf06a;
+  --sc-claw-a: rgba(43, 238, 75, 0.11);
+
+  --sc-machina: #ff7a50;
+  --sc-machina-a: rgba(255, 89, 37, 0.12);
+
+  --sc-amber: #f6b94f;
+  --sc-amber-a: rgba(246, 185, 79, 0.12);
+  --sc-red: #ff6b6b;
+  --sc-red-a: rgba(255, 99, 99, 0.12);
+
+  --sc-glow: rgba(43, 238, 75, 0.13);
+  --sc-glow-2: rgba(255, 89, 37, 0.07);
+  --sc-pitch: rgba(43, 238, 75, 0.24);
+  --sc-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 24px 60px -32px rgba(0, 0, 0, 0.8);
+  --sc-logo-ink: #cac9c9; /* Machina wordmark: gray logo on dark */
+}
+
+/* ── VitePress mapping ─────────────────────────────────────────────── */
+:root,
+.dark {
+  --vp-font-family-base: var(--sc-sans);
+  --vp-font-family-mono: var(--sc-mono);
+
+  --vp-c-bg: var(--sc-bg);
+  --vp-c-bg-alt: var(--sc-bg-2);
+  --vp-c-bg-elv: var(--sc-surface);
+  --vp-c-bg-soft: var(--sc-surface-2);
+
+  --vp-c-text-1: var(--sc-text);
+  --vp-c-text-2: var(--sc-text-2);
+  --vp-c-text-3: var(--sc-text-3);
+
+  --vp-c-divider: var(--sc-line);
+  --vp-c-border: var(--sc-line-2);
+  --vp-c-gutter: var(--sc-line);
+
+  --vp-c-brand-1: var(--sc-claw);
+  --vp-c-brand-2: var(--sc-claw);
+  --vp-c-brand-3: var(--sc-volt);
+  --vp-c-brand-soft: var(--sc-claw-a);
+
+  --vp-c-tip-1: var(--sc-claw);
+  --vp-c-tip-2: var(--sc-claw);
+  --vp-c-tip-3: var(--sc-volt);
+  --vp-c-tip-soft: var(--sc-claw-a);
+
+  --vp-c-warning-1: var(--sc-amber);
+  --vp-c-warning-2: var(--sc-amber);
+  --vp-c-warning-3: var(--sc-amber);
+  --vp-c-warning-soft: var(--sc-amber-a);
+
+  --vp-c-danger-1: var(--sc-red);
+  --vp-c-danger-2: var(--sc-red);
+  --vp-c-danger-3: var(--sc-red);
+  --vp-c-danger-soft: var(--sc-red-a);
+
+  --vp-button-brand-bg: var(--sc-volt);
+  --vp-button-brand-text: var(--sc-volt-ink);
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-hover-bg: var(--sc-volt-hover);
+  --vp-button-brand-hover-text: var(--sc-volt-ink);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-active-bg: var(--sc-volt);
+  --vp-button-brand-active-text: var(--sc-volt-ink);
+  --vp-button-brand-active-border: transparent;
+
+  --vp-code-bg: var(--sc-surface-3);
+  --vp-code-color: var(--sc-text);
+  --vp-code-block-bg: var(--sc-surface);
+  --vp-code-copy-code-bg: var(--sc-surface-2);
+  --vp-code-copy-code-hover-bg: var(--sc-surface-3);
+
+  --vp-nav-bg-color: color-mix(in srgb, var(--sc-bg) 78%, transparent);
+  --vp-nav-screen-bg-color: var(--sc-bg);
+  --vp-sidebar-bg-color: var(--sc-bg);
+  --vp-local-nav-bg-color: color-mix(in srgb, var(--sc-bg) 86%, transparent);
+  --vp-local-search-bg: var(--sc-surface);
+  --vp-local-search-result-bg: var(--sc-surface-2);
+  --vp-local-search-result-border: var(--sc-line);
+  --vp-local-search-highlight-bg: var(--sc-claw);
+  --vp-local-search-highlight-text: var(--sc-bg);
+
+  --vp-custom-block-tip-bg: var(--sc-claw-a);
+  --vp-custom-block-tip-border: transparent;
+}
