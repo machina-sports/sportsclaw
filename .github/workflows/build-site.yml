@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Site-only deploys without cutting an engine release (image tag: site-<sha>).
+  workflow_dispatch:
 
 env:
   APP_NAME: sportsclaw-site
@@ -24,14 +26,23 @@ jobs:
           fetch-depth: 0
 
       - name: Get tag name as release version
-        run: echo "RELEASE_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "RELEASE_NAME=site-${GITHUB_SHA}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Build site (VitePress)
+        env:
+          # Contributor and PR counts on the landing page (best-effort; a failed
+          # fetch falls back to the snapshot in docs/.vitepress/theme/project.data.ts).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # install.sh is served at /install.sh — stage it into VitePress public/
           # before the build so it lands in the dist root.
