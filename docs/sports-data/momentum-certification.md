@@ -1,6 +1,6 @@
 # Momentum seven-sport certification
 
-Machine-checkable companion to [`momentum-certification.json`](./momentum-certification.json).
+Machine-checkable companion to [`momentum-certification.json`](https://github.com/machina-sports/sportsclaw/blob/main/docs/sports-data/momentum-certification.json).
 Generated **2026-08-08T14:29:13Z**. Guarded by `test/momentum-certification.test.mjs`.
 
 > **No sport in this table is currently live-certified.** Synthetic evidence proves the
@@ -71,5 +71,5 @@ correct; they say nothing about live ESPN or Kalshi behaviour for any sport.
 
 ## Related
 
-- [`demo/vault_data/README.md`](../../demo/vault_data/README.md) — fixture details and run commands
+- [`demo/vault_data/README.md`](https://github.com/machina-sports/sportsclaw/blob/main/demo/vault_data/README.md) — fixture details and run commands
 - [`coverage.md`](./coverage.md) — sports-data coverage
