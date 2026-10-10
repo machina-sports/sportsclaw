@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# sportsclaw-relay — data-only sports-skills overlay
+#
+# Upgrades sports-skills to 0.36.0 on top of the exact running relay image and
+# regenerates the schema cache. The engine (0.29.4 /app/dist), relay server,
+# entrypoint, provider config and memory volume are inherited untouched — no
+# source is copied or compiled here.
+#
+# Build:
+#   docker build -f docker/relay/Dockerfile.skills-overlay .
+# =============================================================================
+
+FROM machinasports/sportsclaw-relay@sha256:164eef1c961ac8b61ac3277f289f1c9d24ff1c67977830f154d70a2d0d413abe
+
+# Pins every pip install that names sports-skills — including the unpinned
+# `sports-skills[all]` bootstrap in the deployed ensureVenv — at build and run time.
+COPY docker/relay/skills-overlay.constraints.txt /opt/sportsclaw/skills-overlay.constraints.txt
+ENV PIP_CONSTRAINT=/opt/sportsclaw/skills-overlay.constraints.txt
+
+# --- Inherited /opt/venv (relay + PYTHON_PATH interpreter) --------------------
+RUN /opt/venv/bin/python3 -m pip install --no-cache-dir "sports-skills==0.36.0" && \
+    /opt/venv/bin/python3 -m pip check && \
+    /opt/venv/bin/python3 -c "import importlib.metadata as md, sports_skills; got = (md.version('sports-skills'), sports_skills.__version__); assert got == ('0.36.0', '0.36.0'), f'/opt/venv sports-skills mismatch: {got}'"
+
+# --- Managed venv (/root/.sportsclaw/venv) ------------------------------------
+# Runs the deployed ensureVenv for real (it writes its own extras marker), then
+# installs the exact pin into the venv it returns.
+RUN node --input-type=module <<'EOF'
+import { execFileSync } from "node:child_process";
+import { ensureVenv } from "/app/dist/python.js";
+
+const venv = ensureVenv("/opt/venv/bin/python3");
+if (!venv.ok) throw new Error(`ensureVenv failed: ${venv.error}`);
+const run = (...args) => execFileSync(venv.pythonPath, args, { stdio: "inherit" });
+run("-m", "pip", "install", "--no-cache-dir", "sports-skills[all]==0.36.0");
+run("-m", "pip", "check");
+run("-c", "import importlib.metadata as md, sports_skills; got = (md.version('sports-skills'), sports_skills.__version__); assert got == ('0.36.0', '0.36.0'), f'managed venv sports-skills mismatch: {got}'");
+console.error(`[overlay] managed venv ready: ${venv.pythonPath}`);
+EOF
+
+# --- Regenerate schema cache (fail closed) -----------------------------------
+RUN node --input-type=module <<'EOF'
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { DEFAULT_SKILLS, bootstrapDefaultSchemas, getSchemaDir } from "/app/dist/schema.js";
+
+const count = await bootstrapDefaultSchemas({ pythonPath: "/opt/venv/bin/python3" }, { force: true, verbose: true });
+if (count !== DEFAULT_SKILLS.length) {
+  throw new Error(`schema bootstrap incomplete: ${count} of ${DEFAULT_SKILLS.length}`);
+}
+
+const dir = getSchemaDir();
+const schemas = new Map();
+for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+  const schema = JSON.parse(readFileSync(join(dir, file), "utf-8"));
+  if (schema.version !== "0.36.0") throw new Error(`${file}: schema version ${schema.version}, expected 0.36.0`);
+  schemas.set(schema.sport, schema);
+}
+for (const skill of DEFAULT_SKILLS) {
+  if (!schemas.has(skill)) throw new Error(`missing schema for default skill "${skill}"`);
+}
+
+const required = { nfl: ["get_fantasy_trending"], tennis: ["get_wta_entry_list", "get_wta_player_results"] };
+for (const [sport, commands] of Object.entries(required)) {
+  for (const command of commands) {
+    if (!schemas.get(sport).tools.some((tool) => tool.command === command)) {
+      throw new Error(`required tool ${sport}.${command} not exposed`);
+    }
+  }
+}
+console.error(`[overlay] ${schemas.size} schemas at 0.36.0 in ${dir}`);
+EOF
