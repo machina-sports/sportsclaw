@@ -116,6 +116,8 @@ import {
 } from "./analytics.js";
 import { cmdPlugin } from "./plugin.js";
 import { cmdClip } from "./clipper.js";
+import { probeRuntimeProvenance } from "./runtime-provenance.js";
+import { buildSubprocessEnv } from "./bridge.js";
 import { cmdHighlights } from "./highlights/cli.js";
 import {
   daemonStart,
@@ -1157,21 +1159,11 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
 
   // 3. sports-skills installed + version (skip if Python too old or missing)
   if (pythonOk) {
-    let ssVersion = "";
-    try {
-      ssVersion = await new Promise<string>((resolve, reject) => {
-        execFile(
-          pythonPath,
-          ["-c", "from sports_skills import __version__; print(__version__)"],
-          { timeout: 10_000 },
-          (err, stdout) => {
-            if (err) return reject(err);
-            resolve(stdout.trim());
-          }
-        );
-      });
+    const runtime = await probeRuntimeProvenance(pythonPath, PKG_VERSION);
+    const ssVersion = runtime.sportsSkillsVersion ?? "";
+    if (runtime.probe.ok && ssVersion) {
       console.log(pc.green("  ✓") + ` sports-skills ${ssVersion}`);
-    } catch {
+    } else {
       console.log(pc.red("  ✗") + " sports-skills not installed");
       console.log(`    Fix: ${buildSportsSkillsRepairCommand(pythonPath)}`);
       allGood = false;
@@ -1184,7 +1176,7 @@ async function cmdDoctor(_opts?: { fromChat?: boolean }): Promise<void> {
           execFile(
             pythonPath,
             ["-c", "from sports_skills import f1"],
-            { timeout: 10_000 },
+            { timeout: 10_000, env: buildSubprocessEnv() },
             (err) => (err ? reject(err) : resolve())
           );
         });
@@ -1425,6 +1417,7 @@ function detectConfigDrift(): string[] {
 
 async function cmdHealth(args: string[]): Promise<void> {
   const jsonMode = args.includes("--json");
+  const localMode = args.includes("--local");
   const { pythonPath, provider, model, apiKey } = resolveConfig();
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -1456,20 +1449,27 @@ async function cmdHealth(args: string[]): Promise<void> {
   }
 
   // 4. Check MCP Server statuses
-  const mcpManager = new McpManager(false, false);
   let mcpDetails: Array<{ name: string; connected: boolean; url: string; failures: number; toolsDiscovered: number }> = [];
-  
-  try {
-    await mcpManager.connectAll();
-    mcpDetails = mcpManager.getHealthDetails();
-  } catch (err) {
-    errors.push("Failed to verify MCP server connectivity: " + (err instanceof Error ? err.message : String(err)));
-  } finally {
+
+  if (!localMode) {
+    const mcpManager = new McpManager(false, false);
     try {
-      await mcpManager.disconnectAll();
-    } catch {
-      // ignore
+      await mcpManager.connectAll();
+      mcpDetails = mcpManager.getHealthDetails();
+    } catch (err) {
+      errors.push("Failed to verify MCP server connectivity: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      try {
+        await mcpManager.disconnectAll();
+      } catch {
+        // ignore
+      }
     }
+  }
+
+  const runtime = await probeRuntimeProvenance(pythonPath, PKG_VERSION);
+  if (!runtime.probe.ok) {
+    warnings.push(`Runtime provenance probe failed: ${runtime.probe.error ?? "unknown error"}.`);
   }
 
   // Determine overall status
@@ -1503,6 +1503,8 @@ async function cmdHealth(args: string[]): Promise<void> {
           : {}),
       },
       mcp: mcpDetails,
+      ...(localMode ? { mcpSkipped: { reason: "MCP connectivity was not checked in local mode." } } : {}),
+      runtime,
       schemasInstalled: schemasCount,
       sportsInstalled: schemaSummary.totalSports,
       supportModulesInstalled: schemaSummary.totalSupport,
@@ -1525,6 +1527,8 @@ async function cmdHealth(args: string[]): Promise<void> {
   console.log(`  Overall Status:  ${status === "healthy" ? pc.green(status.toUpperCase()) : status === "degraded" ? pc.yellow(status.toUpperCase()) : pc.red(status.toUpperCase())}`);
   console.log(`  Engine Version:  v${PKG_VERSION}`);
   console.log(`  Provider/Model:  ${provider} (${model || "default"})`);
+  console.log(`  Python Runtime: ${runtime.pythonExecutable ?? runtime.pythonPath}`);
+  console.log(`  sports-skills:  ${runtime.sportsSkillsVersion ?? "unavailable"}`);
   console.log(
     `  Schemas Installed: ${schemasCount} schemas ` +
       `(${schemaSummary.totalSports} sports, ${schemaSummary.totalSupport} support modules)`
@@ -1532,7 +1536,9 @@ async function cmdHealth(args: string[]): Promise<void> {
   console.log("");
 
   console.log(pc.bold("  MCP Connectivity:"));
-  if (mcpDetails.length === 0) {
+  if (localMode) {
+    console.log("    Not checked (--local).");
+  } else if (mcpDetails.length === 0) {
     console.log("    No MCP servers configured.");
   } else {
     for (const mcp of mcpDetails) {
@@ -3165,7 +3171,7 @@ function printHelp(): void {
   console.log("  sportsclaw chat                    Start an interactive conversation (REPL)");
   console.log("  sportsclaw setup [prompt]           AI-guided setup wizard");
   console.log("  sportsclaw doctor                  Check setup and diagnose issues");
-  console.log("  sportsclaw health [--json]         Check system health and status");
+  console.log("  sportsclaw health [--json] [--local]  Check system health and status");
   console.log("  sportsclaw selftest [--quick] [--sport <s>] [--json] [--live]  Run schema smoke tests");
   console.log("  sportsclaw config                  Run interactive configuration wizard");
   console.log("  sportsclaw channels                Configure Discord & Telegram tokens");
