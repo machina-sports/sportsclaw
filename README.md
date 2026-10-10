@@ -65,6 +65,15 @@ If something isn't working, run the built-in diagnostic:
 sportsclaw doctor
 ```
 
+For a local-only diagnostic that does not contact configured MCP servers, use
+`sportsclaw health --local --json`. The result reports the actual Node
+executable, CLI entrypoint, configured and resolved Python interpreters, and
+the loaded `sports_skills` file/version. Normal `sportsclaw health --json`
+also probes the runtime and can report `degraded` if that probe fails; the probe
+has a 10-second timeout. Diagnostic output includes absolute local paths, so
+review it before sharing. Normal health
+continues to check MCP connectivity.
+
 Optional routing controls (defaults shown):
 
 ```bash
