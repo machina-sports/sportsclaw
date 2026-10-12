@@ -788,8 +788,10 @@ export interface SkillGuide {
   name: string;
   /** Short description from skill.yml */
   description: string;
-  /** Raw SKILL.md content */
+  /** Raw SKILL.md content (portable guides: without the YAML frontmatter) */
   body: string;
+  /** Real path of the skill directory (disk guides only) — root for references/ and scripts/ */
+  dir?: string;
 }
 
 export interface RouteDecision {
