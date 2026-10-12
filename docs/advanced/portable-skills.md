@@ -159,8 +159,9 @@ It does **not** limit what an approved helper does once it runs.
   site-packages, `PYTHONPATH`, and the helper's own directory on `sys.path`, but the system
   interpreter's packages are still importable. Helpers that import sibling modules will not
   work.
-- Only the direct helper process is killed on timeout or output limit. Processes the helper
-  spawns itself are not tracked.
+- The helper's POSIX process group receives `SIGKILL` on timeout, output limit, and normal
+  completion. Descendants that create a new session or leave that group can escape cleanup;
+  only approve helpers that do neither.
 - Network egress and filesystem policy must be enforced by the deployment (container, firewall,
   read-only mounts). sportsclaw does not enforce host allowlists or read-only access.
 - Keep the skill root read-only and owned by the operator. The runtime only promises to run the
