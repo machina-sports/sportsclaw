@@ -13,7 +13,16 @@ import type {
   ToolSpec,
   sportsclawConfig,
   SportSchema,
+  SkillGuide,
 } from "./types.js";
+import { loadSkillGuides } from "./skill-guides.js";
+import {
+  SKILL_READ_TOOL,
+  SKILL_RUN_TOOL,
+  SKILL_TOOL_SPECS,
+  readSkillReference,
+  runSkillScript,
+} from "./skill-runtime.js";
 import type { McpManager } from "./mcp.js";
 import { buildSportsSkillsRepairCommand } from "./python.js";
 import { isBlockedTool, logSecurityEvent } from "./security.js";
@@ -218,6 +227,8 @@ export class ToolRegistry {
   private cacheMisses = 0;
   private cacheEnabled = true;
   private cacheTtlMs = 300_000; // 5 minutes default
+  /** Disk skill guides (SPORTSCLAW_SKILL_GUIDES_DIR); enables the skill_* tools when non-empty. */
+  private skillGuides: SkillGuide[] = loadSkillGuides();
 
   /**
    * Configure cache settings. Must be called before any tool calls to take effect.
@@ -286,7 +297,10 @@ export class ToolRegistry {
       toolName === "install_sport" ||
       toolName === "remove_sport" ||
       toolName === "upgrade_sports_skills" ||
-      toolName === machinaLoopTool.spec.name
+      toolName === machinaLoopTool.spec.name ||
+      // Never cached: files and approval policy are re-checked on every call.
+      toolName === SKILL_READ_TOOL ||
+      toolName === SKILL_RUN_TOOL
     );
   }
 
@@ -387,6 +401,9 @@ export class ToolRegistry {
     base = base.filter((s) => s.name !== machinaLoopTool.spec.name);
     if (this.mcpManager?.getMachinaLoopServer()) {
       base.push(machinaLoopTool.spec);
+    }
+    if (this.skillGuides.length > 0) {
+      base.push(...SKILL_TOOL_SPECS);
     }
     // Append MCP tools after Python bridge tools
     if (this.mcpSpecs.length > 0) {
@@ -499,7 +516,11 @@ export class ToolRegistry {
     // Execute the tool
     let result: ToolCallResult;
     const builtin = BUILTIN_TOOLS.find((t) => t.spec.name === toolName);
-    if (builtin) {
+    if (toolName === SKILL_READ_TOOL && this.skillGuides.length > 0) {
+      result = readSkillReference(this.skillGuides, input);
+    } else if (toolName === SKILL_RUN_TOOL && this.skillGuides.length > 0) {
+      result = await runSkillScript(this.skillGuides, input, config);
+    } else if (builtin) {
       result = await builtin.execute(input, config, this);
     } else if (this.mcpRouteMap.has(toolName) && this.mcpManager) {
       // MCP tool — dispatch via MCP client

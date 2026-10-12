@@ -131,6 +131,7 @@ export default defineConfig({
         text: 'Advanced',
         items: [
           { text: 'Connecting MCP Servers', link: '/advanced/mcp' },
+          { text: 'Portable Skills', link: '/advanced/portable-skills' },
           { text: 'Hindsight Memory', link: '/hindsight-memory' },
           { text: 'Watchers & Schedules', link: '/advanced/watchers' },
           { text: 'Operator Mode', link: '/advanced/operator' },
