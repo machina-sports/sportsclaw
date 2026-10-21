@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 
 import { tool as defineTool, jsonSchema, type ToolSet } from "ai";
 
-import { resolveModel, resolveAuthForModel, defaultOpenShellBaseUrl } from "./llm-providers.js";
+import { resolveModel, resolveAuthForModel, resolveOpenShellEndpoint } from "./llm-providers.js";
 import {
   createOperatorDaemon,
   type TickEvent,
@@ -58,7 +58,7 @@ import {
   TICK_BRIEF_FRAGMENT_HEADER,
   TOOL_DISCIPLINE_FRAGMENT,
 } from "./prompts.js";
-import type { InferenceRoute, LLMProvider, OpenShellConfig } from "./types.js";
+import type { InferenceRoute, LLMProvider, NativeEndpoint } from "./types.js";
 import { invokeModelRole } from "./inference/model-role-router.js";
 import { providerToolCeiling } from "./routing/tool-activation.js";
 
@@ -451,17 +451,12 @@ async function buildOperatorTools(
     registry.injectSchema(schema, false);
   }
 
-  // Install the OpenShell egress-proxy dispatcher BEFORE the first MCP
-  // connect. The MCP transport uses global fetch, and Node 20's undici
-  // ignores HTTPS_PROXY env vars by default — so inside an OpenShell
-  // sandbox (network-isolated, all egress via 10.200.0.1:3128) the SSE
-  // connect resolves the Machina pod host via real DNS and fails with
-  // EAI_AGAIN. It used to be installed in resolveJobInputs(), which runs
-  // AFTER connectAll() + resolvePersona(), so the boot-time MCP connect
-  // (and the persona fetch that depends on it) failed before the proxy
-  // was ever wired up. The call is idempotent and no-ops when no proxy
-  // env is set, so it's safe to run unconditionally here.
-  await installOpenShellProxyDispatcher();
+  // Pre-existing generic proxy support for non-OpenShell jobs: honour
+  // HTTPS_PROXY/HTTP_PROXY for global fetch (MCP transport etc.) BEFORE the
+  // first MCP connect. Idempotent; no-ops without proxy env. OpenShell jobs
+  // never touch the global dispatcher — the runtime mediates their egress and
+  // their model client has its own transport.
+  if (!openShellEnabled(cfg)) await installEnvProxyDispatcher();
 
   const mcpManager = new McpManager(verbose, false);
   if (mcpManager.serverCount > 0) {
@@ -583,69 +578,42 @@ async function resolvePersona(
 }
 
 // ---------------------------------------------------------------------------
-// OpenShell — config interpretation + env-var application
+// OpenShell 0.1.x — per-job native endpoint
 //
-// Model construction lives in `./llm-providers.ts`; this file owns the
-// config → resolved-state translation and the env-var side-effects.
+// Validation, the sandbox guard and credential lookup live in
+// `resolveOpenShellEndpoint`; model construction in `./llm-providers.ts`.
+// Nothing here mutates provider env vars or the global dispatcher.
 // ---------------------------------------------------------------------------
 
-interface ResolvedOpenShell {
-  enabled: boolean;
-  baseUrl: string;
-}
-
-function resolveOpenShell(
-  provider: LLMProvider,
-  openshell: OpenShellConfig | undefined,
-): ResolvedOpenShell | undefined {
-  if (!openshell) return undefined;
-  const enabled = openshell.enabled !== false; // default true when block present
-  if (!enabled) return { enabled: false, baseUrl: "" };
-  const baseUrl = openshell.baseUrl ?? defaultOpenShellBaseUrl(provider);
-  return { enabled: true, baseUrl };
+function openShellEnabled(cfg: OperatorJobConfig): boolean {
+  return cfg.openshell !== undefined && cfg.openshell.enabled !== false;
 }
 
 /**
- * Set provider-specific base-URL env vars so any code path inside this
- * process (e.g. engine.ts singletons used by sub-tools) also routes
- * through `inference.local`. The factory call in resolveModel covers the
- * daemon's own generateText path; this covers everything else.
+ * Resolve an enabled job's native endpoint BEFORE sink/tool/MCP setup, so a
+ * missing route, credential or sandbox runtime fails the job up front.
+ * Disabled/absent block → `undefined`, with no OpenShell code path touched.
  */
-function applyOpenShellEnv(
-  provider: LLMProvider,
-  openshell: ResolvedOpenShell,
-): void {
-  switch (provider) {
-    case "anthropic":
-      process.env.ANTHROPIC_BASE_URL = openshell.baseUrl;
-      break;
-    case "openai":
-      process.env.OPENAI_BASE_URL = openshell.baseUrl;
-      break;
-    case "google":
-    case "azure-foundry":
-    case "openai-compatible":
-      // Never reached — config validator + resolveOpenShell both reject.
-      break;
-  }
+function resolveJobOpenShell(cfg: OperatorJobConfig): NativeEndpoint | undefined {
+  if (!openShellEnabled(cfg)) return undefined;
+  // The validator requires an explicit provider when openshell is enabled.
+  return resolveOpenShellEndpoint(cfg.provider as LLMProvider, cfg.openshell);
 }
 
 // Track installation so we don't replace the dispatcher on repeat
-// invocations (each `operate --once` instantiates resolveJobInputs).
-let openShellProxyDispatcherInstalled = false;
+// invocations (each `operate --once` instantiates buildOperatorTools).
+let envProxyDispatcherInstalled = false;
 
 /**
- * Route all outbound fetch() through the supervisor's egress proxy when
- * the sandbox sets HTTPS_PROXY (10.200.0.1:3128). Node 20 ships undici 5,
- * which ignores proxy env vars by default; AI SDK and OpenAI SDK both
- * fall through to Node's global fetch, so without this they'd try to
- * resolve `inference.local` via real DNS and fail with EAI_AGAIN.
+ * Route global fetch() through HTTPS_PROXY/HTTP_PROXY when set. Node's
+ * bundled undici ignores proxy env vars by default. Pre-existing behavior for
+ * non-OpenShell jobs; never called for OpenShell-enabled jobs.
  *
  * Dynamic import + try/catch so a missing/older undici degrades to a
  * warning rather than crashing the engine. Idempotent across ticks.
  */
-async function installOpenShellProxyDispatcher(): Promise<void> {
-  if (openShellProxyDispatcherInstalled) return;
+async function installEnvProxyDispatcher(): Promise<void> {
+  if (envProxyDispatcherInstalled) return;
   const proxyUrl =
     process.env.HTTPS_PROXY ??
     process.env.HTTP_PROXY ??
@@ -655,13 +623,10 @@ async function installOpenShellProxyDispatcher(): Promise<void> {
   try {
     const { EnvHttpProxyAgent, setGlobalDispatcher } = await import("undici");
     setGlobalDispatcher(new EnvHttpProxyAgent());
-    openShellProxyDispatcherInstalled = true;
+    envProxyDispatcherInstalled = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[openshell] failed to install proxy dispatcher (${msg}); ` +
-        `LLM calls to inference.local will fail with EAI_AGAIN until this is fixed.`,
-    );
+    console.error(`[operate] failed to install proxy dispatcher (${msg}); proxied egress may fail.`);
   }
 }
 
@@ -671,14 +636,14 @@ interface ResolvedDaemonInputs {
   rootDir: string;
   personaText: string;
   extraFragments: string[];
-  openshell?: ResolvedOpenShell;
+  openshell?: NativeEndpoint;
   inferenceRoute: InferenceRoute;
 }
 
 async function resolveJobInputs(
   cfg: OperatorJobConfig,
   mcpManager: McpManager,
-  opts: { ensureRootDir?: boolean } = {},
+  opts: { ensureRootDir?: boolean; openshell?: NativeEndpoint } = {},
 ): Promise<ResolvedDaemonInputs> {
   const sportsclawCfg = resolveConfig();
   applyConfigToEnv();
@@ -702,12 +667,9 @@ async function resolveJobInputs(
         "Use direct tools for quick answers, and do not re-start a task that is already running."
     );
   }
-  const openshell = resolveOpenShell(provider, cfg.openshell);
-  if (openshell?.enabled) {
-    applyOpenShellEnv(provider, openshell);
-    await installOpenShellProxyDispatcher();
-  }
-  const inferenceRoute: InferenceRoute = openshell?.enabled
+  const openshell = opts.openshell;
+  // Route label is configuration metadata for sinks, not enforcement evidence.
+  const inferenceRoute: InferenceRoute = openshell
     ? { via: "openshell", baseUrl: openshell.baseUrl, provider, model: modelId }
     : { via: "direct", provider, model: modelId };
   return {
@@ -722,42 +684,14 @@ async function resolveJobInputs(
 }
 
 /**
- * Best-effort startup probe: confirm we're really inside an OpenShell
- * sandbox before handing control to the daemon. Fails fast with a clear
- * error rather than letting the first generateText surface something
- * opaque. Mitigates Risk R4 in docs/openshell-integration-plan.md.
- *
- * The supervisor exports OPENSHELL_SANDBOX=1 inside every container it
- * manages — that's the authoritative signal. Real DNS lookups for
- * `inference.local` don't work because the supervisor intercepts that
- * traffic at the HTTPS_PROXY layer (10.200.0.1:3128) rather than via
- * /etc/hosts. DNS is kept as a fallback only for unusual setups where
- * the env var isn't present.
+ * OpenShell jobs use their explicit native endpoint and never consult the
+ * local credential store (no OAuth read, no logout needed); direct jobs keep
+ * the existing auth resolution.
  */
-async function probeOpenShellHost(baseUrl: string): Promise<void> {
-  if (process.env.OPENSHELL_SANDBOX === "1") return;
-  let host: string;
-  try {
-    host = new URL(baseUrl).hostname;
-  } catch {
-    throw new Error(`OpenShell mode: invalid baseUrl ${JSON.stringify(baseUrl)}`);
-  }
-  const { promises: dnsp } = await import("node:dns");
-  try {
-    await Promise.race([
-      dnsp.lookup(host),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("dns lookup timeout (1.5s)")), 1500),
-      ),
-    ]);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `OpenShell mode: cannot resolve "${host}" (${msg}) and OPENSHELL_SANDBOX is not set. ` +
-        `Are you running inside an OpenShell sandbox? ` +
-        `Set openshell.enabled=false or remove the openshell block to disable.`,
-    );
-  }
+function modelForInputs(inputs: ResolvedDaemonInputs) {
+  return inputs.openshell
+    ? resolveModel(inputs.provider, inputs.modelId, inputs.openshell)
+    : resolveModel(inputs.provider, inputs.modelId, undefined, resolveAuthForModel());
 }
 
 function expandTilde(p: string): string {
@@ -829,8 +763,11 @@ async function runDryRun(jobId: string): Promise<void> {
     console.log(`rootDir:           ${inputs.rootDir}`);
     console.log(`sink:              ${sink.name}`);
     console.log(`memory writeback:  ${memoryToolsOn ? "enabled" : "disabled"}`);
-    if (inputs.openshell?.enabled) {
-      console.log(`inference:         openshell (${inputs.openshell.baseUrl})`);
+    if (openShellEnabled(cfg)) {
+      // Dry-run inspects config only; the sandbox/credential guard runs at launch.
+      const os = cfg.openshell!;
+      const credential = os.credentialless ? "credentialless" : `credential env ${os.credentialEnv}`;
+      console.log(`inference:         openshell native (${os.baseUrl}, ${credential}, api ${os.apiMode ?? "chat"})`);
     } else {
       console.log(`inference:         direct`);
     }
@@ -845,10 +782,11 @@ async function runDryRun(jobId: string): Promise<void> {
 
 async function runOnce(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
+  const openshell = resolveJobOpenShell(cfg);
   const sink = withOperatorSync(await resolveSink(cfg), cfg);
   const tools = await buildOperatorTools(cfg, false, sink);
   try {
-    const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+    const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true, openshell });
     const outputSchema = sink.getOutputSchema?.({ cfg });
     validateOperatorToolCount({
       provider: inputs.provider,
@@ -860,9 +798,6 @@ async function runOnce(jobId: string): Promise<void> {
       jobId: cfg.jobId,
       skills: cfg.skills,
     });
-    if (inputs.openshell?.enabled) {
-      await probeOpenShellHost(inputs.openshell.baseUrl);
-    }
     const ctx: SinkContext = {
       jobId: cfg.jobId,
       modelId: inputs.modelId,
@@ -875,7 +810,7 @@ async function runOnce(jobId: string): Promise<void> {
       jobId: cfg.jobId,
       jobLabel: cfg.label,
       intervalMs: cfg.intervalMs,
-      model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
+      model: modelForInputs(inputs),
       role: inputs.personaText,
       tools: tools.toolSet,
       rootDir: inputs.rootDir,
@@ -946,6 +881,7 @@ function exitCodeFor(event: TickEvent): number {
 
 async function runForeground(jobId: string): Promise<void> {
   const { config: cfg } = loadOperatorJobConfig(jobId);
+  const openshell = resolveJobOpenShell(cfg);
   const sink = withOperatorSync(await resolveSink(cfg), cfg);
   if (cfg.scheduleMode === "sink-polled" && typeof sink.pollForWork !== "function") {
     throw new Error(
@@ -954,7 +890,7 @@ async function runForeground(jobId: string): Promise<void> {
     );
   }
   const tools = await buildOperatorTools(cfg, false, sink);
-  const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true });
+  const inputs = await resolveJobInputs(cfg, tools.mcpManager, { ensureRootDir: true, openshell });
   const outputSchema = sink.getOutputSchema?.({ cfg });
   validateOperatorToolCount({
     provider: inputs.provider,
@@ -966,9 +902,6 @@ async function runForeground(jobId: string): Promise<void> {
     jobId: cfg.jobId,
     skills: cfg.skills,
   });
-  if (inputs.openshell?.enabled) {
-    await probeOpenShellHost(inputs.openshell.baseUrl);
-  }
 
   const ctx: SinkContext = {
     jobId: cfg.jobId,
@@ -982,7 +915,7 @@ async function runForeground(jobId: string): Promise<void> {
     jobId: cfg.jobId,
     jobLabel: cfg.label,
     intervalMs: cfg.intervalMs,
-    model: resolveModel(inputs.provider, inputs.modelId, inputs.openshell?.enabled ? { baseUrl: inputs.openshell.baseUrl } : undefined, resolveAuthForModel()),
+    model: modelForInputs(inputs),
     role: inputs.personaText,
     tools: tools.toolSet,
     rootDir: inputs.rootDir,
@@ -1044,7 +977,7 @@ async function runForeground(jobId: string): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  const inferenceTag = inputs.openshell?.enabled
+  const inferenceTag = inputs.openshell
     ? ` inference=openshell(${inputs.openshell.baseUrl})`
     : "";
   const schedulingTag = cfg.scheduleMode === "sink-polled" ? " schedule=sink-polled" : "";

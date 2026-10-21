@@ -16,6 +16,7 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 import type { LLMProvider, OpenShellConfig } from "./types.js";
+import { openShellEndpointIssues } from "./openshell-native.js";
 import {
   validateModelRoleRouterConfig,
   type ModelRoleRouterConfig,
@@ -157,11 +158,11 @@ export interface OperatorJobConfig {
    */
   persistence?: boolean;
   /**
-   * Opt in to routing LLM calls through NVIDIA OpenShell's Privacy Router.
-   * Absent block = default direct LLM calls; nothing changes. When present
-   * and enabled, the launcher constructs the AI SDK provider with a
-   * `baseURL` pointing at `inference.local` (or the configured `baseUrl`).
-   * See `openshell/README.md` for the deployment runbook.
+   * Opt in to OpenShell 0.1.x native inference. Absent or disabled block =
+   * default direct LLM calls; nothing changes. When enabled, the job must
+   * set `provider`, `openshell.baseUrl` and `openshell.credentialEnv`
+   * (or `credentialless: true`), and it refuses to start outside an
+   * OpenShell sandbox. See `openshell/README.md` for the deployment runbook.
    */
   openshell?: OpenShellConfig;
   /**
@@ -263,7 +264,7 @@ const VALID_PROVIDERS: ReadonlySet<LLMProvider> = new Set<LLMProvider>([
   "openai-compatible",
 ]);
 
-const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+export const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 /**
  * Validate a parsed JSON object against the OperatorJobConfig schema.
@@ -489,48 +490,38 @@ export function validateOperatorJobConfig(
       if (os.enabled !== undefined && typeof os.enabled !== "boolean") {
         push("openshell.enabled", "must be a boolean");
       }
-      if (os.baseUrl !== undefined) {
-        if (typeof os.baseUrl !== "string") {
-          push("openshell.baseUrl", "must be a string URL");
-        } else {
-          try {
-            const url = new URL(os.baseUrl);
-            if (url.protocol !== "http:" && url.protocol !== "https:") {
-              push("openshell.baseUrl", "must be http(s)");
-            }
-          } catch {
-            push("openshell.baseUrl", `not a valid URL: ${JSON.stringify(os.baseUrl)}`);
-          }
-        }
-      }
-      // D1 — Gemini cannot route through the Privacy Router (Google's API
-      // shape is neither OpenAI-compatible nor Anthropic-compatible). Fail
-      // fast at config-load time rather than at the first generateText.
       const openShellEnabled = os.enabled !== false; // default true when block present
-      if (openShellEnabled && raw.provider === "google") {
-        push(
-          "openshell",
-          "provider \"google\" is not supported under openshell — the Privacy Router doesn't speak Google's protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-        );
+      if (!openShellEnabled) {
+        // Disabled block is inert: nothing else is read or required.
+        parsedOpenShell = { enabled: false };
+      } else {
+        for (const i of openShellEndpointIssues(os, raw.provider)) {
+          push(`openshell.${i.field}`, i.message);
+        }
+        // The native request needs an explicit provider protocol (no fallback
+        // to the global sportsclaw config, which may name an unsupported one).
+        if (raw.provider === undefined) {
+          push("provider", "is required when openshell is enabled (\"anthropic\" or \"openai\")");
+        } else if (raw.provider === "google" || raw.provider === "azure-foundry") {
+          push(
+            "openshell",
+            `provider "${raw.provider}" is not supported under openshell — OpenShell native mode is wired for "anthropic" and "openai" (incl. OpenAI-compatible hosts). Drop the openshell block or pick one of those.`,
+          );
+        } else if (raw.provider === "openai-compatible") {
+          push(
+            "openshell",
+            "provider \"openai-compatible\" is not supported under openshell — use provider \"openai\" with openshell.baseUrl set to the custom host and an endpoint-bearing provider profile.",
+          );
+        }
+        parsedOpenShell = {
+          enabled: os.enabled as boolean | undefined,
+          baseUrl: os.baseUrl as string | undefined,
+          credentialEnv: os.credentialEnv as string | undefined,
+          credentialless: os.credentialless as boolean | undefined,
+          apiMode: os.apiMode as OpenShellConfig["apiMode"],
+          timeoutMs: os.timeoutMs as number | undefined,
+        };
       }
-      // azure-foundry targets Azure endpoints directly, not the Privacy
-      // Router's inference.local — the two are mutually exclusive.
-      if (openShellEnabled && raw.provider === "azure-foundry") {
-        push(
-          "openshell",
-          "provider \"azure-foundry\" is not supported under openshell — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-        );
-      }
-      if (openShellEnabled && raw.provider === "openai-compatible") {
-        push(
-          "openshell",
-          "provider \"openai-compatible\" is not supported under openshell — it targets its own OPENAI_COMPATIBLE_BASE_URL, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-        );
-      }
-      parsedOpenShell = {
-        enabled: os.enabled as boolean | undefined,
-        baseUrl: os.baseUrl as string | undefined,
-      };
     }
   }
 

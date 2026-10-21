@@ -103,7 +103,7 @@ docker run --rm -e ANTHROPIC_API_KEY=sk-... sportsclaw "Who won the Super Bowl?"
 
 ### Models & endpoints
 
-sportsclaw works with **Anthropic**, **OpenAI**, **Google**, and **Azure Foundry** out of the box. The config wizard includes curated current model choices plus a custom model/deployment option, so newly deployed provider models do not require a code change. Set `OPENAI_BASE_URL` to point at any OpenAI-compatible endpoint and it routes correctly: reasoning models (`gpt-5*` / `o1*` / `o3*`) use the **Responses API** — required by hosted gateways like **Azure AI Foundry** — while self-hosted chat models (**NVIDIA NIM**, **vLLM**) use `/chat/completions`. For a first-class **Microsoft Foundry / Azure OpenAI** integration (OpenAI- *and* Anthropic-style endpoints, Entra ID auth), pick the `azure-foundry` provider. Its image generator can also use `gpt-image-2` through a Foundry `/openai/v1` endpoint. See [Configuration](docs/getting-started/configuration.md). For sandboxed, policy-routed inference, run inside [NVIDIA OpenShell](openshell/README.md).
+sportsclaw works with **Anthropic**, **OpenAI**, **Google**, and **Azure Foundry** out of the box. The config wizard includes curated current model choices plus a custom model/deployment option, so newly deployed provider models do not require a code change. Set `OPENAI_BASE_URL` to point at any OpenAI-compatible endpoint and it routes correctly: reasoning models (`gpt-5*` / `o1*` / `o3*`) use the **Responses API** — required by hosted gateways like **Azure AI Foundry** — while self-hosted chat models (**NVIDIA NIM**, **vLLM**) use `/chat/completions`. For a first-class **Microsoft Foundry / Azure OpenAI** integration (OpenAI- *and* Anthropic-style endpoints, Entra ID auth), pick the `azure-foundry` provider. Its image generator can also use `gpt-image-2` through a Foundry `/openai/v1` endpoint. See [Configuration](docs/getting-started/configuration.md). For sandboxed operator jobs with policy-enforced egress and provider-mediated credentials, run inside [NVIDIA OpenShell](openshell/README.md).
 
 ### Connect a Machina pod (licensed data & durable loops)
 
@@ -147,11 +147,11 @@ Without a connected Machina pod, memory is stored in local files (`~/.sportsclaw
 export SPORTSCLAW_MEMORY_PROVIDER=hindsight   # file (default) | pod | hindsight
 ```
 
-Hindsight works against OpenAI/Anthropic/Gemini or a fully local Ollama/LM Studio backend, and can run as an offline sidecar inside an OpenShell sandbox. See [`docs/hindsight-memory.md`](docs/hindsight-memory.md) for setup and configuration.
+Hindsight works against OpenAI/Anthropic/Gemini or a fully local Ollama/LM Studio backend, and can run as a sidecar inside an OpenShell sandbox against a local NIM. See [`docs/hindsight-memory.md`](docs/hindsight-memory.md) for setup and configuration.
 
 ### Optional: Run inside NVIDIA OpenShell
 
-For deployments that want sandboxed execution and policy-enforced LLM routing, SportsClaw operator daemons can run inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox with calls routed through the Privacy Router. **This is opt-in via the job config** — direct LLM calls remain the default for everyone else. See [`openshell/README.md`](openshell/README.md) for the runbook and [`docs/openshell-integration-plan.md`](docs/openshell-integration-plan.md) for the integration design.
+For deployments that want sandboxed execution, SportsClaw operator daemons can run inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox, calling the provider's native endpoint with a credential placeholder from an attached OpenShell provider. Tested with OpenShell **0.1.5** only (0.0.x is incompatible; later releases are unqualified). **This is opt-in via the job config** — direct LLM calls remain the default for everyone else, and installing SportsClaw never installs OpenShell. The npm package ships the recipes under `openshell/`; `sportsclaw openshell doctor` / `setup` diagnose and print the steps without provisioning anything. See [`openshell/README.md`](openshell/README.md) for the runbook and [`docs/openshell-integration-plan.md`](docs/openshell-integration-plan.md) for the integration design.
 
 ### Built-in Sports Data Skills
 

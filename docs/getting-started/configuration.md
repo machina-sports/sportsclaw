@@ -62,10 +62,10 @@ export OPENAI_API_KEY=<key>
 # then pick the OpenAI provider + your model id in `sportsclaw config`
 
 # Self-hosted (NIM / vLLM)
-export OPENAI_BASE_URL=https://inference.local/v1
+export OPENAI_BASE_URL=http://<nim-host>:8000/v1
 ```
 
-For sandboxed, policy-routed inference, see [NVIDIA OpenShell](../deployment/openshell).
+For operator jobs inside an OpenShell sandbox, the endpoint comes from the job's `openshell` block, not from `OPENAI_BASE_URL` — see [NVIDIA OpenShell](../deployment/openshell).
 
 ### OpenAI-compatible servers (`openai-compatible` provider)
 
@@ -82,7 +82,7 @@ export SPORTSCLAW_MODEL=meta/llama-3.3-70b-instruct          # required: the id 
 - No reasoning options are sent (they are not portable across servers), so the thinking budget has no effect.
 - The base URL must not embed credentials, a query string, or a fragment.
 - Run manifests record the endpoint host as `endpoint_host`, so runs against different servers never share a `config_sha256`. The same applies to `openai` pointed at a custom `OPENAI_BASE_URL`.
-- Not available under OpenShell.
+- Not available as the provider of an OpenShell job; there, use `provider: "openai"` with `openshell.baseUrl` set to the compatible host (see [NVIDIA OpenShell](../deployment/openshell)).
 
 ### Azure Foundry (first-class provider)
 

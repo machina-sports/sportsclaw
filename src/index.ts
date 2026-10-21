@@ -3187,7 +3187,7 @@ function printHelp(): void {
   console.log("  sportsclaw operate --job <jobId>   Run an autonomous operator daemon (foreground)");
   console.log("  sportsclaw operate --list          List configured operator jobs");
   console.log("  sportsclaw openshell doctor        Diagnose OpenShell prereqs (optional integration)");
-  console.log("  sportsclaw openshell setup         Interactive wizard for OpenShell integration");
+  console.log("  sportsclaw openshell setup         Print a non-mutating OpenShell 0.1.x setup recipe");
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
   console.log("  sportsclaw start operator <jobId>  Start a supervised operator daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");

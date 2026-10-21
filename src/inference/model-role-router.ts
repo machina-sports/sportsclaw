@@ -8,12 +8,13 @@
  * endpoint URL, or a model placement.
  *
  * Routes adapt to the existing harness plumbing:
- *   - `openshell` — AI SDK provider pointed at the OpenShell Privacy
- *     Router (OpenAI-compatible), same construction as the operator
- *     daemon's openshell block.
- *   - `nim` — AI SDK OpenAI-compatible provider pointed at a NIM
- *     endpoint (`baseUrl` in role config, else NIM_BASE_URL /
- *     OPENAI_BASE_URL env). Nemotron thinking-suppression kwargs are
+ *   - `openshell` — OpenShell 0.1.x native endpoint, resolved exactly like
+ *     the operator daemon's openshell block (`resolveOpenShellEndpoint`):
+ *     explicit `baseUrl`, profile-declared `credentialEnv` (or
+ *     `credentialless`), and it refuses to run outside an OpenShell sandbox.
+ *   - `nim` — OpenAI-compatible native client pointed at a NIM endpoint
+ *     (`baseUrl` in role config, else NIM_BASE_URL / OPENAI_BASE_URL env).
+ *     No OpenShell requirement. Nemotron thinking-suppression kwargs are
  *     injected by `resolveModel`'s fetch wrapper.
  *   - `mock` — deterministic in-process echo, no network. Used by unit
  *     tests and the moment-to-air benchmark in CI.
@@ -29,7 +30,9 @@ import { randomUUID } from "node:crypto";
 
 import { generateText } from "ai";
 
-import { defaultOpenShellBaseUrl, resolveModel } from "../llm-providers.js";
+import { resolveModel } from "../llm-providers.js";
+import { openShellEndpointIssues, resolveOpenShellEndpoint } from "../openshell-native.js";
+import type { NativeApiMode, NativeEndpoint } from "../types.js";
 import type { ValidationResult } from "../schema/tv.js";
 import { isModelRole, MODEL_ROLES, type ModelRole } from "./model-roles.js";
 import {
@@ -70,11 +73,18 @@ export interface ModelRoleRouteConfig {
   /** Optional hardware trace metadata. */
   accelerator?: RoleAccelerator;
   /**
-   * Endpoint base URL for openshell/nim routes. Never put credentials
-   * here — auth flows through env/credential stores, same as every
-   * other harness route.
+   * Endpoint base URL for openshell/nim routes (required for openshell).
+   * Never put credentials here.
    */
   baseUrl?: string;
+  /** openshell only: credential env var injected by the attached provider profile. */
+  credentialEnv?: string;
+  /** openshell only: explicit unauthenticated local endpoint. */
+  credentialless?: boolean;
+  /** Request shape for openshell/nim routes. Default `"chat"`. */
+  apiMode?: NativeApiMode;
+  /** Per-request timeout for openshell/nim routes. */
+  timeoutMs?: number;
 }
 
 export interface ModelRoleRouterConfig {
@@ -141,6 +151,27 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
       };
     }
 
+    if (r.route === "openshell") {
+      const [issue] = openShellEndpointIssues(r, "openai");
+      if (issue) return { ok: false, error: `Role "${key}" ${issue.field} ${issue.message}.` };
+      continue;
+    }
+
+    for (const field of ["credentialEnv", "credentialless"] as const) {
+      if (r[field] !== undefined) {
+        return { ok: false, error: `Role "${key}" ${field} applies only to route "openshell".` };
+      }
+    }
+    if (r.apiMode !== undefined && r.apiMode !== "chat" && r.apiMode !== "responses") {
+      return { ok: false, error: `Role "${key}" apiMode must be one of chat, responses.` };
+    }
+    if (
+      r.timeoutMs !== undefined &&
+      (typeof r.timeoutMs !== "number" || !Number.isInteger(r.timeoutMs) || r.timeoutMs <= 0)
+    ) {
+      return { ok: false, error: `Role "${key}" timeoutMs must be a positive integer.` };
+    }
+
     if (r.baseUrl !== undefined) {
       if (typeof r.baseUrl !== "string") {
         return { ok: false, error: `Role "${key}" baseUrl must be a string URL.` };
@@ -198,14 +229,14 @@ function toPrompt(input: unknown): string {
 }
 
 /**
- * Run a role through the OpenAI-compatible chat-completions surface —
- * the shape both OpenShell and NIM serve today.
+ * Run a role through an OpenAI-compatible native endpoint (chat completions
+ * by default, Responses when `apiMode: "responses"`).
  */
 async function runChatRoute(
   envelope: InferenceTaskEnvelope,
-  baseUrl: string,
+  endpoint: NativeEndpoint,
 ): Promise<string> {
-  const model = resolveModel("openai", envelope.model, { baseUrl });
+  const model = resolveModel("openai", envelope.model, endpoint);
   const res = await generateText({ model, prompt: toPrompt(envelope.input) });
   return res.text;
 }
@@ -277,12 +308,18 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
       case "mock":
         output = { mock: true, role, model: routeConfig.model, echo: input };
         break;
-      case "openshell":
-        output = await runChatRoute(
-          envelope,
-          routeConfig.baseUrl ?? defaultOpenShellBaseUrl("openai"),
-        );
+      case "openshell": {
+        // Guard + credential lookup happen here, before any request.
+        const endpoint = resolveOpenShellEndpoint("openai", {
+          baseUrl: routeConfig.baseUrl,
+          credentialEnv: routeConfig.credentialEnv,
+          credentialless: routeConfig.credentialless,
+          apiMode: routeConfig.apiMode,
+          timeoutMs: routeConfig.timeoutMs,
+        }) as NativeEndpoint;
+        output = await runChatRoute(envelope, endpoint);
         break;
+      }
       case "nim": {
         const baseUrl =
           routeConfig.baseUrl ??
@@ -293,7 +330,13 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
             "no NIM endpoint configured — set baseUrl in the role config or NIM_BASE_URL / OPENAI_BASE_URL in the environment.",
           );
         }
-        output = await runChatRoute(envelope, baseUrl);
+        // NIM endpoints are keyless here; the client just needs a non-empty key.
+        output = await runChatRoute(envelope, {
+          baseUrl,
+          apiKey: "unused",
+          apiMode: routeConfig.apiMode,
+          timeoutMs: routeConfig.timeoutMs,
+        });
         break;
       }
     }

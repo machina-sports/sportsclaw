@@ -24,6 +24,7 @@ import {
   listSchemas,
 } from "./schema.js";
 import { loadMcpConfigs, saveMcpConfigs, removeMcpConfig } from "./mcp.js";
+import { markHydrated } from "./env-provenance.js";
 import {
   checkPythonVersion,
   findBestPython,
@@ -394,8 +395,14 @@ export function resolveConfig(): ResolvedConfig {
  */
 function loadEnvFile(filePath: string): void {
   for (const [k, v] of Object.entries(parseEnvFile(filePath))) {
-    if (!process.env[k]) process.env[k] = v;
+    if (!process.env[k]) hydrate(k, v);
   }
+}
+
+/** Fill one env var from saved config, recording provenance (see env-provenance.ts). */
+function hydrate(key: string, value: string): void {
+  process.env[key] = value;
+  markHydrated(key, value);
 }
 
 /**
@@ -410,7 +417,7 @@ export function applyConfigToEnv(): ResolvedConfig {
 
   const envVar = PROVIDER_ENV[resolved.provider];
   if (resolved.apiKey && !process.env[envVar]) {
-    process.env[envVar] = resolved.apiKey;
+    hydrate(envVar, resolved.apiKey);
   }
 
   const envMap: Record<string, string | undefined> = {
@@ -421,24 +428,24 @@ export function applyConfigToEnv(): ResolvedConfig {
     SPORTSCLAW_ROUTING_ALLOW_SPILLOVER: String(resolved.routingAllowSpillover),
   };
   for (const [key, value] of Object.entries(envMap)) {
-    if (value && !process.env[key]) process.env[key] = value;
+    if (value && !process.env[key]) hydrate(key, value);
   }
 
   if (!process.env.PYTHON_PATH && resolved.pythonPath !== "python3") {
-    process.env.PYTHON_PATH = resolved.pythonPath;
+    hydrate("PYTHON_PATH", resolved.pythonPath);
   }
 
   if (resolved.discordBotToken && !process.env.DISCORD_BOT_TOKEN)
-    process.env.DISCORD_BOT_TOKEN = resolved.discordBotToken;
+    hydrate("DISCORD_BOT_TOKEN", resolved.discordBotToken);
   if (resolved.discordAllowedUsers?.length && !process.env.ALLOWED_USERS)
-    process.env.ALLOWED_USERS = resolved.discordAllowedUsers.join(",");
+    hydrate("ALLOWED_USERS", resolved.discordAllowedUsers.join(","));
   if (resolved.discordPrefix && !process.env.DISCORD_PREFIX)
-    process.env.DISCORD_PREFIX = resolved.discordPrefix;
+    hydrate("DISCORD_PREFIX", resolved.discordPrefix);
 
   if (resolved.telegramBotToken && !process.env.TELEGRAM_BOT_TOKEN)
-    process.env.TELEGRAM_BOT_TOKEN = resolved.telegramBotToken;
+    hydrate("TELEGRAM_BOT_TOKEN", resolved.telegramBotToken);
   if (resolved.telegramAllowedUsers?.length && !process.env.TELEGRAM_ALLOWED_USERS)
-    process.env.TELEGRAM_ALLOWED_USERS = resolved.telegramAllowedUsers.join(",");
+    hydrate("TELEGRAM_ALLOWED_USERS", resolved.telegramAllowedUsers.join(","));
 
   return resolved;
 }

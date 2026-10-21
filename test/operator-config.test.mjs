@@ -514,28 +514,47 @@ describe("validateOperatorJobConfig — openshell block", () => {
     assert.strictEqual(r.config.openshell, undefined);
   });
 
-  it("accepts an empty openshell block (defaults to enabled)", () => {
+  // OpenShell 0.1 removed the managed route: an empty block (which used to
+  // default to inference.local) is now rejected with a migration message.
+  it("rejects an empty openshell block (no implicit managed-route default)", () => {
     const r = validateOperatorJobConfig({
       ...base,
       provider: "anthropic",
       openshell: {},
     });
-    assert.strictEqual(r.valid, true);
-    assert.deepStrictEqual(r.config.openshell, {
-      enabled: undefined,
-      baseUrl: undefined,
-    });
+    assert.strictEqual(r.valid, false);
+    assert.match(r.issues.find((i) => i.field === "openshell.baseUrl")?.message ?? "", /native/);
+    assert.ok(r.issues.find((i) => i.field === "openshell.credentialEnv"));
   });
 
-  it("accepts openshell with explicit enabled=true", () => {
+  it("accepts openshell with explicit enabled=true and a native endpoint", () => {
     const r = validateOperatorJobConfig({
       ...base,
       provider: "anthropic",
-      openshell: { enabled: true, baseUrl: "https://inference.local" },
+      openshell: { enabled: true, baseUrl: "https://api.anthropic.com/v1", credentialEnv: "ANTHROPIC_API_KEY" },
     });
-    assert.strictEqual(r.valid, true);
+    assert.strictEqual(r.valid, true, JSON.stringify(r.issues));
     assert.strictEqual(r.config.openshell.enabled, true);
-    assert.strictEqual(r.config.openshell.baseUrl, "https://inference.local");
+    assert.strictEqual(r.config.openshell.baseUrl, "https://api.anthropic.com/v1");
+  });
+
+  it("rejects the removed inference.local endpoint", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      provider: "anthropic",
+      openshell: { enabled: true, baseUrl: "https://inference.local", credentialEnv: "ANTHROPIC_API_KEY" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "openshell.baseUrl"));
+  });
+
+  it("requires an explicit provider when enabled", () => {
+    const r = validateOperatorJobConfig({
+      ...base,
+      openshell: { baseUrl: "https://integrate.api.nvidia.com/v1", credentialEnv: "NVIDIA_API_KEY" },
+    });
+    assert.strictEqual(r.valid, false);
+    assert.ok(r.issues.find((i) => i.field === "provider"));
   });
 
   it("accepts openshell with enabled=false (block present but inert)", () => {
@@ -545,7 +564,7 @@ describe("validateOperatorJobConfig — openshell block", () => {
       openshell: { enabled: false },
     });
     assert.strictEqual(r.valid, true);
-    assert.strictEqual(r.config.openshell.enabled, false);
+    assert.deepStrictEqual(r.config.openshell, { enabled: false });
   });
 
   it("rejects non-object openshell", () => {

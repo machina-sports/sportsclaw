@@ -13,8 +13,8 @@ import {
   buildScaffoldConfig,
   formatReport,
   interpretSandboxProbeResult,
-  parseInferenceGetOutput,
-  parseProviderListOutput,
+  parseGatewayListJson,
+  parseProviderNames,
 } from "../dist/openshell-cli.js";
 
 function stripAnsi(text) {
@@ -83,96 +83,33 @@ describe("formatReport", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseProviderListOutput — `openshell provider list` table parser
+// 0.1.x structured CLI output
+//
+// The 0.0.47 provider-table and `inference` parsers were removed with the
+// managed route; 0.1.x exposes `gateway list -o json` (bare array) and the
+// documented one-name-per-line `provider list --names`.
 // ---------------------------------------------------------------------------
 
-describe("parseProviderListOutput", () => {
-  // Captured verbatim from `openshell provider list` against OpenShell 0.0.47
-  // with one provider (`nvidia-prod`). Header is wrapped in `\x1B[1m...\x1B[0m`.
-  const WITH_PROVIDERS =
-    "\x1B[1mNAME       \x1B[0m  \x1B[1mTYPE  \x1B[0m  \x1B[1mCREDENTIAL_KEYS \x1B[0m  \x1B[1mCONFIG_KEYS\x1B[0m\n" +
-    "nvidia-prod  nvidia  1                 0\n";
-
-  it("returns hasProviders=true when a data row follows the header", () => {
-    assert.deepStrictEqual(parseProviderListOutput(WITH_PROVIDERS), {
-      hasProviders: true,
-    });
+describe("parseGatewayListJson", () => {
+  it("counts entries in the bare JSON array", () => {
+    assert.strictEqual(parseGatewayListJson("[]"), 0);
+    assert.strictEqual(parseGatewayListJson('[{"name":"local"}]\n'), 1);
   });
 
-  it("returns hasProviders=false when only the header is present", () => {
-    const headerOnly =
-      "\x1B[1mNAME       \x1B[0m  \x1B[1mTYPE  \x1B[0m  \x1B[1mCREDENTIAL_KEYS \x1B[0m  \x1B[1mCONFIG_KEYS\x1B[0m\n";
-    assert.deepStrictEqual(parseProviderListOutput(headerOnly), {
-      hasProviders: false,
-    });
-  });
-
-  it("returns hasProviders=false for empty output", () => {
-    assert.deepStrictEqual(parseProviderListOutput(""), {
-      hasProviders: false,
-    });
+  it("returns undefined for non-array or unparseable output", () => {
+    assert.strictEqual(parseGatewayListJson(""), undefined);
+    assert.strictEqual(parseGatewayListJson("{}"), undefined);
+    assert.strictEqual(parseGatewayListJson("NAME  ENDPOINT\n"), undefined);
   });
 });
 
-// ---------------------------------------------------------------------------
-// parseInferenceGetOutput — `openshell inference get` parser
-// ---------------------------------------------------------------------------
-
-describe("parseInferenceGetOutput", () => {
-  // Captured verbatim from `openshell inference get` against OpenShell 0.0.47
-  // with nvidia-prod / nvidia/nemotron-3-nano-30b-a3b pinned. Labels are
-  // wrapped in `\x1B[2m...\x1B[0m` — the old `/Provider:\s*(\S+)/` regex
-  // would capture `\x1B[0m` instead of the actual provider name.
-  const CONFIGURED =
-    "\x1B[1m\x1B[36mGateway inference:\x1B[39m\x1B[0m\n\n" +
-    "  \x1B[2mProvider:\x1B[0m nvidia-prod\n" +
-    "  \x1B[2mModel:\x1B[0m nvidia/nemotron-3-nano-30b-a3b\n" +
-    "  \x1B[2mVersion:\x1B[0m 1\n" +
-    "  \x1B[2mTimeout:\x1B[0m 300s\n";
-
-  const NOT_CONFIGURED =
-    "\x1B[1m\x1B[36mGateway inference:\x1B[39m\x1B[0m\n\n" +
-    "  \x1B[2mNot configured\x1B[0m\n\n" +
-    "\x1B[1m\x1B[36mSystem inference:\x1B[39m\x1B[0m\n\n" +
-    "  \x1B[2mNot configured\x1B[0m\n";
-
-  it("extracts provider and model through ANSI-wrapped labels", () => {
-    assert.deepStrictEqual(parseInferenceGetOutput(CONFIGURED), {
-      provider: "nvidia-prod",
-      model: "nvidia/nemotron-3-nano-30b-a3b",
-    });
+describe("parseProviderNames", () => {
+  it("returns one provider per non-blank line", () => {
+    assert.deepStrictEqual(parseProviderNames("nvidia-native-prod\nollama\n"), ["nvidia-native-prod", "ollama"]);
   });
 
-  it("returns empty provider/model when both sections report 'Not configured'", () => {
-    assert.deepStrictEqual(parseInferenceGetOutput(NOT_CONFIGURED), {
-      provider: undefined,
-      model: undefined,
-    });
-  });
-
-  it("returns Gateway inference values even when System inference is 'Not configured'", () => {
-    // Real observed case: gateway routing pinned, but system-level default
-    // still unset. We care about gateway routing — that's what `inference.local`
-    // resolves through.
-    const MIXED =
-      "\x1B[1m\x1B[36mGateway inference:\x1B[39m\x1B[0m\n\n" +
-      "  \x1B[2mProvider:\x1B[0m nvidia-prod\n" +
-      "  \x1B[2mModel:\x1B[0m nvidia/nemotron-3-nano-30b-a3b\n" +
-      "  \x1B[2mVersion:\x1B[0m 1\n" +
-      "  \x1B[2mTimeout:\x1B[0m 300s\n\n" +
-      "\x1B[1m\x1B[36mSystem inference:\x1B[39m\x1B[0m\n\n" +
-      "  \x1B[2mNot configured\x1B[0m\n";
-    assert.deepStrictEqual(parseInferenceGetOutput(MIXED), {
-      provider: "nvidia-prod",
-      model: "nvidia/nemotron-3-nano-30b-a3b",
-    });
-  });
-
-  it("returns empty when output is unrecognizable", () => {
-    assert.deepStrictEqual(parseInferenceGetOutput("unexpected garbage\n"), {
-      provider: undefined,
-      model: undefined,
-    });
+  it("returns [] for empty output", () => {
+    assert.deepStrictEqual(parseProviderNames(""), []);
   });
 });
 
@@ -260,13 +197,15 @@ describe("interpretSandboxProbeResult", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildScaffoldConfig", () => {
-  it("produces valid JSON with the openshell block enabled by default", () => {
+  it("produces valid JSON with an explicit native openshell block", () => {
     const raw = buildScaffoldConfig({
       jobId: "tv-op",
       personaText: "You are an operator.",
       provider: "anthropic",
       model: "claude-opus-4-6",
       intervalMs: 60000,
+      baseUrl: "https://api.anthropic.com/v1",
+      credentialEnv: "ANTHROPIC_API_KEY",
     });
     const cfg = JSON.parse(raw);
     assert.strictEqual(cfg.jobId, "tv-op");
@@ -274,7 +213,10 @@ describe("buildScaffoldConfig", () => {
     assert.strictEqual(cfg.model, "claude-opus-4-6");
     assert.strictEqual(cfg.intervalMs, 60000);
     assert.strictEqual(cfg.personaText, "You are an operator.");
-    assert.deepStrictEqual(cfg.openshell, {});
+    assert.deepStrictEqual(cfg.openshell, {
+      baseUrl: "https://api.anthropic.com/v1",
+      credentialEnv: "ANTHROPIC_API_KEY",
+    });
   });
 
   it("ends with a trailing newline (POSIX file convention)", () => {
@@ -284,8 +226,14 @@ describe("buildScaffoldConfig", () => {
       provider: "openai",
       model: "gpt-4.1",
       intervalMs: 30000,
+      baseUrl: "http://host.openshell.internal:8000/v1",
+      credentialless: true,
     });
     assert.ok(raw.endsWith("\n"));
+    assert.deepStrictEqual(JSON.parse(raw).openshell, {
+      baseUrl: "http://host.openshell.internal:8000/v1",
+      credentialless: true,
+    });
   });
 
   it("survives the operator-config validator", async () => {
@@ -296,13 +244,12 @@ describe("buildScaffoldConfig", () => {
       provider: "anthropic",
       model: "claude-opus-4-6",
       intervalMs: 60000,
+      baseUrl: "https://api.anthropic.com/v1",
+      credentialEnv: "ANTHROPIC_API_KEY",
     });
-    const parsed = JSON.parse(raw);
-    const result = validateOperatorJobConfig(parsed);
+    const result = validateOperatorJobConfig(JSON.parse(raw));
     assert.strictEqual(result.valid, true, JSON.stringify(result.issues));
-    assert.deepStrictEqual(result.config.openshell, {
-      enabled: undefined,
-      baseUrl: undefined,
-    });
+    assert.strictEqual(result.config.openshell.baseUrl, "https://api.anthropic.com/v1");
+    assert.strictEqual(result.config.openshell.credentialEnv, "ANTHROPIC_API_KEY");
   });
 });
