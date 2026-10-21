@@ -508,7 +508,23 @@ export type ToolProgressEvent =
   | { type: "tool_finish"; toolName: string; toolCallId: string; durationMs: number; success: boolean; skillName?: string }
   | { type: "synthesizing" };
 
+/** One prior turn of a caller-owned transcript. No system/developer/tool roles. */
+export interface CallerHistoryEntry {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface RunOptions {
+  /**
+   * Caller mode leaves transcript ownership to the API caller: no engine
+   * thread, session or daily-log reads/writes. Durable memory stays enabled.
+   */
+  historyMode?: "caller" | "engine";
+  /**
+   * Caller-owned prior turns (caller mode only), excluding the current prompt.
+   * Restored as plain user/assistant messages; never persisted by the engine.
+   */
+  history?: CallerHistoryEntry[];
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
   /**
