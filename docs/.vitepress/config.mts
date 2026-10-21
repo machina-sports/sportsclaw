@@ -3,6 +3,8 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const ORIGIN = 'https://sportsclaw.gg'
+// The developer site lives under /opensource/; the personal-agent homepage owns /.
+const DOCS = `${ORIGIN}/opensource`
 const REPO = 'https://github.com/machina-sports/sportsclaw'
 const DESCRIPTION =
   'The open-source agent engine for live sports — keyless live data, market odds and real-time game events built in. Built by Machina Sports, and the relay inside every Machina project.'
@@ -16,9 +18,10 @@ export default defineConfig({
   description: DESCRIPTION,
   lang: 'en-US',
 
-  // Serves the whole site at sportsclaw.gg/ (see site/Dockerfile + nginx.conf).
-  // Legacy /docs/* URLs are 301'd to /* by nginx.
-  base: '/',
+  // Served at sportsclaw.gg/opensource/ (see site/Dockerfile + nginx.conf); the
+  // personal-agent homepage owns /. Legacy /open-source/*, /docs/* and old root
+  // doc URLs are 301'd here.
+  base: '/opensource/',
 
   srcExclude: ['superpowers/**', 'openshell-research.md', 'README.md', 'HIGHLIGHTS-INTEGRITY.md'],
 
@@ -28,14 +31,15 @@ export default defineConfig({
   appearance: 'dark',
 
   head: [
-    ['link', { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
+    // head entries are not base-prefixed by VitePress.
+    ['link', { rel: 'icon', href: '/opensource/favicon.svg', type: 'image/svg+xml' }],
     ['meta', { name: 'theme-color', content: '#050706', media: '(prefers-color-scheme: dark)' }],
     ['meta', { name: 'theme-color', content: '#fbfcfa', media: '(prefers-color-scheme: light)' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'sportsclaw' }],
     ['meta', { property: 'og:title', content: 'sportsclaw — build AI that understands live sports' }],
     ['meta', { property: 'og:description', content: DESCRIPTION }],
-    ['meta', { property: 'og:url', content: ORIGIN }],
+    ['meta', { property: 'og:url', content: `${DOCS}/` }],
     ['meta', { name: 'twitter:card', content: 'summary' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
@@ -46,7 +50,8 @@ export default defineConfig({
         href: 'https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
       },
     ],
-    // Hide reveal targets before first paint (no flash); skipped for reduced-motion.
+    // Enables landing motion before first paint; skipped for reduced-motion.
+    // Reveal targets stay visible until theme/index.ts marks them pending.
     [
       'script',
       {},
@@ -73,6 +78,8 @@ export default defineConfig({
       },
       { text: 'Contribute', link: '/contributing' },
       { text: 'sports-skills', link: 'https://sports-skills.sh' },
+      // Absolute so VitePress doesn't base-prefix it to /opensource/.
+      { text: 'Hosted', link: `${ORIGIN}/` },
     ],
 
     sidebar: [
@@ -171,12 +178,13 @@ export default defineConfig({
     search: { provider: 'local' },
   },
 
-  // Machine-readable index for LLM/agent ingestion (served at /llms.txt).
-  // Absolute URLs so an agent handed the file can fetch each page directly.
+  // Machine-readable index for LLM/agent ingestion (served at /opensource/llms.txt;
+  // nginx 301s /llms.txt there). Absolute URLs so an agent handed the file can
+  // fetch each page directly. The installer stays at the root /install.sh.
   buildEnd: async (siteConfig) => {
     const pages = siteConfig.pages
       .filter((p) => p !== 'index.md')
-      .map((p) => `- ${ORIGIN}/${p.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '')}`)
+      .map((p) => `- ${DOCS}/${p.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '')}`)
       .sort()
     const llms = [
       '# sportsclaw',
@@ -187,9 +195,9 @@ export default defineConfig({
       '',
       '## Getting started',
       `- Install: \`curl -fsSL ${ORIGIN}/install.sh | bash\``,
-      `- Quickstart: ${ORIGIN}/getting-started/quickstart`,
-      `- sportsclaw in Machina: ${ORIGIN}/machina/`,
-      `- Defaults, limits and trade-offs: ${ORIGIN}/core-concepts/good-to-know`,
+      `- Quickstart: ${DOCS}/getting-started/quickstart`,
+      `- sportsclaw in Machina: ${DOCS}/machina/`,
+      `- Defaults, limits and trade-offs: ${DOCS}/core-concepts/good-to-know`,
       '',
       '## Docs',
       ...pages,
