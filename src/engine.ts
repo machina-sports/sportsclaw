@@ -95,7 +95,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { createGenerateImageTool } from "./image-gen.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";
-import { getSportDisplayName } from "./buttons.js";
+import { validateCallerHistory } from "./caller-history.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 
 // ---------------------------------------------------------------------------
@@ -162,49 +162,7 @@ function resolveTokenBudgets(overrides?: Partial<TokenBudgets>): TokenBudgets {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Patterns that indicate internal tool intents (upgrade, config, etc.) — not sport queries */
-const INTERNAL_INTENT_PATTERNS = [
-  /\b(upgrade|update|refresh)\b.*\b(sports?.?skills?|tools?|package)\b/i,
-  /\b(install|add|remove|uninstall)\b.*\bsports?\b/i,
-  /\b(config|configure|setup|settings)\b/i,
-];
-
-/** Returns true when the prompt targets an internal tool, not a sport query */
-function isInternalToolIntent(prompt: string): boolean {
-  return INTERNAL_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate conversational intents (greetings, pleasantries) — not sport queries */
-const CONVERSATIONAL_INTENT_PATTERNS = [
-  /^(hi|hello|hey|sup|yo|what'?s up|howdy|good morning|gm|gn)\b/i,
-  /^(how are you|how'?s it going|what are you up to|who are you|how are things)\b/i,
-  /^thanks?\b/i,
-];
-
-/** Returns true when the prompt is purely conversational */
-function isConversationalIntent(prompt: string): boolean {
-  return CONVERSATIONAL_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate MCP/pod-related intents — not sport queries */
-const MCP_INTENT_PATTERNS = [
-  // CRUD + pod entity noun
-  /\b(search|list|find|show|get|browse|create|save|store|update|delete|remove|execute|run)\b.*\b(document|workflow|agent|connector|prompt|template)\b/i,
-  // Pod entity noun + CRUD
-  /\b(document|workflow|agent|connector|prompt|template)\b.*\b(search|list|find|show|get|create|save|store|update|delete|remove|execute|run)\b/i,
-  // Direct pod/machina references
-  /\b(pod|machina|mcp)\b/i,
-  // "what's in the pod" / "what do I have" patterns
-  /\bwhat\b.*\b(document|workflow|agent|connector|capabilities?|installed|available)\b/i,
-  // Template operations
-  /\b(install|import).*template\b/i,
-];
-
-function isMcpIntent(prompt: string): boolean {
-  return MCP_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate visual-generation intents — bypass sport clarification */
+/** Patterns that indicate visual-generation intents — route to visual agents */
 const VISUAL_INTENT_PATTERNS = [
   // Direct mentions of unambiguous visual-artifact nouns
   /\b(image|images|poster|posters|infographic|infographics|illustration|illustrations|wallpaper|wallpapers|mockup|mock-?up|mockups)\b/i,
@@ -3415,9 +3373,22 @@ export class sportsclawEngine {
    * @returns The final assistant text.
    */
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    if (options?.history !== undefined && options.historyMode !== "caller") {
+      throw new Error("history is only accepted with historyMode caller");
+    }
+    const callerHistory = options?.history !== undefined ? validateCallerHistory(options.history) : undefined;
+    const callerMode = options?.historyMode === "caller";
+
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
+
+    // Caller mode: the caller owns the transcript, so every run starts clean
+    // and never inherits a previous run's (or another chat's) turns.
+    if (callerMode) {
+      this.messages = [];
+      this._threadLoaded = false;
+    }
 
     // --- Security: Sanitize input FIRST ---
     const sanitization = sanitizeInput(userPrompt);
@@ -3470,7 +3441,8 @@ export class sportsclawEngine {
     }
 
     // --- Session: restore prior conversation history ---
-    const sessionId = options?.sessionId;
+    // Caller mode never reads or writes the engine session store.
+    const sessionId = callerMode ? undefined : options?.sessionId;
     if (sessionId) {
       const prior = await sessionStore.load(sessionId);
       if (prior.length > 0) {
@@ -3529,17 +3501,21 @@ export class sportsclawEngine {
         memory.readStrategy(),
       ]);
 
+      // Caller mode: today's conversation log is the engine's own transcript,
+      // not durable memory. buildMemoryBlock() always appends it last, so cut
+      // at its first header (fail closed if the header also appears earlier).
+      // ponytail: string cut; move to a buildMemoryBlock option if memory.ts changes.
+      if (callerMode) {
+        const logHeader = memoryBlock.indexOf("\n### Today's Conversation Log\n");
+        if (logHeader >= 0) memoryBlock = memoryBlock.slice(0, logHeader);
+      }
+
       if (memoryBlock) {
         console.error(
           `[sportsclaw] memory_loaded user=${options.userId} chars=${memoryBlock.length}`
         );
       }
     }
-
-    // Track whether this is a follow-up turn in an ongoing conversation.
-    // When true, the LLM already has conversation history and can resolve
-    // ambiguity itself — no need to short-circuit with a clarification prompt.
-    const isFollowUp = this.messages.length > 0;
 
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
@@ -3558,7 +3534,7 @@ export class sportsclawEngine {
     // accumulates naturally via subsequent run() calls, so skip to avoid
     // duplicating history. The _threadLoaded flag distinguishes "first run
     // with memory/system messages" from "second run with real history".
-    if (memory && !this._threadLoaded) {
+    if (memory && !callerMode && !this._threadLoaded) {
       this._threadLoaded = true;
       const threadHistory = await memory.readThread();
       if (threadHistory.length > 0) {
@@ -3570,6 +3546,25 @@ export class sportsclawEngine {
         }
       }
     }
+
+    // Caller-owned transcript: plain user/assistant turns after the caller
+    // reset, sanitized like the prompt and never promoted to system. A trailing
+    // copy of the current message is the current turn, sent once below.
+    if (callerHistory) {
+      const restored = callerHistory
+        .map(({ role, content }) => ({ role, content: sanitizeInput(content).sanitized }))
+        .filter((entry) => entry.content);
+      const last = restored.at(-1);
+      if (last?.role === "user" && last.content === sanitizedPrompt) restored.pop();
+      this.messages.push(...restored);
+    }
+
+    // A follow-up has real prior turns (in-memory, session, restored thread or
+    // caller history), checked before the current message is appended and
+    // before routing. The [MEMORY] injection alone is not a prior turn.
+    const isFollowUp = this.messages.some(
+      (m) => (m.role === "user" || m.role === "assistant") && !String(m.content).startsWith("[MEMORY]")
+    );
 
     if (options?.images && options.images.length > 0) {
       const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
@@ -3690,59 +3685,8 @@ export class sportsclawEngine {
       }
     }
 
-    // --- Confidence-based clarification ---
-    // Skip clarification on follow-up turns: the LLM already has conversation
-    // history and can resolve ambiguity from prior context.
-    // YOLO mode: never pause to clarify — the loop must not stall.
-    if (
-      this.config.clarifyOnLowConfidence &&
-      !this.config.yoloMode &&
-      !isFollowUp &&
-      routing.decision &&
-      routing.decision.confidence < this.config.clarifyThreshold &&
-      routing.decision.mode === "ambiguous" &&
-      !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt) &&
-      !isMcpIntent(sanitizedPrompt) &&
-      !isVisualIntent(sanitizedPrompt)
-    ) {
-      const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
-      // Push a matching assistant message so history stays coherent
-      // (prevents orphaned user message that corrupts subsequent LLM calls).
-      this.messages.push({ role: "assistant", content: [{ type: "text", text: clarification }] });
-      if (memory) {
-        await memory.appendToThread(sanitizedPrompt, clarification);
-        await memory.appendExchange(sanitizedPrompt, clarification);
-      }
-      return clarification;
-    }
-
-    // --- Intent clarification (sport known, query purpose unclear) ---
-    // Fires when the router explicitly sets needs_clarification=true,
-    // meaning the sport is identified but what the user wants is genuinely
-    // ambiguous (e.g. bare "NBA" with no context). Gated behind the same
-    // clarifyOnLowConfidence flag as the sport-ambiguity gate above for
-    // consistency. Skip in YOLO and on follow-up turns.
-    if (
-      this.config.clarifyOnLowConfidence &&
-      !this.config.yoloMode &&
-      !isFollowUp &&
-      routing.decision?.needsClarification &&
-      routing.decision.selectedSkills.length > 0 &&
-      !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt) &&
-      !isVisualIntent(sanitizedPrompt)
-    ) {
-      const sport = routing.decision.selectedSkills[0];
-      const sportLabel = getSportDisplayName(sport);
-      const intentQ = `What would you like to know about ${sportLabel}? For example:\n- Live scores or game updates\n- Standings\n- Today's schedule\n- Betting odds or best bets\n- Player or team stats\n- Recent news`;
-      this.messages.push({ role: "assistant", content: [{ type: "text", text: intentQ }] });
-      if (memory) {
-        await memory.appendToThread(sanitizedPrompt, intentQ);
-        await memory.appendExchange(sanitizedPrompt, intentQ);
-      }
-      return intentQ;
-    }
+    // No canned clarification: the main model sees the conversation and asks
+    // one tailored question itself when essential context is missing.
 
     // Capture detected intent for response template injection and evaluation
     const queryIntent = (routing.decision?.intent ?? "ambiguous") as QueryIntent;
@@ -3754,8 +3698,9 @@ export class sportsclawEngine {
     // --- Recent-context hint for the system prompt -------------------------
     // Compact summary of the user's last few turns. Lets the model resolve
     // follow-up references like "started already" or "what about the other
-    // game" without re-reading the full message array.
-    const recentContextHint = this.messages
+    // game" without re-reading the full message array. Caller history stays
+    // in its native turns and is never copied into the system prompt.
+    const recentContextHint = callerHistory ? undefined : this.messages
       .filter((m) => m.role === "user" && !String(m.content).startsWith("[MEMORY]"))
       .slice(-3, -1) // last 2 turns excluding the current one (just appended)
       .map((m) => String(m.content))
@@ -3888,8 +3833,8 @@ export class sportsclawEngine {
       // Append synthesized response to message history (not individual agent messages)
       this.messages.push({ role: "assistant", content: [{ type: "text", text: responseText }] });
 
-      // Memory persistence
-      if (memory) {
+      // Memory persistence (caller mode: the caller owns the transcript)
+      if (memory && !callerMode) {
         try {
           await memory.appendToThread(sanitizedPrompt, responseText);
           await memory.appendExchange(sanitizedPrompt, responseText);
@@ -4230,8 +4175,8 @@ export class sportsclawEngine {
       });
     }
 
-    // --- Memory: write after LLM reply (async, non-blocking) ---
-    if (memory) {
+    // --- Memory: write after LLM reply (caller mode: the caller owns the transcript) ---
+    if (memory && !callerMode) {
       try {
         await memory.appendToThread(sanitizedPrompt, responseText);
         await memory.appendExchange(sanitizedPrompt, responseText);
