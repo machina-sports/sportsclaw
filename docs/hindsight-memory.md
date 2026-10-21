@@ -130,21 +130,29 @@ by the current client contract.
 
 ### Sandboxed (NVIDIA OpenShell + local NIMs)
 
-For fully offline, policy-enforced deployments, run Hindsight as a sidecar
-**inside** an [OpenShell](https://github.com/NVIDIA/OpenShell) sandbox and route
-its LLM calls at the sandbox's Privacy Router (`https://inference.local`) backed
-by local NIMs — no traffic leaves the sandbox:
+For policy-enforced deployments, run Hindsight as a sidecar **inside** an
+[OpenShell](https://github.com/NVIDIA/OpenShell) sandbox and point its LLM calls
+at a local NIM's native endpoint. OpenShell 0.1 removed the managed
+`inference.local` route, so the sandbox needs an attached provider whose
+profile declares that endpoint **and** lists the Hindsight server's own
+executable under `binaries` (the shipped `openshell/providers/nim-local.yaml`
+allows only `/usr/local/bin/node`, so copy it under a new id and add the
+Hindsight interpreter):
 
 ```bash
-# Inside the sandbox, configure Hindsight to use the Privacy Router (OpenAI-compatible):
+# Inside the sandbox, configure Hindsight for the local NIM (OpenAI-compatible):
 export HINDSIGHT_API_LLM_PROVIDER=openai
-export HINDSIGHT_API_LLM_BASE_URL=https://inference.local/v1
-export HINDSIGHT_API_LLM_API_KEY=unused        # Privacy Router injects backend creds
+export HINDSIGHT_API_LLM_BASE_URL=http://host.openshell.internal:8000/v1
+export HINDSIGHT_API_LLM_API_KEY=unused        # credentialless local NIM
 
 # SportsClaw talks to the co-located Hindsight over loopback:
 export SPORTSCLAW_MEMORY_PROVIDER=hindsight
 export HINDSIGHT_BASE_URL=http://localhost:8888
 ```
+
+Whether traffic stays local depends on the effective policy, including every
+attached provider profile — check it with `openshell policy get <sandbox> --full`.
+This setup has not been validated against a live OpenShell runtime.
 
 Because the SportsClaw client only needs `HINDSIGHT_BASE_URL` (+ optional
 `HINDSIGHT_API_KEY`), no code changes are required to move between local, cloud,

@@ -129,7 +129,7 @@ describe("tickOnce — published path", () => {
   it("propagates inferenceRoute to every TickEvent the daemon emits", async () => {
     const route = {
       via: "openshell",
-      baseUrl: "https://inference.local",
+      baseUrl: "https://api.anthropic.com/v1",
       provider: "anthropic",
       model: "claude-opus-4-6",
     };

@@ -1,84 +1,64 @@
-# Provider & Model Pairings for OpenShell Mode
+# Provider & Model Pairings for OpenShell 0.1.x Mode
 
-This is one supported configuration among several. The recipe in this directory works with any provider OpenShell's Privacy Router supports; the NVIDIA Nemotron + Anthropic pairing below is what the Machina Sports TV case study uses.
+In OpenShell 0.1.x the job config — not the gateway — picks the endpoint, model, API mode and timeout. Each SportsClaw job (and each model role) can target a different provider; attach every provider that job needs to its sandbox. Provider attachment grants access; it does not select or restrict the model.
 
-Per gateway, the Privacy Router exposes **one provider and one model** at a time. To switch, run `openshell inference update --provider <name> --model <id>` — propagates to running sandboxes in ~5 seconds without recreation.
+Every pairing needs an imported provider profile whose endpoints cover the base URL and whose `binaries` include `/usr/local/bin/node`. Do not reuse the upstream `openai`/`anthropic` example profiles for another host — import an endpoint-bearing profile under its own id.
 
-## Anthropic (frontier narration)
+## NVIDIA Nemotron via NVIDIA API Catalog
 
-Recommended for SportsClaw jobs that need long-form broadcast text and tool-use chains.
+Profile: `providers/nvidia-native.yaml` (credential env `NVIDIA_API_KEY`).
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-openshell provider create --name anthropic-prod --type anthropic --from-existing
-openshell inference set --provider anthropic-prod --model claude-opus-4-6
-```
-
-Supported Privacy Router route: `POST /v1/messages` only.
-
-Job config:
-```json
-{
-  "provider": "anthropic",
-  "model": "claude-opus-4-6",
-  "openshell": {}
-}
-```
-
-## NVIDIA Nemotron via NVIDIA API Catalog (frontier, GPU-backed)
-
-```bash
-export NVIDIA_API_KEY=nv-...
-openshell provider create --name nvidia-prod --type nvidia --from-existing
-openshell inference set \
-    --provider nvidia-prod \
-    --model nvidia/nemotron-3-super-120b \
-    --timeout 300
-```
-
-Supported route patterns: OpenAI-compatible (`/v1/chat/completions`, `/v1/responses`, `/v1/completions`, `/v1/models`).
-
-For long-thinking phases, set `--timeout 300` (or higher) — Nemotron's default extended reasoning can exceed the 60s Privacy Router default and truncate mid-stream.
-
-Job config:
 ```json
 {
   "provider": "openai",
-  "model": "nvidia/nemotron-3-super-120b",
-  "openshell": {}
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "openshell": {
+    "baseUrl": "https://integrate.api.nvidia.com/v1",
+    "credentialEnv": "NVIDIA_API_KEY",
+    "timeoutMs": 300000
+  }
 }
 ```
 
-(`provider: "openai"` because OpenShell exposes Nemotron via the OpenAI-compatible API surface — the SDK is what matters, not the upstream vendor.)
+`provider: "openai"` selects the OpenAI-compatible wire format. Default `apiMode` is `chat` (`/chat/completions`); set `"apiMode": "responses"` for hosts that serve `/responses`. Long reasoning phases need a generous `timeoutMs`.
 
-## Nemotron-local (on-device, requires NVIDIA GPU)
+## Anthropic
 
-For a self-hosted Nemotron via vLLM or similar:
+Write a profile under your own id (e.g. `anthropic-native`) declaring `ANTHROPIC_API_KEY` bound to `api.anthropic.com` (path `/v1/**`) with `binaries: [/usr/local/bin/node]`, then:
 
-```bash
-openshell provider create \
-    --name nemotron-local \
-    --type openai \
-    --credential OPENAI_API_KEY=empty-if-not-required \
-    --config OPENAI_BASE_URL=http://host.openshell.internal:8000/v1
-openshell inference set --provider nemotron-local --model nemotron-3-nano-30b
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "openshell": {
+    "baseUrl": "https://api.anthropic.com/v1",
+    "credentialEnv": "ANTHROPIC_API_KEY"
+  }
+}
 ```
 
-`host.openshell.internal` resolves from inside the sandbox to the host machine running the inference server. Avoid `127.0.0.1` / `localhost` — the request originates from the gateway, not your shell.
+`apiMode` is not valid for Anthropic (native Messages API). A local Claude Code OAuth login is never used for OpenShell jobs.
 
-## Variant cheatsheet
+## Local NIM / vLLM (on-device GPU)
 
-| Variant | Where it lives | Use when |
-|---|---|---|
-| `nvidia/nemotron-3-super-120b` | NVIDIA API Catalog | Cloud GPU, frontier reasoning |
-| `nvidia/nemotron-3-nano-30b-a3b` | NVIDIA API Catalog | Cheaper / lower latency cloud |
-| Local Nemotron (`--type openai` against vLLM) | On-device GPU | Air-gapped or full-data-locality scenarios |
-| `claude-opus-4-6` | Anthropic via Privacy Router | Long narration, tool chains |
-| `claude-sonnet-4-5-20250514` | Anthropic via Privacy Router | Faster, cheaper Claude |
+Profile: `providers/nim-local.yaml` (credentialless, `host.openshell.internal:8000`; edit the port as needed). Sandboxes reach host services through `host.openshell.internal`, not `127.0.0.1`/`localhost`.
+
+```json
+{
+  "provider": "openai",
+  "model": "<served model id>",
+  "openshell": {
+    "baseUrl": "http://host.openshell.internal:8000/v1",
+    "credentialless": true
+  }
+}
+```
+
+## Model roles
+
+`inference.roles.<role>` with `route: "openshell"` takes the same `baseUrl`, `credentialEnv` | `credentialless`, `apiMode`, `timeoutMs` fields and the same sandbox guard. `route: "nim"` needs no OpenShell fields and works outside a sandbox.
 
 ## What does NOT work in OpenShell mode
 
-- **Gemini.** The validator rejects `provider: "google"` when `openshell` is enabled. OpenShell's Privacy Router doesn't speak Google's `generativelanguage.googleapis.com` protocol. Either drop the `openshell` block (direct calls) or pick a different provider for OpenShell jobs.
-- **Multi-provider per tick.** Gateway-scoped one-provider-one-model. If a tick needs Nemotron for safety + Claude for narration, you need a host-side proxy (LiteLLM-style) that multiplexes upstreams — not shipped here.
-
-See `../docs/openshell-research.md` §a for the Privacy Router protocol details.
+- **Gemini / Azure Foundry.** Not wired for OpenShell native mode; the validator rejects them when `openshell` is enabled.
+- **`provider: "openai-compatible"`.** Use `provider: "openai"` with `openshell.baseUrl` instead.

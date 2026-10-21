@@ -504,9 +504,10 @@ export function createOperatorDaemon(
       recentTickBrief,
       extras: cfg.extraFragments,
     });
-    // Structured output travels via a forced tool call (the OpenShell Privacy
-    // Router forwards `tools` but strips `response_format`/json-schema, so the
-    // SDK's experimental_output yields empty objects through the router). The
+    // Structured output travels via a forced tool call: `tools` are honoured
+    // across providers and OpenAI-compatible hosts, while `response_format`/
+    // json-schema support varies (the retired OpenShell 0.0.x router stripped
+    // it, so experimental_output came back empty). The
     // instruction is domain-NEUTRAL — any "prefer X" bias comes from the sink's
     // optional `guidance` (e.g. TV supplies its broadcast bias), never here.
     const outputGuidance = cfg.outputSchema?.guidance
@@ -642,9 +643,9 @@ export function createOperatorDaemon(
         (!cfg.generateTextImpl || !!cfg.streamTextImpl);
       if (wantStream) {
         // Stream the output tool call's arguments and surface the growing
-        // "answer"/"narrative" field via onPartialOutput. The Privacy Router
-        // strips response_format, so the structured payload only exists as
-        // tool-call input — streamed here as tool-input-delta chunks.
+        // "answer"/"narrative" field via onPartialOutput. The structured
+        // payload only exists as tool-call input (see above) — streamed here
+        // as tool-input-delta chunks.
         const stream = streamImpl(callParams as Parameters<typeof streamText>[0]);
         let outCallId: string | null = null;
         let argsBuf = "";
@@ -737,8 +738,8 @@ export function createOperatorDaemon(
       }
       if (useStructuredOutput) {
         // Structured output arrives as the input of the forced output tool call
-        // (the Privacy Router strips `response_format`, so `experimental_output`
-        // would come back empty). A structured tick that never called the tool
+        // (not `response_format`, whose support varies by host). A structured
+        // tick that never called the tool
         // is a FAILURE, not a silent success — surface it.
         const toolCalls = (result.toolCalls ?? []) as Array<{
           toolName: string;

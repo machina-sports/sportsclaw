@@ -78,24 +78,58 @@ export function azureFoundryOpenAISubmode(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// OpenShell — optional opt-in routing through NVIDIA OpenShell's Privacy
-// Router. Absent / disabled block = default direct LLM calls, unchanged.
-// See docs/openshell-integration-plan.md.
+// OpenShell 0.1.x — optional opt-in native inference inside an OpenShell
+// sandbox. Absent / disabled block = default direct LLM calls, unchanged.
+// See openshell/README.md and docs/openshell-integration-plan.md.
 // ---------------------------------------------------------------------------
 
-export interface OpenShellConfig {
+export type NativeApiMode = "chat" | "responses";
+
+export const DEFAULT_NATIVE_TIMEOUT_MS = 300_000;
+
+/**
+ * Explicit native client settings for `resolveModel`. Carries no runtime
+ * requirement by itself — `resolveOpenShellEndpoint` adds the OpenShell
+ * sandbox guard and credential lookup; NIM roles build one directly.
+ */
+export interface NativeEndpoint {
+  /** Provider-native API base URL (e.g. `https://integrate.api.nvidia.com/v1`). */
+  baseUrl: string;
+  /** Credential (or OpenShell credential placeholder) sent with every request. */
+  apiKey: string;
+  /** OpenAI-style request shape. Default `"chat"`. Ignored for Anthropic. */
+  apiMode?: NativeApiMode;
+  /** Per-request timeout. Unset = the ambient fetch has no extra timeout. */
+  timeoutMs?: number;
   /**
-   * Whether the launcher should route LLM calls through the Privacy Router.
-   * Default: `true` when the openshell block is present.
+   * Use SportsClaw's private HTTP pool instead of the ambient global fetch
+   * dispatcher. Set by `resolveOpenShellEndpoint`; bare endpoints (NIM roles)
+   * keep the ambient transport, including any process-wide proxy agent.
    */
+  isolated?: boolean;
+}
+
+export interface OpenShellConfig {
+  /** Default: `true` when the openshell block is present. */
   enabled?: boolean;
   /**
-   * Base URL handed to the AI SDK provider. Only set when you need to point
-   * at something other than the default. Defaults are provider-specific
-   * (`https://inference.local` for Anthropic, `https://inference.local/v1`
-   * for OpenAI-compatible) and assume you are inside an OpenShell sandbox.
+   * Provider-native API base URL the job calls from inside the sandbox
+   * (required when enabled). Must be covered by an attached provider
+   * profile's endpoints. No credentials, query or fragment.
    */
   baseUrl?: string;
+  /**
+   * Name of the credential env var the attached provider profile injects
+   * (e.g. `NVIDIA_API_KEY`). Its value — an OpenShell placeholder — is sent
+   * as the API key. Required unless `credentialless`.
+   */
+  credentialEnv?: string;
+  /** Explicit unauthenticated local endpoint (e.g. a local NIM). */
+  credentialless?: boolean;
+  /** OpenAI-style request shape. Default `"chat"`. Not valid for Anthropic. */
+  apiMode?: NativeApiMode;
+  /** Native request timeout. Default 300000. */
+  timeoutMs?: number;
 }
 
 /**
