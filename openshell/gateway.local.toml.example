@@ -1,0 +1,56 @@
+# OpenShell v0.1.5 single-user MicroVM gateway.
+# Replace every /ABSOLUTE/STATE and /ABSOLUTE/BIN path before use.
+# TOML does not expand $HOME or shell variables.
+# See docs/deployment/nvidia-reference-architecture.md.
+[openshell]
+version = 2
+
+[openshell.gateway]
+name = "sportsclaw-local-v015"
+bind_address = "127.0.0.1:17671"
+health_bind_address = "127.0.0.1:17672"
+metrics_bind_address = "127.0.0.1:17673"
+compute_driver = "vm"
+log_level = "info"
+policy_validation_failure_mode = "fail_closed"
+disable_tls = false
+enable_loopback_service_http = false
+enable_websocket_tunnel = false
+guest_tls_ca = "/ABSOLUTE/STATE/tls/ca.crt"
+
+[openshell.gateway.tls]
+cert_path = "/ABSOLUTE/STATE/tls/server/tls.crt"
+key_path = "/ABSOLUTE/STATE/tls/server/tls.key"
+client_ca_path = "/ABSOLUTE/STATE/tls/ca.crt"
+
+[openshell.gateway.auth]
+allow_unauthenticated_users = false
+
+[openshell.gateway.mtls_auth]
+enabled = true
+operator_enabled = false
+
+[openshell.gateway.gateway_jwt]
+signing_key_path = "/ABSOLUTE/STATE/tls/jwt/signing.pem"
+public_key_path = "/ABSOLUTE/STATE/tls/jwt/public.pem"
+kid_path = "/ABSOLUTE/STATE/tls/jwt/kid"
+gateway_id = "sportsclaw-local-v015"
+ttl_secs = 3600
+
+[openshell.gateway.ocsf_log]
+path = "/ABSOLUTE/STATE/logs/gateway-ocsf.jsonl"
+rotation = "daily"
+max_files = 7
+queue_capacity = 10000
+queue_max_bytes = 16777216
+
+[openshell.drivers.vm]
+allow_driver_config = false
+state_dir = "/ABSOLUTE/STATE/vm"
+driver_dir = "/ABSOLUTE/BIN"
+default_image = "nvcr.io/nvidia/base/ubuntu:24.04"
+bootstrap_image = "nvcr.io/nvidia/base/ubuntu:24.04"
+grpc_endpoint = "https://host.openshell.internal:17671"
+vcpus = 2
+mem_mib = 2048
+overlay_disk_mib = 4096
