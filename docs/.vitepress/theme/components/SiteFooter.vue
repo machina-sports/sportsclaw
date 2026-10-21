@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { withBase } from 'vitepress'
 import { useSidebar } from 'vitepress/theme'
 import MachinaLogo from './MachinaLogo.vue'
 import pkg from '../../../../package.json'
@@ -59,7 +60,7 @@ const columns = [
           <ul>
             <li v-for="l in col.links" :key="l.text">
               <a
-                :href="l.href"
+                :href="withBase(l.href)"
                 :target="l.external ? '_blank' : undefined"
                 :rel="l.external ? 'noopener' : undefined"
               >{{ l.text }}<span v-if="l.external" class="sc-ext" aria-hidden="true">↗</span></a>

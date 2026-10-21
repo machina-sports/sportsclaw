@@ -1,9 +1,11 @@
 FROM nginx:alpine
 
-# Whole site is the built VitePress output (staged into site/html by CI; see
-# build-site.yml). nginx serves it at the root with cleanUrls + /docs redirects.
+# The personal-agent homepage (site/landing) is served at /. The built VitePress
+# output (staged into site/html by CI; see build-site.yml) is served under
+# /opensource/. nginx keeps /install.sh plus legacy doc URLs working.
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY html/ /usr/share/nginx/html/
+COPY landing/ /usr/share/nginx/html/
+COPY html/ /usr/share/nginx/html/opensource/
 
 EXPOSE 80
 

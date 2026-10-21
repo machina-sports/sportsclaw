@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { withBase } from 'vitepress'
 import { data } from '../project.data'
 
 const fmt = new Intl.NumberFormat('en-US')
@@ -37,7 +38,7 @@ const stats = computed(() =>
         </a>
       </li>
       <li class="sc-contrib-you">
-        <a href="/contributing">
+        <a :href="withBase('/contributing')">
           <span class="sc-contrib-plus" aria-hidden="true">+</span>
           <span class="sc-contrib-name">You?</span>
           <span class="sc-contrib-handle">read the guide</span>

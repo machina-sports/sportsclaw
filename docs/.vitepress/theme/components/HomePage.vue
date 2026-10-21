@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { withBase } from 'vitepress'
 import HeroTerminal from './HeroTerminal.vue'
 import InstallCommand from './InstallCommand.vue'
 import MachinaArchitecture from './MachinaArchitecture.vue'
@@ -203,11 +204,11 @@ const nuances = [
   },
 ]
 
-const agentPrompt = `Build a sports AI app with sportsclaw. First read https://sportsclaw.gg/llms.txt
-for the full doc map, then follow https://sportsclaw.gg/getting-started/quickstart
+const agentPrompt = `Build a sports AI app with sportsclaw. First read https://sportsclaw.gg/opensource/llms.txt
+for the full doc map, then follow https://sportsclaw.gg/opensource/getting-started/quickstart
 to install and scaffold. sportsclaw gives you keyless live scores, standings, odds
 and markets via sports-skills, plus one-command Discord and Telegram bots. Use the
-docs at https://sportsclaw.gg for the CLI, data coverage, and deployment.`
+docs at https://sportsclaw.gg/opensource/ for the CLI, data coverage, and deployment.`
 
 const copied = ref(false)
 async function copyPrompt() {
@@ -247,16 +248,16 @@ async function copyPrompt() {
           <p class="sc-lead">
             sportsclaw is an open-source agent engine with keyless live data, market odds and real-time game
             events built in. Run it in your terminal, ship it as a bot — or use it inside
-            <a href="/machina/" class="sc-inline-machina">Machina</a>, where every project ships with its own
+            <a :href="withBase('/machina/')" class="sc-inline-machina">Machina</a>, where every project ships with its own
             sportsclaw relay.
           </p>
           <InstallCommand />
           <div class="sc-ctas">
-            <a class="sc-btn sc-btn-volt" href="/getting-started/quickstart">
+            <a class="sc-btn sc-btn-volt" :href="withBase('/getting-started/quickstart')">
               Get started
               <svg class="sc-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
             </a>
-            <a class="sc-btn" href="/machina/"><MachinaStar /> How it runs in Machina</a>
+            <a class="sc-btn" :href="withBase('/machina/')"><MachinaStar /> How it runs in Machina</a>
             <a class="sc-btn sc-btn-ghost" href="https://github.com/machina-sports/sportsclaw" target="_blank" rel="noopener">
               <svg class="sc-ico sc-ico-fill" viewBox="0 0 24 24" aria-hidden="true"><path :d="icons.github" /></svg>
               GitHub
@@ -286,7 +287,7 @@ async function copyPrompt() {
           <p>The data, the live game events and the real-time plumbing ship in the box, so you spend your time on the experience instead of stitching feeds together.</p>
         </header>
         <div class="sc-cards">
-          <a v-for="b in builds" :key="b.title" class="sc-card" :href="b.href" data-reveal>
+          <a v-for="b in builds" :key="b.title" class="sc-card" :href="withBase(b.href)" data-reveal>
             <span class="sc-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path :d="icons[b.icon]" /></svg></span>
             <h3>{{ b.title }}</h3>
             <p>{{ b.text }}</p>
@@ -361,7 +362,7 @@ async function copyPrompt() {
             v-for="c in contributions"
             :key="c.title"
             class="sc-tile"
-            :href="c.href"
+            :href="c.href ? withBase(c.href) : undefined"
             data-reveal
           >
             <div class="sc-tile-top">
@@ -413,7 +414,7 @@ async function copyPrompt() {
         </div>
 
         <div class="sc-ctas sc-ctas-center" data-reveal>
-          <a class="sc-btn sc-btn-machina" href="/machina/">
+          <a class="sc-btn sc-btn-machina" :href="withBase('/machina/')">
             Read: sportsclaw in Machina
             <svg class="sc-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </a>
@@ -431,13 +432,13 @@ async function copyPrompt() {
           <p>The trade-offs are deliberate. Here's what sportsclaw will and won't do — and where each rule is enforced.</p>
         </header>
         <div class="sc-nuances">
-          <a v-for="n in nuances" :key="n.title" class="sc-nuance" :href="n.href" data-reveal>
+          <a v-for="n in nuances" :key="n.title" class="sc-nuance" :href="withBase(n.href)" data-reveal>
             <h3>{{ n.title }}</h3>
             <p>{{ n.text }}</p>
           </a>
         </div>
         <p class="sc-section-foot" data-reveal>
-          All of it, with the details: <a href="/core-concepts/good-to-know">Good to know: defaults, limits and trade-offs →</a>
+          All of it, with the details: <a :href="withBase('/core-concepts/good-to-know')">Good to know: defaults, limits and trade-offs →</a>
         </p>
       </div>
     </section>
@@ -491,7 +492,7 @@ npm test        # node:test suite</code></pre>
           </div>
         </div>
         <div class="sc-ctas" data-reveal>
-          <a class="sc-btn sc-btn-volt" href="/contributing">
+          <a class="sc-btn sc-btn-volt" :href="withBase('/contributing')">
             Contributing guide
             <svg class="sc-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </a>
@@ -535,7 +536,7 @@ npm test        # node:test suite</code></pre>
       <div class="sc-wrap" data-reveal>
         <h2>Start in your terminal. <span>Grow on Machina.</span></h2>
         <div class="sc-ctas sc-ctas-center">
-          <a class="sc-btn sc-btn-volt" href="/getting-started/quickstart">
+          <a class="sc-btn sc-btn-volt" :href="withBase('/getting-started/quickstart')">
             Get started
             <svg class="sc-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </a>

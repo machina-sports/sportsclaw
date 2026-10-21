@@ -46,7 +46,7 @@ project's tools next to the keyless skills. Details and manual setup:
 [Licensed data & machina-cli](/sports-data/machina).
 
 <div class="sc-doc-grid">
-  <a class="sc-doc-card" href="/getting-started/quickstart"><strong>Standalone first?</strong><span>Install sportsclaw and run your first grounded query in about a minute.</span></a>
+  <a class="sc-doc-card" href="/opensource/getting-started/quickstart"><strong>Standalone first?</strong><span>Install sportsclaw and run your first grounded query in about a minute.</span></a>
   <a class="sc-doc-card is-machina" href="https://machina.gg"><strong>Need a project?</strong><span>Licensed data, SLAs and the platform around the relay live at machina.gg.</span></a>
 </div>
 
