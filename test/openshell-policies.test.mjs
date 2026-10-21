@@ -39,10 +39,9 @@ test("connected TV policy remains the existing external profile", () => {
 test("Vault REST and tail permissions are local and path-scoped", () => {
   const policy = loadPolicy("policy.vault.yaml");
   // Exhaustive on purpose: a new egress policy must be a deliberate edit here.
-  // `espn` is the read-only site.api.espn.com egress the live cfb skills need;
-  // the local-and-path-scoped assertions below cover only the vault_* entries.
+  // The read-only ESPN egress lives in the explicitly connected
+  // policy.vault-espn.yaml (asserted in openshell-recipes.test.mjs).
   assert.deepEqual(Object.keys(policy.network_policies).sort(), [
-    "espn",
     "vault_pod_mcp",
     "vault_runtime_rest",
     "vault_tail_bus",
@@ -73,31 +72,12 @@ test("Vault REST and tail permissions are local and path-scoped", () => {
     }
   }
 
-  // The vault_* surfaces stay loopback-only. `espn` is the one deliberate
-  // exception — read-only egress to site.api.espn.com for the live cfb skills,
-  // asserted by the sibling sandbox-egress test — so scope this to vault_*
-  // rather than dropping the invariant.
-  const vaultHosts = Object.entries(policy.network_policies)
-    .filter(([name]) => name.startsWith("vault_"))
-    .flatMap(([, entry]) => entry.endpoints)
+  // Every surface in the private profile stays on the host bridge.
+  const hosts = Object.values(policy.network_policies)
+    .flatMap((entry) => entry.endpoints)
     .map((endpoint) => endpoint.host);
-  assert.ok(vaultHosts.length > 0, "expected vault_* network policies to exist");
-  assert.ok(vaultHosts.every((host) => expectedHosts.includes(host)));
-
-  // And the only non-vault egress is the read-only ESPN host set — listed
-  // exhaustively so adding a host, or making one writable, is a deliberate edit.
-  const nonVault = Object.entries(policy.network_policies)
-    .filter(([name]) => !name.startsWith("vault_"))
-    .flatMap(([, entry]) => entry.endpoints);
-  assert.deepEqual(
-    [...new Set(nonVault.map((endpoint) => endpoint.host))].sort(),
-    ["site.api.espn.com", "site.web.api.espn.com", "sports.core.api.espn.com", "www.espn.com"],
-  );
-  for (const endpoint of nonVault) {
-    assert.equal(endpoint.access, "read-only");
-    assert.equal(endpoint.enforcement, "enforce");
-    assert.equal(endpoint.port, 443);
-  }
+  assert.ok(hosts.length > 0, "expected vault_* network policies to exist");
+  assert.ok(hosts.every((host) => expectedHosts.includes(host)));
 });
 
 test("Vault MCP permits only the FastMCP SSE transport routes", () => {

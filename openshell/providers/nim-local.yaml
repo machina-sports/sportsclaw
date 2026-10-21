@@ -1,0 +1,33 @@
+# OpenShell 0.1.x provider profile — host-local NIM, credentialless.
+#
+# For an unauthenticated OpenAI-compatible NIM on the gateway host. Sandboxes
+# reach host services via host.openshell.internal, not localhost/127.0.0.1.
+# Change the port if your NIM listens elsewhere. Only the Node binary may call it.
+#
+#   openshell profile lint -f openshell/providers/nim-local.yaml
+#   openshell profile import -f openshell/providers/nim-local.yaml
+#   openshell provider create --name nim-local --type sportsclaw-nim-local
+#
+# Matching job config:
+#   "provider": "openai",
+#   "model": "<served model id>",
+#   "openshell": { "baseUrl": "http://host.openshell.internal:8000/v1", "credentialless": true }
+#
+# Not yet linted against a live gateway in this repo (`profile lint` needs one).
+
+id: sportsclaw-nim-local
+display_name: Local NIM (SportsClaw)
+description: Host-local NVIDIA NIM OpenAI-compatible API, unauthenticated
+category: inference
+inference_capable: true
+credentials: []
+
+endpoints:
+  - host: host.openshell.internal
+    port: 8000
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+
+binaries:
+  - /usr/local/bin/node

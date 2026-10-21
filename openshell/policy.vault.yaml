@@ -4,9 +4,14 @@
 # TV — external MCP drops, ESPN/Kalshi/Polymarket egress, ports :8000/:8001/
 # :8005/:8090 reserved on the shared box). This file is the private profile:
 # the operator reaches ONLY the local Machina runtime on the host bridge —
-# memory, retrieval and events never leave the box. Inference goes through
-# inference.local (Privacy Router), which is handled by the gateway, not by
-# network_policies.
+# memory, retrieval and events never leave the box.
+#
+# Private only as composed: attached provider profiles add their endpoints to
+# the effective policy. A hosted inference provider (e.g. nvidia-native) adds
+# public egress; keep the posture local by attaching only a host-local
+# profile such as providers/nim-local.yaml, and confirm with
+# `openshell policy get <sandbox> --full`. Need ESPN data? Use
+# policy.vault-espn.yaml — an explicitly connected variant.
 #
 # Port family deliberately offset from the TV reservations (see the vault
 # bundle: nvidia-athlete-vault-sportsclaw box/runtime/compose.yml):
@@ -154,30 +159,4 @@ network_policies:
               path: /messages/
     binaries:
       - path: /usr/local/bin/node
-  espn:
-    name: espn
-    endpoints:
-      - host: site.api.espn.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-      - host: site.web.api.espn.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-      - host: sports.core.api.espn.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-      - host: www.espn.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-    binaries:
-      - path: /opt/venv/bin/python3
-      - path: /usr/bin/python3.11
 

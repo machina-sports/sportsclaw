@@ -1,34 +1,32 @@
 /**
- * `sportsclaw openshell` — doctor + setup wizard for the optional
- * NVIDIA OpenShell integration.
+ * `sportsclaw openshell` — doctor + setup recipe for the optional NVIDIA
+ * OpenShell 0.1.x integration.
  *
  * Subcommands:
  *   sportsclaw openshell doctor          diagnose prereqs, print remediation hints
  *   sportsclaw openshell doctor --json   machine-readable output
- *   sportsclaw openshell setup           guided interactive installer
+ *     [--image <oci-ref>] [--remote] [--probe]
+ *   sportsclaw openshell setup           print a guided, non-mutating recipe
  *
- * The wizard NEVER imports OpenShell as a library — it only shells out
- * to the `openshell` CLI binary and `docker`. That keeps the engine's
- * optional-at-install promise intact: nothing in this file runs unless
- * the user explicitly invokes `sportsclaw openshell ...`.
+ * Nothing here imports OpenShell as a library; the doctor only shells out to
+ * the `openshell` CLI and `docker`, and only when the user explicitly runs
+ * `sportsclaw openshell doctor`. Setup is print-only: it runs no probes, never
+ * provisions, takes credentials, or writes files.
  */
 
-import fs from "node:fs";
 import { spawnSync } from "node:child_process";
-import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 
 import pc from "picocolors";
 
-import {
-  operatorConfigDir,
-  operatorConfigPath,
-} from "./operator-config.js";
+import { JOB_ID_PATTERN } from "./operator-config.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type CheckStatus = "ok" | "missing" | "warn";
+/** "skipped" = not requested (e.g. local checks under --remote); never a pass. */
+export type CheckStatus = "ok" | "missing" | "warn" | "skipped";
 
 export interface CheckResult {
   /** Stable id for the check (e.g. "openshell-cli"). */
@@ -44,8 +42,37 @@ export interface CheckResult {
 
 export interface DoctorReport {
   results: CheckResult[];
-  /** True when every check has status "ok". */
+  /** True when every requested (non-skipped) check has status "ok". */
   allOk: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Supported OpenShell range
+// ---------------------------------------------------------------------------
+
+/** The release this integration was tested against. */
+export const TESTED_OPENSHELL_VERSION = "0.1.5";
+const SUPPORTED_RANGE = `>=${TESTED_OPENSHELL_VERSION} <0.2.0`;
+
+/**
+ * Extract the full version, including any prerelease suffix, from
+ * `openshell --version` output (e.g. "openshell 0.1.5", "openshell 0.1.6-dev").
+ */
+export function parseOpenShellVersion(stdout: string): string | undefined {
+  return /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(stdout)?.[1];
+}
+
+/**
+ * Accepted range: stable 0.1.x from the tested patch upward. Prereleases,
+ * 0.0.x (removed APIs) and 0.2+ are rejected. Only {@link TESTED_OPENSHELL_VERSION}
+ * is qualified; newer accepted patches are reported as an unqualified warning.
+ * ponytail: patch-only window; widen after qualifying a newer minor.
+ */
+export function isSupportedOpenShellVersion(version: string): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!m) return false;
+  const [major, minor, patch] = m.slice(1).map(Number);
+  return major === 0 && minor === 1 && patch >= 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,39 +113,51 @@ function probe(cmd: string, args: string[], timeoutMs = 5_000): ProbeResult {
 // Individual checks
 // ---------------------------------------------------------------------------
 
-function checkOpenshellCli(): CheckResult {
-  const r = probe("openshell", ["--version"]);
-  if (!r.ok) {
+const INSTALL_HINT =
+  `Install OpenShell ${TESTED_OPENSHELL_VERSION}: https://github.com/NVIDIA/OpenShell/releases/tag/v${TESTED_OPENSHELL_VERSION}`;
+
+/** Interpret `openshell --version`, rejecting runtimes outside the tested range. */
+export function interpretVersionProbe(result: ProbeResult): CheckResult {
+  const base = { id: "openshell-cli", label: "OpenShell CLI" };
+  if (!result.ok) {
+    return { ...base, status: "missing", detail: "not on PATH", hint: INSTALL_HINT };
+  }
+  const version = parseOpenShellVersion(result.stdout);
+  if (!version) {
+    return { ...base, status: "missing", detail: "unrecognized version output", hint: INSTALL_HINT };
+  }
+  if (!isSupportedOpenShellVersion(version)) {
+    const hint = version.startsWith("0.0.")
+      ? `OpenShell 0.0.x is incompatible. Moving to ${TESTED_OPENSHELL_VERSION} is a migration, not an in-place upgrade: ` +
+        "upgrade gateway and CLI together, import provider profiles, recreate every sandbox. See openshell/README.md."
+      : version.includes("-")
+        ? `Prerelease builds are not supported; install the stable ${TESTED_OPENSHELL_VERSION} release.`
+        : `Untested OpenShell release; use ${TESTED_OPENSHELL_VERSION} (accepted: stable ${SUPPORTED_RANGE}).`;
+    return { ...base, status: "missing", detail: `openshell ${version} (unsupported; need stable ${SUPPORTED_RANGE})`, hint };
+  }
+  if (version !== TESTED_OPENSHELL_VERSION) {
     return {
-      id: "openshell-cli",
-      label: "OpenShell CLI",
-      status: "missing",
-      detail: "not on PATH",
-      hint: "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh",
+      ...base,
+      status: "warn",
+      detail: `openshell ${version} (accepted but unqualified; only ${TESTED_OPENSHELL_VERSION} is tested)`,
+      hint: `Qualify ${version} on a disposable sandbox before relying on it, or use ${TESTED_OPENSHELL_VERSION}.`,
     };
   }
-  const version = r.stdout.trim() || "(version not reported)";
-  return { id: "openshell-cli", label: "OpenShell CLI", status: "ok", detail: version };
+  return { ...base, status: "ok", detail: `openshell ${version} (tested)` };
+}
+
+function checkOpenshellCli(): CheckResult {
+  return interpretVersionProbe(probe("openshell", ["--version"]));
 }
 
 function checkContainerRuntime(): CheckResult {
   const docker = probe("docker", ["info"]);
   if (docker.ok) {
-    return {
-      id: "container-runtime",
-      label: "Container runtime",
-      status: "ok",
-      detail: "docker",
-    };
+    return { id: "container-runtime", label: "Container runtime", status: "ok", detail: "docker" };
   }
   const podman = probe("podman", ["info"]);
   if (podman.ok) {
-    return {
-      id: "container-runtime",
-      label: "Container runtime",
-      status: "ok",
-      detail: "podman",
-    };
+    return { id: "container-runtime", label: "Container runtime", status: "ok", detail: "podman" };
   }
   return {
     id: "container-runtime",
@@ -129,145 +168,83 @@ function checkContainerRuntime(): CheckResult {
   };
 }
 
+const GATEWAY_HINT =
+  "Start or provision an OpenShell gateway per the OpenShell docs, then register it with " +
+  "`openshell gateway add <endpoint> --name <name>` — registration points the CLI at an existing gateway; it does not start one.";
+
+/** `openshell gateway list -o json` returns a bare JSON array. */
+export function parseGatewayListJson(stdout: string): number | undefined {
+  try {
+    const parsed: unknown = JSON.parse(stdout.trim() || "null");
+    return Array.isArray(parsed) ? parsed.length : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function checkGateway(): CheckResult {
+  const base = { id: "gateway", label: "OpenShell gateway" };
   const r = probe("openshell", ["gateway", "list", "-o", "json"]);
-  if (!r.ok) {
-    return {
-      id: "gateway",
-      label: "OpenShell gateway",
-      status: "missing",
-      detail: "no gateway registered",
-      hint: "openshell gateway add http://127.0.0.1:18080 --local --name local && openshell gateway select local",
-    };
+  const count = r.ok ? parseGatewayListJson(r.stdout) : undefined;
+  if (count === undefined) {
+    return { ...base, status: "missing", detail: "openshell gateway list failed", hint: GATEWAY_HINT };
   }
-  // Parsing best-effort — output shape can change across versions.
-  const out = r.stdout.trim();
-  if (!out || out === "[]" || out === "null") {
-    return {
-      id: "gateway",
-      label: "OpenShell gateway",
-      status: "missing",
-      detail: "list is empty",
-      hint: "openshell gateway add http://127.0.0.1:18080 --local --name local && openshell gateway select local",
-    };
+  if (count === 0) {
+    return { ...base, status: "missing", detail: "no gateway registered", hint: GATEWAY_HINT };
   }
-  return { id: "gateway", label: "OpenShell gateway", status: "ok", detail: "registered" };
+  // Registration only — not a health or provisioning check.
+  return { ...base, status: "ok", detail: `${count} registered (not a health check)` };
 }
 
-// OpenShell 0.0.47 prints colorized output that wraps fields like
-// "Provider:" in ANSI escape sequences. Strip them before regex matching,
-// otherwise `\S+` captures `\033[0m` as the "value".
-const ANSI_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_REGEX, "");
-}
-
-/** Parse the human-readable `openshell provider list` table. v0.0.47 has
- *  no `-o json` flag on this subcommand, so we count non-blank lines:
- *  header alone → no providers; header + ≥1 data row → providers exist. */
-export function parseProviderListOutput(stdout: string): { hasProviders: boolean } {
-  const lines = stripAnsi(stdout)
+/** Parse documented `openshell provider list --names` output (one name per line). */
+export function parseProviderNames(stdout: string): string[] {
+  return stdout
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
-  return { hasProviders: lines.length >= 2 };
-}
-
-/** Parse `openshell inference get` output. Looks at the first section
- *  (Gateway inference) since that's the one the Privacy Router uses to
- *  route inference.local traffic. Returns empty fields when neither a
- *  Provider nor Model line appears — "Not configured" sections naturally
- *  produce that result without a special case. */
-export function parseInferenceGetOutput(stdout: string): {
-  provider?: string;
-  model?: string;
-} {
-  // Scope to the Gateway inference section so a "Not configured" System
-  // inference block doesn't accidentally satisfy the regex.
-  const clean = stripAnsi(stdout);
-  const gatewaySection = clean.split(/^\s*System inference:/im)[0];
-  const provider = /Provider:\s*(\S+)/.exec(gatewaySection)?.[1];
-  const model = /Model:\s*(\S+)/.exec(gatewaySection)?.[1];
-  return { provider, model };
 }
 
 function checkProvider(): CheckResult {
-  const r = probe("openshell", ["provider", "list"]);
+  const base = { id: "provider", label: "Provider instances" };
+  const hint =
+    "Import a provider profile and create a provider from it — run `sportsclaw openshell setup` for the exact commands.";
+  const r = probe("openshell", ["provider", "list", "--names"]);
   if (!r.ok) {
-    return {
-      id: "provider",
-      label: "Inference provider",
-      status: "missing",
-      detail: "openshell provider list failed",
-      hint: "openshell provider create --name <name> --type <anthropic|openai|nvidia> --from-existing",
-    };
+    return { ...base, status: "missing", detail: "openshell provider list failed (needs a reachable gateway)", hint };
   }
-  const { hasProviders } = parseProviderListOutput(r.stdout);
-  if (!hasProviders) {
-    return {
-      id: "provider",
-      label: "Inference provider",
-      status: "missing",
-      detail: "no providers configured",
-      hint: "openshell provider create --name <name> --type <anthropic|openai|nvidia> --from-existing",
-    };
+  const names = parseProviderNames(r.stdout);
+  if (names.length === 0) {
+    return { ...base, status: "missing", detail: "no providers (new gateways ship no profiles)", hint };
   }
-  return {
-    id: "provider",
-    label: "Inference provider",
-    status: "ok",
-    detail: "at least one provider registered",
-  };
+  // Attachment is per sandbox; check it with `openshell sandbox provider list <sandbox>`.
+  return { ...base, status: "ok", detail: names.join(", ") };
 }
 
-function checkInferenceRouting(): CheckResult {
-  const r = probe("openshell", ["inference", "get"]);
+/** Inspect `image` with the detected runtime (docker when none responded). */
+function checkImage(image: string, runtime: string): CheckResult {
+  const base = { id: "image-openshell", label: `${image} image` };
+  const r = probe(runtime, ["image", "inspect", image]);
   if (!r.ok) {
     return {
-      id: "inference-routing",
-      label: "Inference routing",
+      ...base,
       status: "missing",
-      detail: "openshell inference get failed",
-      hint: "openshell inference set --provider <name> --model <model> --timeout 300",
+      detail: `not in local ${runtime}`,
+      hint:
+        `${runtime} build -t sportsclaw:latest . && ${runtime} build -t ${shq(image)} -f openshell/Dockerfile .  ` +
+        "(source checkout; push to a registry the gateway can pull)",
     };
   }
-  const { provider, model } = parseInferenceGetOutput(r.stdout);
-  if (!provider || !model) {
-    return {
-      id: "inference-routing",
-      label: "Inference routing",
-      status: "missing",
-      detail: "no provider/model pinned",
-      hint: "openshell inference set --provider <name> --model <model> --timeout 300",
-    };
-  }
-  return {
-    id: "inference-routing",
-    label: "Inference routing",
-    status: "ok",
-    detail: `${provider} / ${model}`,
-  };
+  // Local presence only; the gateway's engine/registry must also be able to pull it.
+  return { ...base, status: "ok", detail: `present in local ${runtime}` };
 }
 
-function checkImage(image: string, id: string, label: string, buildHint: string): CheckResult {
-  const r = probe("docker", ["image", "inspect", image]);
-  if (!r.ok) {
-    return { id, label, status: "missing", detail: "not built", hint: buildHint };
-  }
-  return { id, label, status: "ok", detail: "present" };
-}
+export const DEFAULT_DOCTOR_IMAGE = "sportsclaw-openshell:latest";
 
 /** Interpret the result of a sandbox-creation probe. The OpenShell CLI
- *  exits 0 even when provisioning times out, so we look at output content
- *  rather than just the exit code. Catches the case where the gateway is
- *  up but no compute driver is registered — the symptom we hit in e2e
- *  testing on 2026-05-23. */
-export function interpretSandboxProbeResult(result: ProbeResult): CheckResult {
+ *  can exit 0 even when provisioning times out, so we look at output content
+ *  rather than just the exit code. */
+export function interpretSandboxProbeResult(result: ProbeResult, image = DEFAULT_DOCTOR_IMAGE): CheckResult {
   const combined = `${result.stdout}\n${result.stderr}`;
-  // Driver-missing manifests as either:
-  //  (a) the CLI printing its own "supervisor relay" timeout after ~300s
-  //  (b) our 45s probe killing the CLI before it gets a chance to print
-  // Both mean the same thing: no compute driver picked up the request.
   if (
     result.timedOut ||
     /supervisor relay|DependenciesNotReady|provisioning timed out/i.test(combined)
@@ -281,12 +258,7 @@ export function interpretSandboxProbeResult(result: ProbeResult): CheckResult {
     };
   }
   if (result.ok) {
-    return {
-      id: "compute-driver",
-      label: "Compute driver",
-      status: "ok",
-      detail: "sandbox provisions",
-    };
+    return { id: "compute-driver", label: "Compute driver", status: "ok", detail: "sandbox provisions" };
   }
   const firstError =
     combined
@@ -298,88 +270,57 @@ export function interpretSandboxProbeResult(result: ProbeResult): CheckResult {
     label: "Compute driver",
     status: "missing",
     detail: firstError.slice(0, 120) || `sandbox create failed (exit ${result.exitCode ?? "?"})`,
-    hint: "Run `openshell sandbox create --from sportsclaw:latest --name probe --no-keep -- true` to see the full error.",
+    hint: `Run \`openshell sandbox create --from ${shq(image)} --name probe --no-keep -- true\` to see the full error.`,
   };
 }
 
-function checkComputeDriver(): CheckResult {
+function checkComputeDriver(image: string): CheckResult {
   // Random name so concurrent doctor runs don't collide.
   const name = `sc-doctor-${Math.random().toString(36).slice(2, 10)}`;
-  // `--no-keep` auto-deletes after the command exits cleanly, but if
-  // provisioning hangs we never reach that exit and the sandbox lingers in
-  // Provisioning forever. 45s probe timeout: longer than typical provisioning,
-  // shorter than the gateway's 300s patience.
   const result = probe(
     "openshell",
-    ["sandbox", "create", "--no-keep", "--name", name, "--from", "sportsclaw:latest", "--", "true"],
+    ["sandbox", "create", "--no-keep", "--name", name, "--from", image, "--", "true"],
     45_000,
   );
-  // Best-effort cleanup. Always run — even on success, just in case --no-keep
-  // didn't fire. spawnSync ignores its own non-zero exits via stdio: ignore.
-  spawnSync("openshell", ["sandbox", "delete", name], {
-    timeout: 10_000,
-    stdio: "ignore",
-  });
-  return interpretSandboxProbeResult(result);
-}
-
-function checkApiKey(): CheckResult {
-  const candidates = [
-    { name: "ANTHROPIC_API_KEY", prov: "anthropic" },
-    { name: "OPENAI_API_KEY", prov: "openai" },
-    { name: "NVIDIA_API_KEY", prov: "nvidia" },
-  ];
-  for (const c of candidates) {
-    if ((process.env[c.name] ?? "").trim().length > 0) {
-      return {
-        id: "api-key",
-        label: "Provider API key",
-        status: "ok",
-        detail: `${c.name} set (${c.prov})`,
-      };
-    }
-  }
-  return {
-    id: "api-key",
-    label: "Provider API key",
-    status: "warn",
-    detail: "none of ANTHROPIC_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY set",
-    hint: "Export one of those env vars before running `openshell provider create --from-existing`.",
-  };
+  // Best-effort cleanup in case --no-keep didn't fire.
+  spawnSync("openshell", ["sandbox", "delete", name], { timeout: 10_000, stdio: "ignore" });
+  return interpretSandboxProbeResult(result, image);
 }
 
 // ---------------------------------------------------------------------------
-// Doctor — public surface (exported for testing the formatter)
+// Doctor — public surface
 // ---------------------------------------------------------------------------
 
-export function runChecks(opts: { probe?: boolean } = {}): DoctorReport {
+export interface DoctorOptions {
+  /** Opt-in live sandbox-provisioning probe (creates a short-lived sandbox). */
+  probe?: boolean;
+  /** Omit local Docker/Podman/image checks (gateway pulls from a registry). */
+  remote?: boolean;
+  /** OCI image for local inspection, the probe, and remediation hints. */
+  image?: string;
+}
+
+export function runChecks(opts: DoctorOptions = {}): DoctorReport {
+  const image = opts.image ?? DEFAULT_DOCTOR_IMAGE;
+  const skipped = "skipped (--remote): not checked; remote image pull and runtime enforcement are NOT verified";
+  const cli = checkOpenshellCli();
+  const runtime: CheckResult = opts.remote
+    ? { id: "container-runtime", label: "Container runtime", status: "skipped", detail: skipped }
+    : checkContainerRuntime();
   const results: CheckResult[] = [
-    checkOpenshellCli(),
-    checkContainerRuntime(),
+    cli,
+    runtime,
     checkGateway(),
     checkProvider(),
-    checkInferenceRouting(),
-    checkImage(
-      "sportsclaw:latest",
-      "image-base",
-      "sportsclaw:latest image",
-      "docker build -t sportsclaw:latest .",
-    ),
-    checkImage(
-      "sportsclaw-openshell:latest",
-      "image-openshell",
-      "sportsclaw-openshell:latest image",
-      "docker build -t sportsclaw-openshell:latest -f openshell/Dockerfile .",
-    ),
-    checkApiKey(),
+    opts.remote
+      ? { id: "image-openshell", label: `${image} image`, status: "skipped", detail: skipped }
+      : checkImage(image, runtime.detail === "podman" ? "podman" : "docker"),
   ];
-  // Active probe is opt-in: it creates a real (short-lived) sandbox and adds
-  // up to 45s to doctor runtime. The other checks are passive and finish
-  // in well under a second.
+  // Active probe is opt-in: it creates a real (short-lived) sandbox.
   if (opts.probe) {
-    results.push(checkComputeDriver());
+    results.push(checkComputeDriver(image));
   }
-  const allOk = results.every((r) => r.status === "ok");
+  const allOk = results.every((r) => r.status === "ok" || r.status === "skipped");
   return { results, allOk };
 }
 
@@ -387,9 +328,10 @@ const MARKERS: Record<CheckStatus, string> = {
   ok: pc.green("✓"),
   missing: pc.red("✗"),
   warn: pc.yellow("!"),
+  skipped: pc.dim("-"),
 };
 
-/** Pretty-print a DoctorReport to stdout. */
+/** Pretty-print a DoctorReport. */
 export function formatReport(report: DoctorReport): string {
   const lines: string[] = [];
   lines.push(pc.bold("sportsclaw openshell doctor"));
@@ -405,28 +347,34 @@ export function formatReport(report: DoctorReport): string {
     }
   }
   lines.push("");
+  const skipped = report.results.filter((r) => r.status === "skipped").length;
   if (report.allOk) {
-    lines.push(pc.green("All checks passed."));
+    lines.push(pc.green(skipped ? `All requested checks passed (${skipped} not checked).` : "All checks passed."));
     lines.push(
       pc.dim(
-        "Create a sandbox with: openshell sandbox create --from sportsclaw-openshell:latest --policy openshell/policy.yaml --name <name>",
+        "Launch with an explicit provider attachment: openshell sandbox create --from <oci-image> --provider <provider> --policy openshell/policy.vault.yaml --name <name> -- <command>  (see `sportsclaw openshell setup`)",
       ),
     );
   } else {
-    const failing = report.results.filter((r) => r.status !== "ok").length;
+    const failing = report.results.filter((r) => r.status !== "ok" && r.status !== "skipped").length;
     lines.push(
       pc.yellow(`${failing} check${failing === 1 ? "" : "s"} need attention.`) +
         " Run " +
         pc.bold("sportsclaw openshell setup") +
-        " to fix interactively.",
+        " for the step-by-step recipe.",
     );
   }
   return lines.join("\n");
 }
 
-async function runDoctor(opts: { json: boolean; probe: boolean }): Promise<void> {
-  const report = runChecks({ probe: opts.probe });
-  if (opts.json) {
+async function runDoctor(args: string[]): Promise<void> {
+  const i = args.indexOf("--image");
+  const image = i === -1 ? undefined : args[i + 1];
+  // Validate before any probe runs; the image only ever travels as an argv element.
+  if (i !== -1 && (image === undefined || image === "" || image.startsWith("-"))) usageError("Missing value for --image");
+  const json = args.includes("--json");
+  const report = runChecks({ probe: args.includes("--probe"), remote: args.includes("--remote"), image });
+  if (json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
     console.log(formatReport(report));
@@ -435,101 +383,8 @@ async function runDoctor(opts: { json: boolean; probe: boolean }): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
-// Setup wizard
+// Setup recipe (non-mutating)
 // ---------------------------------------------------------------------------
-
-function shellOut(cmd: string, args: string[], opts: { allowFailure?: boolean } = {}): boolean {
-  console.log(pc.dim(`$ ${cmd} ${args.join(" ")}`));
-  const out = spawnSync(cmd, args, { stdio: "inherit" });
-  if (out.status !== 0 && !opts.allowFailure) {
-    console.error(pc.red(`Command failed: ${cmd} ${args.join(" ")} (exit ${out.status})`));
-    return false;
-  }
-  return out.status === 0;
-}
-
-async function confirm(rl: ReturnType<typeof createInterface>, prompt: string): Promise<boolean> {
-  const answer = (await rl.question(`${prompt} [Y/n] `)).trim().toLowerCase();
-  return answer === "" || answer === "y" || answer === "yes";
-}
-
-async function ask(rl: ReturnType<typeof createInterface>, prompt: string, def?: string): Promise<string> {
-  const suffix = def ? ` [${def}]` : "";
-  const v = (await rl.question(`${prompt}${suffix}: `)).trim();
-  return v || def || "";
-}
-
-async function fixOpenshellCli(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  console.log(pc.bold("\nOpenShell CLI is not installed."));
-  console.log(pc.dim("Source: https://github.com/NVIDIA/OpenShell"));
-  if (!(await confirm(rl, "Install it now via the official install.sh?"))) {
-    console.log(pc.yellow("Skipped — install manually before continuing."));
-    return false;
-  }
-  // The official one-liner pipes curl into sh. We replicate via spawn so
-  // the user sees the output.
-  return shellOut("sh", ["-c", "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"]);
-}
-
-async function fixGateway(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  console.log(pc.bold("\nNo OpenShell gateway registered."));
-  if (!(await confirm(rl, "Register a local gateway at http://127.0.0.1:18080?"))) {
-    return false;
-  }
-  if (!shellOut("openshell", ["gateway", "add", "http://127.0.0.1:18080", "--local", "--name", "local"])) {
-    return false;
-  }
-  return shellOut("openshell", ["gateway", "select", "local"]);
-}
-
-async function fixProvider(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  console.log(pc.bold("\nNo inference provider configured."));
-  console.log("Which provider?");
-  console.log("  1) anthropic  (uses ANTHROPIC_API_KEY)");
-  console.log("  2) openai     (uses OPENAI_API_KEY)");
-  console.log("  3) nvidia     (uses NVIDIA_API_KEY, NVIDIA API Catalog)");
-  const choice = await ask(rl, "Pick 1/2/3", "1");
-  const map: Record<string, { type: string; env: string; defaultModel: string }> = {
-    "1": { type: "anthropic", env: "ANTHROPIC_API_KEY", defaultModel: "claude-opus-4-6" },
-    "2": { type: "openai", env: "OPENAI_API_KEY", defaultModel: "gpt-4.1" },
-    "3": { type: "nvidia", env: "NVIDIA_API_KEY", defaultModel: "nvidia/nemotron-3-super-120b" },
-  };
-  const pick = map[choice];
-  if (!pick) {
-    console.log(pc.red(`Unknown choice ${JSON.stringify(choice)}.`));
-    return false;
-  }
-  if (!(process.env[pick.env] ?? "").trim()) {
-    console.log(
-      pc.yellow(
-        `${pick.env} is not set in your environment. Export it first, then re-run setup.`,
-      ),
-    );
-    return false;
-  }
-  const name = (await ask(rl, "Provider record name", `${pick.type}-prod`)).trim();
-  if (!shellOut("openshell", ["provider", "create", "--name", name, "--type", pick.type, "--from-existing"])) {
-    return false;
-  }
-  const model = await ask(rl, "Model to pin", pick.defaultModel);
-  return shellOut("openshell", [
-    "inference", "set", "--provider", name, "--model", model, "--timeout", "300",
-  ]);
-}
-
-async function fixBaseImage(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  console.log(pc.bold("\nsportsclaw:latest image not built."));
-  console.log(pc.dim("This builds the root sportsclaw image. Takes several minutes."));
-  if (!(await confirm(rl, "Build it now?"))) return false;
-  return shellOut("docker", ["build", "-t", "sportsclaw:latest", "."]);
-}
-
-async function fixOpenshellImage(rl: ReturnType<typeof createInterface>): Promise<boolean> {
-  console.log(pc.bold("\nsportsclaw-openshell:latest image not built."));
-  console.log(pc.dim("Thin downstream image layering a sandbox user onto sportsclaw:latest."));
-  if (!(await confirm(rl, "Build it now?"))) return false;
-  return shellOut("docker", ["build", "-t", "sportsclaw-openshell:latest", "-f", "openshell/Dockerfile", "."]);
-}
 
 interface ScaffoldOpts {
   jobId: string;
@@ -537,9 +392,12 @@ interface ScaffoldOpts {
   provider: "anthropic" | "openai";
   model: string;
   intervalMs: number;
+  baseUrl: string;
+  credentialEnv?: string;
+  credentialless?: boolean;
 }
 
-/** Build the JSON content for a scaffolded openshell-enabled job config. */
+/** Build the JSON content for an openshell-enabled job config. */
 export function buildScaffoldConfig(opts: ScaffoldOpts): string {
   const cfg = {
     jobId: opts.jobId,
@@ -548,111 +406,197 @@ export function buildScaffoldConfig(opts: ScaffoldOpts): string {
     personaText: opts.personaText,
     provider: opts.provider,
     model: opts.model,
-    openshell: {},
+    openshell: {
+      baseUrl: opts.baseUrl,
+      ...(opts.credentialless ? { credentialless: true } : { credentialEnv: opts.credentialEnv }),
+    },
   };
   return JSON.stringify(cfg, null, 2) + "\n";
 }
 
-async function offerScaffold(rl: ReturnType<typeof createInterface>): Promise<void> {
-  console.log(pc.bold("\nScaffold a starter job config?"));
-  if (!(await confirm(rl, "Create a sample openshell-enabled job in ~/.sportsclaw/operator/?"))) {
-    return;
-  }
-  const jobId = (await ask(rl, "Job id (filename basename)", "openshell-tv")).trim();
-  if (!/^[A-Za-z0-9._-]+$/.test(jobId)) {
-    console.log(pc.red(`Invalid jobId ${JSON.stringify(jobId)}.`));
-    return;
-  }
-  const filePath = operatorConfigPath(jobId);
-  if (fs.existsSync(filePath)) {
-    console.log(pc.yellow(`${filePath} already exists — not overwriting.`));
-    return;
-  }
-  fs.mkdirSync(operatorConfigDir(), { recursive: true });
-  const provider = ((await ask(rl, "Provider (anthropic/openai)", "anthropic")).trim() as "anthropic" | "openai");
-  const defaultModel = provider === "openai" ? "gpt-4.1" : "claude-opus-4-6";
-  const model = (await ask(rl, "Model id", defaultModel)).trim();
-  const personaText =
-    (await ask(rl, "Persona (one-line, will be embedded in the system prompt)",
-      "You are SportsClaw, an autonomous broadcast editor.")).trim();
-  const content = buildScaffoldConfig({
-    jobId,
-    personaText,
-    provider: provider === "openai" ? "openai" : "anthropic",
-    model,
-    intervalMs: 60_000,
-  });
-  fs.writeFileSync(filePath, content, "utf8");
-  console.log(pc.green(`Wrote ${filePath}`));
-  console.log(
-    pc.dim("Validate with: sportsclaw operate --validate " + jobId),
-  );
+export interface SetupRecipeOpts {
+  profileFile: string;
+  profileId: string;
+  providerName: string;
+  /** OCI image reference the gateway's container engine can pull. */
+  image: string;
+  sandboxName: string;
+  policyFile: string;
+  credentialless?: boolean;
+  /** Operator job id; defaults to "openshell-op". */
+  jobId?: string;
 }
 
-async function runSetup(): Promise<void> {
-  console.log(pc.bold("sportsclaw openshell setup"));
-  console.log("");
-  let report = runChecks();
-  console.log(formatReport(report));
-  console.log("");
-  if (report.allOk) {
-    console.log(pc.green("Nothing to fix."));
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      await offerScaffold(rl);
-    } finally {
-      rl.close();
-    }
-    return;
+/** POSIX single-quote one shell word. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The ordered 0.1.x commands to bring up a SportsClaw operator sandbox. Every
+ * user/config/path value is POSIX-quoted so the text runs as printed. The
+ * daemon runs as the sandbox's foreground main process under OpenShell's
+ * restart policy — not via `sportsclaw start operator` (a host service manager).
+ */
+export function buildSetupRecipe(o: SetupRecipeOpts): string {
+  const jobId = o.jobId ?? "openshell-op";
+  if (!JOB_ID_PATTERN.test(jobId)) {
+    throw new Error(`Invalid job id ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
   }
+  const jobFile = `./${jobId}.json`;
+  const sandboxCreate = [
+    `openshell sandbox create --name ${shq(o.sandboxName)} --from ${shq(o.image)}`,
+    `--provider ${shq(o.providerName)} --policy ${shq(o.policyFile)}`,
+    `--upload ${shq(`${jobFile}:/sandbox/.sportsclaw/operator/${jobId}.json`)}`,
+    `--detach --restart-policy on-failure -- node /app/dist/index.js operate --job ${shq(jobId)}`,
+  ].join(" \\\n  ");
+  return [
+    "# 0. Gateway: start/provision it per the OpenShell docs. `openshell gateway add` only registers an existing one.",
+    "",
+    "# 1. Validate and import the provider profile (both need the active gateway; lint does not register).",
+    `openshell profile lint -f ${shq(o.profileFile)}`,
+    `openshell profile import -f ${shq(o.profileFile)}`,
+    "",
+    o.credentialless
+      ? "# 2. Create the provider instance (credentialless profile)."
+      : "# 2. Create the provider instance. --from-existing reads the profile's credential env var from THIS shell.",
+    `openshell provider create --name ${shq(o.providerName)} --type ${shq(o.profileId)}` +
+      (o.credentialless ? "" : " --from-existing"),
+    "",
+    "# 3. Build an OCI image and push it where the gateway's engine can pull it (source checkout).",
+    "#    docker build -t sportsclaw:latest . && docker build -t <image> -f openshell/Dockerfile . && docker push <image>",
+    "",
+    `# 4. Save the job config (see below) as ${jobFile}, then launch with the provider attached.`,
+    sandboxCreate,
+    "",
+    "# 5. Verify attachment and the effective policy (provider-derived endpoints included).",
+    `openshell sandbox provider list ${shq(o.sandboxName)}`,
+    `openshell policy get ${shq(o.sandboxName)} --full`,
+    "",
+    "# Attach to an already-running sandbox instead (new processes pick it up):",
+    `#   openshell sandbox provider attach ${shq(o.sandboxName)} ${shq(o.providerName)} --wait`,
+  ].join("\n");
+}
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    // Sequential dependency: CLI → runtime → gateway → provider → inference → image.
-    // We re-check after each fix because earlier fixes can unblock later ones.
-    const fixers: Array<{ id: string; fn: () => Promise<boolean> }> = [
-      { id: "openshell-cli", fn: () => fixOpenshellCli(rl) },
-      {
-        id: "container-runtime",
-        fn: async () => {
-          console.log(pc.yellow("Docker / Podman must be started manually — install Docker Desktop or run `sudo systemctl start docker`, then re-run this wizard."));
-          return false;
-        },
-      },
-      { id: "gateway", fn: () => fixGateway(rl) },
-      { id: "provider", fn: () => fixProvider(rl) },
-      { id: "image-base", fn: () => fixBaseImage(rl) },
-      { id: "image-openshell", fn: () => fixOpenshellImage(rl) },
-    ];
+/** Base sandbox policies shipped in openshell/. `vault` is the strict default. */
+const POLICIES: Record<string, { file: string; note?: string }> = {
+  vault: { file: "policy.vault.yaml" },
+  "vault-espn": {
+    file: "policy.vault-espn.yaml",
+    note: "Policy vault-espn adds read-only public ESPN egress for the Python skills.",
+  },
+  connected: {
+    file: "policy.yaml",
+    note:
+      "WARNING: policy connected grants write-capable Machina MCP access (cloud pods) plus public " +
+      "market/news/sports egress (ESPN, Kalshi, Polymarket) and the TV overlay/tail routes. Use it only for " +
+      "the connected Sports TV workload.",
+  },
+};
 
-    for (const fx of fixers) {
-      report = runChecks();
-      const failing = report.results.find((r) => r.id === fx.id && r.status !== "ok");
-      if (!failing) continue;
-      const ok = await fx.fn();
-      if (!ok) {
-        console.log(pc.yellow(`Skipping remaining steps — fix \"${fx.id}\" first, then re-run.`));
-        return;
-      }
-    }
+const PROFILES: Record<string, {
+  file: string;
+  id: string;
+  provider: "openai";
+  baseUrl: string;
+  model: string;
+  credentialEnv?: string;
+  credentialless?: boolean;
+  /** What attaching this provider adds to the effective policy. */
+  boundary: string;
+}> = {
+  "nvidia-native": {
+    file: "nvidia-native.yaml",
+    id: "nvidia-native",
+    provider: "openai",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    model: "nvidia/nemotron-3-super-120b-a12b",
+    credentialEnv: "NVIDIA_API_KEY",
+    boundary:
+      "Privacy boundary: attaching this hosted provider authorizes external inference egress to " +
+      "integrate.api.nvidia.com (prompts leave the box), even though the base policy is local-only.",
+  },
+  "nim-local": {
+    file: "nim-local.yaml",
+    id: "sportsclaw-nim-local",
+    provider: "openai",
+    baseUrl: "http://host.openshell.internal:8000/v1",
+    model: "<served-model-id>",
+    credentialless: true,
+    boundary: "Privacy boundary: this provider reaches only host.openshell.internal:8000 (a host-local NIM).",
+  },
+};
 
-    report = runChecks();
-    console.log("");
-    console.log(formatReport(report));
-    console.log("");
-    if (report.allOk) {
-      await offerScaffold(rl);
-      console.log("");
-      console.log(pc.green("Setup complete."));
-      console.log(pc.dim("Next: openshell sandbox create --from sportsclaw-openshell:latest --policy openshell/policy.yaml --name <name>"));
-      console.log(pc.dim("Then:  openshell sandbox upload <name> ~/.sportsclaw/operator/<jobId>.json /sandbox/.sportsclaw/operator/<jobId>.json"));
-      console.log(pc.dim("And:   openshell sandbox exec -n <name> -- node /app/dist/index.js operate --job <jobId> --once"));
-    } else {
-      console.log(pc.yellow("Some checks still fail. Re-run the wizard after fixing them manually."));
-    }
-  } finally {
-    rl.close();
+const SETUP_FLAGS = ["--profile", "--policy", "--provider-name", "--image", "--sandbox", "--job"] as const;
+
+function usageError(message: string): never {
+  console.error(message);
+  printOpenshellHelp();
+  process.exit(2);
+}
+
+/** Print-only: renders the recipe; runs no openshell/docker probes (use `doctor`). */
+async function runSetup(args: string[]): Promise<void> {
+  const opts: Record<string, string> = {};
+  for (let i = 0; i < args.length; i += 2) {
+    const name = args[i];
+    if (!(SETUP_FLAGS as readonly string[]).includes(name)) usageError(`Unknown setup option: ${name}`);
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith("--")) usageError(`Missing value for ${name}`);
+    opts[name] = value;
   }
+  const profileKey = opts["--profile"] ?? "nvidia-native";
+  const profile = PROFILES[profileKey];
+  if (!profile) usageError(`Unknown --profile ${JSON.stringify(profileKey)}. Use one of: ${Object.keys(PROFILES).join(", ")}.`);
+  const policyKey = opts["--policy"] ?? "vault";
+  const policy = POLICIES[policyKey];
+  if (!policy) usageError(`Unknown --policy ${JSON.stringify(policyKey)}. Use one of: ${Object.keys(POLICIES).join(", ")}.`);
+  const jobId = opts["--job"] ?? "openshell-op";
+  if (!JOB_ID_PATTERN.test(jobId)) usageError(`Invalid --job ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
+  const providerName = opts["--provider-name"] ?? `${profileKey}-prod`;
+  const image = opts["--image"] ?? "<registry>/sportsclaw-openshell:<tag>";
+  const sandboxName = opts["--sandbox"] ?? "sportsclaw-op";
+  // Recipes ship in the npm package next to dist/.
+  const recipesDir = fileURLToPath(new URL("../openshell/", import.meta.url));
+
+  console.log(pc.bold(`OpenShell setup recipe (${profileKey}, policy ${policyKey}) — review, then run yourself:`));
+  console.log(pc.dim(`Tested with OpenShell ${TESTED_OPENSHELL_VERSION} only. Run \`sportsclaw openshell doctor\` to check prerequisites.`));
+  console.log("");
+  console.log(
+    buildSetupRecipe({
+      profileFile: `${recipesDir}providers/${profile.file}`,
+      profileId: profile.id,
+      providerName,
+      image,
+      sandboxName,
+      policyFile: `${recipesDir}${policy.file}`,
+      credentialless: profile.credentialless,
+      jobId,
+    }),
+  );
+  console.log("");
+  console.log(profile.boundary);
+  if (policy.note) console.log(policy.note);
+  console.log("");
+  console.log(pc.bold(`# ${jobId}.json`));
+  console.log(
+    buildScaffoldConfig({
+      jobId,
+      personaText: "You are SportsClaw, an autonomous broadcast editor.",
+      provider: profile.provider,
+      model: profile.model,
+      intervalMs: 60_000,
+      baseUrl: profile.baseUrl,
+      credentialEnv: profile.credentialEnv,
+      credentialless: profile.credentialless,
+    }),
+  );
+  console.log(
+    pc.dim(
+      "Nothing above was executed. Environment markers and route labels are operational checks only; " +
+        "network policy and credential enforcement belong to the OpenShell runtime.",
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -661,16 +605,21 @@ async function runSetup(): Promise<void> {
 
 function printOpenshellHelp(): void {
   console.log([
-    "sportsclaw openshell — optional NVIDIA OpenShell helpers",
+    `sportsclaw openshell — optional NVIDIA OpenShell helpers (tested: ${TESTED_OPENSHELL_VERSION} only; accepted: stable ${SUPPORTED_RANGE})`,
     "",
     "Usage:",
     "  sportsclaw openshell doctor           Diagnose prereqs, print remediation hints",
     "  sportsclaw openshell doctor --probe   Add a live sandbox-provisioning probe (~45s)",
     "  sportsclaw openshell doctor --json    Machine-readable doctor output",
-    "  sportsclaw openshell setup            Interactive wizard: install, gateway, provider, image, scaffold",
+    "      [--image <oci-ref>]  Image to inspect locally, probe, and name in hints (default sportsclaw-openshell:latest)",
+    "      [--remote]           Skip local docker/podman + image checks (reported as not checked, not verified)",
+    "  sportsclaw openshell setup            Print a setup recipe (print-only; runs nothing)",
+    "      [--profile nvidia-native|nim-local] [--policy vault|vault-espn|connected]",
+    "      [--provider-name <name>] [--image <oci-ref>] [--sandbox <name>] [--job <jobId>]",
+    "      Default policy: vault (local-only). connected adds write-capable MCP + public egress.",
     "",
-    "Both subcommands shell out to the `openshell` binary and `docker`; nothing is",
-    "imported as a library. OpenShell remains optional at install for everyone else.",
+    "doctor shells out to `openshell`; local `docker`/`podman` checks are skipped with --remote. Setup only prints commands.",
+    "OpenShell remains optional at install for everyone else.",
     "",
     "Background: openshell/README.md  |  docs/openshell-integration-plan.md",
   ].join("\n"));
@@ -689,12 +638,9 @@ export async function cmdOpenshell(args: string[]): Promise<void> {
   }
   switch (sub) {
     case "doctor":
-      return runDoctor({
-        json: rest.includes("--json"),
-        probe: rest.includes("--probe"),
-      });
+      return runDoctor(rest);
     case "setup":
-      return runSetup();
+      return runSetup(rest);
     default:
       console.error(`Unknown openshell subcommand: ${sub}`);
       printOpenshellHelp();

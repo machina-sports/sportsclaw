@@ -12,14 +12,18 @@
  *     `google`), which reads its standard base-URL env var
  *     (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` /
  *     `GOOGLE_GENERATIVE_AI_BASE_URL`) at construction time.
- *   - OpenShell: when an `OpenShellRoute` is supplied, the provider's
- *     `create*` factory is invoked with an explicit `baseURL`, routing
- *     calls through the Privacy Router. The apiKey is a placeholder —
- *     the router strips client credentials and injects backend ones.
+ *   - Native endpoint: when a `NativeEndpoint` is supplied, the provider's
+ *     `create*` factory gets that explicit base URL, key, API mode and
+ *     optional timeout. OpenShell endpoints (`isolated`) use a private shared
+ *     HTTP pool; bare endpoints keep the ambient fetch. Nothing is read from or
+ *     written to the ambient provider env, and no global dispatcher is touched.
+ *     Used by OpenShell 0.1.x jobs (see `resolveOpenShellEndpoint`) and by
+ *     NIM model roles.
  *
- * Google is unsupported under OpenShell because the Privacy Router
- * speaks OpenAI-compatible and Anthropic-compatible HTTP only.
- * `operator-config`'s validator rejects that combination at load time.
+ * OpenShell 0.1 removed the managed inference route. Workloads now
+ * call the provider's native API with the credential placeholder injected by
+ * the attached provider profile; OpenShell's runtime (policy + proxy) owns
+ * enforcement and credential substitution. Google is not wired for this path.
  */
 
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
@@ -38,6 +42,7 @@ import {
   type AzureFoundryApiMode,
   type AzureFoundryAuthMode,
   type LLMProvider,
+  type NativeEndpoint,
 } from "./types.js";
 
 /**
@@ -62,7 +67,7 @@ function stripThink(s: string): string {
     .trim();
 }
 
-function nimNemotronFetch(): typeof fetch {
+function nimNemotronFetch(base?: typeof fetch): typeof fetch {
   return async (input, init) => {
     let thinkingOn = false;
     if (init?.body && typeof init.body === "string") {
@@ -100,7 +105,7 @@ function nimNemotronFetch(): typeof fetch {
         // body not JSON — leave alone
       }
     }
-    const res = await fetch(input, init);
+    const res = await (base ?? fetch)(input, init);
     // Strip <think> from the (non-streaming) JSON response so reasoning never
     // reaches the tool-call/JSON parser. Best-effort: pass through on any issue.
     if (thinkingOn && res.ok) {
@@ -134,10 +139,54 @@ function nimNemotronFetch(): typeof fetch {
   };
 }
 
-/** Resolved OpenShell routing decision passed into `resolveModel`. */
-export interface OpenShellRoute {
-  /** Base URL handed to the AI SDK provider factory. */
-  baseUrl: string;
+// OpenShell sandbox guard + credential lookup live in ./openshell-native.ts;
+// `resolveModel` only consumes the resulting explicit NativeEndpoint.
+export {
+  nativeBaseUrlProblem,
+  openShellEndpointIssues,
+  resolveOpenShellEndpoint,
+} from "./openshell-native.js";
+export type { NativeApiMode, NativeEndpoint } from "./types.js";
+export { DEFAULT_NATIVE_TIMEOUT_MS } from "./types.js";
+
+/**
+ * One lazy, module-private undici pool shared by every isolated (OpenShell)
+ * client, so an ambient global dispatcher (e.g. a process-wide proxy agent)
+ * never carries their traffic and repeated clients reuse sockets instead of
+ * leaking per-client pools. Credentials and model stay request-scoped. Idle
+ * sockets close after the bounded keep-alive windows. The global dispatcher is
+ * never touched. TLS verification stays on with Node's default trust store,
+ * which includes `NODE_EXTRA_CA_CERTS` (OpenShell injects its CA there).
+ */
+let isolatedTransport: Promise<{ fetch: typeof fetch; dispatcher: unknown }> | undefined;
+
+const isolatedFetch: typeof fetch = async (input, init) => {
+  isolatedTransport ??= import("undici").then((u) => ({
+    fetch: u.fetch as unknown as typeof fetch,
+    dispatcher: new u.Agent({ keepAliveTimeout: 10_000, keepAliveMaxTimeout: 60_000 }),
+  }));
+  const t = await isolatedTransport;
+  return t.fetch(input, { ...init, dispatcher: t.dispatcher } as RequestInit);
+};
+
+/** Add a per-request timeout to `base` (default: the ambient global fetch). */
+function withTimeout(timeoutMs: number, base?: typeof fetch): typeof fetch {
+  return (input, init) => {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return (base ?? fetch)(input, { ...init, signal });
+  };
+}
+
+/**
+ * Transport for an explicit native endpoint: OpenShell endpoints get the
+ * isolated pool; bare endpoints (NIM roles) keep the ambient fetch and only
+ * add a timeout when one is configured.
+ */
+function nativeTransport(native: NativeEndpoint): typeof fetch | undefined {
+  const base = native.isolated ? isolatedFetch : undefined;
+  if (native.timeoutMs !== undefined) return withTimeout(native.timeoutMs, base);
+  return base;
 }
 
 /**
@@ -356,33 +405,6 @@ function resolveAzureFoundryModel(modelId: string) {
 }
 
 /**
- * Provider-specific default base URL for OpenShell's `inference.local`.
- * Each SDK has its own path convention — Anthropic appends
- * `/v1/messages`, OpenAI clients expect the `/v1` prefix already in
- * the base URL.
- */
-export function defaultOpenShellBaseUrl(provider: LLMProvider): string {
-  switch (provider) {
-    case "anthropic":
-      return "https://inference.local";
-    case "openai":
-      return "https://inference.local/v1";
-    case "google":
-      throw new Error(
-        "OpenShell does not support Google's API protocol. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-      );
-    case "azure-foundry":
-      throw new Error(
-        "OpenShell does not support the \"azure-foundry\" provider — it targets Azure endpoints, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-      );
-    case "openai-compatible":
-      throw new Error(
-        "OpenShell does not support the \"openai-compatible\" provider — it targets its own OPENAI_COMPATIBLE_BASE_URL, not the Privacy Router. Drop the openshell block or pick provider \"anthropic\" / \"openai\".",
-      );
-  }
-}
-
-/**
  * Build a `ResolvedModelAuth` from the persisted credential store. Returns
  * `undefined` (i.e. "use SDK defaults") if no OAuth opt-in is recorded —
  * the API-key path doesn't need a value here because the AI SDK reads the
@@ -406,41 +428,32 @@ export function resolveAuthForModel(): ResolvedModelAuth | undefined {
 export function resolveModel(
   provider: LLMProvider,
   modelId: string,
-  openshell?: OpenShellRoute,
+  native?: NativeEndpoint,
   auth?: ResolvedModelAuth,
 ) {
-  if (openshell) {
-    if (auth?.anthropic?.kind === "oauth_claude_code") {
-      throw new Error(
-        "OpenShell mode is incompatible with Claude Code OAuth — the Privacy " +
-        "Router injects its own credentials. Either drop the openshell block " +
-        "or run `sportsclaw logout claude` to fall back to the API key.",
-      );
-    }
+  if (native) {
+    // The explicit endpoint carries its own credential; ambient auth (incl.
+    // Claude Code OAuth) is deliberately not used here and not disturbed.
+    const fetchImpl = nativeTransport(native);
     switch (provider) {
       case "anthropic":
         return createAnthropic({
-          baseURL: openshell.baseUrl,
-          apiKey: "openshell-unused",
+          baseURL: native.baseUrl,
+          apiKey: native.apiKey,
+          ...(fetchImpl ? { fetch: fetchImpl } : {}),
         })(modelId);
-      case "openai":
-        // .chat (not the default factory) targets POST /v1/chat/completions.
-        // The default uses /v1/responses, which the OpenShell Privacy Router
-        // proxies through to the upstream — but most OpenAI-compatible
-        // upstreams (NVIDIA API Catalog, Nemotron-on-vLLM, etc.) only serve
-        // /v1/chat/completions and 404 on /v1/responses. Forcing chat keeps
-        // OpenShell mode working across every supported provider.
-        return createOpenAI({
-          baseURL: openshell.baseUrl,
-          apiKey: "openshell-unused",
-          fetch: nimNemotronFetch(),
-        }).chat(modelId);
-      case "google":
-      case "azure-foundry":
-      case "openai-compatible":
-        throw new Error(
-          `OpenShell mode does not support provider "${provider}".`,
-        );
+      case "openai": {
+        // Chat completions by default: NIM/vLLM-style upstreams commonly serve
+        // only /chat/completions. Hosts that serve /responses opt in.
+        const p = createOpenAI({
+          baseURL: native.baseUrl,
+          apiKey: native.apiKey,
+          fetch: nimNemotronFetch(fetchImpl),
+        });
+        return native.apiMode === "responses" ? p.responses(modelId) : p.chat(modelId);
+      }
+      default:
+        throw new Error(`Native endpoint mode does not support provider "${provider}".`);
     }
   }
   switch (provider) {

@@ -1,0 +1,47 @@
+# OpenShell 0.1.x provider profile — NVIDIA API Catalog, native endpoint.
+#
+# Hosted, authenticated inference for the SportsClaw Node operator. Imported
+# under its own id (never reuse the upstream `nvidia` example id), binding
+# NVIDIA_API_KEY only to integrate.api.nvidia.com and only for the Node binary.
+# Attaching this provider ADDS public egress to that host to the sandbox's
+# effective policy.
+#
+# No secret values live here. Create the provider from your shell env:
+#   openshell profile lint -f openshell/providers/nvidia-native.yaml
+#   openshell profile import -f openshell/providers/nvidia-native.yaml
+#   openshell provider create --name nvidia-native-prod --type nvidia-native --from-existing
+#
+# Matching job config:
+#   "provider": "openai",
+#   "model": "<real NVIDIA model id>",
+#   "openshell": { "baseUrl": "https://integrate.api.nvidia.com/v1", "credentialEnv": "NVIDIA_API_KEY" }
+#
+# Not yet linted against a live gateway in this repo (`profile lint` needs one).
+
+id: nvidia-native
+display_name: NVIDIA Native API (SportsClaw)
+description: NVIDIA API Catalog OpenAI-compatible inference for the SportsClaw Node operator
+category: inference
+inference_capable: true
+
+credentials:
+  - name: api_key
+    description: NVIDIA API Catalog key
+    env_vars: [NVIDIA_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+
+discovery:
+  credentials: [api_key]
+
+endpoints:
+  - host: integrate.api.nvidia.com
+    port: 443
+    path: /v1/**
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+
+binaries:
+  - /usr/local/bin/node
