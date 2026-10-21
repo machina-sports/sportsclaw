@@ -18,6 +18,13 @@ provider. Moving from 0.0.x is a migration (import profiles, recreate sandboxes)
 [runbook](https://github.com/machina-sports/sportsclaw/blob/main/openshell/README.md).
 :::
 
+## Local gateway and reference-architecture foundation
+
+For a versioned local MicroVM gateway, authenticated access, audit export and the
+remaining enterprise controls, use the
+[NVIDIA reference-architecture foundation](nvidia-reference-architecture.md).
+A working gateway does not by itself qualify sandbox enforcement or the full reference design.
+
 ## Check your setup
 
 ```bash
@@ -43,8 +50,8 @@ The printed base policy defaults to the local-only `policy.vault.yaml`; pass
 warning) or `--policy vault-espn` to opt in to more. A hosted provider attachment still authorizes
 external inference egress to that provider even on the local-only policy.
 `openshell gateway add` only registers an existing gateway; it does not start one.
-`openshell profile lint` needs an active gateway — the shipped profiles have not been linted
-against one in this repository.
+`openshell profile lint` needs an active gateway. Lint the shipped profiles against your selected
+gateway before importing them; static repository checks cannot establish live compatibility.
 
 ## The steps
 
