@@ -50,6 +50,7 @@ import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
+import { text } from "node:stream/consumers";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
@@ -2193,9 +2194,11 @@ export function takeOneShotHistory(
   if (idx < 0) return undefined;
   if (historyMode !== "caller") throw new Error("--history-stdin requires --history-mode caller");
   args.splice(idx, 1);
+  // Read outside the parse guard so a stdin failure is not reported as bad JSON.
+  const input = readStdin();
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readStdin());
+    parsed = JSON.parse(input);
   } catch {
     throw new Error("--history-stdin expects a JSON object with a history array");
   }
@@ -2240,6 +2243,23 @@ export function takeOneShotConversation(
   };
 }
 
+/**
+ * Reads all of stdin for caller-mode --history-stdin. readFileSync(0) can
+ * throw EAGAIN on a nonblocking pipe before the full payload arrives, so
+ * large relay payloads are awaited to EOF. Calls that fail before the read (no
+ * --history-stdin, not caller mode) never touch stdin.
+ */
+async function readHistoryStdin(args: string[]): Promise<(() => string) | undefined> {
+  const modeIdx = args.indexOf("--history-mode");
+  if (!args.includes("--history-stdin") || modeIdx < 0 || args[modeIdx + 1] !== "caller") return undefined;
+  try {
+    const input = await text(process.stdin);
+    return () => input;
+  } catch (error: unknown) {
+    throw new Error(`--history-stdin could not read stdin: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
@@ -2261,7 +2281,7 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   // Parse --session-id / --history-mode / --history-stdin (used by relay for
   // caller-owned history). Spread into every engine.run below.
-  const conversation = takeOneShotConversation(args);
+  const conversation = takeOneShotConversation(args, await readHistoryStdin(args));
 
   // Parse --system-prompt <text> flag (used by relay to inject caller context)
   let systemPrompt: string | undefined;
