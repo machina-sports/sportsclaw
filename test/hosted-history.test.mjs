@@ -350,6 +350,6 @@ describe("CLI one-shot parsing", () => {
     const query = source.slice(start, source.indexOf("\nasync function ", start + 1));
     assert.equal([...query.matchAll(/engine\.run\(prompt,/g)].length, 3);
     assert.equal([...query.matchAll(/\.\.\.conversation/g)].length, 3);
-    assert.match(query, /const conversation = takeOneShotConversation\(args\)/);
+    assert.match(query, /const conversation = takeOneShotConversation\(args, await readHistoryStdin\(args\)\)/);
   });
 });
