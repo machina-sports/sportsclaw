@@ -29,7 +29,7 @@
 #   GET  /api/highlights/jobs/{job_id}/artifacts  — Manifest + clip paths
 # =============================================================================
 
-FROM node:20-slim AS base
+FROM node:22.23.4-slim AS base
 
 # --- System dependencies -----------------------------------------------------
 RUN apt-get update && \
