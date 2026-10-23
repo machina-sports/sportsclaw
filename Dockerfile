@@ -5,7 +5,7 @@
 # Developers can run the agent, CLI commands, or chat listeners out of the box.
 # =============================================================================
 
-FROM node:20-slim AS base
+FROM node:22.23.4-slim AS base
 
 # Install Python 3 and pip, plus iproute2 (the OpenShell supervisor's
 # network-namespace setup requires `ip` from iproute2).
