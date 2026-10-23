@@ -25,7 +25,7 @@
 #   POST /api/query/sync        — Execute a one-shot query (buffered JSON response)
 # =============================================================================
 
-FROM node:20-slim AS base
+FROM node:22.23.4-slim AS base
 
 # --- System dependencies -----------------------------------------------------
 RUN apt-get update && \
