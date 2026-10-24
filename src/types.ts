@@ -565,6 +565,13 @@ export interface McpServerConfig {
   description?: string;
   /** Origin of this server config (e.g. "machina" when added via `sportsclaw machina connect`). */
   provider?: "machina";
+  /**
+   * Deployment-owned: keep this server's raw tools, description and pod
+   * inventory away from the model. Only trusted in-process callers (e.g.
+   * PodMemoryStorage via callToolDirect) can reach it. Fails closed: any value
+   * other than absent or literal `false` is treated as internal-only.
+   */
+  internalOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------

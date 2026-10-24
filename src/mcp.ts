@@ -333,9 +333,26 @@ export type McpErrorCode =
 const TOOL_CACHE_DIR = join(MCP_CONFIG_DIR, "mcp-cache");
 const TOOL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * The single internal-only policy predicate. Fails closed: only an absent or
+ * literal `false` value is public, so a malformed value ("false", 0, null, …)
+ * can never accidentally expose a private server's tools.
+ */
+export function isInternalOnly(config: McpServerConfig | undefined): boolean {
+  const value = (config as { internalOnly?: unknown } | undefined)?.internalOnly;
+  return value !== undefined && value !== false;
+}
+
 function configHash(config: McpServerConfig): string {
-  // Simple hash: JSON of url + tools whitelist. Changes when config changes.
-  return Buffer.from(JSON.stringify({ url: config.url, tools: config.tools ?? [] })).toString("base64url");
+  // Simple hash: JSON of url + tools whitelist (+ internal-only policy, only
+  // when set, so default servers keep their existing cache identity).
+  return Buffer.from(
+    JSON.stringify({
+      url: config.url,
+      tools: config.tools ?? [],
+      ...(isInternalOnly(config) ? { internalOnly: true } : {}),
+    })
+  ).toString("base64url");
 }
 
 /** Clear the MCP tool discovery cache. Called on config change or --refresh-mcp. */
@@ -635,30 +652,40 @@ export class McpManager {
   // Tool access
   // -------------------------------------------------------------------------
 
-  /** Get all discovered MCP tool specs (already prefixed with mcp__<server>__) */
-  getToolSpecs(): ToolSpec[] {
-    return [...this.toolSpecs];
+  /** True for servers whose tools must never reach the model. */
+  private isPrivateServer(serverName: string): boolean {
+    return isInternalOnly(this.configs[serverName]);
   }
 
-  /** Get the MCP route map for injection into ToolRegistry */
+  /** Get model-facing MCP tool specs (already prefixed with mcp__<server>__) */
+  getToolSpecs(): ToolSpec[] {
+    return this.toolSpecs.filter((spec) => {
+      const route = this.routeMap.get(spec.name);
+      return !!route && !this.isPrivateServer(route.serverName);
+    });
+  }
+
+  /** Get the model-facing MCP route map for injection into ToolRegistry */
   getRouteMap(): Map<string, { serverName: string; toolName: string }> {
-    return new Map(this.routeMap);
+    return new Map(
+      [...this.routeMap].filter(([, route]) => !this.isPrivateServer(route.serverName))
+    );
   }
 
   /** Get server name → description map for system prompt context */
   getServerDescriptions(): Map<string, string> {
     const result = new Map<string, string>();
     for (const [name, config] of Object.entries(this.configs)) {
-      if (config.description) {
+      if (config.description && !isInternalOnly(config)) {
         result.set(name, config.description);
       }
     }
     return result;
   }
 
-  /** Get discovered pod capabilities for all connected servers */
+  /** Get discovered pod capabilities for all model-facing connected servers */
   getPodCapabilities(): Map<string, PodCapabilities> {
-    return new Map(this.podCaps);
+    return new Map([...this.podCaps].filter(([server]) => !this.isPrivateServer(server)));
   }
 
   // -------------------------------------------------------------------------
@@ -679,15 +706,16 @@ export class McpManager {
       // Fetch a full page so detection (e.g. of the loop-runner agent) doesn't
       // miss entries beyond the API's small default page size.
       const args = { page_size: 100 };
+      // Trusted internal discovery: callToolDirect also works for internal-only pods.
       const [wfResult, agResult, cnResult] = await Promise.allSettled([
         hasSearch("search_workflows")
-          ? this.callTool(`mcp__${serverName}__search_workflows`, args)
+          ? this.callToolDirect(serverName, "search_workflows", args)
           : Promise.resolve(null),
         hasSearch("search_agents")
-          ? this.callTool(`mcp__${serverName}__search_agents`, args)
+          ? this.callToolDirect(serverName, "search_agents", args)
           : Promise.resolve(null),
         hasSearch("connector_search")
-          ? this.callTool(`mcp__${serverName}__connector_search`, args)
+          ? this.callToolDirect(serverName, "connector_search", args)
           : Promise.resolve(null),
       ]);
 
@@ -758,20 +786,53 @@ export class McpManager {
     }
   }
 
-  /** Call an MCP tool by its prefixed name */
+  private static unknownTool(name: string): { content: string; isError: boolean; errorCode: McpErrorCode } {
+    return {
+      content: JSON.stringify({ error: `Unknown MCP tool: ${name}` }),
+      isError: true,
+      errorCode: "not_found",
+    };
+  }
+
+  /**
+   * Model-facing dispatch by prefixed name. Tools of internal-only servers are
+   * refused here — indistinguishable from an unknown tool — before the SDK.
+   */
   async callTool(
     prefixedName: string,
     args: Record<string, unknown>
   ): Promise<{ content: string; isError: boolean; errorCode?: McpErrorCode }> {
     const route = this.routeMap.get(prefixedName);
-    if (!route) {
-      return {
-        content: JSON.stringify({ error: `Unknown MCP tool: ${prefixedName}` }),
-        isError: true,
-        errorCode: "not_found",
-      };
+    if (!route || this.isPrivateServer(route.serverName)) {
+      return McpManager.unknownTool(prefixedName);
     }
+    return this.invoke(route, args);
+  }
 
+  /**
+   * Trusted in-process call by server name and raw tool name (no mcp__ prefix).
+   * Used by PodMemoryStorage, the decision ledger and pod discovery; reaches
+   * internal-only servers. Never expose this to the model.
+   */
+  async callToolDirect(
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>
+  ): Promise<{ content: string; isError: boolean; errorCode?: McpErrorCode }> {
+    const prefixedName = `mcp__${serverName}__${toolName}`;
+    const route = this.routeMap.get(prefixedName);
+    // Exact match guards against `__` in names resolving to another server's route.
+    if (!route || route.serverName !== serverName || route.toolName !== toolName) {
+      return McpManager.unknownTool(prefixedName);
+    }
+    return this.invoke(route, args);
+  }
+
+  /** Shared invocation: connection, circuit breaker, timeout, content parsing. */
+  private async invoke(
+    route: { serverName: string; toolName: string },
+    args: Record<string, unknown>
+  ): Promise<{ content: string; isError: boolean; errorCode?: McpErrorCode }> {
     const connection = this.connections.get(route.serverName);
     if (!connection) {
       return {
@@ -878,18 +939,6 @@ export class McpManager {
   }
 
   /**
-   * Call a tool by server name and raw tool name (no mcp__ prefix).
-   * Convenience wrapper used by PodMemoryStorage.
-   */
-  async callToolDirect(
-    serverName: string,
-    toolName: string,
-    args: Record<string, unknown>
-  ): Promise<{ content: string; isError: boolean; errorCode?: McpErrorCode }> {
-    return this.callTool(`mcp__${serverName}__${toolName}`, args);
-  }
-
-  /**
    * Find the first connected Machina MCP server (has document CRUD tools).
    * Returns undefined if no Machina pod is connected.
    */
@@ -913,7 +962,9 @@ export class McpManager {
     // connection, so additionally require a LIVE connection that actually exposes
     // the two tools machina_loop calls. Otherwise the tool would be advertised for
     // a dropped/route-filtered pod and every call would fail opaquely.
+    // Internal-only pods are excluded so machina_loop cannot become a bypass.
     for (const [server, caps] of this.podCaps) {
+      if (this.isPrivateServer(server)) continue;
       if (!caps.agents.some((a) => a.name === LOOP_RUNNER_AGENT)) continue;
       if (!this.connections.has(server)) continue;
       const has = (tool: string) => this.routeMap.has(`mcp__${server}__${tool}`);
