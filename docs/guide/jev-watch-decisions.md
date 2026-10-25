@@ -48,7 +48,9 @@ Exact keys only. Text 1–4,000 characters, locale `en`/`pt`/`es`, 1–100 candi
 
 Only the current request text, its locale, the fixed instructions and the public candidate labels. Candidates are offered under positional option keys (`c1`…`c100`) plus `no_match` and `uncertain`, and are mapped back to the caller's public IDs locally, so a returned ID is never model-authored. Reference IDs are sent as the matching option keys. No history, account, profile, subscription records or private IDs are accepted.
 
-## Policy (`watch-decision-policy-1`)
+## Policy (`watch-decision-policy-2`)
+
+- Sports-information requests, including short requests for live games, fixtures, schedules or scores, are ordinary chat (`none`). Listing games is not asking to list monitoring subscriptions. `list_takes` is reserved for requests about alert/monitoring subscription options.
 
 - An outcome counts only when native confidence ≥ 0.80 **and** the top-two probability margin ≥ 0.15. The two gates are independent; otherwise the result is `clarify`.
 - The explicit `uncertain` option is always `clarify`.
