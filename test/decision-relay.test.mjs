@@ -477,7 +477,7 @@ describe("decision worker process", () => {
     assert.doesNotMatch(run.stdout, /Traceback|at Object|SyntaxError/);
   });
 
-  it("imports the decision client and node builtins and nothing else", () => {
+  it("imports only the decision client, lightweight inference boundary and node builtins", () => {
     const seen = new Set();
     const external = new Set();
     const visit = (file) => {
@@ -498,7 +498,7 @@ describe("decision worker process", () => {
     assert.deepEqual([...external], [], "the worker must not pull in a package dependency");
     assert.deepEqual(
       [...seen].map((file) => file.slice(distDir.length + 1)).sort(),
-      ["decision-client.js", "decision-relay.js"],
+      ["decision-client.js", "decision-relay.js", "inference/decide.js", "inference/receipt.js"],
       "no engine, CLI, MCP, memory or listener module may enter the import graph"
     );
   });

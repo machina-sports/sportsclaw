@@ -20,7 +20,8 @@
  * to deliver results to the user.
  */
 
-import { generateText, tool as defineTool, jsonSchema, stepCountIs, type ToolSet } from "ai";
+import { tool as defineTool, jsonSchema, stepCountIs, type ToolSet } from "ai";
+import { generate } from "./inference/run.js";
 import { samplingCallOptions } from "./run-manifest.js";
 import type { sportsclawConfig, LLMProvider } from "./types.js";
 import { buildProviderOptions, DEFAULT_CONFIG } from "./types.js";
@@ -284,7 +285,7 @@ export class SubagentManager {
         prompt: task.prompt,
         installedSkills: params.registry.getInstalledSkills(),
         toolSpecs: allowedSpecs,
-        model: params.model as Parameters<typeof generateText>[0]["model"],
+        model: params.model as Parameters<typeof generate>[1]["model"],
         modelId: params.config.model ?? "subagent",
         provider: params.provider,
         abortSignal,
@@ -311,8 +312,8 @@ export class SubagentManager {
         params.thinkingBudget ?? 4096
       );
 
-      const result = await generateText({
-        model: params.model as Parameters<typeof generateText>[0]["model"],
+      const result = await generate({ purpose: "subagent" }, {
+        model: params.model as Parameters<typeof generate>[1]["model"],
         ...samplingCallOptions(params.config.sampling ?? {}),
         system: systemPrompt,
         prompt: task.prompt,

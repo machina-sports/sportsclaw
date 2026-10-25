@@ -21,13 +21,13 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { generateText } from "ai";
 import lockfile from "proper-lockfile";
 import { listTasks, completeTask, expireOldTasks } from "./taskbus.js";
 import type { WatcherTask, LLMProvider } from "./types.js";
 import { buildProviderOptions } from "./types.js";
 import { HeartbeatStateStore } from "./heartbeat-state.js";
 import type { CronJobState } from "./heartbeat-state.js";
+import { generate } from "./inference/run.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -638,8 +638,8 @@ export class HeartbeatService {
   private async evaluateCondition(task: WatcherTask): Promise<boolean> {
     const providerOpts = buildProviderOptions(this.provider, this.thinkingBudget);
 
-    const result = await generateText({
-      model: this.model as Parameters<typeof generateText>[0]["model"],
+    const result = await generate({ purpose: "heartbeat_condition" }, {
+      model: this.model as Parameters<typeof generate>[1]["model"],
       system: [
         "You are a condition evaluator for a sports monitoring system.",
         "Given a condition and context, determine if the condition can be",

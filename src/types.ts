@@ -762,9 +762,20 @@ export type ToolProgressEvent =
     }
   | { type: "synthesizing" };
 
+/** One prior turn of a caller-owned transcript. No system/developer/tool roles. */
+export interface CallerHistoryEntry {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface RunOptions {
   /** Caller mode leaves transcript ownership to the API caller; durable memory remains enabled. */
   historyMode?: "caller" | "engine";
+  /**
+   * Caller-owned prior turns (caller mode only), excluding the current prompt.
+   * Restored as plain user/assistant messages; never persisted by the engine.
+   */
+  history?: CallerHistoryEntry[];
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
   /** Exactly one native agent ID to select explicitly for this run. */
@@ -809,6 +820,13 @@ export interface McpServerConfig {
   description?: string;
   /** Origin of this server config (e.g. "machina" when added via `sportsclaw machina connect`). */
   provider?: "machina";
+  /**
+   * Deployment-owned: keep this server's raw tools, description and pod
+   * inventory away from the model. Only trusted in-process callers (e.g.
+   * PodMemoryStorage via callToolDirect) can reach it. Fails closed: any value
+   * other than absent or literal `false` is treated as internal-only.
+   */
+  internalOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------

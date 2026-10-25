@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generate } from "./inference/run.js";
 import type {
   LLMProvider,
   RouteDecision,
@@ -15,7 +15,7 @@ import { planSkillCaps } from "./routing/complexity.js";
 import { TEAM_ALIASES } from "./routing/team-aliases.js";
 import { resolveSkillRoutingSettings, routeSkillsWithJev } from "./routing/skill-routing.js";
 
-type ModelType = Parameters<typeof generateText>[0]["model"];
+type ModelType = Parameters<typeof generate>[1]["model"];
 
 interface RouteInput {
   prompt: string;
@@ -293,7 +293,7 @@ async function runLlmRouter(
   const startedAt = Date.now();
 
   try {
-    const result = await generateText({
+    const result = await generate({ purpose: "routing" }, {
       model,
       ...samplingCallOptions(input.config.sampling ?? {}),
       system: [

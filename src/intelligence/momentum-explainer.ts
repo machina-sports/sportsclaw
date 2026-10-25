@@ -38,7 +38,7 @@ import {
   createAnthropicOAuthProvider,
   loadClaudeCodeTokens,
 } from "../anthropic-oauth.js";
-import { generateText } from "ai";
+import { generate } from "../inference/run.js";
 import type {
   WatchEvent,
   WatchChange,
@@ -488,8 +488,8 @@ async function generateCard(
     "Write the one-sentence Momentum Explainer now.",
   ].join("\n");
 
-  const result = await generateText({
-    model: model as Parameters<typeof generateText>[0]["model"],
+  const result = await generate({ purpose: "momentum_explain" }, {
+    model: model as Parameters<typeof generate>[1]["model"],
     system,
     prompt,
     maxOutputTokens: 120,

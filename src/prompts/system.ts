@@ -112,6 +112,7 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   for (const block of CORE_BEHAVIOR_SECTIONS) {
     sections.push(block);
   }
+  sections.push(CONVERSATION_SECTION);
 
   // ---- Memory directives (static-ish — only varies by hasMemory + skipFanProfile) ----
   if (ctx.hasMemory) {
@@ -171,6 +172,17 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
 // ---------------------------------------------------------------------------
 // Sub-section builders
 // ---------------------------------------------------------------------------
+
+/** How to carry a conversation across turns. Static: no prior turn content here. */
+const CONVERSATION_SECTION = [
+  "## Conversation",
+  "",
+  "- A short follow-up continues the prior task: keep its match, market, date and scope unless the user changes them. A new topic replaces the old scope.",
+  "- Venues or sources the user names add to the prior check. Cover every one, or say which are unavailable here.",
+  "- Lead with evidence from the tools. No option menus, no generic \"what do you want to know\" question, no forced follow-up question at the end.",
+  "- If an essential detail (game, date, market) is missing and cannot be inferred from the conversation, ask one short, specific question.",
+  "- Never invent context, prices or odds, and never claim a check you did not run.",
+].join("\n");
 
 function memorySection(skipFanProfile: boolean): string {
   const lines = [

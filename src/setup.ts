@@ -9,7 +9,6 @@
 
 import { createInterface } from "node:readline/promises";
 import {
-  generateText,
   tool as defineTool,
   jsonSchema,
   stepCountIs,
@@ -18,6 +17,7 @@ import {
 } from "ai";
 import pc from "picocolors";
 
+import { generate } from "./inference/run.js";
 import { resolveModel, resolveAuthForModel } from "./llm-providers.js";
 import { resolveAnthropicAuth } from "./credentials.js";
 
@@ -432,7 +432,7 @@ export async function runSetup(initialPrompt?: string): Promise<void> {
 
   try {
     for (let turn = 0; turn < MAX_TURNS; turn++) {
-      const result = await generateText({
+      const result = await generate({ purpose: "setup" }, {
         model,
         system,
         messages,

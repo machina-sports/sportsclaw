@@ -35,15 +35,17 @@
 
 import path from "node:path";
 import {
-  generateText,
-  streamText,
   jsonSchema,
   hasToolCall,
   stepCountIs,
+  type generateText,
+  type streamText,
   type LanguageModel,
   type ToolSet,
   type Tool,
 } from "ai";
+
+import { generate, stream as streamInference } from "./inference/run.js";
 
 import {
   HeartbeatService,
@@ -417,8 +419,16 @@ export function createOperatorDaemon(
   const recentBriefLimit = cfg.recentBriefLimit ?? DEFAULT_RECENT_BRIEF_LIMIT;
   const recentBriefJobIds = cfg.recentBriefJobIds ?? [jobId];
   const tickPromptTemplate = cfg.tickPrompt ?? DEFAULT_TICK_PROMPT;
-  const generateImpl = cfg.generateTextImpl ?? generateText;
-  const streamImpl = cfg.streamTextImpl ?? streamText;
+  // Every tick — real or with an injected SDK-compatible impl — executes
+  // through the unified boundary; the injected impl only replaces the SDK call.
+  const inferenceCtx = {
+    purpose: "operator_tick",
+    route: cfg.inferenceRoute?.via === "openshell" ? ("openshell" as const) : ("direct" as const),
+  };
+  const generateImpl = ((params: Parameters<typeof generateText>[0]) =>
+    generate(inferenceCtx, params, cfg.generateTextImpl)) as unknown as typeof generateText;
+  const streamImpl = ((params: Parameters<typeof streamText>[0]) =>
+    streamInference(inferenceCtx, params, cfg.streamTextImpl)) as unknown as typeof streamText;
 
   const heartbeat =
     cfg.heartbeat ??

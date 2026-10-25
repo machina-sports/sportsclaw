@@ -53,6 +53,14 @@ jobs:
         run: node --test test/*.test.mjs
       - name: CI smoke (engine boot + memory_loaded log)
         run: node test/ci-smoke.mjs
+      - name: Hosted caller-history HTTP contract (isolated, no API keys)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/relay-history-venv"
+          "$RUNNER_TEMP/relay-history-venv/bin/pip" install "aiohttp==3.14.3"
+          HIGHLIGHTS_JOBS_ROOT="$RUNNER_TEMP/relay-history-jobs" \
+          HIGHLIGHTS_MEDIA_ROOT="$RUNNER_TEMP/relay-history-media" \
+          PYTHONDONTWRITEBYTECODE=1 \
+          "$RUNNER_TEMP/relay-history-venv/bin/python" -m unittest discover -s docker/relay -p test_hosted_history.py
 
   # Live provider integration is intentionally not part of required CI: it
   # depends on repo-scoped API-key secrets that can expire or be unavailable in

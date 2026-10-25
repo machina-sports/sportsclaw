@@ -53,7 +53,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   odds: {
-    hint: "Show the spread/line, moneyline, and over/under. Include the sportsbook name. Format: '[Team A] -4.5 vs [Team B], O/U 225.5 (DraftKings)'.",
+    hint: "Compare the same event/date, market, period, line and selection on every requested venue; if neither the request nor prior conversation specifies a market, start with the full-game moneyline and say so. Compact result first: one short line per venue with the exact quote and sign, price type (bid/ask/last) and quote time; say explicitly when a venue or its matching market is missing. No unrelated schedules or prop dumps. Convert odds only with the betting convert_odds or another calculation tool; if it is unavailable, keep the original quotes and omit derived odds.",
     expectedToolPatterns: ["odds", "bet", "line"],
     requiredKeywords: [],
   },
@@ -83,7 +83,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   analysis: {
-    hint: "Structure: situation → data → take. Back every claim with actual numbers from tools. End with a clear verdict. No wishy-washy conclusions.",
+    hint: "Structure: situation → data → take. Back every claim with actual numbers from tools. End with a clear verdict on what was checked. For arbitrage, count only executable complementary prices on the same event and settlement terms, net of fees, with available size/liquidity and matching quote timestamps; anything else is an indicative spread, not a verified opportunity. If the scan is incomplete, report the checked scope only; never conclude that no risk-free arb exists anywhere. No allocation worksheet unless asked.",
     expectedToolPatterns: [],
     requiredKeywords: [],
   },
@@ -118,6 +118,7 @@ export function buildTemplatePrompt(intent: QueryIntent): string {
     "## Response Shape",
     "",
     `Detected query type: **${intent.replace(/_/g, " ")}**`,
+    "Apply this shape only when consistent with the current request, retained conversation scope and available evidence. Do not add unrelated markets or fields.",
     "",
     t.hint,
   ].join("\n");

@@ -28,8 +28,6 @@
 
 import { randomUUID } from "node:crypto";
 
-import { generateText } from "ai";
-
 import { resolveModel } from "../llm-providers.js";
 import { openShellEndpointIssues, resolveOpenShellEndpoint } from "../openshell-native.js";
 import type { NativeApiMode, NativeEndpoint } from "../types.js";
@@ -43,6 +41,8 @@ import {
   type InferenceTaskSource,
   type InferenceTrace,
 } from "./inference-task.js";
+import { generate } from "./run.js";
+import type { InferenceContext, InferenceReceipt } from "./receipt.js";
 
 // ---------------------------------------------------------------------------
 // Route config — where each role runs. Hardware is metadata, not contract.
@@ -221,6 +221,81 @@ export interface InvokeModelRoleArgs<TInput = unknown> {
   taskId?: string;
   /** Free-form metadata attached to the task envelope. */
   meta?: Record<string, unknown>;
+  /** Cancels the in-flight native request (not only the caller's wait). */
+  abortSignal?: AbortSignal;
+  /** Per-call sanitized receipt observer (no endpoint, prompt or output). */
+  onReceipt?: (receipt: InferenceReceipt) => void;
+}
+
+/**
+ * Resolve the native endpoint for an already-validated `openshell` / `nim`
+ * route. The single place the role security rules live:
+ *   - openshell: `resolveOpenShellEndpoint` (OPENSHELL_SANDBOX=1, profile
+ *     credential from the workload env only, isolated transport);
+ *   - nim: explicit `baseUrl`, else NIM_BASE_URL / OPENAI_BASE_URL from `env`.
+ * Throws (never falls back to a cloud client) when a route cannot be resolved.
+ * `env` is explicit; it defaults to `process.env`.
+ */
+export function resolveNativeRoleEndpoint(
+  routeConfig: ModelRoleRouteConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): NativeEndpoint {
+  if (routeConfig.route === "openshell") {
+    return resolveOpenShellEndpoint(
+      "openai",
+      {
+        baseUrl: routeConfig.baseUrl,
+        credentialEnv: routeConfig.credentialEnv,
+        credentialless: routeConfig.credentialless,
+        apiMode: routeConfig.apiMode,
+        timeoutMs: routeConfig.timeoutMs,
+      },
+      env,
+    ) as NativeEndpoint;
+  }
+  if (routeConfig.route === "nim") {
+    const baseUrl = routeConfig.baseUrl ?? env.NIM_BASE_URL ?? env.OPENAI_BASE_URL;
+    if (!baseUrl) {
+      throw new Error(
+        "no NIM endpoint configured — set baseUrl in the role config or NIM_BASE_URL / OPENAI_BASE_URL in the environment.",
+      );
+    }
+    // NIM endpoints are keyless here; the client just needs a non-empty key.
+    return { baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs };
+  }
+  throw new Error(`route "${routeConfig.route}" has no native endpoint`);
+}
+
+const NATIVE_ROUTE_KEYS: ReadonlySet<string> = new Set([
+  "route", "model", "locality", "accelerator", "baseUrl", "credentialEnv", "credentialless", "apiMode", "timeoutMs",
+]);
+
+/**
+ * Build a model for a server-owned native route config (`nim` / `openshell`
+ * only, `model` required, existing route validation + resolver). Throws on
+ * anything invalid or unresolvable — callers must not fall back to a cloud
+ * client. Returns the route label for receipts.
+ */
+export function resolveNativeRouteModel(
+  raw: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): { model: ReturnType<typeof resolveModel>; route: "nim" | "openshell" } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("native route config must be an object");
+  const config = raw as Record<string, unknown>;
+  if (Object.keys(config).some((key) => !NATIVE_ROUTE_KEYS.has(key))) {
+    throw new Error("native route config has unsupported keys");
+  }
+  if (config.route !== "nim" && config.route !== "openshell") {
+    throw new Error("native route must be nim or openshell");
+  }
+  const check = validateModelRoleRouterConfig({ roles: { brain: config } });
+  if (!check.ok) throw new Error(`invalid native route config: ${check.error}`);
+  const routeConfig = config as unknown as ModelRoleRouteConfig;
+  const endpoint = resolveNativeRoleEndpoint(routeConfig, env);
+  return {
+    model: resolveModel("openai", routeConfig.model, endpoint),
+    route: routeConfig.route as "nim" | "openshell",
+  };
 }
 
 /** Serialize arbitrary role input into a prompt for chat-shaped routes. */
@@ -235,9 +310,11 @@ function toPrompt(input: unknown): string {
 async function runChatRoute(
   envelope: InferenceTaskEnvelope,
   endpoint: NativeEndpoint,
+  ctx: InferenceContext,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   const model = resolveModel("openai", envelope.model, endpoint);
-  const res = await generateText({ model, prompt: toPrompt(envelope.input) });
+  const res = await generate(ctx, { model, prompt: toPrompt(envelope.input), abortSignal });
   return res.text;
 }
 
@@ -308,35 +385,16 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
       case "mock":
         output = { mock: true, role, model: routeConfig.model, echo: input };
         break;
-      case "openshell": {
-        // Guard + credential lookup happen here, before any request.
-        const endpoint = resolveOpenShellEndpoint("openai", {
-          baseUrl: routeConfig.baseUrl,
-          credentialEnv: routeConfig.credentialEnv,
-          credentialless: routeConfig.credentialless,
-          apiMode: routeConfig.apiMode,
-          timeoutMs: routeConfig.timeoutMs,
-        }) as NativeEndpoint;
-        output = await runChatRoute(envelope, endpoint);
-        break;
-      }
+      case "openshell":
       case "nim": {
-        const baseUrl =
-          routeConfig.baseUrl ??
-          process.env.NIM_BASE_URL ??
-          process.env.OPENAI_BASE_URL;
-        if (!baseUrl) {
-          return fail(
-            "no NIM endpoint configured — set baseUrl in the role config or NIM_BASE_URL / OPENAI_BASE_URL in the environment.",
-          );
-        }
-        // NIM endpoints are keyless here; the client just needs a non-empty key.
-        output = await runChatRoute(envelope, {
-          baseUrl,
-          apiKey: "unused",
-          apiMode: routeConfig.apiMode,
-          timeoutMs: routeConfig.timeoutMs,
-        });
+        // Guard + credential lookup happen here, before any request.
+        const endpoint = resolveNativeRoleEndpoint(routeConfig);
+        output = await runChatRoute(
+          envelope,
+          endpoint,
+          { purpose: "model_role", route: routeConfig.route, onReceipt: args.onReceipt },
+          args.abortSignal,
+        );
         break;
       }
     }

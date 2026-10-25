@@ -38,6 +38,7 @@ import {
   type DecisionReceipt,
   type DecisionTransport,
 } from "../decision-client.js";
+import { decide as runDecision } from "../inference/decide.js";
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -273,7 +274,9 @@ export class CapabilityRouter {
       return { status: "clarify", reasonCode: "no_deterministic_result", source: "deterministic" };
     }
 
-    const result = await this.client.decide(
+    const result = await runDecision(
+      { purpose: "capability_routing" },
+      this.client,
       { state: buildState(snapshot), questions: buildQuestions(snapshot) },
       { abortSignal: options.abortSignal }
     );

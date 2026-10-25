@@ -28,6 +28,7 @@ import {
   type ChoiceQuestion,
   type DecisionTransport,
 } from "./decision-client.js";
+import { decide as runTypedDecision } from "./inference/decide.js";
 import type {
   EvidenceChoiceLabel,
   EvidenceCriterionKey,
@@ -303,7 +304,9 @@ export async function runJevDecision(params: {
     return receipt("unavailable", "invalid_settings");
   }
 
-  const result = await client.decide(
+  const result = await runTypedDecision(
+    { purpose: "evidence_decision" },
+    client,
     { state, questions: buildChoiceQuestions() },
     { abortSignal: params.abortSignal }
   );
