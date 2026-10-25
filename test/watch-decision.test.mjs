@@ -183,6 +183,18 @@ it("defines sports-information lists separately from monitoring subscriptions in
   assert.equal(generative.length, 0);
 });
 
+it("passes only validated public reference descriptions, not opaque reference keys, to the target decision", async () => {
+  const body = targetBody("Watch that match", { referenceIds: [CANDIDATES[1].id] });
+  const h = jev(q => choice(q, optionFor(q, CANDIDATES[1].label), { confidence: 1 }));
+  const { result } = await decide(body, { transport: h.transport });
+  const wire = h.calls[0].wire;
+  assert.deepEqual(wire.state.previouslyDiscussedCandidates, [CANDIDATES[1].label]);
+  assert.equal(Object.hasOwn(wire.state, "referenced"), false);
+  const [, question] = onlyQuestion(wire);
+  assert.match(question.criteria[optionFor(question, CANDIDATES[1].label)], /^Previously discussed public match:/);
+  assert.equal(result.selection.targetId, CANDIDATES[1].id);
+});
+
 function assertFailure(result, reasonCode, label = reasonCode) {
   assert.deepEqual(result, { contract: D, ok: false, reasonCode }, label);
 }
