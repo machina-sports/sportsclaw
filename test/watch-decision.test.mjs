@@ -170,6 +170,19 @@ async function decide(body, { env = ENV, transport = jev().transport, abortSigna
   return { result, generative };
 }
 
+it("defines sports-information lists separately from monitoring subscriptions in the real decision payload", async () => {
+  const h = jev((question) => {
+    assert.match(question.criteria.ordinary, /live games, fixtures, schedules, scores/);
+    assert.match(question.criteria.list_available, /NOT a list of games/);
+    assert.match(question.instructions, /including short noun phrases/);
+    return choice(question, "ordinary", { confidence: 1 });
+  });
+  const { result, generative } = await decide(intentBody("Live games today"), { transport: h.transport });
+  assert.equal(result.intent, "none");
+  assert.equal(h.calls.length, 1);
+  assert.equal(generative.length, 0);
+});
+
 function assertFailure(result, reasonCode, label = reasonCode) {
   assert.deepEqual(result, { contract: D, ok: false, reasonCode }, label);
 }
