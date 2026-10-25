@@ -498,11 +498,19 @@ export interface EvidenceVerifierConfig {
   confidenceThreshold?: number;
   /** Use the generative verifier when a decision is ambiguous. Default: false. */
   fallbackToGenerative?: boolean;
+  /**
+   * Deployment-owned action when the generative checker flags a draft.
+   * "retain" (default) keeps the draft and traces the flags; "correct" opts in
+   * to one correction plus the bounded recheck. Invalid values refuse.
+   */
+  generativeAction?: EvidenceGenerativeAction;
   /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   /** Environment source for opt-in and credential lookup. Defaults to process.env. */
   env?: Record<string, string | undefined>;
 }
+
+export type EvidenceGenerativeAction = "retain" | "correct";
 
 /** Validated settings produced by resolveEvidenceVerifierSettings(). */
 export interface ResolvedEvidenceVerifierSettings {
@@ -512,6 +520,7 @@ export interface ResolvedEvidenceVerifierSettings {
   timeoutMs: number;
   confidenceThreshold: number;
   fallbackToGenerative: boolean;
+  generativeAction: EvidenceGenerativeAction;
   /** True only when the Jev verifier may run. Never carries the credential. */
   enabled: boolean;
   /** Why a requested verifier is not enabled, e.g. "local_only". */
@@ -762,9 +771,20 @@ export type ToolProgressEvent =
     }
   | { type: "synthesizing" };
 
+/** One prior turn of a caller-owned transcript. No system/developer/tool roles. */
+export interface CallerHistoryEntry {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface RunOptions {
   /** Caller mode leaves transcript ownership to the API caller; durable memory remains enabled. */
   historyMode?: "caller" | "engine";
+  /**
+   * Caller-owned prior turns (caller mode only), excluding the current prompt.
+   * Restored as plain user/assistant messages; never persisted by the engine.
+   */
+  history?: CallerHistoryEntry[];
   /** User or thread ID for memory isolation. If omitted, memory is disabled. */
   userId?: string;
   /** Exactly one native agent ID to select explicitly for this run. */
@@ -809,6 +829,13 @@ export interface McpServerConfig {
   description?: string;
   /** Origin of this server config (e.g. "machina" when added via `sportsclaw machina connect`). */
   provider?: "machina";
+  /**
+   * Deployment-owned: keep this server's raw tools, description and pod
+   * inventory away from the model. Only trusted in-process callers (e.g.
+   * PodMemoryStorage via callToolDirect) can reach it. Fails closed: any value
+   * other than absent or literal `false` is treated as internal-only.
+   */
+  internalOnly?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,19 @@ describe("one-shot CLI user propagation", () => {
     );
   });
 
+  it("preserves caller transcript and session through the shared runner", async () => {
+    const history = [{ role: "user", content: "synthetic prior turn" }, { role: "assistant", content: "synthetic answer" }];
+    let received;
+    await runOneShotEngine({ run: async (_prompt, options) => { received = options; return "ok"; } }, "current", {
+      userId: "synthetic-scope", agentIds: [], delegated: false,
+      historyMode: "caller", sessionId: "synthetic-session", history,
+    });
+    assert.equal(received.userId, "synthetic-scope");
+    assert.equal(received.sessionId, "synthetic-session");
+    assert.deepEqual(received.history, history);
+    assert.equal(received.historyMode, "caller");
+  });
+
   it("routes headless, verbose, and normal CLI branches through the shared user-aware runner", () => {
     const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
     const calls = [...source.matchAll(/runOneShotEngine\(engine, prompt, \{([\s\S]*?)\n\s*\}\);/g)];

@@ -49,8 +49,15 @@ Explicit programmatic settings take precedence over environment settings. `env` 
 | `SPORTSCLAW_EVIDENCE_TIMEOUT_MS` | `timeoutMs` | `8000` |
 | `SPORTSCLAW_EVIDENCE_CONFIDENCE` | `confidenceThreshold` | `0.9` |
 | `SPORTSCLAW_EVIDENCE_FALLBACK` | `fallbackToGenerative` | disabled |
+| `SPORTSCLAW_EVIDENCE_ACTION` | `generativeAction` | `retain` |
 
 Models must use a pinned `jev-X.Y.Z` identifier. Timeout accepts 250–60000 milliseconds and confidence accepts 0.5–1. Invalid settings resolve to conservative defaults and are reported by `resolveEvidenceVerifierSettings().diagnostics`. No key is stored by the settings resolver.
+
+### Generative action
+
+`generativeAction` decides what happens when the **generative** checker flags a draft. `retain` (the default) keeps the draft and records the flags in the run trace. `correct` is a deployment opt-in that preserves the earlier hosted intent of correcting actionable discrepancies: the main model makes one correction through the existing correction pass, and the existing bounded recheck must confirm it. If the correction can't be produced, the recheck still finds a problem, or the recheck can't return a verdict, the answer is refused. The contradicted draft and an unchecked correction are never shipped. With a partial evidence view, flags that only mark a claim as not visible still don't trigger a rewrite.
+
+This isn't the legacy correction algorithm, it adds no provider route or vendor redirection, and it doesn't make the checker more accurate. An unrecognised value refuses verification before any verifier or model call instead of silently falling back to `retain`. Jev decisions, consent, fallback and abort rules are unchanged.
 
 **`local_only` applies to this optional verifier, not to the whole engine.** Main answer generation and other tools retain their existing provider/data policies. With Jev selected and cloud consent withheld, neither Jev nor a generative verification fallback runs.
 

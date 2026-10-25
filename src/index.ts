@@ -43,6 +43,23 @@
   };
 }
 
+// Unified inference boundary — first-class library API. Runtime model calls
+// (generation, streaming, native images, typed Jev decisions) go through these.
+export {
+  generate as generateInference,
+  stream as streamInference,
+  image as imageInference,
+  INFERENCE_ERROR_CODES,
+  type InferenceContext,
+  type InferenceErrorCode,
+  type InferenceKind,
+  type InferenceReceipt,
+  type InferenceRouteLabel,
+  type InferenceStatus,
+} from "./inference/run.js";
+export { decide as decideInference } from "./inference/decide.js";
+export { INFERENCE_PURPOSES } from "./inference/receipt.js";
+
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
@@ -50,6 +67,7 @@ import { createWriteStream, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
+import { text } from "node:stream/consumers";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { formatResponse } from "./formatters/index.js";
@@ -80,6 +98,7 @@ import {
   DEFAULT_SKILLS,
 } from "./schema.js";
 import type { ToolProgressEvent, McpServerConfig, RunOptions } from "./types.js";
+import { validateCallerHistory, validateSessionId } from "./caller-history.js";
 import {
   loadConfig,
   resolveConfig,
@@ -2308,6 +2327,8 @@ function emitNdjson(event: Record<string, unknown>): void {
 
 export function buildOneShotRunOptions(params: {
   historyMode?: RunOptions["historyMode"];
+  sessionId?: RunOptions["sessionId"];
+  history?: RunOptions["history"];
   userId?: string;
   systemPrompt?: string;
   agentIds: string[];
@@ -2318,6 +2339,8 @@ export function buildOneShotRunOptions(params: {
 }): RunOptions {
   return {
     ...(params.historyMode ? { historyMode: params.historyMode } : {}),
+    ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+    ...(params.history !== undefined ? { history: params.history } : {}),
     userId: params.userId,
     systemPrompt: params.systemPrompt,
     ...(params.agentIds.length > 0 ? { agentIds: params.agentIds } : {}),
@@ -2345,6 +2368,97 @@ export function takeOneShotUserId(args: string[]): string | undefined {
   const userId = args[userIdx + 1];
   args.splice(userIdx, 2);
   return userId;
+}
+
+/** Parse --session-id <id>: an opaque caller session, independent of --user. */
+export function takeOneShotSessionId(args: string[]): string | undefined {
+  const idx = args.indexOf("--session-id");
+  if (idx < 0) return undefined;
+  if (idx + 1 >= args.length || args[idx + 1].startsWith("--")) {
+    throw new Error("--session-id requires a session id");
+  }
+  const sessionId = validateSessionId(args[idx + 1]);
+  args.splice(idx, 2);
+  return sessionId;
+}
+
+/**
+ * --history-stdin: read `{"history": [...], "images"?: [...]}` from stdin
+ * (caller mode only). History never travels through argv or the environment.
+ */
+export function takeOneShotHistory(
+  args: string[],
+  historyMode: RunOptions["historyMode"],
+  readStdin: () => string = () => readFileSync(0, "utf-8"),
+): Pick<RunOptions, "history" | "images"> | undefined {
+  const idx = args.indexOf("--history-stdin");
+  if (idx < 0) return undefined;
+  if (historyMode !== "caller") throw new Error("--history-stdin requires --history-mode caller");
+  args.splice(idx, 1);
+  // Read outside the parse guard so a stdin failure is not reported as bad JSON.
+  const input = readStdin();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    throw new Error("--history-stdin expects a JSON object with a history array");
+  }
+  const keys = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed) : [];
+  if (!keys.includes("history") || keys.some((key) => key !== "history" && key !== "images")) {
+    throw new Error("--history-stdin expects a JSON object with a history array and optional images");
+  }
+  const { history, images } = parsed as { history: unknown; images?: unknown };
+  if (
+    images !== undefined &&
+    (!Array.isArray(images) || !images.every((img) =>
+      img && typeof img === "object" && typeof img.data === "string" && typeof img.mimeType === "string"))
+  ) {
+    throw new Error("--history-stdin images must be an array of {data, mimeType} strings");
+  }
+  return {
+    history: validateCallerHistory(history),
+    ...(images ? { images: images as NonNullable<RunOptions["images"]> } : {}),
+  };
+}
+
+/**
+ * Conversation flags for one-shot queries: --session-id, --history-mode and
+ * --history-stdin. Removes them from `args`. Legacy calls without these flags
+ * get an empty object, so their run options are unchanged.
+ */
+export function takeOneShotConversation(
+  args: string[],
+  readStdin?: () => string,
+): Pick<RunOptions, "historyMode" | "sessionId" | "history" | "images"> {
+  const sessionId = takeOneShotSessionId(args);
+  const historyIdx = args.indexOf("--history-mode");
+  const historyMode = historyIdx >= 0 ? args[historyIdx + 1] : "engine";
+  if (historyMode !== "caller" && historyMode !== "engine") {
+    throw new Error("--history-mode must be caller or engine");
+  }
+  if (historyIdx >= 0) args.splice(historyIdx, 2);
+  return {
+    ...(historyIdx >= 0 ? { historyMode } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...takeOneShotHistory(args, historyMode, readStdin),
+  };
+}
+
+/**
+ * Reads all of stdin for caller-mode --history-stdin. readFileSync(0) can
+ * throw EAGAIN on a nonblocking pipe before the full payload arrives, so
+ * large relay payloads are awaited to EOF. Calls that fail before the read (no
+ * --history-stdin, not caller mode) never touch stdin.
+ */
+async function readHistoryStdin(args: string[]): Promise<(() => string) | undefined> {
+  const modeIdx = args.indexOf("--history-mode");
+  if (!args.includes("--history-stdin") || modeIdx < 0 || args[modeIdx + 1] !== "caller") return undefined;
+  try {
+    const input = await text(process.stdin);
+    return () => input;
+  } catch (error: unknown) {
+    throw new Error(`--history-stdin could not read stdin: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2495,12 +2609,11 @@ async function cmdQuery(args: string[]): Promise<void> {
 
   // Parse --user <id> flag (used by relay/pipe to enable memory & thread persistence)
   const userId = takeOneShotUserId(args);
-  const historyIdx = args.indexOf("--history-mode");
-  const historyMode = historyIdx >= 0 ? args[historyIdx + 1] : "engine";
-  if (historyMode !== "caller" && historyMode !== "engine") {
-    throw new Error("--history-mode must be caller or engine");
-  }
-  if (historyIdx >= 0) args.splice(historyIdx, 2);
+
+  // Parse --session-id / --history-mode / --history-stdin (used by relay for
+  // caller-owned history). Spread into every engine.run below.
+  const conversation = takeOneShotConversation(args, await readHistoryStdin(args));
+  const historyMode = conversation.historyMode ?? "engine";
 
   // Parse --system-prompt <text> flag (used by relay to inject caller context)
   let systemPrompt: string | undefined;
@@ -2637,6 +2750,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         delegated,
         images: inboundImages,
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
+        ...conversation,
       });
       const formatted = formatResponse(result, formatArg as any);
       for (const img of engine.generatedImages) {
@@ -2677,6 +2791,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         systemPrompt,
         agentIds,
         delegated,
+        ...conversation,
       });
       console.log(renderMarkdown(result));
       await saveGeneratedImages(engine);
@@ -2709,6 +2824,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         delegated,
         onProgress: tracker.handler,
         abortSignal: cancel.abortSignal,
+        ...conversation,
       });
       s.stop(tracker.doneSummary());
       console.log(renderMarkdown(result));

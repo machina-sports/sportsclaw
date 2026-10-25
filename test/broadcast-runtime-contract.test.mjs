@@ -14,8 +14,8 @@ test("capability discovery accepts actual singular workflow name and legacy plur
     const manager = new McpManager();
     manager.routeMap.set(`mcp__pod__${name}`, {});
     const calls = [];
-    manager.callTool = async (tool) => {
-      calls.push(tool);
+    manager.callToolDirect = async (server, tool) => {
+      calls.push(`mcp__${server}__${tool}`);
       return { content: JSON.stringify([{ name: "generate-poll-bank" }]), isError: false };
     };
     await manager.discoverCapabilities("pod");

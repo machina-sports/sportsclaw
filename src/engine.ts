@@ -11,12 +11,13 @@
  */
 
 import {
-  generateText,
   tool as defineTool,
   jsonSchema,
   stepCountIs,
   type ToolSet,
 } from "ai";
+
+import { generate } from "./inference/run.js";
 
 import { resolveModel, resolveAuthForModel } from "./llm-providers.js";
 
@@ -120,7 +121,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { createGenerateImageTool } from "./image-gen.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";
-import { getSportDisplayName } from "./buttons.js";
+import { validateCallerHistory } from "./caller-history.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import {
   buildResultOverview,
@@ -381,49 +382,7 @@ function resolveTokenBudgets(overrides?: Partial<TokenBudgets>): TokenBudgets {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Patterns that indicate internal tool intents (upgrade, config, etc.) — not sport queries */
-const INTERNAL_INTENT_PATTERNS = [
-  /\b(upgrade|update|refresh)\b.*\b(sports?.?skills?|tools?|package)\b/i,
-  /\b(install|add|remove|uninstall)\b.*\bsports?\b/i,
-  /\b(config|configure|setup|settings)\b/i,
-];
-
-/** Returns true when the prompt targets an internal tool, not a sport query */
-function isInternalToolIntent(prompt: string): boolean {
-  return INTERNAL_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate conversational intents (greetings, pleasantries) — not sport queries */
-const CONVERSATIONAL_INTENT_PATTERNS = [
-  /^(hi|hello|hey|sup|yo|what'?s up|howdy|good morning|gm|gn)\b/i,
-  /^(how are you|how'?s it going|what are you up to|who are you|how are things)\b/i,
-  /^thanks?\b/i,
-];
-
-/** Returns true when the prompt is purely conversational */
-function isConversationalIntent(prompt: string): boolean {
-  return CONVERSATIONAL_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate MCP/pod-related intents — not sport queries */
-const MCP_INTENT_PATTERNS = [
-  // CRUD + pod entity noun
-  /\b(search|list|find|show|get|browse|create|save|store|update|delete|remove|execute|run)\b.*\b(document|workflow|agent|connector|prompt|template)\b/i,
-  // Pod entity noun + CRUD
-  /\b(document|workflow|agent|connector|prompt|template)\b.*\b(search|list|find|show|get|create|save|store|update|delete|remove|execute|run)\b/i,
-  // Direct pod/machina references
-  /\b(pod|machina|mcp)\b/i,
-  // "what's in the pod" / "what do I have" patterns
-  /\bwhat\b.*\b(document|workflow|agent|connector|capabilities?|installed|available)\b/i,
-  // Template operations
-  /\b(install|import).*template\b/i,
-];
-
-function isMcpIntent(prompt: string): boolean {
-  return MCP_INTENT_PATTERNS.some((p) => p.test(prompt));
-}
-
-/** Patterns that indicate visual-generation intents — bypass sport clarification */
+/** Patterns that indicate visual-generation intents — route to visual agents */
 const VISUAL_INTENT_PATTERNS = [
   // Direct mentions of unambiguous visual-artifact nouns
   /\b(image|images|poster|posters|infographic|infographics|illustration|illustrations|wallpaper|wallpapers|mockup|mock-?up|mockups)\b/i,
@@ -1310,7 +1269,7 @@ export class sportsclawEngine {
       .map((item, idx) => `Successful source ${idx + 1} output:\n${item.output}`)
       .join("\n\n");
     try {
-      const res = await generateText({
+      const res = await generate({ purpose: "verification" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         system:
@@ -1462,7 +1421,7 @@ export class sportsclawEngine {
         : "";
 
     try {
-      const res = await generateText({
+      const res = await generate({ purpose: "synthesis" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         system: [
@@ -1544,7 +1503,8 @@ export class sportsclawEngine {
   /**
    * Validate the final response text against raw tool outputs. The default
    * (generative) checker flags discrepancies in the run trace and keeps the
-   * draft; the opt-in Jev verifier still corrects and rechecks.
+   * draft unless the deployment opts into generativeAction "correct"; the
+   * opt-in Jev verifier still corrects and rechecks.
    */
   private async validateResponseEvidence(params: {
     userPrompt: string;
@@ -1565,6 +1525,9 @@ export class sportsclawEngine {
     // stands. Discarding grounded work over an infrastructure hiccup left the
     // user with nothing after a dozen successful tool calls.
     const unverified = (reason: string) => {
+      // A recheck judges a correction made because the draft was contradicted:
+      // neither that draft nor the unchecked correction may ship.
+      if (params.correctionAttempted) return unavailable;
       if (this._verifyNotes) this._verifyNotes.unverified = true;
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation did not complete (${reason}); returning the drafted answer`);
@@ -1612,6 +1575,22 @@ export class sportsclawEngine {
     // --- Optional decision verifier (opt-in; default path is untouched) ---
     const verifierConfig = this.config.evidenceVerifier;
     const settings = resolveEvidenceVerifierSettings(verifierConfig);
+    // A misconfigured deployment policy refuses before any verifier is called.
+    if (settings.diagnostics.includes("invalid_generativeAction")) {
+      if (this.config.verbose) console.error("[sportsclaw] invalid evidence action; refusing to verify");
+      return unavailable;
+    }
+    // One correction on the main model, then the existing bounded recheck.
+    const correctAndRecheck = async (discrepancies: Verdict["discrepancies"]): Promise<string> => {
+      if (params.correctionAttempted || params.abortSignal?.aborted) return unavailable;
+      discrepanciesFound = true;
+      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
+      const corrected = await this.correctAgainstEvidence({
+        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
+      });
+      if (!corrected) return unavailable;
+      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
+    };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
     if (settings.provider === "jev") {
       if (!settings.enabled) {
@@ -1650,16 +1629,7 @@ export class sportsclawEngine {
         }
       }
     }
-    if (jevDiscrepancies) {
-      if (params.correctionAttempted) return unavailable;
-      discrepanciesFound = true;
-      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
-      const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: jevDiscrepancies,
-      });
-      if (!corrected) return unavailable;
-      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
-    }
+    if (jevDiscrepancies) return correctAndRecheck(jevDiscrepancies);
 
     // A verdict that will not parse is the checker misbehaving, not a finding
     // about the draft. Ask once more before deciding the check cannot run.
@@ -1679,7 +1649,7 @@ export class sportsclawEngine {
     };
     try {
       // Step 1: LLM-driven verification pass to detect conflicts
-      const validationRes = await generateText({
+      const validationRes = await generate({ purpose: "verification" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         system:
@@ -1727,7 +1697,7 @@ export class sportsclawEngine {
       this.notePass("verification", usageOf(validationRes));
       let parsed = readVerdict(validationRes.text);
       if (!parsed) {
-        const retryRes = await generateText({
+        const retryRes = await generate({ purpose: "verification" }, {
           model: this.mainModel,
           ...this.samplingOptions(),
           system: partialViewRule + failedToolsRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
@@ -1762,6 +1732,12 @@ export class sportsclawEngine {
         return draft; // clean!
       }
       if (params.correctionAttempted) return unavailable;
+
+      // Opt-in "correct" preserves the hosted deployment's correction intent
+      // through the existing correction pass and bounded recheck. It is not the
+      // legacy algorithm, adds no provider route, and makes the checker no more
+      // accurate; an unconfirmed correction is refused, never shipped.
+      if (settings.generativeAction === "correct") return await correctAndRecheck(actionable);
 
       if (this.config.verbose) {
         console.error(
@@ -1806,7 +1782,7 @@ export class sportsclawEngine {
   }): Promise<string | undefined> {
     const { userPrompt, draft, serializedToolOutputs } = params;
     try {
-      const correctionRes = await generateText({
+      const correctionRes = await generate({ purpose: "correction" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         system:
@@ -3050,7 +3026,7 @@ export class sportsclawEngine {
           const model = this.mainModel;
 
           const summarize = async (content: string, existing: string): Promise<string> => {
-            const res = await generateText({
+            const res = await generate({ purpose: "compaction" }, {
               model,
               ...this.samplingOptions(),
               system: [
@@ -4110,7 +4086,7 @@ export class sportsclawEngine {
     ].join("\n");
 
     let mainSystemPromptSha256: string | undefined;
-    const result = await generateText({
+    const result = await generate({ purpose: "chat" }, {
       model: this.mainModel,
       ...this.samplingOptions(),
       system: (mainSystemPromptSha256 = sha256(system), system),
@@ -4212,7 +4188,7 @@ export class sportsclawEngine {
     // Use a lightweight LLM call to produce a compact summary
     let summary: string;
     try {
-      const result = await generateText({
+      const result = await generate({ purpose: "compaction" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         system:
@@ -4263,6 +4239,12 @@ export class sportsclawEngine {
   }
 
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    if (options?.history !== undefined && options.historyMode !== "caller") {
+      throw new Error("history is only accepted with historyMode caller");
+    }
+    const callerHistory = options?.history !== undefined ? validateCallerHistory(options.history) : undefined;
+    const callerMode = options?.historyMode === "caller";
+
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
@@ -4280,8 +4262,10 @@ export class sportsclawEngine {
       nativeAgentId,
       options?.sessionId,
     );
+    // Caller mode: the caller owns the transcript, so every run starts clean
+    // and never inherits a previous run's (or another chat's) turns.
     if (
-      options?.historyMode === "caller" ||
+      callerMode ||
       (this._conversationNamespace &&
       this._conversationNamespace !== activeConversationNamespace)
     ) {
@@ -4422,11 +4406,6 @@ export class sportsclawEngine {
       }
     }
 
-    // Track whether this is a follow-up turn in an ongoing conversation.
-    // When true, the LLM already has conversation history and can resolve
-    // ambiguity itself — no need to short-circuit with a clarification prompt.
-    const isFollowUp = this.messages.length > 0;
-
     // Inject memory as a user-role message (not system prompt) to reduce
     // prompt injection surface area. Memory content is user-generated, so
     // it should not have system-level authority. Fresh memory is injected
@@ -4474,6 +4453,25 @@ export class sportsclawEngine {
         }
       }
     }
+
+    // Caller-owned transcript: plain user/assistant turns after the caller
+    // reset, sanitized like the prompt and never promoted to system. A trailing
+    // copy of the current message is the current turn, sent once below.
+    if (callerHistory) {
+      const restored = callerHistory
+        .map(({ role, content }) => ({ role, content: sanitizeInput(content).sanitized }))
+        .filter((entry) => entry.content);
+      const last = restored.at(-1);
+      if (last?.role === "user" && last.content === sanitizedPrompt) restored.pop();
+      this.messages.push(...restored);
+    }
+
+    // A follow-up has real prior turns (in-memory, session, restored thread or
+    // caller history), checked before the current message is appended and
+    // before routing. The [MEMORY] injection alone is not a prior turn.
+    const isFollowUp = this.messages.some(
+      (m) => (m.role === "user" || m.role === "assistant") && !String(m.content).startsWith("[MEMORY]")
+    );
 
     if (options?.images && options.images.length > 0) {
       const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
@@ -4656,73 +4654,8 @@ export class sportsclawEngine {
       }
     }
 
-    // --- Confidence-based clarification ---
-    // Skip clarification on follow-up turns: the LLM already has conversation
-    // history and can resolve ambiguity from prior context.
-    // YOLO mode: never pause to clarify — the loop must not stall.
-    if (
-      this.config.clarifyOnLowConfidence &&
-      !this.config.yoloMode &&
-      !isFollowUp &&
-      routing.decision &&
-      routing.decision.confidence < this.config.clarifyThreshold &&
-      routing.decision.mode === "ambiguous" &&
-      !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt) &&
-      !isMcpIntent(sanitizedPrompt) &&
-      !isVisualIntent(sanitizedPrompt)
-    ) {
-      const clarification = `I'm not sure which sport you mean. Did you want:\n\n${routing.decision.selectedSkills.map((skill) => `- ${skill}`).join("\n")}\n\nPlease clarify your question.`;
-      // Push a matching assistant message so history stays coherent
-      // (prevents orphaned user message that corrupts subsequent LLM calls).
-      this.messages.push({ role: "assistant", content: [{ type: "text", text: clarification }] });
-      if (memory) {
-        try {
-          if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, clarification);
-          if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, clarification);
-        } catch (err) {
-          if (!hindsightMemory) throw err;
-          console.error(
-            `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
-          );
-        }
-      }
-      return clarification;
-    }
-
-    // --- Intent clarification (sport known, query purpose unclear) ---
-    // Fires when the router explicitly sets needs_clarification=true,
-    // meaning the sport is identified but what the user wants is genuinely
-    // ambiguous (e.g. bare "NBA" with no context). Gated behind the same
-    // clarifyOnLowConfidence flag as the sport-ambiguity gate above for
-    // consistency. Skip in YOLO and on follow-up turns.
-    if (
-      this.config.clarifyOnLowConfidence &&
-      !this.config.yoloMode &&
-      !isFollowUp &&
-      routing.decision?.needsClarification &&
-      routing.decision.selectedSkills.length > 0 &&
-      !isInternalToolIntent(sanitizedPrompt) &&
-      !isConversationalIntent(sanitizedPrompt) &&
-      !isVisualIntent(sanitizedPrompt)
-    ) {
-      const sport = routing.decision.selectedSkills[0];
-      const sportLabel = getSportDisplayName(sport);
-      const intentQ = `What would you like to know about ${sportLabel}? For example:\n- Live scores or game updates\n- Standings\n- Today's schedule\n- Betting odds or best bets\n- Player or team stats\n- Recent news`;
-      this.messages.push({ role: "assistant", content: [{ type: "text", text: intentQ }] });
-      if (memory) {
-        try {
-          if (options?.historyMode !== "caller") await memory.appendToThread(sanitizedPrompt, intentQ);
-          if (options?.historyMode !== "caller") await memory.appendExchange(sanitizedPrompt, intentQ);
-        } catch (err) {
-          if (!hindsightMemory) throw err;
-          console.error(
-            `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
-          );
-        }
-      }
-      return intentQ;
-    }
+    // No canned clarification: the main model sees the conversation and asks
+    // one tailored question itself when essential context is missing.
 
     // Capture detected intent for response template injection and evaluation
     const queryIntent = (routing.decision?.intent ?? "ambiguous") as QueryIntent;
@@ -4734,8 +4667,9 @@ export class sportsclawEngine {
     // --- Recent-context hint for the system prompt -------------------------
     // Compact summary of the user's last few turns. Lets the model resolve
     // follow-up references like "started already" or "what about the other
-    // game" without re-reading the full message array.
-    const recentContextHint = this.messages
+    // game" without re-reading the full message array. Caller history stays
+    // in its native turns and is never copied into the system prompt.
+    const recentContextHint = callerHistory ? undefined : this.messages
       .filter((m) => m.role === "user" && !String(m.content).startsWith("[MEMORY]"))
       .slice(-3, -1) // last 2 turns excluding the current one (just appended)
       .map((m) => String(m.content))
@@ -4778,7 +4712,7 @@ export class sportsclawEngine {
         const laneLabel = `${agent.name} (${this.mainModelId})`;
         emitProgress?.({ type: "phase", label: laneLabel });
 
-        return generateText({
+        return generate({ purpose: "chat_lane" }, {
           model: this.mainModel,
           ...this.samplingOptions(),
           system: this.buildSystemPrompt({
@@ -4865,7 +4799,7 @@ export class sportsclawEngine {
         responseText = agentTexts[0].replace(/^\[.*?\]\n/, "");
       } else {
         try {
-          const synthesisResult = await generateText({
+          const synthesisResult = await generate({ purpose: "synthesis" }, {
             model: this.mainModel,
             ...this.samplingOptions(),
             system:
@@ -4947,7 +4881,7 @@ export class sportsclawEngine {
       return system;
     };
     const callLLM = (messagesOverride?: Message[]) =>
-      generateText({
+      generate({ purpose: "chat" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
         // Composed fresh on each call so per-turn context (user prompt,

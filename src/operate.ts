@@ -70,27 +70,38 @@ const MODEL_ROLE_TIMEOUT_MS = 25_000;
 
 /** Governed wrapper around invokeModelRole exposed via SinkContext, so sinks run
  *  a second inference WITHOUT importing /app/dist internals. Bounded + fail-closed:
- *  only `completed` carries an output; timeout → timed_out, throw → failed. */
-function makeRunModelRole(): NonNullable<SinkContext["runModelRole"]> {
+ *  only `completed` carries an output; timeout → timed_out, throw → failed.
+ *  The timeout aborts the underlying native request, not only the wait. */
+export function makeRunModelRole(): NonNullable<SinkContext["runModelRole"]> {
   const invoke = invokeModelRole as (a: {
     role: string;
     input: unknown;
     source: string;
     config?: unknown;
+    abortSignal?: AbortSignal;
   }) => Promise<{ output?: unknown }>;
   return async ({ role = "brain", input, source, config, timeoutMs }) => {
     const started = Date.now();
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
     try {
       const res = await Promise.race([
-        invoke({ role, input, source: source ?? "sink", config }),
-        new Promise<never>((_r, rej) =>
-          setTimeout(() => rej(new Error("model role timeout")), timeoutMs ?? MODEL_ROLE_TIMEOUT_MS),
-        ),
+        invoke({ role, input, source: source ?? "sink", config, abortSignal: controller.signal }),
+        new Promise<never>((_r, rej) => {
+          timer = setTimeout(() => {
+            const timeout = new Error("model role timeout");
+            controller.abort(timeout);
+            rej(timeout);
+          }, timeoutMs ?? MODEL_ROLE_TIMEOUT_MS);
+        }),
       ]);
       return { status: "completed", output: res.output, latencyMs: Date.now() - started };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { status: /timeout/i.test(msg) ? "timed_out" : "failed", error: msg, latencyMs: Date.now() - started };
+      const timedOut = controller.signal.aborted || /timeout/i.test(msg);
+      return { status: timedOut ? "timed_out" : "failed", error: msg, latencyMs: Date.now() - started };
+    } finally {
+      clearTimeout(timer);
     }
   };
 }

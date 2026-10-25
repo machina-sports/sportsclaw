@@ -26,6 +26,7 @@ Endpoints:
     PATCH /api/agents/{id} → Update or inactivate a native agent
     POST /api/agents/delegate → One-hop query delegated to another native agent
     POST /api/decide       → Typed decision passthrough (no engine, opt-in)
+    POST /api/watch-intent → Typed watch-intent interpretation (no engine, opt-in)
     POST /api/highlights/jobs                     → Create a typed highlights job
     GET  /api/highlights/jobs/{job_id}            → Job status
     POST /api/highlights/jobs/{job_id}/cancel     → Cancel a job (terminal state)
@@ -38,7 +39,10 @@ Query body:
         "provider": "anthropic",           // optional, override provider
         "model": "claude-sonnet-4-5-...",  // optional, override model
         "agent_id": "analyst",             // optional, exact native agent
-        "verbose": false                   // optional, enable debug output
+        "verbose": false,                  // optional, enable debug output
+        "session_id": "opaque-id",         // optional, 1-128 printable chars
+        "history_mode": "caller",          // optional, caller | engine
+        "history": [{"role": "user", "content": "..."}]  // caller mode, /api/query/sync only
     }
 """
 
@@ -61,6 +65,7 @@ from decision_api import (
     decision_enabled,
     register_decision_routes,
 )
+from watch_intent_api import register_watch_intent_routes
 from highlights_jobs import (
     DEFAULT_JOB_TTL_SEC,
     DEFAULT_MAX_JOB_OUTPUT_BYTES,
@@ -77,6 +82,11 @@ DEFAULT_TIMEOUT = int(os.environ.get("RELAY_TIMEOUT", 180))
 MAX_QUERY_TIMEOUT = int(os.environ.get("RELAY_MAX_QUERY_TIMEOUT", 300))
 MAX_QUERY_CONCURRENCY = int(os.environ.get("RELAY_MAX_QUERY_CONCURRENCY", 4))
 MAX_PROMPT_CHARS = 20000
+# Mirrors src/caller-history.ts.
+MAX_HISTORY_ENTRIES = 40
+MAX_HISTORY_CHARS = 12000
+MAX_SESSION_ID_CHARS = 128
+HISTORY_CONTRACT = "structured-v1"
 if not 1 <= DEFAULT_TIMEOUT <= MAX_QUERY_TIMEOUT or MAX_QUERY_CONCURRENCY < 1:
     raise ValueError("invalid relay query limits")
 AGENT_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -160,6 +170,29 @@ def _query_agent_auth_error(
     return _agents_auth_error(request)
 
 
+def _validate_session_id(value: object) -> None:
+    """Opaque caller session id; mirrors validateSessionId in src/caller-history.ts."""
+    if (not isinstance(value, str) or not value or len(value) > MAX_SESSION_ID_CHARS
+            or value != value.strip() or value.startswith("-")
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+        raise ValueError(f"session_id must be 1-{MAX_SESSION_ID_CHARS} printable characters")
+
+
+def _validate_history(history: object) -> None:
+    """Caller-owned prior turns; mirrors validateCallerHistory in src/caller-history.ts."""
+    if not isinstance(history, list) or len(history) > MAX_HISTORY_ENTRIES:
+        raise ValueError(f"history must be a list of at most {MAX_HISTORY_ENTRIES} entries")
+    total = 0
+    for entry in history:
+        if (not isinstance(entry, dict) or set(entry) != {"role", "content"}
+                or entry["role"] not in ("user", "assistant")
+                or not isinstance(entry["content"], str) or not entry["content"].strip()):
+            raise ValueError("history entries must be exactly {role: user|assistant, content: nonempty string}")
+        total += len(entry["content"])
+    if total > MAX_HISTORY_CHARS:
+        raise ValueError(f"history content must total at most {MAX_HISTORY_CHARS} characters")
+
+
 def query_guard(handler):
     @wraps(handler)
     async def guarded(request):
@@ -178,6 +211,12 @@ def query_guard(handler):
                 raise ValueError(f"timeout must be an integer between 1 and {MAX_QUERY_TIMEOUT}")
             if body.get("history_mode", "engine") not in ("caller", "engine"):
                 raise ValueError("history_mode must be caller or engine")
+            if "session_id" in body:
+                _validate_session_id(body["session_id"])
+            if "history" in body:
+                if body.get("history_mode") != "caller":
+                    raise ValueError("history requires history_mode caller")
+                _validate_history(body["history"])
             for key in ("user_id", "provider", "model", "system_prompt", "format", "api_key"):
                 if key in body and (not isinstance(body[key], str) or len(body[key]) > MAX_PROMPT_CHARS):
                     raise ValueError(f"invalid {key}")
@@ -213,11 +252,17 @@ async def capabilities(request):
             "build_revision": os.environ.get("SPORTSCLAW_BUILD_REVISION"),
             "skills": skills, "mcp_servers": mcp,
             "history_modes": ["engine", "caller"],
+            "history_contract": HISTORY_CONTRACT,
+            "structured_history": True,
+            "session_id": True,
             "query": {"default_timeout_seconds": DEFAULT_TIMEOUT,
                       "max_timeout_seconds": MAX_QUERY_TIMEOUT,
                       "max_concurrency": MAX_QUERY_CONCURRENCY,
                       "max_prompt_characters": MAX_PROMPT_CHARS,
-                      "max_output_bytes": MAX_OUTPUT_BYTES},
+                      "max_output_bytes": MAX_OUTPUT_BYTES,
+                      "max_history_entries": MAX_HISTORY_ENTRIES,
+                      "max_history_characters": MAX_HISTORY_CHARS,
+                      "max_session_id_characters": MAX_SESSION_ID_CHARS},
             # Readiness only: the decision credential itself is never disclosed.
             "decision": {"protocol_version": "1.0", "path": DECISION_ROUTE,
                          "data_policy": decision_data_policy(),
@@ -450,6 +495,13 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
         return web.json_response(
             {"status": False, "error": "prompt is required"}, status=400
         )
+    if "history" in body:
+        # A stream has no per-response contract ack, so a caller could not tell
+        # whether this replica honored the history. Refuse rather than drop it.
+        return web.json_response(
+            {"status": False, "error": "structured history is only supported on /api/query/sync"},
+            status=400,
+        )
 
     user_id = body.get("user_id", "api-anonymous")
     timeout = body.get("timeout", DEFAULT_TIMEOUT)
@@ -553,12 +605,13 @@ async def query_sync(request: web.Request) -> web.Response:
 
     cmd = _build_cmd(body)
     env = _build_env(body)
+    stdin = _build_stdin(body)
     started_at = time.monotonic()
 
     log(f"sync: user={user_id} prompt={prompt[:80]}")
 
     try:
-        stdout_bytes, stderr_bytes, returncode = await buffered(cmd, env, timeout)
+        stdout_bytes, stderr_bytes, returncode = await buffered(cmd, env, timeout, stdin)
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
 
         stdout_text = stdout_bytes.decode() if stdout_bytes else ""
@@ -631,6 +684,10 @@ async def query_sync(request: web.Request) -> web.Response:
                 "user_id": user_id,
                 "elapsed_ms": elapsed_ms,
             }
+            if body.get("history_mode") == "caller" and "history" in body:
+                # Bind success to this query's contract, not a different replica's capabilities.
+                resp["history_contract"] = HISTORY_CONTRACT
+                resp["session_id"] = body.get("session_id")
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -792,8 +849,12 @@ def _build_cmd(body: dict) -> list[str]:
     user_id = body.get("user_id")
     if user_id:
         cmd.extend(["--user", user_id])
+    if body.get("session_id") is not None:
+        cmd.extend(["--session-id", body["session_id"]])
     if body.get("history_mode") is not None:
         cmd.extend(["--history-mode", body["history_mode"]])
+    if body.get("history") is not None:
+        cmd.append("--history-stdin")
 
     agent_id = body.get("agent_id")
     if agent_id is not None:
@@ -816,6 +877,16 @@ def _build_cmd(body: dict) -> list[str]:
     return cmd
 
 
+def _build_stdin(body: dict) -> bytes | None:
+    """Caller history (and its images) ride on the child's stdin, never argv, the environment or logs."""
+    if body.get("history") is None:
+        return None
+    payload = {"history": body["history"]}
+    if body.get("images"):
+        payload["images"] = body["images"]
+    return json.dumps(payload).encode()
+
+
 def _build_env(body: dict | None = None) -> dict[str, str]:
     """
     Build environment for the subprocess.
@@ -824,6 +895,8 @@ def _build_env(body: dict | None = None) -> dict[str, str]:
     provider, model, and user-specific API keys.
     """
     env = dict(os.environ)
+    # The relay's own credential never reaches the engine or its tools.
+    env.pop("AGENTS_API_TOKEN", None)
 
     if body:
         if body.get("provider"):
@@ -853,7 +926,7 @@ def _build_env(body: dict | None = None) -> dict[str, str]:
                     content_type="application/json",
                 )
             env[env_var] = body["api_key"]
-        if body.get("images"):
+        if body.get("images") and body.get("history") is None:
             env["SPORTSCLAW_INBOUND_IMAGES"] = json.dumps(body["images"])
 
     return env
@@ -871,6 +944,13 @@ def create_app() -> web.Application:
     app.router.add_post("/api/query", query_stream)
     app.router.add_post("/api/query/sync", query_sync)
     register_decision_routes(
+        app, auth_error=_agents_auth_error, node_bin=SPORTSCLAW_BIN,
+        entry=SPORTSCLAW_ENTRY, build_env=_build_env,
+        max_concurrency=MAX_QUERY_CONCURRENCY,
+    )
+    # Same token gate and shared slot counter; server env only (no request
+    # body reaches _build_env), so provider/model are never request-owned.
+    register_watch_intent_routes(
         app, auth_error=_agents_auth_error, node_bin=SPORTSCLAW_BIN,
         entry=SPORTSCLAW_ENTRY, build_env=_build_env,
         max_concurrency=MAX_QUERY_CONCURRENCY,

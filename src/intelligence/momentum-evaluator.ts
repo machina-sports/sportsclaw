@@ -34,7 +34,7 @@
  * never goes to the model.
  */
 
-import { generateText } from "ai";
+import { generate } from "../inference/run.js";
 import type { LLMProvider } from "../types.js";
 import {
   LLM_CALL_TIMEOUT_MS,
@@ -242,8 +242,8 @@ async function judgeCard(
 
   // Generous budget: a truncated verdict is unparseable and fails closed,
   // which rejects good cards for the wrong reason (seen live 2026-07-17).
-  const result = await generateText({
-    model: evaluator.model as Parameters<typeof generateText>[0]["model"],
+  const result = await generate({ purpose: "momentum_evaluate" }, {
+    model: evaluator.model as Parameters<typeof generate>[1]["model"],
     system,
     prompt,
     maxOutputTokens: 1000,

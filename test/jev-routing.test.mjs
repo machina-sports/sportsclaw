@@ -571,7 +571,7 @@ describe("engine routing boundary", () => {
     assert.ok(refusal > 0 && resolve > 0 && widening > 0, "expected all three markers in dist/engine.js");
     assert.ok(resolve < refusal, "the refusal must be decided after routing resolves");
     assert.ok(refusal < widening, "the refusal must return before history widening");
-    const generate = source.indexOf("generateText(", widening);
-    assert.ok(generate > widening, "expected the main generateText call after history widening");
+    const generate = source.indexOf("generate(", widening);
+    assert.ok(generate > widening, "expected the unified main generation call after history widening");
   });
 });

@@ -5,8 +5,9 @@
  * stdin, hands it to `JevDecisionClient` and writes exactly one serialized
  * `DecisionResult` on stdout. Nothing else happens: no engine, no CLI, no MCP,
  * no memory, no generative model, no listener. This module imports the decision
- * client and Node stdlib and nothing more, so the import graph cannot pull one
- * of those in behind it.
+ * client, the typed decision boundary (`inference/decide.ts`, itself SDK-free)
+ * and Node stdlib and nothing more, so the import graph cannot pull one of
+ * those in behind it.
  *
  * Everything the caller does not own is fixed here, server side: the endpoint
  * is the client's, the model is the pinned default, the deadline is fixed, and
@@ -29,6 +30,7 @@ import {
   type DecisionResult,
   type DecisionTransport,
 } from "./decision-client.js";
+import { decide } from "./inference/decide.js";
 
 /** Bytes accepted on stdin. Smaller than the client's own request bound. */
 export const MAX_RELAY_BODY_BYTES = 32 * 1024;
@@ -147,7 +149,9 @@ export async function runDecision(
         get: () => env.TYPESAFE_API_KEY,
       }),
     });
-    const result = await client.decide(request, { abortSignal: options.abortSignal });
+    const result = await decide({ purpose: "decision_relay" }, client, request, {
+      abortSignal: options.abortSignal,
+    });
     return options.abortSignal?.aborted ? refuse("aborted", elapsed()) : result;
   } catch {
     // The client documents that it never throws; if that ever changes, the
