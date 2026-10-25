@@ -46,9 +46,11 @@ Exact keys only. Text 1–4,000 characters, locale `en`/`pt`/`es`, 1–100 candi
 
 ## Data sent to Jev
 
-Only the current request text, its locale, the fixed instructions and the public candidate labels. Candidates are offered under positional option keys (`c1`…`c100`) plus `no_match` and `uncertain`, and are mapped back to the caller's public IDs locally, so a returned ID is never model-authored. Reference IDs are sent as the matching option keys. No history, account, profile, subscription records or private IDs are accepted.
+Only the current request text, its locale, the fixed instructions and the public candidate labels. Candidates are offered under positional option keys (`c1`…`c100`) plus `no_match` and `uncertain`, and are mapped back to the caller's public IDs locally, so a returned ID is never model-authored. Reference IDs are resolved locally to the corresponding verified public labels. Only those descriptions are marked as previously discussed in the model input; raw history and opaque reference IDs are not sent. No history, account, profile, subscription records or private IDs are accepted.
 
-## Policy (`watch-decision-policy-2`)
+## Policy (`watch-decision-policy-3`)
+
+- Resolve explicit teams, opponents and competition first. Then use the verified public descriptions of previously discussed candidates to resolve implicit references. A reference cannot override an explicit conflict. Remaining ambiguity still requires clarification.
 
 - Sports-information requests, including short requests for live games, fixtures, schedules or scores, are ordinary chat (`none`). Listing games is not asking to list monitoring subscriptions. `list_takes` is reserved for requests about alert/monitoring subscription options.
 
