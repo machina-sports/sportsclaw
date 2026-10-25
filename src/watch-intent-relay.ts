@@ -11,13 +11,20 @@
  * (NIM / OpenShell route, fail-closed) or else SPORTSCLAW_PROVIDER /
  * SPORTSCLAW_MODEL via the existing provider resolver. The request can carry
  * none of them. Nothing is ever written to stderr.
+ *
+ * A body declaring `watch-decision-v1` is dispatched to the Jev typed decision
+ * (`watch-decision.ts`) instead, under its own operator gates; it never builds
+ * a generative model.
  */
 
 import { pathToFileURL } from "node:url";
 
+import type { DecisionTransport } from "./decision-client.js";
 import { resolveNativeRouteModel } from "./inference/model-role-router.js";
+import type { InferenceContext } from "./inference/receipt.js";
 import { resolveAuthForModel, resolveModel } from "./llm-providers.js";
 import { DEFAULT_MODELS, type LLMProvider } from "./types.js";
+import { runWatchDecision, WATCH_DECISION_CONTRACT, type WatchDecisionResult } from "./watch-decision.js";
 import {
   interpretWatchIntent,
   parseWatchIntentRequest,
@@ -72,28 +79,53 @@ export interface WatchIntentWorkerOptions {
   env?: Env;
   /** Injected for offline tests; production uses `createServerModel`. */
   createModel?: (env: Env) => Model;
+  /** Injected Jev HTTP seam for offline tests (`watch-decision-v1` only). */
+  decisionTransport?: DecisionTransport;
+  /** Per-call sanitized receipt observer (`watch-decision-v1` only). */
+  onReceipt?: InferenceContext["onReceipt"];
   abortSignal?: AbortSignal;
+}
+
+/** Bounded JSON parse; undefined for an empty, oversized or malformed body. */
+function parseBody(body: string): unknown {
+  if (typeof body !== "string" || !body || Buffer.byteLength(body, "utf8") > MAX_WATCH_INTENT_BODY_BYTES) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(body);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Run one interpretation over an already-read body. Never throws. */
 export async function runWatchIntent(
   body: string,
   options: WatchIntentWorkerOptions = {},
-): Promise<WatchIntentResult> {
+): Promise<WatchIntentResult | WatchDecisionResult> {
   const env = options.env ?? process.env;
   if (env[WATCH_INTENT_ENABLED_ENV] !== "true") return watchIntentFailure("disabled");
+  const parsed = parseBody(body);
+  if (
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) &&
+    (parsed as { contract?: unknown }).contract === WATCH_DECISION_CONTRACT
+  ) {
+    // Jev path: no generative model is ever built here, on any outcome.
+    const native = env[WATCH_INTENT_NATIVE_CONFIG_ENV];
+    return runWatchDecision(parsed, {
+      env,
+      nativeOnly: native !== undefined && native !== "",
+      timeoutMs: WATCH_INTENT_TIMEOUT_MS,
+      transport: options.decisionTransport,
+      abortSignal: options.abortSignal,
+      onReceipt: options.onReceipt,
+    });
+  }
+
+  // Legacy watch-intent-v1, unchanged order: abort, then body validation.
   if (options.abortSignal?.aborted) return watchIntentFailure("aborted");
-  if (typeof body !== "string" || !body || Buffer.byteLength(body, "utf8") > MAX_WATCH_INTENT_BODY_BYTES) {
-    return watchIntentFailure("invalid_request");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return watchIntentFailure("invalid_request");
-  }
   // Validate before any model is built, so a refused request costs nothing.
-  if (!parseWatchIntentRequest(parsed)) return watchIntentFailure("invalid_request");
+  if (parsed === undefined || !parseWatchIntentRequest(parsed)) return watchIntentFailure("invalid_request");
 
   let model: Model;
   let route: "nim" | "openshell" | undefined;
@@ -125,7 +157,7 @@ async function readStdin(): Promise<string | undefined> {
 
 async function main(): Promise<void> {
   (globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
-  let result: WatchIntentResult;
+  let result: WatchIntentResult | WatchDecisionResult;
   try {
     // Always drain stdin so the parent's write never hits a closed pipe.
     const body = await readStdin();
