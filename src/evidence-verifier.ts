@@ -102,6 +102,9 @@ export function resolveEvidenceVerifierSettings(
 
   const provider = pick("provider", config?.provider, env.SPORTSCLAW_EVIDENCE_VERIFIER, ["generative", "jev"] as const, "generative");
   const dataPolicy = pick("dataPolicy", config?.dataPolicy, env.SPORTSCLAW_EVIDENCE_DATA_POLICY, ["local_only", "cloud_allowed"] as const, "local_only");
+  // An invalid action is reported here and refused by the engine before any
+  // verifier call: silently retaining would hide a deployment misconfiguration.
+  const generativeAction = pick("generativeAction", config?.generativeAction, env.SPORTSCLAW_EVIDENCE_ACTION, ["retain", "correct"] as const, "retain");
 
   const rawModel = (config?.model ?? env.SPORTSCLAW_EVIDENCE_MODEL)?.trim();
   let model = DEFAULT_JEV_MODEL;
@@ -120,6 +123,7 @@ export function resolveEvidenceVerifierSettings(
     timeoutMs: number("timeoutMs", config?.timeoutMs, env.SPORTSCLAW_EVIDENCE_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     confidenceThreshold: number("confidenceThreshold", config?.confidenceThreshold, env.SPORTSCLAW_EVIDENCE_CONFIDENCE, MIN_CONFIDENCE, 1, DEFAULT_CONFIDENCE),
     fallbackToGenerative,
+    generativeAction,
     // Cloud consent is explicit: local_only stops here, before any credential
     // read or network access.
     enabled: provider === "jev" && dataPolicy === "cloud_allowed",

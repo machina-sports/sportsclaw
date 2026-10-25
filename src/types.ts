@@ -498,11 +498,19 @@ export interface EvidenceVerifierConfig {
   confidenceThreshold?: number;
   /** Use the generative verifier when a decision is ambiguous. Default: false. */
   fallbackToGenerative?: boolean;
+  /**
+   * Deployment-owned action when the generative checker flags a draft.
+   * "retain" (default) keeps the draft and traces the flags; "correct" opts in
+   * to one correction plus the bounded recheck. Invalid values refuse.
+   */
+  generativeAction?: EvidenceGenerativeAction;
   /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   /** Environment source for opt-in and credential lookup. Defaults to process.env. */
   env?: Record<string, string | undefined>;
 }
+
+export type EvidenceGenerativeAction = "retain" | "correct";
 
 /** Validated settings produced by resolveEvidenceVerifierSettings(). */
 export interface ResolvedEvidenceVerifierSettings {
@@ -512,6 +520,7 @@ export interface ResolvedEvidenceVerifierSettings {
   timeoutMs: number;
   confidenceThreshold: number;
   fallbackToGenerative: boolean;
+  generativeAction: EvidenceGenerativeAction;
   /** True only when the Jev verifier may run. Never carries the credential. */
   enabled: boolean;
   /** Why a requested verifier is not enabled, e.g. "local_only". */

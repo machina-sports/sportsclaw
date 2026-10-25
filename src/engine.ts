@@ -1503,7 +1503,8 @@ export class sportsclawEngine {
   /**
    * Validate the final response text against raw tool outputs. The default
    * (generative) checker flags discrepancies in the run trace and keeps the
-   * draft; the opt-in Jev verifier still corrects and rechecks.
+   * draft unless the deployment opts into generativeAction "correct"; the
+   * opt-in Jev verifier still corrects and rechecks.
    */
   private async validateResponseEvidence(params: {
     userPrompt: string;
@@ -1524,6 +1525,9 @@ export class sportsclawEngine {
     // stands. Discarding grounded work over an infrastructure hiccup left the
     // user with nothing after a dozen successful tool calls.
     const unverified = (reason: string) => {
+      // A recheck judges a correction made because the draft was contradicted:
+      // neither that draft nor the unchecked correction may ship.
+      if (params.correctionAttempted) return unavailable;
       if (this._verifyNotes) this._verifyNotes.unverified = true;
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation did not complete (${reason}); returning the drafted answer`);
@@ -1571,6 +1575,22 @@ export class sportsclawEngine {
     // --- Optional decision verifier (opt-in; default path is untouched) ---
     const verifierConfig = this.config.evidenceVerifier;
     const settings = resolveEvidenceVerifierSettings(verifierConfig);
+    // A misconfigured deployment policy refuses before any verifier is called.
+    if (settings.diagnostics.includes("invalid_generativeAction")) {
+      if (this.config.verbose) console.error("[sportsclaw] invalid evidence action; refusing to verify");
+      return unavailable;
+    }
+    // One correction on the main model, then the existing bounded recheck.
+    const correctAndRecheck = async (discrepancies: Verdict["discrepancies"]): Promise<string> => {
+      if (params.correctionAttempted || params.abortSignal?.aborted) return unavailable;
+      discrepanciesFound = true;
+      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
+      const corrected = await this.correctAgainstEvidence({
+        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
+      });
+      if (!corrected) return unavailable;
+      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
+    };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
     if (settings.provider === "jev") {
       if (!settings.enabled) {
@@ -1609,16 +1629,7 @@ export class sportsclawEngine {
         }
       }
     }
-    if (jevDiscrepancies) {
-      if (params.correctionAttempted) return unavailable;
-      discrepanciesFound = true;
-      if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
-      const corrected = await this.correctAgainstEvidence({
-        ...params, draft, serializedToolOutputs, partialViewRule, discrepancies: jevDiscrepancies,
-      });
-      if (!corrected) return unavailable;
-      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
-    }
+    if (jevDiscrepancies) return correctAndRecheck(jevDiscrepancies);
 
     // A verdict that will not parse is the checker misbehaving, not a finding
     // about the draft. Ask once more before deciding the check cannot run.
@@ -1721,6 +1732,12 @@ export class sportsclawEngine {
         return draft; // clean!
       }
       if (params.correctionAttempted) return unavailable;
+
+      // Opt-in "correct" preserves the hosted deployment's correction intent
+      // through the existing correction pass and bounded recheck. It is not the
+      // legacy algorithm, adds no provider route, and makes the checker no more
+      // accurate; an unconfirmed correction is refused, never shipped.
+      if (settings.generativeAction === "correct") return await correctAndRecheck(actionable);
 
       if (this.config.verbose) {
         console.error(
