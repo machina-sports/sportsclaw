@@ -229,6 +229,34 @@ function assertWire(calls, mustInclude = []) {
 // ---------------------------------------------------------------------------
 
 describe("slip-decision selected changes", () => {
+  it("identifies the complete singleton draft in target guidance without bypassing Jev", async () => {
+    const context = { ...clone(CONTEXT), legs: [clone(CONTEXT.legs[1])] };
+    const proposal = change("review", { base: REV_ID, targets: [LEG_IDS[1]] });
+    const j = jev(plan({ action: "review", target: "leg_1", targetSpec: { confidence: 0.95, top: 0.95, second: 0.05 } }));
+    assertSelected(await run(request("Review the remaining leg without changes", proposal, context), { transport: j.transport }), proposal);
+    assert.equal(j.calls.length, 2);
+    const q = targetQuestion(j.calls);
+    assert.match(q.instructions, /complete active draft/i);
+    assert.match(q.instructions, /exactly one current leg/i);
+    assert.match(q.instructions, /conflicting event or selection/i);
+    assert.match(q.instructions, /Explicit ordinal references/i);
+    assert.match(q.criteria.leg_1, /^Only current slip leg:/);
+    assertWire(j.calls);
+  });
+
+  it("keeps singleton target abstention and confidence gates instead of forcing the only leg", async () => {
+    const context = { ...clone(CONTEXT), legs: [clone(CONTEXT.legs[1])] };
+    const proposal = change("review", { base: REV_ID, targets: [LEG_IDS[1]] });
+    for (const target of ["clarify", "leg_1"]) {
+      const j = jev(plan({ action: "review", target, targetSpec: target === "clarify" ? {confidence:0.95,top:0.95,second:0.05} : {confidence:0.79,top:0.9,second:0.1} }));
+      assertStatus(await run(request("Review a different event", proposal, context), { transport: j.transport }), "clarify");
+      assert.equal(j.calls.length, 2);
+      assertWire(j.calls);
+    }
+    assert.equal(decision.SLIP_DECISION_POLICY.minConfidence, 0.8);
+    assert.equal(decision.SLIP_DECISION_POLICY.minMargin, 0.15);
+  });
+
   it("selects a create from a new slip request with exactly the seven action options", async () => {
     const j = jev(plan({ action: "create" }));
     const text = "Make me a slip: Chelsea to beat Arsenal at 2.10 and Lakers -3.5";
@@ -402,7 +430,7 @@ describe("slip-decision import and explanation policy", () => {
     await run(request("Here is my supplied slip; review it", CREATE), { transport: j.transport });
     const q = questionsOf(j.calls).find(isActionQuestion);
     assert.ok(q);
-    assert.equal(decision.SLIP_DECISION_POLICY.version, "slip-decision-policy-2");
+    assert.equal(decision.SLIP_DECISION_POLICY.version, "slip-decision-policy-3");
     assert.match(q.criteria.create, /import|capture/i);
     assert.match(q.criteria.create, /suggest/i);
     assert.match(q.criteria.review, /explain/i);
