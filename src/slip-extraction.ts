@@ -6,6 +6,11 @@
  * unified boundary (purpose `slip_extraction`): native Output.object, no tools,
  * no tool choice, no repair, continuation, retry or fallback.
  *
+ * Provider options are copied and restricted for this pass only: provider-side
+ * MCP servers or containers are refused before dispatch, and Anthropic is
+ * pinned to native `output_format` (never its synthetic json tool) with
+ * extended thinking disabled, so its wire max_tokens stays the 8192 ceiling.
+ *
  * The extractor sees only the exact request text, the validated current
  * revision, the current request images and the final answer, all as data.
  * Inputs are bounded before the call and never truncated. Anything other than
@@ -129,6 +134,28 @@ function validImages(value: unknown): SlipExtractionImage[] | undefined {
   return images;
 }
 
+type ProviderOptions = NonNullable<SlipExtractionOptions["providerOptions"]>;
+
+/** Native output_format only, and no thinking budget added on top of max_tokens. */
+const ANTHROPIC_EXTRACTION = { structuredOutputMode: "outputFormat", thinking: { type: "disabled" } };
+
+/**
+ * A shallow copy restricted for this tool-free pass, or undefined when any
+ * namespace configures provider-side MCP servers or a container. Every
+ * namespace carrying an Anthropic structuredOutputMode or thinking setting gets
+ * the same restriction, so a custom provider alias cannot override it.
+ */
+function extractionProviderOptions(providerOptions: ProviderOptions = {}): ProviderOptions | undefined {
+  const restricted: ProviderOptions = { ...providerOptions };
+  for (const [name, value] of Object.entries(restricted)) {
+    if (!isPlainObject(value)) continue;
+    if ((Array.isArray(value.mcpServers) && value.mcpServers.length > 0) || value.container != null) return undefined;
+    if ("structuredOutputMode" in value || "thinking" in value) restricted[name] = { ...value, ...ANTHROPIC_EXTRACTION };
+  }
+  restricted.anthropic = { ...restricted.anthropic, ...ANTHROPIC_EXTRACTION };
+  return restricted;
+}
+
 function usageOf(usage: unknown): SlipExtractionUsage | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const u = usage as { inputTokens?: unknown; outputTokens?: unknown; totalTokens?: unknown };
@@ -150,6 +177,9 @@ export async function extractSlipProposal(input: SlipExtractionInput, options: S
   if (textBytes > SLIP_EXTRACTION_MAX_TEXT_BYTES) return failed("invalid_request");
   const images = validImages(input.images);
   if (!images) return failed("invalid_request");
+  // This stage permits no tools, provider-side ones included.
+  const providerOptions = extractionProviderOptions(options.providerOptions);
+  if (!providerOptions) return failed("invalid_request");
 
   const caller = options.abortSignal;
   if (caller?.aborted) return failed("aborted");
@@ -187,7 +217,7 @@ export async function extractSlipProposal(input: SlipExtractionInput, options: S
       maxOutputTokens: SLIP_EXTRACTION_MAX_OUTPUT_TOKENS,
       maxRetries: 0,
       abortSignal: controller.signal,
-      ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
+      providerOptions,
       // Usage of the performed call survives an output-parsing failure.
       onStepFinish: (step) => {
         usage = usageOf(step.usage);

@@ -4286,15 +4286,16 @@ export class sportsclawEngine {
    * Records the extraction usage (pass + _lastUsage) and returns the response
    * text — with saved/confirmed/placed claims removed when the outcome is a
    * failure or clarification — plus the extraction tokens still to be charged
-   * to the daily ledger by the caller.
+   * to the daily ledger by the caller. `unsuccessful` is the typed outcome
+   * (denied, failed decision or clarify), independent of the text.
    */
   private async finalizeSlip(
     slip: SlipRun | undefined,
     responseText: string,
     options: RunOptions | undefined,
-  ): Promise<{ text: string; tokens: number }> {
-    if (!slip) return { text: responseText, tokens: 0 };
-    if (slip.denied) return { text: SLIP_UNAVAILABLE_TEXT, tokens: 0 };
+  ): Promise<{ text: string; tokens: number; unsuccessful: boolean }> {
+    if (!slip) return { text: responseText, tokens: 0, unsuccessful: false };
+    if (slip.denied) return { text: SLIP_UNAVAILABLE_TEXT, tokens: 0, unsuccessful: true };
     const providerOptions = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
     const extraction = await extractSlipProposal(
       {
@@ -4330,11 +4331,12 @@ export class sportsclawEngine {
 
     const decision = slip.decision;
     const clarify = decision?.ok === true && decision.decision.status === "clarify";
+    const unsuccessful = decision?.ok === false || clarify;
     let text = responseText;
-    if (decision?.ok === false || clarify) {
+    if (unsuccessful) {
       text = clarify ? SLIP_CLARIFY_TEXT : SLIP_UNAVAILABLE_TEXT;
     }
-    return { text, tokens: usage?.totalTokens ?? 0 };
+    return { text, tokens: usage?.totalTokens ?? 0, unsuccessful };
   }
 
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
@@ -5367,8 +5369,9 @@ export class sportsclawEngine {
       const finalized = await this.finalizeSlip(slip, responseText, options);
       // The main pass was charged above; the extraction is charged once here.
       recordTokens(finalized.tokens);
-      if (finalized.text !== responseText) {
-        // Stored history must carry only the safe final text for this turn.
+      if (finalized.unsuccessful) {
+        // Stored history must carry only the safe final text for this turn,
+        // even when the final answer already equals it: earlier steps may hold claims.
         // Preserve tool causality, not unaccepted model prose in any language.
         responseText = finalized.text;
         const turn = this.messages.slice(turnMessagesStart);

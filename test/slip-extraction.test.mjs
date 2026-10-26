@@ -250,7 +250,8 @@ describe("parseSlipExtractionEnvelope", () => {
 
 describe("extractSlipProposal", () => {
   it("makes one tool-free native structured-output call with the caller's model options", async () => {
-    const providerOptions = { anthropic: { thinking: { type: "disabled" } } };
+    const providerOptions = { anthropic: { thinking: { type: "disabled" } }, google: { thinkingConfig: { thinkingBudget: 1024 } } };
+    const callerOptions = clone(providerOptions);
     const { result, calls } = await extract({ context: CONTEXT, sampling: { temperature: 0.2, seed: 7 }, providerOptions });
 
     const { usage, ...rest } = result;
@@ -265,7 +266,12 @@ describe("extractSlipProposal", () => {
     assert.equal(call.maxOutputTokens, 8192);
     assert.equal(call.temperature, 0.2);
     assert.equal(call.seed, 7);
-    assert.deepEqual(call.providerOptions, providerOptions);
+    assert.deepEqual(call.providerOptions, {
+      ...callerOptions,
+      // The protective Anthropic controls for this pass; other namespaces pass through unchanged.
+      anthropic: { thinking: { type: "disabled" }, structuredOutputMode: "outputFormat" },
+    });
+    assert.deepEqual(providerOptions, callerOptions, "caller options are not mutated");
     assert.ok(call.abortSignal, "the call always carries the bounded deadline");
     assert.ok(call.prompt.every((m) => m.role === "system" || m.role === "user"), "a fresh data prompt, no continuation");
     const seen = JSON.stringify(call.prompt);

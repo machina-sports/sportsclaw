@@ -472,6 +472,29 @@ function lastQueryEvent() {
 const KICKOFF = "Chelsea kick off at 17:30 on Saturday at Stamford Bridge.";
 
 describe("engine.run slip mode", () => {
+  for (const kind of ["failed", "clarify", "denied"]) {
+    it(`clears earlier completion claims when the final answer is already safe (${kind})`, async () => {
+      await withEnv(GATES, async () => {
+        const safe = kind === "clarify"
+          ? "Please clarify which draft or selection you want me to work with."
+          : "I could not prepare a reliable draft proposal. Please check the selections or clarify the request.";
+        const claim = `EARLIER_CLAIM_${kind}: the wager is live at the book.`;
+        jevAnswer = kind === "clarify" ? () => "clarify" : undefined;
+        const m = scripted([[say(claim), slipCall(CREATE)], [say(safe)]], {
+          extract: [kind === "clarify" ? envelope("proposal", CREATE) : extracted("not JSON")],
+        });
+        const engine = newEngine(m.model, kind === "denied" ? {toolAllowlist:["get_agent_config"]} : {});
+        const results = [], sessionId = `already-safe-${kind}`;
+        const text = await engine.run(REQUEST, {userId:`already-safe-user-${kind}`,sessionId,slip:turn(REQUEST),onSlipResult:r=>results.push(r)});
+        assert.equal(m.chat.length, 2, "the earlier claim and already-safe final both ran");
+        assert.equal(text, safe);
+        assert.equal(results.length, 1);
+        assert.ok(!JSON.stringify(engine.history).includes(claim));
+        assert.ok(!JSON.stringify(sessionStore.get(sessionId)).includes(claim));
+        assert.equal(lastAssistantText(engine.history), safe);
+      });
+    });
+  }
   for (const claim of ["Bilhete registrado e aposta efetuada.", "The wager is now live at the book."]) {
     it(`discards the whole unaccepted answer rather than guessing claim words: ${claim}`, async () => {
       await withEnv(GATES, async () => {
@@ -519,7 +542,8 @@ describe("engine.run slip mode", () => {
       assert.equal(filesOf(call).length, 1, "the current request image");
       assert.equal(call.temperature, 0.3, "the resolved primary sampling");
       assert.equal(call.seed, 11);
-      assert.deepEqual(call.providerOptions, m.chat[0].providerOptions, "the resolved primary provider options");
+      assert.equal(m.chat[0].providerOptions, undefined, "ordinary answer options are unchanged");
+      assert.deepEqual(call.providerOptions, { anthropic: { structuredOutputMode: "outputFormat", thinking: { type: "disabled" } } }, "extraction-only native output and total-token guard");
 
       for (const c of m.all) assert.ok(!offeredNames(c).includes("submit_slip_change"), "never offered to the answer model");
       assert.ok(!engine.lastRunTrace.offeredTools.includes("submit_slip_change"));

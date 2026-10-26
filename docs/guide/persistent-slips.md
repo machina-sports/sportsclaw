@@ -62,7 +62,16 @@ before and calls `onSlipResult` exactly once per successful run.
   extraction call** (`extractSlipProposal`, receipt purpose `slip_extraction`)
   on the same resolved model, sampling and provider options: native structured
   output (`Output.object`), no tools or tool choice, no retry, repair,
-  continuation or fallback. It sees only `requestText`, `context`, the current
+  continuation or fallback. Provider options are copied and restricted for this
+  pass only (the caller's map is not mutated): provider-side MCP servers or a
+  container in any namespace are refused as `invalid_request` before dispatch;
+  Anthropic is pinned to native `output_format` (`structuredOutputMode:
+  "outputFormat"`, never the adapter's synthetic json tool) with extended
+  thinking disabled, and any namespace carrying those Anthropic settings gets
+  the same values, so a custom provider alias cannot override them. A model or
+  endpoint that rejects native output fails once as `inference_unavailable`,
+  with no fallback. Other namespaces (e.g. Google `thinkingConfig`) pass
+  through unchanged. It sees only `requestText`, `context`, the current
   request images and the final answer, as data; the answer contributes only
   `agent_suggestion` legs with `quotedOdds: null`.
 - The reply is one envelope `{status:"none"|"proposal", change}`. `none` (with
@@ -80,9 +89,12 @@ before and calls `onSlipResult` exactly once per successful run.
   with `requestText` and the context. Text or leg descriptions containing
   reserved slip identifiers (`slp_`/`slr_`/`sll_`) are refused as
   `invalid_request` before any credential read or request.
-- On a failed or clarifying outcome, saved/confirmed/placed claims are removed
-  from the answer before it is stored; the returned text and the stored final
-  assistant message are the same.
+- On a denied, failed or clarifying outcome, the answer is replaced by a fixed
+  safe message, and all of the turn's assistant text (including earlier steps)
+  is removed before storage, keeping tool calls and results; prior turns are
+  unchanged. This follows the typed outcome, even when the answer already
+  equals the safe message. The returned text and the stored final assistant
+  message are the same.
 - An explicit tool allowlist that omits `submit_slip_change` still denies the
   slip capability (no extraction, `{ok:false, reasonCode:"disabled"}`); naming
   it permits extraction without offering any tool. A routing refusal ends the
@@ -98,7 +110,7 @@ refused as `invalid_request` before the model call, never truncated.
 | Bound | Value |
 | --- | --- |
 | Deadline | 20 s (combined with the caller's abort) |
-| Output tokens | 8192 |
+| Output tokens | 8192 requested (`maxOutputTokens`); with Anthropic thinking disabled, also the wire `max_tokens` |
 | Retries | 0 |
 | Text | UTF-8 bytes of the turn JSON + the answer ≤ 65536 |
 | Images | ≤ 4; PNG/JPEG/WebP/GIF; non-empty strict base64; ≤ 10 MiB each, ≤ 20 MiB total decoded |
