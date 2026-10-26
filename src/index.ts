@@ -99,6 +99,7 @@ import {
 } from "./schema.js";
 import type { ToolProgressEvent, McpServerConfig, RunOptions } from "./types.js";
 import { validateCallerHistory, validateSessionId } from "./caller-history.js";
+import { parseSlipTurnInput, type SlipTurnResult } from "./slip-output.js";
 import {
   loadConfig,
   resolveConfig,
@@ -2336,6 +2337,8 @@ export function buildOneShotRunOptions(params: {
   images?: RunOptions["images"];
   onProgress?: RunOptions["onProgress"];
   abortSignal?: AbortSignal;
+  slip?: RunOptions["slip"];
+  onSlipResult?: RunOptions["onSlipResult"];
 }): RunOptions {
   return {
     ...(params.historyMode ? { historyMode: params.historyMode } : {}),
@@ -2348,7 +2351,17 @@ export function buildOneShotRunOptions(params: {
     ...(params.images ? { images: params.images } : {}),
     ...(params.onProgress ? { onProgress: params.onProgress } : {}),
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+    ...(params.slip !== undefined ? { slip: params.slip } : {}),
+    ...(params.onSlipResult ? { onSlipResult: params.onSlipResult } : {}),
   };
+}
+
+/** The headless NDJSON result line; the typed slip result rides beside the text, never in it. */
+export function oneShotResultEvent(
+  text: string,
+  slip?: SlipTurnResult,
+): { type: "result"; text: string; slip?: SlipTurnResult } {
+  return slip === undefined ? { type: "result", text } : { type: "result", text, slip };
 }
 
 export function runOneShotEngine(
@@ -2383,14 +2396,15 @@ export function takeOneShotSessionId(args: string[]): string | undefined {
 }
 
 /**
- * --history-stdin: read `{"history": [...], "images"?: [...]}` from stdin
- * (caller mode only). History never travels through argv or the environment.
+ * --history-stdin: read `{"history": [...], "images"?: [...], "slip"?: {...}}`
+ * from stdin (caller mode only). History and the slip-turn-v1 input never
+ * travel through argv or the environment.
  */
 export function takeOneShotHistory(
   args: string[],
   historyMode: RunOptions["historyMode"],
   readStdin: () => string = () => readFileSync(0, "utf-8"),
-): Pick<RunOptions, "history" | "images"> | undefined {
+): Pick<RunOptions, "history" | "images" | "slip"> | undefined {
   const idx = args.indexOf("--history-stdin");
   if (idx < 0) return undefined;
   if (historyMode !== "caller") throw new Error("--history-stdin requires --history-mode caller");
@@ -2404,10 +2418,12 @@ export function takeOneShotHistory(
     throw new Error("--history-stdin expects a JSON object with a history array");
   }
   const keys = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed) : [];
-  if (!keys.includes("history") || keys.some((key) => key !== "history" && key !== "images")) {
-    throw new Error("--history-stdin expects a JSON object with a history array and optional images");
+  if (!keys.includes("history") || keys.some((key) => key !== "history" && key !== "images" && key !== "slip")) {
+    throw new Error("--history-stdin expects a JSON object with a history array, optional images and optional slip");
   }
-  const { history, images } = parsed as { history: unknown; images?: unknown };
+  const { history, images, slip } = parsed as { history: unknown; images?: unknown; slip?: unknown };
+  const slipInput = slip === undefined ? undefined : parseSlipTurnInput(slip);
+  if (slip !== undefined && !slipInput) throw new Error("--history-stdin slip must be a valid slip-turn-v1 input");
   if (
     images !== undefined &&
     (!Array.isArray(images) || !images.every((img) =>
@@ -2418,6 +2434,7 @@ export function takeOneShotHistory(
   return {
     history: validateCallerHistory(history),
     ...(images ? { images: images as NonNullable<RunOptions["images"]> } : {}),
+    ...(slipInput ? { slip: slipInput } : {}),
   };
 }
 
@@ -2429,7 +2446,7 @@ export function takeOneShotHistory(
 export function takeOneShotConversation(
   args: string[],
   readStdin?: () => string,
-): Pick<RunOptions, "historyMode" | "sessionId" | "history" | "images"> {
+): Pick<RunOptions, "historyMode" | "sessionId" | "history" | "images" | "slip"> {
   const sessionId = takeOneShotSessionId(args);
   const historyIdx = args.indexOf("--history-mode");
   const historyMode = historyIdx >= 0 ? args[historyIdx + 1] : "engine";
@@ -2742,6 +2759,8 @@ async function cmdQuery(args: string[]): Promise<void> {
           console.error("[sportsclaw] Failed to parse SPORTSCLAW_INBOUND_IMAGES env:", err);
         }
       }
+      // This run's typed slip result, captured locally and emitted on its result line.
+      let slipResult: SlipTurnResult | undefined;
       const result = await runOneShotEngine(engine, prompt, {
         historyMode,
         userId,
@@ -2751,7 +2770,18 @@ async function cmdQuery(args: string[]): Promise<void> {
         images: inboundImages,
         onProgress: (event) => emitNdjson({ ...event, category: "progress" }),
         ...conversation,
+        ...(conversation.slip !== undefined
+          ? {
+              onSlipResult: (typed: SlipTurnResult) => {
+                if (slipResult !== undefined) throw new Error("duplicate slip result");
+                slipResult = typed;
+              },
+            }
+          : {}),
       });
+      if (conversation.slip !== undefined && slipResult === undefined) {
+        throw new Error("slip result missing");
+      }
       const formatted = formatResponse(result, formatArg as any);
       for (const img of engine.generatedImages) {
         emitNdjson({ type: "image", data: img.data, mimeType: img.mimeType, prompt: img.prompt });
@@ -2760,7 +2790,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         emitNdjson({ type: "video", data: vid.data, mimeType: vid.mimeType, prompt: vid.prompt });
       }
       await emitManifest();
-      emitNdjson({ type: "result", text: formatted.text });
+      emitNdjson(oneShotResultEvent(formatted.text, slipResult));
       // Wait for stdout to drain before exiting — process.stdout.write() to
       // a pipe is async and process.exit() would truncate unflushed data
       // (e.g. large base64 image lines that exceed the 64KB pipe buffer).

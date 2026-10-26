@@ -5,6 +5,7 @@
  */
 
 import type { ModelMessage } from "ai";
+import type { SlipTurnInput, SlipTurnResult } from "./slip-output.js";
 
 // ---------------------------------------------------------------------------
 // Supported LLM providers
@@ -812,6 +813,13 @@ export interface RunOptions {
   chatId?: string;
   /** @deprecated Use onProgress instead */
   onSpinnerUpdate?: (msg: string) => void;
+  /**
+   * Opt-in `slip-turn-v1` request: the exact original user message and the
+   * caller's stored revision. Requires `onSlipResult` and the server slip gates.
+   */
+  slip?: SlipTurnInput;
+  /** Receives exactly one typed slip result per successful run with `slip`. */
+  onSlipResult?: (result: SlipTurnResult) => void;
 }
 
 // ---------------------------------------------------------------------------

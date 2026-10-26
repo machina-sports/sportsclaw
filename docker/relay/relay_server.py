@@ -66,6 +66,12 @@ from decision_api import (
     register_decision_routes,
 )
 from watch_intent_api import register_watch_intent_routes
+from slip_contract import (
+    TURN_CONTRACT as SLIP_TURN_CONTRACT,
+    parse_slip_turn_input,
+    parse_slip_turn_result,
+    slip_enabled,
+)
 from highlights_jobs import (
     DEFAULT_JOB_TTL_SEC,
     DEFAULT_MAX_JOB_OUTPUT_BYTES,
@@ -220,8 +226,17 @@ def query_guard(handler):
             for key in ("user_id", "provider", "model", "system_prompt", "format", "api_key"):
                 if key in body and (not isinstance(body[key], str) or len(body[key]) > MAX_PROMPT_CHARS):
                     raise ValueError(f"invalid {key}")
+            if "slip" in body:
+                # Opt-in slip-turn-v1 rides with caller history only; refused before any spawn.
+                if body.get("history_mode") != "caller" or "history" not in body:
+                    raise ValueError("slip requires history_mode caller with history")
+                if parse_slip_turn_input(body["slip"]) is None:
+                    raise ValueError("invalid slip")
         except (ValueError, TypeError) as error:
             return web.json_response({"status": False, "error": str(error)}, status=400)
+        # Server environment only: a request body can never enable slips.
+        if "slip" in body and not slip_enabled():
+            return web.json_response({"status": False, "error": "slip contract unavailable"}, status=503)
         app = request.app
         # No await between inspection and increment: admission is atomic on the event loop.
         if app.get("active_queries", 0) >= MAX_QUERY_CONCURRENCY:
@@ -267,6 +282,9 @@ async def capabilities(request):
             "decision": {"protocol_version": "1.0", "path": DECISION_ROUTE,
                          "data_policy": decision_data_policy(),
                          "enabled": decision_enabled()},
+            # Advertised only when this server's gates permit slips; every
+            # response is still acknowledged per request by its input hash.
+            **({"slip_contract": SLIP_TURN_CONTRACT} if slip_enabled() else {}),
         })
     except Exception:
         return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
@@ -495,6 +513,10 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
         return web.json_response(
             {"status": False, "error": "prompt is required"}, status=400
         )
+    if "slip" in body:
+        # A slip needs a verified per-response acknowledgement; streams have none.
+        return web.json_response(
+            {"status": False, "error": "slip is only supported on /api/query/sync"}, status=400)
     if "history" in body:
         # A stream has no per-response contract ack, so a caller could not tell
         # whether this replica honored the history. Refuse rather than drop it.
@@ -607,8 +629,13 @@ async def query_sync(request: web.Request) -> web.Response:
     env = _build_env(body)
     stdin = _build_stdin(body)
     started_at = time.monotonic()
+    # Validated by query_guard. Its request text, context and answer stay out of logs.
+    slip_input = body.get("slip")
 
-    log(f"sync: user={user_id} prompt={prompt[:80]}")
+    if slip_input is None:
+        log(f"sync: user={user_id} prompt={prompt[:80]}")
+    else:
+        log(f"sync: slip request prompt_chars={len(prompt)}")
 
     try:
         stdout_bytes, stderr_bytes, returncode = await buffered(cmd, env, timeout, stdin)
@@ -623,6 +650,7 @@ async def query_sync(request: web.Request) -> web.Response:
 
         # Parse NDJSON lines from engine output
         result_text = None
+        result_events = []
         error_text = None
         images = []
         videos = []
@@ -642,6 +670,7 @@ async def query_sync(request: web.Request) -> web.Response:
                 etype = event.get("type")
                 if etype == "result":
                     result_text = event.get("text", "")
+                    result_events.append(event)
                 elif etype == "error":
                     error_text = event.get("error", "Unknown error")
                 elif etype == "image":
@@ -677,6 +706,30 @@ async def query_sync(request: web.Request) -> web.Response:
                 "elapsed_ms": elapsed_ms,
             }, status=500)
 
+        # A requested slip needs exactly one native result acknowledging this
+        # exact input; an unrequested one is never passed through. No
+        # acknowledgement is ever synthesized from the request.
+        slip_result = None
+        if result_text is not None and slip_input is not None:
+            if len(result_events) == 1:
+                slip_result = parse_slip_turn_result(result_events[0].get("slip"), slip_input)
+            if slip_result is None:
+                log("sync: slip acknowledgement missing or invalid")
+                return web.json_response({
+                    "status": False,
+                    "error": "slip acknowledgement missing or invalid",
+                    "user_id": user_id,
+                    "elapsed_ms": elapsed_ms,
+                }, status=502)
+        elif any("slip" in event for event in result_events):
+            log("sync: unrequested slip result refused")
+            return web.json_response({
+                "status": False,
+                "error": "unrequested slip result",
+                "user_id": user_id,
+                "elapsed_ms": elapsed_ms,
+            }, status=502)
+
         if result_text is not None:
             resp = {
                 "status": True,
@@ -688,6 +741,8 @@ async def query_sync(request: web.Request) -> web.Response:
                 # Bind success to this query's contract, not a different replica's capabilities.
                 resp["history_contract"] = HISTORY_CONTRACT
                 resp["session_id"] = body.get("session_id")
+            if slip_result is not None:
+                resp["slip"] = slip_result
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -878,12 +933,14 @@ def _build_cmd(body: dict) -> list[str]:
 
 
 def _build_stdin(body: dict) -> bytes | None:
-    """Caller history (and its images) ride on the child's stdin, never argv, the environment or logs."""
+    """Caller history (with its images and opt-in slip) rides on the child's stdin, never argv, the environment or logs."""
     if body.get("history") is None:
         return None
     payload = {"history": body["history"]}
     if body.get("images"):
         payload["images"] = body["images"]
+    if body.get("slip") is not None:
+        payload["slip"] = body["slip"]
     return json.dumps(payload).encode()
 
 
