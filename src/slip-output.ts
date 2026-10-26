@@ -338,10 +338,35 @@ const CHANGE_SCHEMA = {
   required: [...CHANGE_KEYS],
   properties: {
     contract: { const: SLIP_CHANGE_CONTRACT },
-    action: { enum: ["create", "append", "remove", "replace", "review", "clarify"] },
+    action: {
+      enum: ["create", "append", "remove", "replace", "review", "clarify"],
+      description:
+        "create: baseRevisionId=null, targetLegIds=[], legs=the new legs (at least 1); " +
+        "append: baseRevisionId=current revision ID, targetLegIds=[], legs=only the new legs to add; " +
+        "remove: baseRevisionId=current revision ID, targetLegIds=IDs to remove (at least 1, not all), legs=[]; " +
+        "replace: baseRevisionId=current revision ID, targetLegIds=exactly 1 leg ID, legs=exactly 1 replacement leg; " +
+        "review: baseRevisionId=current revision ID, targetLegIds=selected leg IDs or [] for the whole slip, legs=[]; " +
+        "clarify: baseRevisionId=current revision ID or null if there is no slip, targetLegIds=[], legs=[], " +
+        "and describe the uncertainty in unresolved.",
+    },
     baseRevisionId: { type: ["string", "null"], description: "The current slip revision ID from context, or null for a new slip." },
-    targetLegIds: { type: "array", maxItems: MAX_SLIP_LEGS, items: { type: "string" } },
-    legs: { type: "array", maxItems: MAX_SLIP_LEGS, items: LEG_SCHEMA },
+    targetLegIds: {
+      type: "array",
+      maxItems: MAX_SLIP_LEGS,
+      items: { type: "string" },
+      description:
+        "IDs from context of the existing legs the action affects, never the legs to keep: " +
+        "remove = the IDs to remove; replace = exactly 1 ID to replace; review = the IDs to review, " +
+        "or [] for the whole slip; create/append/clarify = [].",
+    },
+    legs: {
+      type: "array",
+      maxItems: MAX_SLIP_LEGS,
+      items: LEG_SCHEMA,
+      description:
+        "Only new or replacement legs, not the slip after the edit: never copy unchanged or remaining legs here. " +
+        "create/append = the new legs in the order shown; replace = exactly 1 replacement leg; remove/review/clarify = [].",
+    },
     unresolved: { type: "array", maxItems: MAX_UNRESOLVED, items: { type: "string", minLength: 1, maxLength: MAX_FIELD_CHARS } },
   },
 };
@@ -351,6 +376,11 @@ const TOOL_DESCRIPTION =
   "remove/replace/review existing legs, or clarify. Mark selections the user supplied as user_text or " +
   "user_image and selections you suggest yourself as agent_suggestion with quotedOdds null; keep unreadable " +
   "or missing details null and list them in unresolved. Do not invent IDs or prices. " +
+  "Each action is a delta against the current slip: legs holds only new or replacement legs, never the remaining slip. " +
+  "Reason and inspect first, then submit one final, complete proposal; never submit intermediate or incremental drafts. " +
+  "For an image, count its distinct visible rows and use each visible row once, without invented duplicates. " +
+  "A rejected proposal cannot be repaired by submitting again in the same turn, and a conflicting or different " +
+  "second proposal invalidates the whole turn. If unsure, use clarify rather than guessing selections or prices. " +
   "This is a proposal only: nothing is saved or confirmed by calling it, so never tell the user the slip " +
   "was saved or confirmed.";
 
