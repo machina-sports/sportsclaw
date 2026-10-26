@@ -122,6 +122,22 @@ import { createGenerateImageTool } from "./image-gen.js";
 import { buildTemplatePrompt, type QueryIntent } from "./response-templates.js";
 import { evaluateResponse } from "./evaluator.js";
 import { validateCallerHistory } from "./caller-history.js";
+import {
+  SLIP_OUTPUT_TOOL_NAME,
+  SLIP_TURN_CONTRACT,
+  createSlipOutputCollector,
+  hashSlipTurnInput,
+  parseSlipTurnInput,
+  type SlipOutputCollector,
+  type SlipRevision,
+  type SlipTurnResult,
+} from "./slip-output.js";
+import {
+  SLIP_DECISION_CONTRACT,
+  runSlipDecision,
+  slipDecisionsEnabled,
+  type SlipDecisionResult,
+} from "./slip-decision.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import {
   buildResultOverview,
@@ -895,6 +911,30 @@ function routingRefusalMessage(outcome: SkillRoutingMeta): string {
   if (outcome.status === "clarify") return "Which sport or data source should I use? Please narrow the request.";
   if (outcome.status === "unsupported") return "The available sports capabilities do not support that request.";
   return "I could not route this request. Please check the routing configuration or try again later.";
+}
+
+/** Request-local slip state for one run(); never stored on the engine. */
+interface SlipRun {
+  collector: SlipOutputCollector;
+  context: SlipRevision | null;
+  /** The output tool was refused by an allowlist or agent restriction. */
+  denied: boolean;
+}
+
+/** Main-model guidance for a run that offers submit_slip_change. */
+function slipPromptSection(context: SlipRevision | null): string {
+  return (
+    "\n\n## Bet slip\n\n" +
+    `This turn can record a bet-slip proposal. When the user asks to create, import (pasted text or a screenshot), ` +
+    `add to, remove from, replace in or review their slip, call ${SLIP_OUTPUT_TOOL_NAME} once with the structured ` +
+    `change. Do not call it for ordinary sports questions. Selections the user supplied are user_text or user_image, ` +
+    `with their quoted odds copied exactly; selections you suggest yourself are agent_suggestion with quotedOdds null. ` +
+    `Never invent IDs or prices. The tool records a proposal only: never say the slip was saved, confirmed or placed, ` +
+    `and never confirm it yourself.\n\n` +
+    (context
+      ? `Current slip (use revisionId as baseRevisionId and leg ids as targetLegIds):\n${JSON.stringify(context)}`
+      : "There is no current slip: a new slip is a create with baseRevisionId null.")
+  );
 }
 
 export class sportsclawEngine {
@@ -4239,6 +4279,45 @@ export class sportsclawEngine {
   }
 
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    if (options?.slip === undefined) return this.runTurn(userPrompt, options);
+
+    // Explicit slip mode: validate and gate before any model, tool or credential work.
+    const observe = options.onSlipResult;
+    if (typeof observe !== "function") throw new Error("slip mode requires an onSlipResult observer");
+    const input = parseSlipTurnInput(options.slip);
+    if (!input) throw new Error("invalid slip turn input");
+    if (!slipDecisionsEnabled()) throw new Error("slip mode is disabled on this server");
+    const inputHash = hashSlipTurnInput(input);
+    const slip: SlipRun = { collector: createSlipOutputCollector(input.context), context: input.context, denied: false };
+
+    const text = await this.runTurn(userPrompt, options, slip);
+
+    let decision: SlipDecisionResult | null = null;
+    if (slip.denied) {
+      decision = { contract: SLIP_DECISION_CONTRACT, ok: false, reasonCode: "disabled" };
+    } else if (slip.collector.invalid()) {
+      // A malformed, refused or undispatched proposal is never decided or repaired.
+      decision = { contract: SLIP_DECISION_CONTRACT, ok: false, reasonCode: "invalid_response" };
+    } else {
+      const proposal = slip.collector.finish();
+      if (proposal) {
+        // Jev sees only the exact original request, never the composed prompt or history.
+        decision = await runSlipDecision(
+          { contract: SLIP_DECISION_CONTRACT, text: input.requestText, proposal, context: input.context },
+          { abortSignal: options.abortSignal },
+        );
+      }
+    }
+    const result: SlipTurnResult = { contract: SLIP_TURN_CONTRACT, inputHash, decision };
+    try {
+      observe(result);
+    } catch {
+      throw new Error("slip result observer failed");
+    }
+    return text;
+  }
+
+  private async runTurn(userPrompt: string, options?: RunOptions, slip?: SlipRun): Promise<string> {
     if (options?.history !== undefined && options.historyMode !== "caller") {
       throw new Error("history is only accepted with historyMode caller");
     }
@@ -4542,6 +4621,15 @@ export class sportsclawEngine {
         if (!allowed.has(name)) delete tools[name];
       }
     }
+    // The slip output tool is request-scoped, never global, and an explicit
+    // allowlist that omits it is honored rather than widened.
+    if (slip) {
+      if (!this.config.toolAllowlist || this.config.toolAllowlist.includes(SLIP_OUTPUT_TOOL_NAME)) {
+        tools[SLIP_OUTPUT_TOOL_NAME] = slip.collector.tool;
+      } else {
+        slip.denied = true;
+      }
+    }
     emitProgress?.({ type: "phase", label: "Routing to skills" });
     const routing = await this.resolveActiveToolsForPrompt(
       sanitizedPrompt,
@@ -4637,6 +4725,13 @@ export class sportsclawEngine {
       activeTools = activeTools.filter((name) => name in tools);
     }
 
+    // An agent restriction that filtered the output tool out keeps it out.
+    if (slip && !slip.denied && activeTools && !activeTools.includes(SLIP_OUTPUT_TOOL_NAME)) {
+      slip.denied = true;
+      delete tools[SLIP_OUTPUT_TOOL_NAME];
+    }
+    const slipSection = slip && !slip.denied ? slipPromptSection(slip.context) : "";
+
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;
       const meta = routing.routeMeta;
@@ -4725,7 +4820,7 @@ export class sportsclawEngine {
             strategyContent,
             callerSystemPrompt: options?.systemPrompt,
             ...(agentActiveTools !== undefined ? { activeToolNames: agentActiveTools } : {}),
-          }),
+          }) + slipSection,
           messages: this.messages,
           tools,
           ...(agentActiveTools !== undefined ? { activeTools: agentActiveTools } : {}),
@@ -4733,6 +4828,7 @@ export class sportsclawEngine {
           stopWhen: stepCountIs(parallelMaxTurns),
           maxOutputTokens: budgets.main,
           ...(providerOpts ? { providerOptions: providerOpts } : {}),
+          onStepFinish: (step) => slip?.collector.observeStep(step),
           experimental_onToolCallFinish: (event) => {
             const { toolCall, durationMs, success } = event;
             const skillName = this.registry.getSkillName(toolCall.toolName);
@@ -4752,6 +4848,8 @@ export class sportsclawEngine {
             }
             // Node.js single-threaded event loop: Map operations are safe across
             // concurrent promises — no data races on failedExternalTools/succeededExternalTools.
+            // The slip output tool records a proposal, not evidence.
+            if (toolCall.toolName === SLIP_OUTPUT_TOOL_NAME) return;
             if (!success && !toolCall.toolName.startsWith("update_")) {
               failedExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
             } else if (success && !toolCall.toolName.startsWith("update_")) {
@@ -4896,7 +4994,7 @@ export class sportsclawEngine {
           strategyContent,
           callerSystemPrompt: options?.systemPrompt,
           ...(activeTools ? { activeToolNames: activeTools } : {}),
-        })),
+        }) + slipSection),
         messages: messagesOverride ?? this.messages,
         tools,
         ...(activeTools ? { activeTools } : {}),
@@ -4946,6 +5044,8 @@ export class sportsclawEngine {
             });
           }
 
+          // The slip output tool records a proposal, not evidence.
+          if (toolCall.toolName === SLIP_OUTPUT_TOOL_NAME) return;
           if (!success && !toolCall.toolName.startsWith("update_")) {
             failedExternalTools.set(toolCall.toolCallId, {
               toolName: toolCall.toolName,
@@ -4958,7 +5058,9 @@ export class sportsclawEngine {
             });
           }
         },
-        onStepFinish: ({ toolCalls }) => {
+        onStepFinish: (step) => {
+          const { toolCalls } = step;
+          slip?.collector.observeStep(step);
           stepCount++;
           if (this.config.verbose) {
             console.error(
