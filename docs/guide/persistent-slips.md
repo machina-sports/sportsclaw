@@ -42,6 +42,14 @@ Leg `source` is `user_text`/`user_image` (quoted odds kept exactly as the user
 wrote them) or `agent_suggestion` (the assistant's own pick; `quotedOdds` must
 be `null`). None of these is a verified venue market or price.
 
+A `slip-change-v1` is a delta against `context`, not the slip after the edit.
+`legs` holds only new legs (`create`/`append`) or exactly one replacement
+(`replace`), and is `[]` for `remove`, `review` and `clarify`; `targetLegIds`
+names the existing legs affected (for `remove`, the legs to drop, never the
+ones to keep). The `submit_slip_change` description tells the model to submit
+one final, complete proposal per turn: a refused proposal cannot be repaired
+by resubmitting, and a conflicting second proposal invalidates the turn.
+
 ## Engine
 
 `engine.run(prompt, { slip, onSlipResult })` returns the answer string as

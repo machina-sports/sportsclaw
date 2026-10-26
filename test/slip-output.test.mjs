@@ -243,6 +243,47 @@ describe("validateSlipRevision", () => {
 // ---------------------------------------------------------------------------
 
 describe("submit_slip_change collector", () => {
+  it("describes per-action delta arity in the model-visible schema", () => {
+    const schema = slip.createSlipOutputCollector(null).tool.inputSchema?.jsonSchema;
+    assert.ok(schema?.properties?.action && schema?.properties?.legs);
+    const action = schema.properties.action.description ?? "";
+    for (const name of ["remove", "review", "clarify"]) {
+      assert.match(action, new RegExp(`${name}[^;\\n]*legs\\s*=\\s*\\[\\]`, "i"));
+    }
+    assert.match(action, /replace[^;\n]*(exactly one|1)[^;\n]*leg/i);
+    assert.match(schema.properties.legs.description ?? "", /not[^.]*remaining|never[^.]*unchanged/i);
+  });
+
+  it("describes target IDs as the affected existing legs, not the retained ones", () => {
+    const schema = slip.createSlipOutputCollector(null).tool.inputSchema.jsonSchema;
+    const text = schema.properties.targetLegIds.description ?? "";
+    assert.match(text, /remove/i);
+    assert.match(text, /IDs to remove|legs to remove/i);
+    assert.match(text, /replace/i);
+    assert.match(text, /review/i);
+  });
+
+  it("tells the model to finish reasoning and count visible rows before one final proposal", () => {
+    const text = slip.createSlipOutputCollector(null).tool.description;
+    assert.match(text, /one final|exactly one complete/i);
+    assert.match(text, /conflicting|different.*invalid/i);
+    assert.match(text, /count[^.]*rows|each visible[^.]*once/i);
+    assert.match(text, /intermediate|incremental/i);
+  });
+
+  it("still rejects a remove carrying retained legs and any later in-turn repair", async () => {
+    const collector = slip.createSlipOutputCollector(clone(CONTEXT));
+    const { id, ...retainedLeg } = clone(CONTEXT.legs[1]);
+    const malformed = change("remove", { base: REV_ID, targets: [LEG_IDS[0]], legs: [retainedLeg] });
+    const bad = await submit(collector, malformed);
+    assert.equal(bad.accepted, false);
+    assert.equal(bad.reasonCode, "invalid_change");
+    const repair = await submit(collector, change("remove", { base: REV_ID, targets: [LEG_IDS[0]] }));
+    assert.equal(repair.accepted, false);
+    assert.equal(collector.invalid(), true);
+    assert.equal(collector.finish(), undefined);
+  });
+
   it("captures nothing on an ordinary turn that never calls the tool", () => {
     const collector = slip.createSlipOutputCollector(null);
     assert.equal(typeof collector.tool.execute, "function");
