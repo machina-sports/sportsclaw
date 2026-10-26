@@ -4293,7 +4293,8 @@ export class sportsclawEngine {
     responseText: string,
     options: RunOptions | undefined,
   ): Promise<{ text: string; tokens: number }> {
-    if (!slip || slip.denied) return { text: responseText, tokens: 0 };
+    if (!slip) return { text: responseText, tokens: 0 };
+    if (slip.denied) return { text: SLIP_UNAVAILABLE_TEXT, tokens: 0 };
     const providerOptions = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
     const extraction = await extractSlipProposal(
       {
@@ -5362,7 +5363,7 @@ export class sportsclawEngine {
     }
 
     // --- Slip: one extraction on the final answer, before persistence and accounting ---
-    if (slip && !slip.denied) {
+    if (slip) {
       const finalized = await this.finalizeSlip(slip, responseText, options);
       // The main pass was charged above; the extraction is charged once here.
       recordTokens(finalized.tokens);

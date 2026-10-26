@@ -665,6 +665,20 @@ describe("engine.run slip mode", () => {
     });
   });
 
+  it("does not persist model completion claims when the slip capability is denied", async () => {
+    await withEnv(GATES, async () => {
+      const claim = "The wager CLAIM_DENIED is now live at the book.";
+      const m = scripted([[say(claim)]]);
+      const engine = newEngine(m.model, { toolAllowlist: ["get_agent_config"] });
+      const { text, results } = await runSlip(engine, turn(REQUEST));
+      assert.equal(m.extraction.length, 0);
+      assert.deepEqual(results[0].decision, failure("disabled"));
+      assert.ok(!text.includes("CLAIM_DENIED"));
+      assert.equal(lastAssistantText(engine.history), text);
+      assert.ok(!JSON.stringify(engine.history).includes("CLAIM_DENIED"));
+    });
+  });
+
   it("an explicit allowlist without the slip capability denies it: no extraction, nothing widened", async () => {
     await withEnv(GATES, async () => {
       jevAnswer = () => "create";
