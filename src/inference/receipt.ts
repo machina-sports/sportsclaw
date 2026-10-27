@@ -77,7 +77,7 @@ export const INFERENCE_PURPOSES = [
   "chat", "chat_lane", "routing", "verification", "correction", "compaction", "synthesis",
   "tool_repair", "subagent", "heartbeat_condition", "setup", "operator_tick", "momentum_explain",
   "momentum_evaluate", "model_role", "image", "watch_intent", "evidence_decision",
-  "capability_routing", "decision_relay", "slip_decision", "other",
+  "capability_routing", "decision_relay", "slip_decision", "slip_extraction", "other",
 ] as const;
 const PURPOSES: ReadonlySet<string> = new Set(INFERENCE_PURPOSES);
 

@@ -317,12 +317,13 @@ const LEG_SCHEMA = {
           required: ["value", "format"],
           properties: {
             value: { type: "string", minLength: 1, maxLength: MAX_QUOTED_CHARS, description: "Exactly as quoted by the user." },
-            format: { enum: [...FORMATS] },
+            format: { type: "string", enum: [...FORMATS] },
           },
         },
       ],
     },
     source: {
+      type: "string",
       enum: [...SOURCES],
       description:
         "user_text/user_image: the user supplied this selection (copy their quoted odds exactly). " +
@@ -337,8 +338,11 @@ const CHANGE_SCHEMA = {
   additionalProperties: false,
   required: [...CHANGE_KEYS],
   properties: {
-    contract: { const: SLIP_CHANGE_CONTRACT },
+    // Typed singleton enum, not an untyped const: a native structured-output
+    // provider (Google) ignored the const and produced off-contract literals.
+    contract: { type: "string", enum: [SLIP_CHANGE_CONTRACT] },
     action: {
+      type: "string",
       enum: ["create", "append", "remove", "replace", "review", "clarify"],
       description:
         "create: baseRevisionId=null, targetLegIds=[], legs=the new legs (at least 1); " +
@@ -370,6 +374,45 @@ const CHANGE_SCHEMA = {
     unresolved: { type: "array", maxItems: MAX_UNRESOLVED, items: { type: "string", minLength: 1, maxLength: MAX_FIELD_CHARS } },
   },
 };
+
+// ---------------------------------------------------------------------------
+// Bounded extraction envelope: one structured-output reply per turn
+// ---------------------------------------------------------------------------
+
+export type SlipExtractionEnvelope =
+  | { status: "none"; change: null }
+  | { status: "proposal"; change: SlipChange };
+
+/** Native structured-output schema for the one extraction call. */
+export const SLIP_EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["status", "change"],
+  properties: {
+    status: { type: "string", enum: ["none", "proposal"] },
+    change: { anyOf: [{ type: "null" }, CHANGE_SCHEMA] },
+  },
+};
+
+/**
+ * Exact envelope validation against the request's context. `none` carries no
+ * change; a proposal must be a valid change that fits the context (never a
+ * confirm). Returns a fresh copy, or null. Never throws, never repairs.
+ */
+export function parseSlipExtractionEnvelope(value: unknown, context: SlipRevision | null): SlipExtractionEnvelope | null {
+  try {
+    const raw = exactKeys(value, ["status", "change"]);
+    const base = context === null ? null : parseSlipRevision(context);
+    if (context !== null && base === null) return null;
+    if (raw.status === "none") return raw.change === null ? { status: "none", change: null } : null;
+    if (raw.status !== "proposal") return null;
+    const change = parseSlipChange(raw.change);
+    if (!change || slipProposalProblem(change, base)) return null;
+    return { status: "proposal", change };
+  } catch {
+    return null;
+  }
+}
 
 const TOOL_DESCRIPTION =
   "Submit ONE structured bet-slip change proposal for the user's request: create a new slip, append legs, " +

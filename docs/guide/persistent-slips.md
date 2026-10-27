@@ -46,9 +46,7 @@ A `slip-change-v1` is a delta against `context`, not the slip after the edit.
 `legs` holds only new legs (`create`/`append`) or exactly one replacement
 (`replace`), and is `[]` for `remove`, `review` and `clarify`; `targetLegIds`
 names the existing legs affected (for `remove`, the legs to drop, never the
-ones to keep). The `submit_slip_change` description tells the model to submit
-one final, complete proposal per turn: a refused proposal cannot be repaired
-by resubmitting, and a conflicting second proposal invalidates the turn.
+ones to keep).
 
 ## Engine
 
@@ -57,16 +55,65 @@ before and calls `onSlipResult` exactly once per successful run.
 
 - Invalid input, a missing observer or closed gates reject before any model,
   tool or credential work. A throwing observer rejects the run.
-- The request-scoped `submit_slip_change` tool is added to the normal
-  generate/tool path only. An explicit tool allowlist or agent restriction that
-  omits it is honored, and the result is `{ok:false, reasonCode:"disabled"}`.
-- Any SDK dispatch failure in the run (malformed arguments, unknown tool,
-  refused proposal) yields `invalid_response` with no Jev call. An error payload
-  returned by a successfully dispatched tool does not.
-- Only a clean captured proposal goes to Jev (`runSlipDecision`, pinned
-  `jev-1.14.0`), with `requestText` and the context. Text or leg descriptions
-  containing reserved slip identifiers (`slp_`/`slr_`/`sll_`) are refused as
+- Ordinary answering and research run unchanged. No slip tool is offered to the
+  answer model, in the normal path or in parallel agent lanes.
+- After the final answer and its evidence checks, and before history, session
+  and memory persistence and token accounting, the engine makes **one bounded
+  extraction call** (`extractSlipProposal`, receipt purpose `slip_extraction`)
+  on the same resolved model, sampling and provider options: native structured
+  output (`Output.object`), no tools or tool choice, no retry, repair,
+  continuation or fallback. Provider options are copied and restricted for this
+  pass only (the caller's map is not mutated): provider-side MCP servers or a
+  container in any namespace are refused as `invalid_request` before dispatch;
+  Anthropic is pinned to native `output_format` (`structuredOutputMode:
+  "outputFormat"`, never the adapter's synthetic json tool) with extended
+  thinking disabled, and any namespace carrying those Anthropic settings gets
+  the same values, so a custom provider alias cannot override them. A model or
+  endpoint that rejects native output fails once as `inference_unavailable`,
+  with no fallback. Other namespaces (e.g. Google `thinkingConfig`) pass
+  through unchanged. It sees only `requestText`, `context`, the current
+  request images and the final answer, as data; the answer contributes only
+  `agent_suggestion` legs with `quotedOdds: null`.
+- The reply is one envelope `{status:"none"|"proposal", change}`. `none` (with
+  `change: null`) gives `decision: null` and keeps the answer. A `proposal`
+  must pass the strict change parser and the action/base/target checks against
+  `context`; a model `confirm` is refused. Fixed literals and string enums in the
+  native schema are typed (`{type:"string", enum:[...]}`); an untyped `const`
+  was ignored by a native provider. This is schema representation only — the
+  output is never coerced or repaired.
+- Malformed, truncated (`length`), refused/filtered or off-contract output,
+  provider errors, the deadline and caller aborts become
+  `{ok:false, reasonCode}` (`invalid_response`, `inference_unavailable`,
+  `timeout`, `aborted`, `invalid_request`) — never `none` — with no Jev call.
+- Only a valid proposal goes to Jev (`runSlipDecision`, pinned `jev-1.14.0`),
+  with `requestText` and the context. Text or leg descriptions containing
+  reserved slip identifiers (`slp_`/`slr_`/`sll_`) are refused as
   `invalid_request` before any credential read or request.
+- On a denied, failed or clarifying outcome, the answer is replaced by a fixed
+  safe message, and all of the turn's assistant text (including earlier steps)
+  is removed before storage, keeping tool calls and results; prior turns are
+  unchanged. This follows the typed outcome, even when the answer already
+  equals the safe message. The returned text and the stored final assistant
+  message are the same.
+- An explicit tool allowlist that omits `submit_slip_change` still denies the
+  slip capability (no extraction, `{ok:false, reasonCode:"disabled"}`); naming
+  it permits extraction without offering any tool. A routing refusal ends the
+  turn with no extraction.
+- Extraction usage is added once to the run's usage, pass usage, daily token
+  ledger and query analytics, including when its output fails to parse.
+
+### Extraction bounds
+
+Initial ceilings, not accuracy or performance claims. Out-of-bound input is
+refused as `invalid_request` before the model call, never truncated.
+
+| Bound | Value |
+| --- | --- |
+| Deadline | 20 s (combined with the caller's abort) |
+| Output tokens | 8192 requested (`maxOutputTokens`); with Anthropic thinking disabled, also the wire `max_tokens` |
+| Retries | 0 |
+| Text | UTF-8 bytes of the turn JSON + the answer ≤ 65536 |
+| Images | ≤ 4; PNG/JPEG/WebP/GIF; non-empty strict base64; ≤ 10 MiB each, ≤ 20 MiB total decoded |
 
 ## CLI and relay
 
@@ -85,5 +132,5 @@ before and calls `onSlipResult` exactly once per successful run.
 
 ## Limits
 
-Proposal extraction quality depends on the answer model; offline tests use a
+Proposal extraction quality depends on the primary model; offline tests use a
 scripted model and fake Jev transport and say nothing about live accuracy.
