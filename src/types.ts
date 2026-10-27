@@ -6,6 +6,7 @@
 
 import type { ModelMessage } from "ai";
 import type { SlipTurnInput, SlipTurnResult } from "./slip-output.js";
+import type { ArtifactTurnInput, ArtifactTurnResult } from "./artifact-output.js";
 
 // ---------------------------------------------------------------------------
 // Supported LLM providers
@@ -820,6 +821,13 @@ export interface RunOptions {
   slip?: SlipTurnInput;
   /** Receives exactly one typed slip result per successful run with `slip`. */
   onSlipResult?: (result: SlipTurnResult) => void;
+  /**
+   * Opt-in `artifact-turn-v1` request: offers `submit_artifact` for this run.
+   * Requires `onArtifactResult` and caller-owned history (`historyMode: "caller"`).
+   */
+  artifact?: ArtifactTurnInput;
+  /** Receives exactly one typed artifact result per successful run with `artifact`. */
+  onArtifactResult?: (result: ArtifactTurnResult) => void;
 }
 
 // ---------------------------------------------------------------------------

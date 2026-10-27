@@ -48,7 +48,7 @@ Reads `SKILL.md` or a file under `references/` of that skill. No script approval
   covers URLs), and control characters are rejected.
 - The real path must equal `<skill dir>/<path>`. Any symlink along the way is rejected, which
   covers escaping symlinks.
-- The target must be a regular file ending in `.md`, `.txt`, `.json`, `.yaml`, or `.yml`, at most
+- The target must be a regular file ending in `.md`, `.txt`, `.json`, `.yaml`, `.yml`, or `.html`, at most
   256 KiB, and valid UTF-8.
 - Error codes: `invalid_args`, `unknown_skill`, `invalid_path`, `not_found`, `too_large`,
   `not_text`.

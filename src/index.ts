@@ -100,6 +100,7 @@ import {
 import type { ToolProgressEvent, McpServerConfig, RunOptions } from "./types.js";
 import { validateCallerHistory, validateSessionId } from "./caller-history.js";
 import { parseSlipTurnInput, type SlipTurnResult } from "./slip-output.js";
+import { parseArtifactTurnInput, type ArtifactTurnResult } from "./artifact-output.js";
 import {
   loadConfig,
   resolveConfig,
@@ -2339,6 +2340,8 @@ export function buildOneShotRunOptions(params: {
   abortSignal?: AbortSignal;
   slip?: RunOptions["slip"];
   onSlipResult?: RunOptions["onSlipResult"];
+  artifact?: RunOptions["artifact"];
+  onArtifactResult?: RunOptions["onArtifactResult"];
 }): RunOptions {
   return {
     ...(params.historyMode ? { historyMode: params.historyMode } : {}),
@@ -2353,15 +2356,23 @@ export function buildOneShotRunOptions(params: {
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
     ...(params.slip !== undefined ? { slip: params.slip } : {}),
     ...(params.onSlipResult ? { onSlipResult: params.onSlipResult } : {}),
+    ...(params.artifact !== undefined ? { artifact: params.artifact } : {}),
+    ...(params.onArtifactResult ? { onArtifactResult: params.onArtifactResult } : {}),
   };
 }
 
-/** The headless NDJSON result line; the typed slip result rides beside the text, never in it. */
+/** The headless NDJSON result line; typed slip and artifact results ride beside the text, never in it. */
 export function oneShotResultEvent(
   text: string,
   slip?: SlipTurnResult,
-): { type: "result"; text: string; slip?: SlipTurnResult } {
-  return slip === undefined ? { type: "result", text } : { type: "result", text, slip };
+  artifact?: ArtifactTurnResult,
+): { type: "result"; text: string; slip?: SlipTurnResult; artifact?: ArtifactTurnResult } {
+  return {
+    type: "result",
+    text,
+    ...(slip !== undefined ? { slip } : {}),
+    ...(artifact !== undefined ? { artifact } : {}),
+  };
 }
 
 export function runOneShotEngine(
@@ -2396,15 +2407,15 @@ export function takeOneShotSessionId(args: string[]): string | undefined {
 }
 
 /**
- * --history-stdin: read `{"history": [...], "images"?: [...], "slip"?: {...}}`
- * from stdin (caller mode only). History and the slip-turn-v1 input never
- * travel through argv or the environment.
+ * --history-stdin: read `{"history": [...], "images"?: [...], "slip"?: {...}, "artifact"?: {...}}`
+ * from stdin (caller mode only). History, the slip-turn-v1 input and the
+ * artifact-turn-v1 input never travel through argv or the environment.
  */
 export function takeOneShotHistory(
   args: string[],
   historyMode: RunOptions["historyMode"],
   readStdin: () => string = () => readFileSync(0, "utf-8"),
-): Pick<RunOptions, "history" | "images" | "slip"> | undefined {
+): Pick<RunOptions, "history" | "images" | "slip" | "artifact"> | undefined {
   const idx = args.indexOf("--history-stdin");
   if (idx < 0) return undefined;
   if (historyMode !== "caller") throw new Error("--history-stdin requires --history-mode caller");
@@ -2418,12 +2429,15 @@ export function takeOneShotHistory(
     throw new Error("--history-stdin expects a JSON object with a history array");
   }
   const keys = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed) : [];
-  if (!keys.includes("history") || keys.some((key) => key !== "history" && key !== "images" && key !== "slip")) {
-    throw new Error("--history-stdin expects a JSON object with a history array, optional images and optional slip");
+  const allowed = new Set(["history", "images", "slip", "artifact"]);
+  if (!keys.includes("history") || keys.some((key) => !allowed.has(key))) {
+    throw new Error("--history-stdin expects a JSON object with a history array, optional images, slip and artifact");
   }
-  const { history, images, slip } = parsed as { history: unknown; images?: unknown; slip?: unknown };
+  const { history, images, slip, artifact } = parsed as { history: unknown; images?: unknown; slip?: unknown; artifact?: unknown };
   const slipInput = slip === undefined ? undefined : parseSlipTurnInput(slip);
   if (slip !== undefined && !slipInput) throw new Error("--history-stdin slip must be a valid slip-turn-v1 input");
+  const artifactInput = artifact === undefined ? undefined : parseArtifactTurnInput(artifact);
+  if (artifact !== undefined && !artifactInput) throw new Error("--history-stdin artifact must be a valid artifact-turn-v1 input");
   if (
     images !== undefined &&
     (!Array.isArray(images) || !images.every((img) =>
@@ -2435,6 +2449,7 @@ export function takeOneShotHistory(
     history: validateCallerHistory(history),
     ...(images ? { images: images as NonNullable<RunOptions["images"]> } : {}),
     ...(slipInput ? { slip: slipInput } : {}),
+    ...(artifactInput ? { artifact: artifactInput } : {}),
   };
 }
 
@@ -2446,7 +2461,7 @@ export function takeOneShotHistory(
 export function takeOneShotConversation(
   args: string[],
   readStdin?: () => string,
-): Pick<RunOptions, "historyMode" | "sessionId" | "history" | "images" | "slip"> {
+): Pick<RunOptions, "historyMode" | "sessionId" | "history" | "images" | "slip" | "artifact"> {
   const sessionId = takeOneShotSessionId(args);
   const historyIdx = args.indexOf("--history-mode");
   const historyMode = historyIdx >= 0 ? args[historyIdx + 1] : "engine";
@@ -2759,8 +2774,9 @@ async function cmdQuery(args: string[]): Promise<void> {
           console.error("[sportsclaw] Failed to parse SPORTSCLAW_INBOUND_IMAGES env:", err);
         }
       }
-      // This run's typed slip result, captured locally and emitted on its result line.
+      // This run's typed slip and artifact results, captured locally and emitted on its result line.
       let slipResult: SlipTurnResult | undefined;
+      let artifactResult: ArtifactTurnResult | undefined;
       const result = await runOneShotEngine(engine, prompt, {
         historyMode,
         userId,
@@ -2778,9 +2794,20 @@ async function cmdQuery(args: string[]): Promise<void> {
               },
             }
           : {}),
+        ...(conversation.artifact !== undefined
+          ? {
+              onArtifactResult: (typed: ArtifactTurnResult) => {
+                if (artifactResult !== undefined) throw new Error("duplicate artifact result");
+                artifactResult = typed;
+              },
+            }
+          : {}),
       });
       if (conversation.slip !== undefined && slipResult === undefined) {
         throw new Error("slip result missing");
+      }
+      if (conversation.artifact !== undefined && artifactResult === undefined) {
+        throw new Error("artifact result missing");
       }
       const formatted = formatResponse(result, formatArg as any);
       for (const img of engine.generatedImages) {
@@ -2790,7 +2817,7 @@ async function cmdQuery(args: string[]): Promise<void> {
         emitNdjson({ type: "video", data: vid.data, mimeType: vid.mimeType, prompt: vid.prompt });
       }
       await emitManifest();
-      emitNdjson(oneShotResultEvent(formatted.text, slipResult));
+      emitNdjson(oneShotResultEvent(formatted.text, slipResult, artifactResult));
       // Wait for stdout to drain before exiting — process.stdout.write() to
       // a pipe is async and process.exit() would truncate unflushed data
       // (e.g. large base64 image lines that exceed the 64KB pipe buffer).
