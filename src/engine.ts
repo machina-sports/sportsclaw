@@ -18,6 +18,7 @@ import {
 } from "ai";
 
 import { generate } from "./inference/run.js";
+import { DECISION_LIMITS } from "./decision-client.js";
 
 import { resolveModel, resolveAuthForModel } from "./llm-providers.js";
 
@@ -44,6 +45,7 @@ import {
   NO_FALLBACK_REASONS,
   buildVerificationState,
   correctionDiscrepancies,
+  refusedEvidenceContent,
   resolveEvidenceVerifierSettings,
   runJevDecision,
 } from "./evidence-verifier.js";
@@ -83,6 +85,7 @@ import {
 } from "./agents.js";
 import { McpManager, summarizeMcpServers } from "./mcp.js";
 import { loadSkillGuides } from "./skill-guides.js";
+import { SKILL_READ_TOOL } from "./skill-runtime.js";
 import type { SkillGuide } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -951,11 +954,20 @@ interface ArtifactRun {
   denied: boolean;
   /** Set by finalizeArtifact once the answer's evidence checks ran. */
   result: ArtifactTurnResult | null;
+  /** sha256 of the HTML a passing evidence check actually judged; only that document may be published. */
+  checkedSha256?: string;
+}
+
+/** A real submit_artifact call happened (accepted or refused); merely offering or denying the tool is not one. */
+function artifactAttempted(artifact: ArtifactRun | undefined): boolean {
+  return Boolean(artifact && !artifact.denied && (artifact.collector.finish() !== undefined || artifact.collector.problem() !== null));
 }
 
 // A known non-success discards model prose entirely; word lists cannot certify
 // whether an arbitrary language or paraphrase falsely claims completion.
 const SLIP_UNAVAILABLE_TEXT = "I could not prepare a reliable draft proposal. Please check the selections or clarify the request.";
+/** Reply for a turn whose only output is a valid document. Claims no storage or publication. */
+const ARTIFACT_PREPARED_TEXT = "I prepared the requested report as a separate document.";
 const SLIP_CLARIFY_TEXT = "Please clarify which draft or selection you want me to work with.";
 
 export class sportsclawEngine {
@@ -983,8 +995,8 @@ export class sportsclawEngine {
     passes[pass] = passes[pass] ? addUsage(passes[pass], usage) : usage;
   }
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
-  /** Set while verifyWithTrace runs: whether the check could not run, and the draft before any correction. */
-  private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[] };
+  /** Set while verifyWithTrace runs: whether the check could not run, the draft before any correction, the HTML a pass judged. */
+  private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string };
   private _lastRunTrace: RunTrace | null = null;
 
   /** Sanitized evidence-verification receipts from the last run(). */
@@ -1536,12 +1548,20 @@ export class sportsclawEngine {
    * draft, corrected it, withheld it, or could not check it; with the draft
    * from before a correction, so the effect of corrections can be measured.
    */
-  private async verifyWithTrace(params: Parameters<sportsclawEngine["validateResponseEvidence"]>[0]): Promise<string> {
-    const notes: { unverified?: boolean; firstDraft?: string; flagged?: string[] } = {};
+  private async verifyWithTrace(
+    params: Parameters<sportsclawEngine["validateResponseEvidence"]>[0],
+    artifact?: ArtifactRun,
+  ): Promise<string> {
+    const notes: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string } = {};
     this._verifyNotes = notes;
+    // The candidate document is judged with the prose, never as source evidence;
+    // the caller's nonce is a known private value that must not leave.
+    const html = artifact && !artifact.denied ? artifact.collector.finish()?.html : undefined;
     let out: string;
     try {
-      out = await this.validateResponseEvidence(params);
+      out = await this.validateResponseEvidence(
+        artifact ? { ...params, artifactHtml: html, privateValues: [artifact.input.nonce] } : params
+      );
     } finally {
       this._verifyNotes = undefined;
     }
@@ -1558,6 +1578,7 @@ export class sportsclawEngine {
         ...(notes.flagged ? { flaggedClaims: notes.flagged } : {}),
       };
     }
+    if (artifact && outcome === "kept" && notes.artifactSha256 !== undefined) artifact.checkedSha256 = notes.artifactSha256;
     return out;
   }
 
@@ -1576,9 +1597,20 @@ export class sportsclawEngine {
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
     correctionAttempted?: boolean;
+    /** The complete HTML document delivered with the draft (Jev judges it with the prose). */
+    artifactHtml?: string;
+    /** Known private values (e.g. the artifact nonce) that must never reach Jev. */
+    privateValues?: string[];
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
-    if (toolOutputs.length === 0) return draft;
+    const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
+    // Jev is the one checker for a turn whose only evidence is a failed source. A
+    // candidate HTML report is checked even with no tool output (its data may be
+    // the user's own), and so is the recheck of a correction that check asked for.
+    if (
+      toolOutputs.length === 0 && params.artifactHtml === undefined && !params.correctionAttempted &&
+      !(settings.provider === "jev" && (params.failedTools?.length ?? 0) > 0)
+    ) return draft;
     const unavailable = VERIFY_UNAVAILABLE;
     // A draft assembled from real tool output is only thrown away when the
     // check ran and found it unsupported. When the check itself cannot run —
@@ -1629,16 +1661,31 @@ export class sportsclawEngine {
       ? `These tools failed this turn, so their data is not available: ${failedTools.join(", ")}. ` +
         "A specific value or result the data shown does not contain, and that could only have come from one of them, is unsupported: flag it, even when the view is partial.\n"
       : "";
+    // No tool ran: the only input is the request itself (e.g. a report from the user's own numbers).
+    const suppliedInputRule = toolOutputs.length === 0 && failedTools.length === 0
+      ? "No source data was fetched this turn. Values the user explicitly supplied in the request are premises for this answer, " +
+        "not verified sports facts, and a question that merely mentions a value does not establish it. " +
+        "Any other factual claim in the draft or report is unsupported: flag it.\n"
+      : "";
+    // The candidate report is judged as part of the answer, never as source data.
+    const reportRule = params.artifactHtml !== undefined
+      ? "A complete HTML report is delivered with the draft. It is part of the answer, not source data: check every claim in it exactly like the draft's.\n"
+      : "";
+    const reportLines = params.artifactHtml !== undefined
+      ? ["Complete HTML report delivered with the draft (part of the answer to check, not source data):", params.artifactHtml]
+      : [];
 
     let discrepanciesFound = false;
     type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string; kind?: string }> };
 
     // --- Optional decision verifier (opt-in; default path is untouched) ---
     const verifierConfig = this.config.evidenceVerifier;
-    const settings = resolveEvidenceVerifierSettings(verifierConfig);
     // A misconfigured deployment policy refuses before any verifier is called.
-    if (settings.diagnostics.includes("invalid_generativeAction")) {
-      if (this.config.verbose) console.error("[sportsclaw] invalid evidence action; refusing to verify");
+    if (
+      settings.diagnostics.includes("invalid_generativeAction") ||
+      (settings.provider === "jev" && settings.diagnostics.includes("invalid_publicToolNames"))
+    ) {
+      if (this.config.verbose) console.error("[sportsclaw] invalid evidence setting; refusing to verify");
       return unavailable;
     }
     // One correction on the main model, then the existing bounded recheck.
@@ -1650,9 +1697,13 @@ export class sportsclawEngine {
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
       });
       if (!corrected) return unavailable;
-      return this.validateResponseEvidence({ ...params, draft: corrected, correctionAttempted: true });
+      // Only the prose was corrected: the recheck judges it alone and can never certify the old HTML.
+      return this.validateResponseEvidence({ ...params, artifactHtml: undefined, draft: corrected, correctionAttempted: true });
     };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
+    /** Set when admitted Jev mode routes a source-free report to the primary checker below. */
+    let sourceFreeReceipt: EvidenceVerificationReceipt | undefined;
+    const startedAt = Date.now();
     if (settings.provider === "jev") {
       if (!settings.enabled) {
         this.recordEvidenceReceipt({
@@ -1666,27 +1717,68 @@ export class sportsclawEngine {
         // simply does not happen here.
         return params.correctionAttempted ? unavailable : unverified(settings.reasonCode ?? "disabled");
       } else {
-        const decision = await runJevDecision({
-          settings,
-          state: buildVerificationState({ userPrompt, serializedToolOutputs, draft, callerSystemPrompt: params.callerSystemPrompt }),
-          transport: verifierConfig?.transport,
-          env: verifierConfig?.env,
-          abortSignal: params.abortSignal,
-          recheck: params.correctionAttempted === true,
+        // Refusals below happen before any credential read or request and never
+        // fall back: the same material must not reach another verifier instead.
+        const blocked = (reasonCode: string): string => {
+          this.recordEvidenceReceipt({
+            provider: "jev", requestedModel: settings.model, status: "blocked", reasonCode, latencyMs: 0,
+            questionCount: 0, fallbackUsed: false, recheck: params.correctionAttempted === true,
+          });
+          return params.correctionAttempted ? unavailable : unverified(reasonCode);
+        };
+        // Only operator-approved public tools may reach Jev. One unapproved source
+        // refuses the whole check: certifying the rest would vouch for an answer
+        // partly built from it.
+        const admitted = new Set(settings.publicToolNames);
+        if ([...toolOutputs.map((item) => item.toolName), ...failedTools].some((name) => !admitted.has(name))) {
+          return blocked("unapproved_evidence");
+        }
+        const state = buildVerificationState({
+          userPrompt, serializedToolOutputs, draft,
+          sourceStatus: partialViewRule + failedToolsRule + suppliedInputRule || undefined,
+          candidateHtml: params.artifactHtml,
         });
-        // Ambiguous or unavailable decisions only reach the generative verifier
-        // when the caller asked for that fallback — and never after an auth
-        // refusal, a missing credential or a caller abort.
-        const mayFallback = settings.fallbackToGenerative && !NO_FALLBACK_REASONS.has(decision.reasonCode);
-        const decisive = decision.status === "supported" || decision.status === "contradicted";
-        this.recordEvidenceReceipt({ ...decision.receipt, fallbackUsed: !decisive && mayFallback });
-        if (decision.status === "supported") return draft;
-        if (decision.status === "contradicted") jevDiscrepancies = correctionDiscrepancies(decision.contradicted);
-        else if (!mayFallback) {
-          if (decision.reasonCode === "aborted") return unavailable;
-          // A chain that already confirmed a contradiction must not ship an
-          // unchecked correction just because the recheck could not run.
-          return params.correctionAttempted ? unavailable : unverified(decision.reasonCode);
+        const refused = refusedEvidenceContent(state, params.privateValues);
+        if (refused) return blocked(refused);
+        if (toolOutputs.length === 0 && failedTools.length === 0) {
+          // A report (or its correction's recheck) built only from the user's own
+          // premises has no external evidence for Jev to judge. The primary
+          // checker below takes the one check slot, chosen here before any key
+          // read or request: a route, not a fallback, so fallbackToGenerative is
+          // not consulted. Jev's state bound still applies first.
+          if (state.length > DECISION_LIMITS.maxStateChars) return blocked("request_too_large");
+          sourceFreeReceipt = {
+            provider: "generative", requestedModel: this.mainModelId, status: "unavailable", reasonCode: "source_free",
+            latencyMs: 0, questionCount: 0, fallbackUsed: false, recheck: params.correctionAttempted === true,
+          };
+          this.recordEvidenceReceipt(sourceFreeReceipt);
+        } else {
+          const decision = await runJevDecision({
+            settings,
+            state,
+            transport: verifierConfig?.transport,
+            env: verifierConfig?.env,
+            abortSignal: params.abortSignal,
+            recheck: params.correctionAttempted === true,
+          });
+          // Ambiguous or unavailable decisions only reach the generative verifier
+          // when the caller asked for that fallback — and never after an auth
+          // refusal, a missing credential or a caller abort.
+          const mayFallback = settings.fallbackToGenerative && !NO_FALLBACK_REASONS.has(decision.reasonCode);
+          const decisive = decision.status === "supported" || decision.status === "contradicted";
+          this.recordEvidenceReceipt({ ...decision.receipt, fallbackUsed: !decisive && mayFallback });
+          if (decision.status === "supported") {
+            // Bind the pass to the exact document it judged.
+            if (params.artifactHtml !== undefined && this._verifyNotes) this._verifyNotes.artifactSha256 = sha256(params.artifactHtml);
+            return draft;
+          }
+          if (decision.status === "contradicted") jevDiscrepancies = correctionDiscrepancies(decision.contradicted);
+          else if (!mayFallback) {
+            if (decision.reasonCode === "aborted") return unavailable;
+            // A chain that already confirmed a contradiction must not ship an
+            // unchecked correction just because the recheck could not run.
+            return params.correctionAttempted ? unavailable : unverified(decision.reasonCode);
+          }
         }
       }
     }
@@ -1717,6 +1809,8 @@ export class sportsclawEngine {
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           partialViewRule +
           failedToolsRule +
+          suppliedInputRule +
+          reportRule +
           "Judge the draft's claims, not whether the question could be answered: never flag a draft for answering " +
           "instead of declining. A value computed from the data (a count, sum, rate, or a player's team from a roster) " +
           "is supported when its inputs are in the data.\n" +
@@ -1746,9 +1840,10 @@ export class sportsclawEngine {
         prompt: [
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
-          serializedToolOutputs,
+          serializedToolOutputs || "(none)",
           `Draft response to check:`,
           draft,
+          ...reportLines,
         ].join("\n\n"),
         ...this.checkerCallOptions(),
         abortSignal: params.abortSignal,
@@ -1761,15 +1856,16 @@ export class sportsclawEngine {
         const retryRes = await generate({ purpose: "verification" }, {
           model: this.mainModel,
           ...this.samplingOptions(),
-          system: partialViewRule + failedToolsRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+          system: partialViewRule + failedToolsRule + suppliedInputRule + reportRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
           prompt: [
             `User request: ${userPrompt}`,
             `Raw source data (Source of Truth):`,
-            serializedToolOutputs,
+            serializedToolOutputs || "(none)",
             `Draft response to check:`,
             draft,
+            ...reportLines,
           ].join("\n\n"),
           ...this.checkerCallOptions(),
           abortSignal: params.abortSignal,
@@ -1777,6 +1873,12 @@ export class sportsclawEngine {
         });
         this.notePass("verification", usageOf(retryRes));
         parsed = readVerdict(retryRes.text);
+      }
+      if (sourceFreeReceipt) {
+        // The primary model answered the check; its verdict, never a Jev decision.
+        sourceFreeReceipt.model = this.mainModelId;
+        sourceFreeReceipt.status = !parsed ? "unavailable" : parsed.isValid ? "supported" : "contradicted";
+        sourceFreeReceipt.latencyMs = Date.now() - startedAt;
       }
       if (!parsed) return unverified("the checker did not return a usable verdict twice");
 
@@ -1790,6 +1892,10 @@ export class sportsclawEngine {
         ? parsed.discrepancies.filter((d) => d.kind !== "unsupported")
         : parsed.discrepancies;
       if (parsed.isValid || actionable.length === 0) {
+        // Only a verdict with no discrepancy at all binds the pass to the exact document it judged.
+        if (parsed.isValid && params.artifactHtml !== undefined && this._verifyNotes) {
+          this._verifyNotes.artifactSha256 = sha256(params.artifactHtml);
+        }
         return draft; // clean!
       }
       if (params.correctionAttempted) return unavailable;
@@ -4313,9 +4419,15 @@ export class sportsclawEngine {
     slip: SlipRun | undefined,
     responseText: string,
     options: RunOptions | undefined,
+    /** A real artifact submission/refusal is this turn's output: no unrequested secondary extraction. */
+    skipExtraction = false,
   ): Promise<{ text: string; tokens: number; unsuccessful: boolean }> {
     if (!slip) return { text: responseText, tokens: 0, unsuccessful: false };
     if (slip.denied) return { text: SLIP_UNAVAILABLE_TEXT, tokens: 0, unsuccessful: true };
+    if (skipExtraction) {
+      slip.decision = null;
+      return { text: responseText, tokens: 0, unsuccessful: false };
+    }
     const providerOptions = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
     const extraction = await extractSlipProposal(
       {
@@ -4438,8 +4550,9 @@ export class sportsclawEngine {
       artifact.result = { ...base, artifact: null, reasonCode: null };
       return;
     }
-    const outcome = this._lastRunTrace?.verification?.outcome;
-    if (outcome === "corrected" || outcome === "flagged" || outcome === "withheld") {
+    // Only a passing check that judged this exact document publishes it; a
+    // verification label about the prose alone does not.
+    if (artifact.checkedSha256 !== sha256(captured.html)) {
       artifact.result = { ...base, artifact: null, reasonCode: "evidence_unverified" };
       return;
     }
@@ -4778,7 +4891,10 @@ export class sportsclawEngine {
     // no second model, no tool call. YOLO and follow-up turns do not override
     // it — the router did not fail to be confident, it declined to guess.
     const routingOutcome = routing.routeMeta?.routing;
-    if (routingOutcome && routingOutcome.status !== "selected") {
+    // An explicit no_tools route answers from the main model with every
+    // executor removed for this run only (see callTools below).
+    const noTools = routingOutcome?.status === "no_tools";
+    if (routingOutcome && routingOutcome.status !== "selected" && !noTools) {
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] route status=${routingOutcome.status} source=${routingOutcome.source} reason=${routingOutcome.reasonCode} ms=${routingOutcome.latencyMs}`
@@ -4809,10 +4925,29 @@ export class sportsclawEngine {
       }
     }
 
+    // An external_inputs route is advice, not admission: its shortlist is the
+    // most it may execute, and a low confidence never widens it.
+    const advisory = routingOutcome?.reasonCode === "advisory_selection" || routingOutcome?.reasonCode === "advisory_no_tools";
+    // An already-offered artifact collector is a pure data sink, not an external
+    // action: it is the one executor a no_tools run keeps, together with the
+    // already-offered public guide reader used to compose it.
+    const artifactOffered = Boolean(artifact && !artifact.denied && ARTIFACT_OUTPUT_TOOL_NAME in tools);
+    const noToolsExecutors = artifactOffered
+      ? [ARTIFACT_OUTPUT_TOOL_NAME, ...(SKILL_READ_TOOL in tools ? [SKILL_READ_TOOL] : [])]
+      : [];
+    // Advisory data inputs exclude legacy always-active external/business tools.
+    const advisorySkills = new Set(routing.decision?.selectedSkills ?? []);
+    const advisoryTools = advisory ? (routing.activeTools ?? []).filter((name) => {
+      if (noToolsExecutors.includes(name)) return true;
+      const skill = this.registry.getSkillName(name);
+      return !name.startsWith("mcp__") && skill !== undefined && advisorySkills.has(skill);
+    }) : undefined;
+    // no_tools offers only the definitions history needs (widened below).
+    let routedTools = noTools ? noToolsExecutors : advisory ? advisoryTools : routing.activeTools;
     let activeTools = finalizeActiveTools({
-      routedActiveTools: routing.activeTools,
+      routedActiveTools: routedTools,
       isFollowUp,
-      lowConfidence: Boolean(
+      lowConfidence: !noTools && !advisory && Boolean(
         routing.decision && routing.decision.confidence < this.config.clarifyThreshold
       ),
       historyToolNames: Array.from(historyToolNames),
@@ -4841,11 +4976,13 @@ export class sportsclawEngine {
         );
     const activeAgents = agentRoutes.map((r) => r.agent);
 
-    if (explicitAgents) {
+    if (explicitAgents && !noTools) {
       const constrained = this.filterToolsForAgent(explicitAgents[0], Object.keys(tools));
       if (constrained !== undefined) {
+        // The agent's filter narrows advice; it never adds tools beyond the shortlist.
+        routedTools = advisory ? constrained.filter((name) => routing.activeTools?.includes(name)) : constrained;
         activeTools = finalizeActiveTools({
-          routedActiveTools: constrained,
+          routedActiveTools: routedTools,
           isFollowUp,
           lowConfidence: false,
           historyToolNames: Array.from(historyToolNames),
@@ -4901,10 +5038,29 @@ export class sportsclawEngine {
       .filter((s) => s.trim().length > 0)
       .join(" | ") || undefined;
 
+    // Tools that may actually execute this run. no_tools keeps only the pure
+    // output executors; an advisory shortlist keeps only its own (already
+    // allowed) tools, so a history-widened definition restores no executor.
+    // Undefined: the existing strict behaviour, every offered tool executes.
+    const executable = noTools ? new Set(noToolsExecutors) : advisory ? new Set(routedTools ?? []) : undefined;
+    // Definitions may stay for provider compatibility with history, but without
+    // an executor a call the model attempts anyway (toolChoice is not a security
+    // boundary) never runs SDK, MCP, agent or business code. Per-run only.
+    const withExecutors = (set: ToolSet): ToolSet =>
+      executable
+        ? (Object.fromEntries(
+            Object.entries(set).map(([name, def]) => {
+              if (executable.has(name)) return [name, def];
+              const { execute: _execute, ...definition } = def as ToolSet[string] & { execute?: unknown };
+              return [name, definition];
+            })
+          ) as ToolSet)
+        : set;
+
     // --- Parallel agent execution ---
     // When parallelAgents is enabled and multiple agents were routed,
     // run each agent as an independent lane and synthesize the results.
-    if (this.config.parallelAgents && activeAgents.length > 1) {
+    if (this.config.parallelAgents && activeAgents.length > 1 && !noTools) {
       if (this.config.verbose) {
         console.error(
           `[sportsclaw] parallel agents: launching ${activeAgents.length} lanes`
@@ -4924,10 +5080,14 @@ export class sportsclawEngine {
           totalToolCount: allToolNames.length,
           ceiling,
         });
+        // An advisory lane stays inside the shortlist, whatever the agent's own filter.
+        const laneRoutedTools = advisory
+          ? (agentRoutedTools ?? routedTools)?.filter((name) => routedTools?.includes(name))
+          : agentRoutedTools;
         const agentActiveTools = finalizeActiveTools({
-          routedActiveTools: agentRoutedTools?.filter((name) => name !== ARTIFACT_OUTPUT_TOOL_NAME),
+          routedActiveTools: laneRoutedTools?.filter((name) => name !== ARTIFACT_OUTPUT_TOOL_NAME),
           isFollowUp,
-          lowConfidence: Boolean(
+          lowConfidence: !advisory && Boolean(
             routing.decision && routing.decision.confidence < this.config.clarifyThreshold
           ),
           // This set was collected after context pruning from the retained,
@@ -4954,7 +5114,7 @@ export class sportsclawEngine {
             ...(agentActiveTools !== undefined ? { activeToolNames: agentActiveTools } : {}),
           }) + slipSection,
           messages: this.messages,
-          tools: laneTools,
+          tools: withExecutors(laneTools),
           ...(agentActiveTools !== undefined ? { activeTools: agentActiveTools } : {}),
           abortSignal: options?.abortSignal,
           stopWhen: stepCountIs(parallelMaxTurns),
@@ -4979,9 +5139,11 @@ export class sportsclawEngine {
             }
             // Node.js single-threaded event loop: Map operations are safe across
             // concurrent promises — no data races on failedExternalTools/succeededExternalTools.
-            if (!success && !toolCall.toolName.startsWith("update_")) {
+            // A skill guide read is instructions, never sports evidence.
+            const dataSource = !toolCall.toolName.startsWith("update_") && toolCall.toolName !== SKILL_READ_TOOL;
+            if (!success && dataSource) {
               failedExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
-            } else if (success && !toolCall.toolName.startsWith("update_")) {
+            } else if (success && dataSource) {
               succeededExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
             }
           },
@@ -5104,6 +5266,10 @@ export class sportsclawEngine {
       return responseText;
     }
 
+    // Executors per `executable` above; `tools` and config are untouched for later turns.
+    const callTools: ToolSet = withExecutors(tools);
+    const toolChoice = noTools && !artifactOffered ? ("none" as const) : undefined;
+
     let mainSystemPromptSha256: string | undefined;
     let mainSystem = "";
     const recordSystemPrompt = (system: string): string => {
@@ -5129,8 +5295,9 @@ export class sportsclawEngine {
           ...(activeTools ? { activeToolNames: activeTools } : {}),
         }) + slipSection + artifactSection),
         messages: messagesOverride ?? this.messages,
-        tools,
+        tools: callTools,
         ...(activeTools ? { activeTools } : {}),
+        ...(toolChoice ? { toolChoice } : {}),
         abortSignal: options?.abortSignal,
         stopWhen: stepCountIs(this.config.maxTurns),
         prepareStep: ({ stepNumber }) => wrapUpStep(stepNumber, this.config.maxTurns, mainSystem),
@@ -5177,8 +5344,10 @@ export class sportsclawEngine {
             });
           }
 
-          // The artifact output tool echoes the model's own document: never evidence.
-          const dataSource = !toolCall.toolName.startsWith("update_") && toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME;
+          // The artifact output tool echoes the model's own document and a skill
+          // guide read is instructions: neither is evidence.
+          const dataSource = !toolCall.toolName.startsWith("update_") &&
+            toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
           if (!success && dataSource) {
             failedExternalTools.set(toolCall.toolCallId, {
               toolName: toolCall.toolName,
@@ -5253,7 +5422,11 @@ export class sportsclawEngine {
     // Recovery pass: some providers occasionally return empty final text
     // even when the request is valid. Run one constrained retry with an
     // explicit directive to produce a concrete answer.
-    if (!result.text?.trim() && !this.hasAnyStepText(result.steps)) {
+    // Not on no_tools: its recovery instruction invites tool calls.
+    // Not when a valid artifact was submitted: that is already a complete answer.
+    if (!noTools && !result.text?.trim() && !this.hasAnyStepText(result.steps) && !artifact?.collector.finish()) {
+      // A discarded or failed recovery must leave the collector as the selected attempt left it.
+      const restoreArtifact = artifact?.collector.checkpoint();
       const recoveryMessages: Message[] = [
         ...this.messages,
         ...(result.response.messages as Message[]),
@@ -5275,9 +5448,12 @@ export class sportsclawEngine {
           )
         ) {
           result = recovered;
+        } else {
+          restoreArtifact?.();
         }
       } catch {
         // keep the original result path
+        restoreArtifact?.();
       }
     }
 
@@ -5287,7 +5463,7 @@ export class sportsclawEngine {
         servedModelId: result.response?.modelId,
         mainSystemPromptSha256,
         offeredTools: [...new Set(offered)].sort(),
-        toolSurfaceSha256: hashToolSurface(tools, offered),
+        toolSurfaceSha256: hashToolSurface(callTools, offered),
         providerWarnings: formatProviderWarnings(result.steps),
         parallelAgents: false,
         ...routedSkillsOf(routing),
@@ -5349,6 +5525,11 @@ export class sportsclawEngine {
       }
     }
 
+    // A valid document with no prose is a complete answer: say so neutrally,
+    // never that it was saved or published (only the caller can).
+    const capturedArtifact = artifact && !artifact.denied ? artifact.collector.finish() : undefined;
+    if (!finalText?.trim() && capturedArtifact) finalText = ARTIFACT_PREPARED_TEXT;
+
     let responseText =
       stepCount >= this.config.maxTurns && !finalText
         ? "[sportsclaw] Max turns reached without a final response."
@@ -5367,7 +5548,7 @@ export class sportsclawEngine {
       (f) => !succeededToolNames.has(f.toolName) && f.toolName !== QUERY_TOOL_RESULT_TOOL
     );
 
-    if (successes.length > 0 && this.isLowSignalResponse(responseText)) {
+    if (successes.length > 0 && responseText !== ARTIFACT_PREPARED_TEXT && this.isLowSignalResponse(responseText)) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
         result.steps as Array<{
@@ -5417,10 +5598,12 @@ export class sportsclawEngine {
     // is told which tools failed, so it covers what this gate did in one pass.
     // The gate stayed blind to most of the data and turned supported answers
     // into UNKNOWN after a rejected argument (bench v1-fix: 6 of 22 losses).
-    // It still runs when nothing succeeded, or when the opt-in Jev verifier
-    // (which can decline to check) is configured.
-    const checkerCoversFailures =
-      successes.length > 0 && resolveEvidenceVerifierSettings(this.config.evidenceVerifier).provider !== "jev";
+    // It still runs when nothing succeeded, or when Jev is requested without
+    // cloud consent; never when the enabled Jev verifier is the one checker for
+    // the turn, which gets the failed sources itself.
+    const verifierSettings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
+    const jevCovers = verifierSettings.provider === "jev" && verifierSettings.enabled;
+    const checkerCoversFailures = jevCovers || (successes.length > 0 && verifierSettings.provider !== "jev");
     if (netFailures.length > 0 && !checkerCoversFailures) {
       responseText = await this.applyEvidenceGate({
         userPrompt: sanitizedPrompt,
@@ -5438,7 +5621,9 @@ export class sportsclawEngine {
     }
 
     // --- Evidence Validation Gate (Hermes fact-checker pattern) ---
-    if (successes.length > 0) {
+    // A captured document is always judged by the configured checker, even
+    // when no tool ran; plain chat with no evidence still makes no check.
+    if (successes.length > 0 || (jevCovers && netFailures.length > 0) || capturedArtifact) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
         result.steps as Array<{
@@ -5459,7 +5644,7 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
-      });
+      }, artifact);
     }
 
     // --- Artifact: decided after the evidence checks, before persistence ---
@@ -5467,7 +5652,7 @@ export class sportsclawEngine {
 
     // --- Slip: one extraction on the final answer, before persistence and accounting ---
     if (slip) {
-      const finalized = await this.finalizeSlip(slip, responseText, options);
+      const finalized = await this.finalizeSlip(slip, responseText, options, artifactAttempted(artifact));
       // The main pass was charged above; the extraction is charged once here.
       recordTokens(finalized.tokens);
       if (finalized.unsuccessful) {

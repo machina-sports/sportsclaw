@@ -49,7 +49,8 @@ export interface ArtifactTurnInput {
  * - denied: an explicit tool allowlist omits `submit_artifact`;
  * - invalid_artifact: a malformed, oversized or undispatchable submission;
  * - conflicting_artifact: two different submissions in one run;
- * - evidence_unverified: the answer's evidence check corrected, flagged or withheld it.
+ * - evidence_unverified: no passing evidence check judged this exact document (absent,
+ *   unverified, refused, contradicted, or only the prose was corrected).
  */
 export type ArtifactReasonCode = "denied" | "invalid_artifact" | "conflicting_artifact" | "evidence_unverified";
 
@@ -158,6 +159,8 @@ export interface ArtifactOutputCollector {
   observeStep(step: unknown): void;
   /** Forget everything captured so far (a retried model call starts clean). */
   reset(): void;
+  /** Remember the current state; calling the returned function restores it (a discarded attempt leaves nothing). */
+  checkpoint(): () => void;
   /** The single captured document, or undefined (unused, invalid or conflicting). */
   finish(): ArtifactOutput | undefined;
   /** The reason the collector was invalidated, or null. */
@@ -231,6 +234,12 @@ export function createArtifactOutputCollector(): ArtifactOutputCollector {
       captured = undefined;
       captureKey = undefined;
       invalidated = null;
+    },
+    checkpoint: () => {
+      const saved = { captured, captureKey, invalidated };
+      return () => {
+        ({ captured, captureKey, invalidated } = saved);
+      };
     },
     finish: () => (captured && !invalidated ? { ...captured } : undefined),
     problem: () => invalidated,

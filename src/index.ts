@@ -526,6 +526,7 @@ export type {
   CapabilityRouterConfig,
   RoutingClarify,
   RoutingLocalReasonCode,
+  RoutingNoTools,
   RoutingOptions,
   RoutingOutcome,
   RoutingProvider,

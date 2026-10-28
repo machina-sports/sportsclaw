@@ -29,7 +29,7 @@ artifact-v1         { contract: "artifact-v1", title, mimeType: "text/html", htm
 | `denied` | An explicit `toolAllowlist` omits `submit_artifact`. |
 | `invalid_artifact` | A malformed, oversized, truncated or undispatchable submission. |
 | `conflicting_artifact` | Two different documents in one run. |
-| `evidence_unverified` | The answer's evidence check corrected, flagged or withheld it, so the document built from the same research is dropped. |
+| `evidence_unverified` | No passing evidence check judged this exact document: verification was absent, unverified, refused or contradicted, or only the prose was corrected. |
 
 `src/artifact-output.ts` is the TypeScript side; `docker/relay/artifact_contract.py` mirrors it
 for the relay with the standard library only.
@@ -54,8 +54,28 @@ await engine.run(prompt, {
   resubmission is fine; a different second document invalidates the run.
 - `submit_artifact` is not a data source: it is excluded from the evidence bookkeeping, so the
   model's own document is never used as evidence for its answer.
+- A document is published only when the configured evidence checker judged the complete HTML
+  beside the prose and passed: the default generative checker (no TypeSafe key or gateway needed),
+  or the opt-in [Jev evidence verifier](../guide/jev-evidence-verifier.md) against approved public
+  tool evidence. The pass is bound to that exact document's hash. A generative verdict with any
+  discrepancy, an unverified or refused check, a contradiction, or a correction of the prose alone
+  never certifies the HTML, and a correct short introduction cannot vouch for a different document.
+- The check runs whenever a valid document was captured, even when no tool ran: a report built
+  from numbers the user supplied is judged with the request as its only input. Those values are
+  premises for the answer, not verified sports facts, and any other factual claim is unsupported.
+  A turn with no document and no tool evidence makes no check call.
+- With Jev, HTML with a data URI or inline image, the run's nonce, a slip ID or a reserved `rpt_`
+  report reference (any letter case, also percent-encoded), a signed link or a credential field,
+  or one that makes the check oversized, is refused before any credential read or request.
+- A real submission (accepted or refused) is the turn's output: in a slip turn it replaces the
+  secondary slip extraction and the slip result carries `decision: null`. Merely offering or
+  denying the tool changes nothing.
 - Parallel agent lanes never get the tool (they are partial drafts that get synthesized).
-- A retried model call starts with an empty collector.
+- A retried model call starts with an empty collector. A valid document with empty prose is a
+  complete answer: the text is a fixed neutral line saying a report was prepared as a separate
+  document (never that it was saved or published), with no empty-response recovery or
+  re-synthesis. A recovery that is discarded or fails leaves the collector exactly as the selected
+  attempt left it.
 
 ## CLI and relay
 

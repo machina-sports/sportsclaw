@@ -93,7 +93,9 @@ export function resolveSkillRoutingSettings(
     "local_only"
   );
 
-  const rawModel = config?.model;
+  // Explicit config wins; the environment pins a hosted model without a config rewrite.
+  const rawModel: unknown =
+    config?.model !== undefined ? config.model : env.SPORTSCLAW_ROUTING_MODEL || undefined;
   let model = DEFAULT_MODEL;
   if (rawModel !== undefined) {
     if (typeof rawModel === "string" && MODEL_PATTERN.test(rawModel)) model = rawModel;
@@ -239,7 +241,7 @@ export interface JevSkillRouteInput {
   prompt: string;
   installedSkills: string[];
   toolSpecs: ToolSpec[];
-  /** Deterministically inferred helper skills (news, markets, …). */
+  /** Deterministically inferred helper skills (news, markets, …). Ignored: the shortlist is Jev's advice only. */
   helperSkills: readonly string[];
   /** Only forwarded when the caller opted into `includeRecentContext`. */
   recentContext?: string;
@@ -285,6 +287,9 @@ export async function routeSkillsWithJev(
       confidenceThreshold: settings.confidenceThreshold,
       marginThreshold: settings.marginThreshold,
       maxSelected: settings.maxSelected,
+      // Skills supply sports data: judge only the external inputs the request
+      // needs, not whether the whole reply (writing, explaining, editing) is.
+      scope: "external_inputs",
       ...(settings.transport ? { transport: settings.transport } : {}),
       ...(settings.env ? { env: settings.env } : {}),
     });
@@ -312,20 +317,26 @@ export async function routeSkillsWithJev(
     latencyMs: elapsed(),
   };
 
+  if (outcome.status === "no_tools") {
+    // An answer that needs no capability: no skills and no helper union. It
+    // grants nothing; the engine decides what may run.
+    return {
+      decision: {
+        selectedSkills: [],
+        mode: "focused",
+        confidence: outcome.confidence ?? 0,
+        reason: `Jev routing: ${outcome.reasonCode}`,
+        needsClarification: false,
+      },
+      meta: legacyMeta(meta),
+    };
+  }
   if (outcome.status !== "selected") return refusal(meta);
 
   // Every validated ID survives — the selection is not squeezed into the
-  // legacy focused slice — and deterministic helper skills are still unioned.
+  // legacy focused slice — and nothing is added to it: the router already
+  // capped it, and inferred helper skills are not part of the advice.
   const selectedSkills = [...outcome.selectedIds];
-  for (const helper of input.helperSkills) {
-    if (!input.installedSkills.includes(helper)) {
-      return refusal({ ...meta, status: "unavailable", reasonCode: "invalid_helper" });
-    }
-    if (!selectedSkills.includes(helper)) selectedSkills.push(helper);
-  }
-  if (selectedSkills.length > settings.maxSelected) {
-    return refusal({ ...meta, status: "clarify", reasonCode: "too_many_required" });
-  }
 
   return {
     decision: {

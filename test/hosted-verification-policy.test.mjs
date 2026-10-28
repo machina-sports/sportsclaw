@@ -338,7 +338,7 @@ describe("correct does not bypass Jev refusals", () => {
       const { transport, calls } = recorder(() => jsonResponse({ error: "denied" }, status));
       const { engine, model } = fixture({
         replies: [FLAGGED, CORRECTED],
-        verifier: correctMode({ provider: "jev", dataPolicy: "cloud_allowed", fallbackToGenerative: true, transport, env: { TYPESAFE_API_KEY: "test-key" } }),
+        verifier: correctMode({ provider: "jev", dataPolicy: "cloud_allowed", publicToolNames: ["mcp__pod__match_summary"], fallbackToGenerative: true, transport, env: { TYPESAFE_API_KEY: "test-key" } }),
       });
       assert.equal(await engine.validateResponseEvidence(input), input.draft);
       assert.equal(calls.length, 1);
@@ -359,7 +359,7 @@ describe("correct does not bypass Jev refusals", () => {
     const { transport, calls } = recorder((n) => jsonResponse(body(n === 1 ? "contradicted" : "supported")));
     const { engine, model } = fixture({
       replies: [CORRECTED],
-      verifier: { provider: "jev", dataPolicy: "cloud_allowed", generativeAction: "retain", transport, env: { TYPESAFE_API_KEY: "test-key" } },
+      verifier: { provider: "jev", dataPolicy: "cloud_allowed", publicToolNames: ["mcp__pod__match_summary"], generativeAction: "retain", transport, env: { TYPESAFE_API_KEY: "test-key" } },
     });
     assert.equal(await engine.validateResponseEvidence(input), CORRECTED);
     assert.equal(calls.length, 2);

@@ -12,8 +12,10 @@ import { describe, it } from "node:test";
 import { MockLanguageModelV3 } from "ai/test";
 import { sportsclawEngine } from "../dist/engine.js";
 import {
+  buildChoiceQuestions,
   buildVerificationState,
   CHOICE_OPTIONS,
+  correctionDiscrepancies,
   DEFAULT_JEV_MODEL,
   EVIDENCE_CRITERIA,
   JEV_ENDPOINT,
@@ -94,11 +96,12 @@ function fixture({ replies = [], verifier } = {}) {
   return { engine, model };
 }
 
-/** Opt-in settings with cloud consent and an injected transport. */
+/** Opt-in settings with cloud consent, the fixture source approved as public, and an injected transport. */
 function optIn(transport, extra = {}) {
   return {
     provider: "jev",
     dataPolicy: "cloud_allowed",
+    publicToolNames: ["mcp__pod__search_documents"],
     transport,
     env: { TYPESAFE_API_KEY: "test-key" },
     ...extra,
@@ -207,15 +210,24 @@ describe("opt-in support path", () => {
     }
   });
 
-  it("preserves caller policy, attribution and missing-coverage rules in the state", async () => {
+  it("sends only the approved projection: no raw caller policy, profile or history", async () => {
     const { transport, calls } = recorder(() => jsonResponse(jevBody()));
     const { engine } = fixture({ verifier: optIn(transport) });
-    await engine.validateResponseEvidence(input);
+    // Ordinary personalization the candidate itself shows the user stays in scope.
+    const draft = "SYNTHETIC_FAN_NAME, as a Flamengo fan: low scores prove tactical containment.";
+    await engine.validateResponseEvidence({
+      ...input,
+      draft,
+      callerSystemPrompt: "CALLER_POLICY_MARKER Use Portuguese. PROFILE_MARKER favourite team Flamengo. HISTORY_MARKER earlier turn.",
+    });
     const state = calls[0].body.state;
-    assert.match(state, /Keep coverage gaps explicit/);
+    for (const marker of ["CALLER_POLICY_MARKER", "PROFILE_MARKER", "HISTORY_MARKER"]) {
+      assert.doesNotMatch(state, new RegExp(marker));
+    }
+    assert.ok(state.includes(input.userPrompt), "the approved current request");
+    assert.ok(state.includes(draft), "the complete candidate, personalization included");
     assert.match(state, /cite genuine publishers and URLs/);
     assert.match(state, /Two recorded games finished 0-0/);
-    assert.match(state, /Low scores prove tactical containment/);
     const questions = JSON.stringify(calls[0].body.questions);
     assert.match(questions, /Missing optional coverage does not invalidate/);
     assert.match(questions, /untrusted/i);
@@ -520,7 +532,7 @@ describe("oversized material is refused, never truncated", () => {
     assert.ok(state.length > 32_000);
     assert.doesNotMatch(state, /\[truncated\]/);
     assert.match(state, /Low scores prove tactical containment/);
-    assert.match(state, /Keep coverage gaps explicit/);
+    assert.doesNotMatch(state, /Keep coverage gaps explicit/);
   });
 
   const oversized = {
@@ -788,4 +800,231 @@ describe("receipts stay sanitized", () => {
     const out = await engine.validateResponseEvidence(input);
     assert.doesNotMatch(out, /jev|receipt|reasonCode|verified by/i);
   });
+});
+
+describe("approved state projection", () => {
+  it("replaces raw caller policy with one fixed public policy", () => {
+    const base = {
+      userPrompt: input.userPrompt,
+      serializedToolOutputs: "Two recorded games finished 0-0.",
+      draft: "SYNTHETIC_FAN_NAME, low scores prove tactical containment.",
+    };
+    const withPolicy = buildVerificationState({ ...base, callerSystemPrompt: "CALLER_POLICY_MARKER Use Portuguese." });
+    assert.doesNotMatch(withPolicy, /CALLER_POLICY_MARKER/);
+    assert.equal(withPolicy, buildVerificationState({ ...base, callerSystemPrompt: "Another caller's policy." }));
+    assert.equal(withPolicy, buildVerificationState(base));
+    for (const field of Object.values(base)) assert.ok(withPolicy.includes(field));
+  });
+
+  it("scopes the no-publication rule to this application's own side effects", () => {
+    const state = buildVerificationState({ userPrompt: input.userPrompt, serializedToolOutputs: "x", draft: "y" });
+    assert.match(state, /never claim that this application saved, published, placed or confirmed/i);
+    assert.match(state, /league confirmed something or an outlet published something is an ordinary factual claim/i);
+    assert.doesNotMatch(state, /never claim that anything was/i);
+  });
+});
+
+describe("shared judgment scope", () => {
+  it("keeps output hygiene separate from factual support and public provenance labels", () => {
+    const question = buildChoiceQuestions().caller_constraints;
+    assert.match(question.instructions, /hygiene|presentation/i);
+    assert.match(question.instructions, /factual_support/);
+    assert.match(question.instructions, /coverage_freshness/);
+    assert.match(question.instructions, /synthetic|illustrative/i);
+    assert.match(question.instructions, /application/);
+  });
+  // Wording contracts only: they pin what every question is asked to judge, not
+  // how accurately the provider judges it.
+  const questions = Object.entries(buildChoiceQuestions());
+
+  it("asks every question about the whole candidate, prose and complete HTML alike", () => {
+    assert.deepEqual(questions.map(([key]) => key), [...EVIDENCE_CRITERIA]);
+    for (const [key, question] of questions) {
+      assert.deepEqual(Object.keys(question.criteria).sort(), [...CHOICE_OPTIONS].sort(), key);
+      assert.match(question.instructions, /\bprose\b/i, key);
+      assert.match(question.instructions, /\bHTML\b/i, key);
+      // A correct intro cannot cancel a contradiction elsewhere in the document.
+      assert.match(question.instructions, /\banywhere\b/i, key);
+      // Layout is not a sports fact; visible labels and table values are.
+      assert.match(question.instructions, /\b(CSS|SVG|layout)\b/i, key);
+      assert.match(question.instructions, /\b(visible|labels?|tables?)\b/i, key);
+    }
+  });
+
+  it("admits explicitly user-supplied data as evidence with its provenance, never guesses or the candidate's own claims", () => {
+    for (const [key, question] of questions) {
+      assert.match(question.instructions, /explicitly (supplie|provide)/i, key);
+      assert.match(question.instructions, /\bguess/i, key);
+      assert.match(question.instructions, /\bown claims?\b/i, key);
+      // Supplied data must not be presented as verified or live fact.
+      assert.match(question.instructions, /\b(verified|live)\b/i, key);
+    }
+    const [factual] = correctionDiscrepancies(["factual_support"]);
+    assert.match(factual.evidence, /explicitly (supplie|provide)/i);
+  });
+
+  it("supports a criterion with no applicable claim but still abstains on an uncertain material one", () => {
+    for (const [key, question] of questions) {
+      assert.match(question.criteria.supported, /not applicable|\bno\b[^.]*\b(claims?|premises?|statements?)\b/i, key);
+      assert.match(question.criteria.unknown, /\bmaterial\b/i, key);
+    }
+  });
+});
+
+describe("public evidence admission", () => {
+  const settingsOf = (config) => resolveEvidenceVerifierSettings({ provider: "jev", dataPolicy: "cloud_allowed", ...config });
+  const ENV_TOOLS = "SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS";
+
+  it("admits nothing by default; exact IDs from config or a JSON-array env, config first", () => {
+    assert.deepEqual(settingsOf({ env: {} }).publicToolNames, []);
+    assert.deepEqual(
+      settingsOf({ env: { [ENV_TOOLS]: '["nba_get_scoreboard","mcp__pod__search_documents"]' } }).publicToolNames,
+      ["nba_get_scoreboard", "mcp__pod__search_documents"]
+    );
+    assert.deepEqual(
+      settingsOf({ publicToolNames: ["nba_get_scoreboard"], env: { [ENV_TOOLS]: '["mcp__pod__search_documents"]' } }).publicToolNames,
+      ["nba_get_scoreboard"]
+    );
+  });
+
+  it("reports invalid values instead of guessing or falling back to the env", () => {
+    const invalid = {
+      "env not JSON": { env: { [ENV_TOOLS]: "nba_get_scoreboard" } },
+      "env not an array": { env: { [ENV_TOOLS]: '{"nba_get_scoreboard":true}' } },
+      "env non-string entry": { env: { [ENV_TOOLS]: "[1]" } },
+      "config not an array": { publicToolNames: "nba_get_scoreboard", env: {} },
+      "config empty name": { publicToolNames: [""], env: {} },
+      "invalid config over a valid env": { publicToolNames: "x", env: { [ENV_TOOLS]: '["nba_get_scoreboard"]' } },
+    };
+    for (const [label, config] of Object.entries(invalid)) {
+      assert.ok(settingsOf(config).diagnostics.includes("invalid_publicToolNames"), label);
+    }
+  });
+
+  it("refuses an invalid setting before any verifier, credential read or request", async () => {
+    const trapWithTools = (value) => Object.defineProperty({ [ENV_TOOLS]: value }, "TYPESAFE_API_KEY", {
+      get() { assert.fail("credential must not be read before admission"); },
+    });
+    const configs = [
+      { publicToolNames: "mcp__pod__search_documents", env: trapEnv() },
+      { publicToolNames: [""], env: trapEnv() },
+      { publicToolNames: undefined, env: trapWithTools("not json") },
+    ];
+    for (const extra of configs) {
+      const { transport, calls } = recorder(() => jsonResponse(jevBody()));
+      const { engine, model } = fixture({ replies: [CLEAN], verifier: optIn(transport, { fallbackToGenerative: true, ...extra }) });
+      assert.match(await engine.validateResponseEvidence(input), /could not verify/i);
+      assert.equal(calls.length, 0);
+      assert.equal(model.doGenerateCalls.length, 0);
+    }
+  });
+
+  it("refuses unapproved evidence before any credential read, request or fallback, never certifying the rest", async () => {
+    const privateSource = { toolName: "mcp__pod__get_private_report", output: "PRIVATE_REPORT_MARKER finished 3-1." };
+    const cases = {
+      "no public tools configured": [{ publicToolNames: undefined }, input],
+      "a private source beside an approved one": [{}, { ...input, toolOutputs: [...input.toolOutputs, privateSource] }],
+      "a private failed source": [{}, { ...input, failedTools: [privateSource.toolName] }],
+    };
+    for (const [label, [extra, params]] of Object.entries(cases)) {
+      const { transport, calls } = recorder(() => jsonResponse(jevBody()));
+      const { engine, model } = fixture({
+        replies: [CLEAN],
+        verifier: optIn(transport, { env: trapEnv(), fallbackToGenerative: true, ...extra }),
+      });
+      assert.equal(await engine.validateResponseEvidence(params), params.draft, label);
+      assert.equal(calls.length, 0, label);
+      assert.equal(model.doGenerateCalls.length, 0, label);
+      assert.equal(engine.evidenceReceipts[0]?.status, "blocked", label);
+      assert.equal(engine.evidenceReceipts[0]?.reasonCode, "unapproved_evidence", label);
+    }
+  });
+});
+
+describe("provider-bound private content", () => {
+  const SIGNED = "https://reports.example.test/r/SYNTHETIC_REPORT?X-Amz-Signature=SYNTHETICSIG&X-Amz-Expires=300";
+  const source = (output) => [{ toolName: "mcp__pod__search_documents", output }];
+  const cases = {
+    "a signed link in a source": { ...input, toolOutputs: source(`Two recorded games finished 0-0. Report: ${SIGNED}`) },
+    "a credential field in a source": { ...input, toolOutputs: source('{"games":[{"score":"0-0"}],"api_key":"SYNTHETIC_SECRET_VALUE"}') },
+    "a signed link in the candidate": { ...input, draft: `${input.draft} Full report: ${SIGNED}` },
+  };
+
+  for (const [label, params] of Object.entries(cases)) {
+    it(`refuses ${label} before any credential read, request or fallback`, async () => {
+      const { transport, calls } = recorder(() => jsonResponse(jevBody()));
+      const { engine, model } = fixture({
+        replies: [CLEAN],
+        verifier: optIn(transport, { env: trapEnv(), fallbackToGenerative: true }),
+      });
+      assert.equal(await engine.validateResponseEvidence(params), params.draft);
+      assert.equal(calls.length, 0);
+      assert.equal(model.doGenerateCalls.length, 0);
+      assert.equal(engine.evidenceReceipts[0]?.status, "blocked");
+      assert.equal(engine.evidenceReceipts[0]?.reasonCode, "private_content");
+    });
+  }
+});
+
+describe("a source-free report goes to the primary checker", () => {
+  const HTML = "<!doctype html><html><body><table><tr><td>Time Azul</td><td>12</td></tr></table></body></html>";
+  const report = {
+    userPrompt: "Build a report from the numbers I supply: Time Azul 12 points.",
+    draft: "Here is the table from the numbers you supplied.",
+    toolOutputs: [],
+    callerSystemPrompt: input.callerSystemPrompt,
+    artifactHtml: HTML,
+  };
+
+  it("is selected before any Jev credential read or request, in one check, and the receipt says so", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(jevBody()));
+    const { engine, model } = fixture({ replies: [CLEAN], verifier: optIn(transport, { env: trapEnv() }) });
+    assert.equal(await engine.validateResponseEvidence(report), report.draft);
+    assert.equal(calls.length, 0);
+    assert.equal(model.doGenerateCalls.length, 1, "one primary check, no extra model step");
+    const judged = JSON.stringify(model.doGenerateCalls[0].prompt);
+    assert.ok(judged.includes(HTML), "the complete document");
+    assert.ok(judged.includes(report.draft), "beside the prose");
+    assert.deepEqual(engine.evidenceReceipts.map((r) => [r.provider, r.reasonCode]), [["generative", "source_free"]]);
+  });
+
+  it("plain chat still has no checker, and a report with a failed source stays on Jev", async () => {
+    const chat = recorder(() => jsonResponse(jevBody()));
+    const plain = fixture({ verifier: optIn(chat.transport, { env: trapEnv() }) });
+    assert.equal(await plain.engine.validateResponseEvidence({ ...report, artifactHtml: undefined }), report.draft);
+    assert.equal(chat.calls.length + plain.model.doGenerateCalls.length, 0);
+
+    const failed = recorder(() => jsonResponse(jevBody()));
+    const { engine, model } = fixture({ verifier: optIn(failed.transport) });
+    await engine.validateResponseEvidence({ ...report, failedTools: ["mcp__pod__search_documents"] });
+    assert.equal(failed.calls.length, 1);
+    assert.equal(model.doGenerateCalls.length, 0);
+    assert.equal(engine.evidenceReceipts[0].provider, "jev");
+  });
+
+  const SIGNED = "https://reports.example.test/r/SYNTHETIC_REPORT?X-Amz-Signature=SYNTHETICSIG&X-Amz-Expires=300";
+  const withBody = (extra) => HTML.replace("</table>", `</table>${extra}`);
+  const refusals = {
+    local_only: [{ dataPolicy: "local_only" }, report],
+    invalid_setting: [{ publicToolNames: "mcp__pod__search_documents" }, report],
+    "private_content (signed link)": [{}, { ...report, artifactHtml: withBody(`<a href="${SIGNED}">report</a>`) }],
+    "private_content (known private value)": [{}, { ...report, artifactHtml: withBody("<p>nonce_0123456789abcdef</p>"), privateValues: ["nonce_0123456789abcdef"] }],
+    unsupported_content: [{}, { ...report, artifactHtml: withBody('<img src="data:image/png;base64,iVBORw0KGgoSYNTHETIC=">') }],
+    request_too_large: [{}, { ...report, artifactHtml: withBody(`<p>${"Time Azul 12 points. ".repeat(2_000)}</p>`) }],
+  };
+
+  for (const [label, [extra, params]] of Object.entries(refusals)) {
+    it(`refuses ${label} before the branch: no primary check, credential read or request`, async () => {
+      const { transport, calls } = recorder(() => jsonResponse(jevBody()));
+      const { engine, model } = fixture({
+        replies: [CLEAN],
+        verifier: optIn(transport, { env: trapEnv(), fallbackToGenerative: true, ...extra }),
+      });
+      await engine.validateResponseEvidence(params);
+      assert.equal(calls.length, 0);
+      assert.equal(model.doGenerateCalls.length, 0);
+      const expected = label.split(" ")[0];
+      if (expected !== "invalid_setting") assert.equal(engine.evidenceReceipts[0]?.reasonCode, expected);
+    });
+  }
 });
