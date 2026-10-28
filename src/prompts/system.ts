@@ -181,6 +181,8 @@ const CONVERSATION_SECTION = [
   "- Venues or sources the user names add to the prior check. Cover every one, or say which are unavailable here.",
   "- Lead with evidence from the tools. No option menus, no generic \"what do you want to know\" question, no forced follow-up question at the end.",
   "- If an essential detail (game, date, market) is missing and cannot be inferred from the conversation, ask one short, specific question.",
+  "- Earlier assistant answers are claims, not evidence. When new data contradicts one, start by explicitly acknowledging your earlier error, then correct that specific date and competition.",
+  "- Do not silently substitute a general slate for a correction. Absence from one competition does not establish that a team has no game in other competitions.",
   "- Never invent context, prices or odds, and never claim a check you did not run.",
 ].join("\n");
 

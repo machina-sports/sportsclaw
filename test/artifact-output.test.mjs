@@ -42,7 +42,7 @@ const home = mkdtempSync(join(tmpdir(), "sportsclaw-artifact-"));
 const ENV_KEYS = [
   "HOME", "USERPROFILE", "sportsclaw_SCHEMA_DIR", "SPORTSCLAW_SCHEMA_DIR", "SPORTSCLAW_SESSION_DIR",
   "SPORTSCLAW_MEMORY_PROVIDER", "ANTHROPIC_API_KEY", "SPORTSCLAW_AGENTS_DIR", "SPORTSCLAW_SKILLS", "sportsclaw_SKILLS",
-  "SPORTSCLAW_ROUTING_PROVIDER", "SPORTSCLAW_ROUTING_DATA_POLICY", "SPORTSCLAW_SKILL_GUIDES_DIR",
+  "SPORTSCLAW_ROUTING_PROVIDER", "SPORTSCLAW_ROUTING_DATA_POLICY", "SPORTSCLAW_ROUTING_PUBLIC_DATA_TOOLS", "SPORTSCLAW_SKILL_GUIDES_DIR",
   "SPORTSCLAW_EVIDENCE_VERIFIER", "SPORTSCLAW_EVIDENCE_DATA_POLICY", "SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS",
   "SPORTSCLAW_SLIP_ENABLED", "SPORTSCLAW_SLIP_JEV_DATA_POLICY", "SPORTSCLAW_SLIP_NATIVE_ONLY", "SPORTSCLAW_WATCH_INTENT_NATIVE_CONFIG",
 ];
@@ -111,11 +111,12 @@ function generated(content) {
  * One scripted step per tool-bearing call; tool-less calls (fact-check, router, synthesis) get a clean
  * verdict, or `verdict(options)` when given.
  */
-function scripted(steps, { synthesis, verdict = () => VERDICT_OK } = {}) {
+function scripted(steps, { synthesis, verdict = () => VERDICT_OK, mainWithoutTools = false } = {}) {
   const chat = [];
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
-      if (!options.tools || options.tools.length === 0) {
+      const auxiliary = /isValid|expert sports editor|Combine the following agent responses/.test(JSON.stringify(options.prompt));
+      if ((!options.tools || options.tools.length === 0) && (!mainWithoutTools || auxiliary)) {
         const lanes = synthesis !== undefined && JSON.stringify(options.prompt).includes("Combine the following agent responses");
         return generated([say(lanes ? synthesis : verdict(options))]);
       }
@@ -696,6 +697,128 @@ describe("a no-input advisory turn with a public skill guide", () => {
     } finally {
       delete process.env.SPORTSCLAW_SKILL_GUIDES_DIR;
       rmSync(guides, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("an opt-in public data pool on the actual conversational run", () => {
+  /** Advisory routing that suggests no input; publicDataTools is the operator's execution approval. */
+  const advisoryRouting = () => {
+    const routed = [];
+    const routing = {
+      provider: "jev", dataPolicy: "cloud_allowed", env: { TYPESAFE_API_KEY: "synthetic-key" }, publicDataTools: ["nba_get_scores"],
+      transport: async (_url, init) => {
+        routed.push(init.body);
+        const body = JSON.parse(init.body);
+        const answers = {};
+        for (const [id, question] of Object.entries(body.questions)) {
+          const choice = id === "disposition" ? "clarify" : "not_required";
+          const labels = Object.keys(question.criteria);
+          answers[id] = { type: "choice", choice, confidence: 0.97, probabilities: Object.fromEntries(labels.map((l) => [l, l === choice ? 1 : 0])) };
+        }
+        return new Response(JSON.stringify({ model: body.model, answers }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    };
+    return { routed, routing };
+  };
+  /** The real engine with one installed public NBA read in the pool; no tool is scripted to run. */
+  const pooledEngine = (model, jev, routing, checker) => {
+    const engine = evidenceEngine(model, jev, { routing, ...checker });
+    engine.registry.injectSchema({
+      sport: "nba",
+      tools: [{ name: "nba_get_scores", command: "get_scores", description: "Scores", parameters: { type: "object", properties: {} } }],
+    });
+    return engine;
+  };
+  const converse = (engine, prompt, history = HISTORY) => engine.run(prompt, { historyMode: "caller", history: clone(history) });
+  const UCL_MARKER = "Real Madrid vs Arsenal";
+  const UCL = `Champions League today, Oct 27: ${UCL_MARKER} at 20:00.`;
+
+  it("sends fabricated source-free fixture prose to the existing primary checker, never Jev, and never ships it", async () => {
+    for (const [mode, checker] of CHECKERS) {
+      const jev = jevRecorder();
+      const { routed, routing } = advisoryRouting();
+      const { model, all } = scripted([[say(UCL)]], { verdict: judge(UCL_MARKER), mainWithoutTools: true });
+      const text = await converse(pooledEngine(model, jev, routing, checker(jev)), "Champions League today?");
+      assert.equal(routed.length, 1, `${mode}: one advisory routing request`);
+      const [first] = checkerCalls(all);
+      assert.ok(first && promptText(first).includes(UCL_MARKER), `${mode}: the primary checker saw the no-source prose`);
+      assert.match(promptText(first), /No source data was fetched this turn/, `${mode}: the existing no-source rule`);
+      assert.equal(jev.bodies.length, 0, `${mode}: no Jev request`);
+      assert.equal(jev.reads(), 0, `${mode}: no Jev credential read`);
+      assert.ok(!text.includes(UCL_MARKER), `${mode}: the unsupported fixture is corrected or refused`);
+      assert.ok(text === CORRECTED || /could not verify/i.test(text), `${mode}: correct-and-recheck or the safe refusal, got ${text}`);
+    }
+  });
+
+  it("keeps a complete moderate-size schedule for the checker rather than clipping it to 8k", async () => {
+    const jev = jevRecorder();
+    const { routing } = advisoryRouting();
+    const source = JSON.stringify({ events: Array.from({ length: 12 }, (_, i) => ({ id: i, name: `Team${i} at Opponent${i}`, date: "2026-10-28", details: "x".repeat(900) })) });
+    assert.ok(source.length > 8000 && source.length < 16000);
+    const { model, all } = scripted([[toolCall("nba_get_scores", "{}")], [say("There are 12 games on the supplied schedule.")]], { mainWithoutTools: true });
+    const engine = pooledEngine(model, jev, routing, generative(jev));
+    const build = engine.buildTools.bind(engine);
+    engine.buildTools = (...args) => ({ ...build(...args), nba_get_scores: tool({ description: "Public schedule", inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => JSON.parse(source) }) });
+    await converse(engine, "Who plays today?");
+    const checks = checkerCalls(all);
+    assert.equal(checks.length, 1);
+    const seen = promptText(checks[0]);
+    assert.ok(seen.includes(source), "the complete recorded schedule reaches the checker");
+    assert.doesNotMatch(seen, /truncated middle/);
+  });
+
+  it("lets a stable explanation pass without any data retrieval", async () => {
+    const EXPLAIN = "A point spread is a handicap: the favourite must win by more than the line for a bet on it to cover.";
+    for (const [mode, checker] of CHECKERS) {
+      const jev = jevRecorder();
+      const { routing } = advisoryRouting();
+      const { model, chat } = scripted([[say(EXPLAIN)]], { verdict: judge("NEVER_PRESENT_MARKER"), mainWithoutTools: true });
+      const text = await converse(pooledEngine(model, jev, routing, checker(jev)), "What is a point spread?");
+      assert.equal(text, EXPLAIN, mode);
+      assert.equal(chat.length, 1, `${mode}: one main call, no tool step`);
+      assert.equal(jev.bodies.length, 0, mode);
+    }
+  });
+
+  it("never ships unchecked fixture prose when the check cannot complete", async () => {
+    for (const [mode, checker] of CHECKERS) {
+      const jev = jevRecorder();
+      const { routing } = advisoryRouting();
+      const { model } = scripted([[say(UCL)]], { verdict: () => "not json", mainWithoutTools: true });
+      const text = await converse(pooledEngine(model, jev, routing, checker(jev)), "Champions League today?");
+      assert.ok(!text.includes(UCL_MARKER), `${mode}: no unchecked fixture`);
+      assert.match(text, /could not verify/i, `${mode}: the existing safe refusal`);
+      assert.equal(jev.bodies.length, 0, mode);
+    }
+  });
+
+  it("does not treat a wrong prior answer as evidence, while the main answer keeps the history", async () => {
+    const PRIOR = "PRIOR_WRONG_ANSWER_MARKER: Champions League today, Oct 27: Real Madrid vs Arsenal.";
+    const history = [
+      { role: "user", content: "Who’s playing today" },
+      { role: "assistant", content: "Which league?" },
+      { role: "user", content: "NBA" },
+      { role: "assistant", content: "Lakers vs Celtics tonight." },
+      { role: "user", content: "Champions League today?" },
+      { role: "assistant", content: PRIOR },
+    ];
+    const MARK = "Inter vs Bayern";
+    for (const [mode, checker] of CHECKERS) {
+      const jev = jevRecorder();
+      const { routed, routing } = advisoryRouting();
+      const { model, chat, all } = scripted([[say(`You're right, correction: today it is ${MARK} at 21:00.`)]], { verdict: judge(MARK), mainWithoutTools: true });
+      const text = await converse(pooledEngine(model, jev, routing, checker(jev)), "That's wrong, correct it.", history);
+      assert.ok(chat[0] && JSON.stringify(chat[0].prompt).includes("PRIOR_WRONG_ANSWER_MARKER"), `${mode}: main history retained`);
+      const checks = checkerCalls(all);
+      assert.ok(checks.length >= 1, `${mode}: the correction itself is checked`);
+      for (const call of checks) {
+        assert.ok(!promptText(call).includes("PRIOR_WRONG_ANSWER_MARKER"), `${mode}: a prior assistant claim is not checker evidence`);
+        assert.doesNotMatch(promptText(call), /\[Internal source \d+/, `${mode}: no purported source`);
+      }
+      assert.ok(!text.includes(MARK), `${mode}: the unsupported correction is corrected again or refused`);
+      assert.ok(routed.every((body) => !body.includes("PRIOR_WRONG_ANSWER_MARKER")), `${mode}: raw history never reaches Jev`);
+      assert.equal(jev.bodies.length, 0, mode);
     }
   });
 });

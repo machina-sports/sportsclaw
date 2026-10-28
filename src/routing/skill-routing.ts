@@ -31,6 +31,8 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 const MIN_TIMEOUT_MS = 250;
 const MAX_TIMEOUT_MS = 60_000;
 const MODEL_PATTERN = /^jev-\d+\.\d+\.\d+$/;
+/** One exact tool name: no wildcard, blank or whitespace. */
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /** Operation names per candidate description, so one skill stays one short line. */
 const MAX_OPERATIONS_PER_SKILL = 8;
@@ -112,10 +114,32 @@ export function resolveSkillRoutingSettings(
     }
   }
 
+  // Exact tool names only: explicit config wins, a malformed value approves
+  // nothing and is reported, never repaired or replaced by the environment.
+  const rawPool: unknown =
+    config?.publicDataTools !== undefined ? config.publicDataTools : env.SPORTSCLAW_ROUTING_PUBLIC_DATA_TOOLS || undefined;
+  let publicDataTools: string[] = [];
+  if (rawPool !== undefined) {
+    let pool: unknown = rawPool;
+    if (config?.publicDataTools === undefined) {
+      try {
+        pool = JSON.parse(rawPool as string);
+      } catch {
+        pool = undefined;
+      }
+    }
+    if (Array.isArray(pool) && pool.every((name) => typeof name === "string" && TOOL_NAME_PATTERN.test(name))) {
+      publicDataTools = [...new Set(pool as string[])];
+    } else {
+      diagnostics.push("invalid_publicDataTools");
+    }
+  }
+
   return {
     provider,
     dataPolicy,
     model,
+    publicDataTools,
     timeoutMs: number("timeoutMs", config?.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     confidenceThreshold: number(
       "confidenceThreshold",

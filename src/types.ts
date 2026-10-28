@@ -436,6 +436,14 @@ export interface SkillRoutingConfig {
   maxSelected?: number;
   /** Send the recent conversation turns to the decision provider. Default: false. */
   includeRecentContext?: boolean;
+  /**
+   * Exact installed skill tool names the operator approved as public data reads
+   * on every advisory turn, beside Jev's advice. Wins over
+   * SPORTSCLAW_ROUTING_PUBLIC_DATA_TOOLS (a JSON array). Default: none. A
+   * non-empty pool also makes source-free prose go through the evidence check.
+   * Invalid values refuse.
+   */
+  publicDataTools?: string[];
   /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   /** Environment source for opt-in and credential lookup. Defaults to process.env. */
@@ -452,6 +460,8 @@ export interface ResolvedSkillRoutingSettings {
   marginThreshold: number;
   maxSelected: number;
   includeRecentContext: boolean;
+  /** Approved public data tool names; empty when none (or the setting was invalid). */
+  publicDataTools: string[];
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   env?: Record<string, string | undefined>;
   /** Sanitized codes for rejected settings, e.g. "invalid_timeoutMs". */

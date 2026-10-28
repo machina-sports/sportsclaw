@@ -72,6 +72,7 @@ import {
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
+import { resolveSkillRoutingSettings } from "./routing/skill-routing.js";
 import {
   finalizeActiveTools,
   providerToolCeiling,
@@ -154,8 +155,10 @@ import {
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import {
   buildResultOverview,
+  findArrays,
   hasQueryableRows,
   QUERY_TOOL_RESULT_TOOL,
+  MAX_LIMIT as TOOL_RESULT_MAX_ROWS,
   queryToolResult,
   TOOL_OUTPUT_TRUNCATED_MARKER,
   ToolResultStore,
@@ -196,7 +199,7 @@ export const REPEATED_CALL_NOTE =
  * first rows). Undefined when it is not JSON, has no array, or is too big to
  * store; the caller then falls back to the head slice.
  */
-function storeOversizedJson(store: ToolResultStore, toolName: string, content: string): string | undefined {
+function storeOversizedJson(store: ToolResultStore, toolName: string, content: string, completeFixtures = false): string | undefined {
   let value: unknown;
   try {
     value = JSON.parse(content);
@@ -206,6 +209,25 @@ function storeOversizedJson(store: ToolResultStore, toolName: string, content: s
   if (!hasQueryableRows(value)) return undefined;
   const id = store.put(toolName, value, content.length);
   if (id === undefined) return undefined;
+  if (completeFixtures) {
+    const shape = findArrays(value)[0];
+    const columns = new Set(shape?.columns ?? []);
+    if (shape && columns.has("start_time") && columns.has("status") &&
+        (columns.has("name") || columns.has("competitors"))) {
+      const fields = ["id", "event_id", "name", "short_name", "start_time", "date", "status", "status_detail",
+        "competition", "competitors", "home", "away", "scores"].filter((field) => columns.has(field));
+      // Reuse the bounded reader. Show every fixture, not a misleading first
+      // page; non-fixture metadata remains in the same authorized store.
+      const projected = queryToolResult(store, { result_id: id, path: shape.path, fields, limit: TOOL_RESULT_MAX_ROWS }, TOOL_OUTPUT_CHAR_CAP);
+      try {
+        const rows = JSON.parse(projected) as { total_rows?: number; returned_rows?: number };
+        if (rows.total_rows === shape.rows && rows.returned_rows === shape.rows) {
+          const view = `${TOOL_OUTPUT_TRUNCATED_MARKER}: field projection only; all ${shape.rows} fixture rows from ${shape.path} are retained. Other fields omitted. Full original: result_id "${id}" via ${QUERY_TOOL_RESULT_TOOL}.]\n${projected}`;
+          if (view.length <= TOOL_OUTPUT_CHAR_CAP) return view;
+        }
+      } catch { /* A byte-limited projection retains the explicit overview below. */ }
+    }
+  }
   return (
     `${TOOL_OUTPUT_TRUNCATED_MARKER}: this result is ${content.length.toLocaleString()} chars, over the ` +
     `${TOOL_OUTPUT_CHAR_CAP.toLocaleString()}-char limit, so only an overview is shown. The full result is stored ` +
@@ -241,7 +263,23 @@ const QUERY_TOOL_RESULT_DESCRIPTION =
   "competitor does); a path to an object returns that object. Comparisons are numeric when both sides are numbers. " +
   "Results exist only for the current turn.";
 
-const SCALAR_VALUE_SCHEMA = { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] };
+/**
+ * Private key under which run() hands query_tool_result, out of the model's
+ * reach, the tools whose results this call or lane may read (public-data mode).
+ */
+const READER_AUTHORITY = Symbol("readerAuthority");
+
+/** Code-owned record of a successful public-data query: its actual sources and validated query. */
+interface QueryProvenance {
+  sources: string[];
+  query: string;
+  verificationQuery?: string;
+  verificationOutput?: string;
+}
+
+type ToolExecute = NonNullable<ToolSet[string]["execute"]>;
+
+const SCALAR_VALUE_SCHEMA ={ anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] };
 
 const QUERY_TOOL_RESULT_SCHEMA = {
   type: "object",
@@ -1450,16 +1488,31 @@ export class sportsclawEngine {
     successfulToolCallIds: Set<string>,
     maxChars = 4_000,
     /** Draft terms: large outputs are cut to the windows around them (see focusEvidenceOnClaims). */
-    focusTerms?: string[]
-  ): Array<{ toolName: string; output: string; truncated: boolean }> {
-    const out: Array<{ toolName: string; output: string; truncated: boolean }> = [];
+    focusTerms?: string[],
+    /** Recorded by query_tool_result itself, keyed by tool call id; never read from an output. */
+    queryProvenance?: Map<string, QueryProvenance>,
+    verificationView = false
+  ): Array<{ toolName: string; output: string; truncated: boolean; sourceToolNames?: string[] }> {
+    const out: Array<{ toolName: string; output: string; truncated: boolean; sourceToolNames?: string[] }> = [];
     for (const step of steps) {
       for (const result of step.toolResults ?? []) {
         if (!successfulToolCallIds.has(result.toolCallId)) continue;
+        const provenance = result.toolName === QUERY_TOOL_RESULT_TOOL ? queryProvenance?.get(result.toolCallId) : undefined;
+        const evidence = (verificationView ? provenance?.verificationOutput : undefined) ?? result.output;
         const output = focusTerms
-          ? focusEvidenceOnClaims(trimJsonWhitespace(compactStructuredJson(extractEvidenceString(result.output))), focusTerms, maxChars)
-          : this.summarizeToolOutput(result.output, maxChars);
+          ? focusEvidenceOnClaims(trimJsonWhitespace(compactStructuredJson(extractEvidenceString(evidence))), focusTerms, maxChars)
+          : this.summarizeToolOutput(evidence, maxChars);
         if (!output) continue;
+        if (provenance) {
+          // The actual filter and counts travel with the rows: zero matches is scoped to that query.
+          out.push({
+            toolName: result.toolName,
+            output: `[Query of a stored result of this turn: ${provenance.query}]\n${verificationView && provenance.verificationQuery ? `[Verification view of the same filters and fields, with the existing maximum row limit: ${provenance.verificationQuery}]\n` : ""}${output}`,
+            truncated: isTruncatedEvidence(output),
+            sourceToolNames: provenance.sources,
+          });
+          continue;
+        }
         out.push({ toolName: result.toolName, output, truncated: isTruncatedEvidence(output) });
       }
     }
@@ -1543,6 +1596,12 @@ export class sportsclawEngine {
     return { maxOutputTokens: CHECKER_OUTPUT_TOKENS + thinking, ...(opts ? { providerOptions: opts } : {}) };
   }
 
+  /** True when the operator approved a public data pool for Jev advisory routing. */
+  private publicDataMode(): boolean {
+    const routing = resolveSkillRoutingSettings(this.config.routing);
+    return routing.provider === "jev" && routing.publicDataTools.length > 0;
+  }
+
   /**
    * validateResponseEvidence, plus what it did in the run trace: kept the
    * draft, corrected it, withheld it, or could not check it; with the draft
@@ -1591,7 +1650,8 @@ export class sportsclawEngine {
   private async validateResponseEvidence(params: {
     userPrompt: string;
     draft: string;
-    toolOutputs: Array<{ toolName: string; output: string; truncated?: boolean }>;
+    /** sourceToolNames: code-recorded origins of an internal query_tool_result output only. */
+    toolOutputs: Array<{ toolName: string; output: string; truncated?: boolean; sourceToolNames?: string[] }>;
     /** Tools that failed this turn and never succeeded; their data is absent. */
     failedTools?: string[];
     callerSystemPrompt?: string;
@@ -1604,11 +1664,14 @@ export class sportsclawEngine {
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
+    // An operator-approved public data pool makes fresh facts checkable, so
+    // source-free prose is checked too and an unchecked draft never ships.
+    const strict = this.publicDataMode();
     // Jev is the one checker for a turn whose only evidence is a failed source. A
     // candidate HTML report is checked even with no tool output (its data may be
     // the user's own), and so is the recheck of a correction that check asked for.
     if (
-      toolOutputs.length === 0 && params.artifactHtml === undefined && !params.correctionAttempted &&
+      !strict && toolOutputs.length === 0 && params.artifactHtml === undefined && !params.correctionAttempted &&
       !(settings.provider === "jev" && (params.failedTools?.length ?? 0) > 0)
     ) return draft;
     const unavailable = VERIFY_UNAVAILABLE;
@@ -1619,8 +1682,9 @@ export class sportsclawEngine {
     // user with nothing after a dozen successful tool calls.
     const unverified = (reason: string) => {
       // A recheck judges a correction made because the draft was contradicted:
-      // neither that draft nor the unchecked correction may ship.
-      if (params.correctionAttempted) return unavailable;
+      // neither that draft nor the unchecked correction may ship. Neither may
+      // an unchecked draft in public-data mode.
+      if (params.correctionAttempted || strict) return unavailable;
       if (this._verifyNotes) this._verifyNotes.unverified = true;
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence validation did not complete (${reason}); returning the drafted answer`);
@@ -1652,7 +1716,9 @@ export class sportsclawEngine {
     // is not a contradiction: flagging it replaced correct answers with
     // "unavailable" (e.g. a season game log whose middle was omitted, #172).
     const partialViewRule = partialView
-      ? "Some sources are marked TRUNCATED or were not shown, so you see only part of the data the draft was written from. " +
+      ? strict
+        ? "Some source data is omitted. Omission is not a contradiction, but it cannot substantiate a concrete current or date-specific sports claim. Mark claims that the visible evidence cannot support as unsupported; do not certify them merely because they might be in omitted data.\n"
+        : "Some sources are marked TRUNCATED or were not shown, so you see only part of the data the draft was written from. " +
         "A claim that is merely not visible in that partial data is NOT a discrepancy. " +
         "Flag a claim only when the data you can see contradicts it.\n"
       : "";
@@ -1662,10 +1728,15 @@ export class sportsclawEngine {
         "A specific value or result the data shown does not contain, and that could only have come from one of them, is unsupported: flag it, even when the view is partial.\n"
       : "";
     // No tool ran: the only input is the request itself (e.g. a report from the user's own numbers).
+    // Public-data prose: only concrete current claims need a source (a report keeps the strict rule).
     const suppliedInputRule = toolOutputs.length === 0 && failedTools.length === 0
       ? "No source data was fetched this turn. Values the user explicitly supplied in the request are premises for this answer, " +
         "not verified sports facts, and a question that merely mentions a value does not establish it. " +
-        "Any other factual claim in the draft or report is unsupported: flag it.\n"
+        (strict && params.artifactHtml === undefined
+          ? "Stable general knowledge, rule explanations, opinion and the assistant's own identity need no source. " +
+            "Any concrete current or date-specific sports claim (a fixture, result, score, start time, standing, odds or price) " +
+            "is unsupported, including one repeated from an earlier assistant answer: flag it.\n"
+          : "Any other factual claim in the draft or report is unsupported: flag it.\n")
       : "";
     // The candidate report is judged as part of the answer, never as source data.
     const reportRule = params.artifactHtml !== undefined
@@ -1730,7 +1801,13 @@ export class sportsclawEngine {
         // refuses the whole check: certifying the rest would vouch for an answer
         // partly built from it.
         const admitted = new Set(settings.publicToolNames);
-        if ([...toolOutputs.map((item) => item.toolName), ...failedTools].some((name) => !admitted.has(name))) {
+        // A query is admitted by its recorded origins only, all of them approved;
+        // naming query_tool_result itself admits nothing.
+        const admittedOutput = (item: (typeof toolOutputs)[number]): boolean =>
+          item.toolName === QUERY_TOOL_RESULT_TOOL
+            ? (item.sourceToolNames?.length ?? 0) > 0 && item.sourceToolNames!.every((name) => admitted.has(name))
+            : admitted.has(item.toolName);
+        if (!toolOutputs.every(admittedOutput) || failedTools.some((name) => !admitted.has(name))) {
           return blocked("unapproved_evidence");
         }
         const state = buildVerificationState({
@@ -1888,7 +1965,7 @@ export class sportsclawEngine {
       // act then, unless a tool failed: a value only it could have supplied
       // must still be caught (#194). A flag without a kind counts as a
       // contradiction.
-      const actionable = partialView && failedTools.length === 0
+      const actionable = !strict && partialView && failedTools.length === 0
         ? parsed.discrepancies.filter((d) => d.kind !== "unsupported")
         : parsed.discrepancies;
       if (parsed.isValid || actionable.length === 0) {
@@ -1905,6 +1982,9 @@ export class sportsclawEngine {
       // legacy algorithm, adds no provider route, and makes the checker no more
       // accurate; an unconfirmed correction is refused, never shipped.
       if (settings.generativeAction === "correct") return await correctAndRecheck(actionable);
+      // Public-data mode never keeps a flagged draft: the Jev path keeps its own
+      // correct-and-recheck for the source-free check it routed here; otherwise refuse.
+      if (strict) return settings.provider === "jev" ? await correctAndRecheck(actionable) : unavailable;
 
       if (this.config.verbose) {
         console.error(
@@ -2005,6 +2085,7 @@ export class sportsclawEngine {
     runPlatform?: "telegram" | "discord" | "cli",
     runChatId?: string,
     succeededToolResultsThisTurn?: Map<string, string>,
+    queryProvenanceThisTurn?: Map<string, QueryProvenance>,
   ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
@@ -2120,7 +2201,7 @@ export class sportsclawEngine {
             const totalChars = result.content.length;
             // JSON with rows: keep it whole harness-side and show an overview
             // the model can follow up on with query_tool_result (#176).
-            const overview = storeOversizedJson(resultStore, spec.name, result.content);
+            const overview = storeOversizedJson(resultStore, spec.name, result.content, this.publicDataMode());
             if (overview !== undefined) {
               succeededToolResultsThisTurn?.set(signature, overview);
               return overview;
@@ -2148,7 +2229,40 @@ export class sportsclawEngine {
       toolMap[QUERY_TOOL_RESULT_TOOL] = defineTool({
         description: QUERY_TOOL_RESULT_DESCRIPTION,
         inputSchema: jsonSchema(QUERY_TOOL_RESULT_SCHEMA),
-        execute: async (args: Record<string, unknown>) => queryToolResult(resultStore, args, TOOL_OUTPUT_CHAR_CAP),
+        execute: async (args: Record<string, unknown>, options) => {
+          if (!this.publicDataMode()) return queryToolResult(resultStore, args, TOOL_OUTPUT_CHAR_CAP);
+          // Public-data mode: only results of tools this call may itself execute,
+          // by their stored origin; without run()'s context, nothing is read.
+          const authority = (options?.experimental_context as Record<symbol, unknown> | undefined)?.[READER_AUTHORITY];
+          if (!(authority instanceof Set)) throw new Error(`${QUERY_TOOL_RESULT_TOOL} is not available for this call.`);
+          const ids = Array.isArray(args.result_ids) && args.result_ids.length > 0 ? args.result_ids : [args.result_id];
+          const sources = ids.map((id) => (typeof id === "string" ? resultStore.get(id.trim())?.toolName : undefined));
+          if (sources.some((name) => name !== undefined && !authority.has(name))) {
+            throw new Error("That result_id is not available here: query only results of tools you called in this turn.");
+          }
+          const out = queryToolResult(resultStore, args, TOOL_OUTPUT_CHAR_CAP);
+          const { result_id, result_ids, path, where, fields, sort_by, descending, limit, aggregate } = args;
+          const query = { result_id, result_ids, path, where, fields, sort_by, descending, limit, aggregate };
+          let page: { matched_rows?: number; returned_rows?: number } | undefined;
+          try { page = JSON.parse(out); } catch { /* A truncated non-JSON view cannot be expanded safely. */ }
+          let verificationQuery: string | undefined;
+          let verificationOutput: string | undefined;
+          if (typeof page?.matched_rows === "number" && typeof page.returned_rows === "number" &&
+              page.matched_rows > page.returned_rows && (typeof limit !== "number" || limit < TOOL_RESULT_MAX_ROWS)) {
+            // Presentation pagination is not an evidence boundary. Reuse the same
+            // authorized query, filters and fields under the existing row/byte caps.
+            const expanded = { ...query, limit: TOOL_RESULT_MAX_ROWS };
+            verificationOutput = queryToolResult(resultStore, expanded, TOOL_OUTPUT_CHAR_CAP);
+            verificationQuery = JSON.stringify(expanded).slice(0, 2_000);
+          }
+          queryProvenanceThisTurn?.set(options.toolCallId, {
+            sources: [...new Set(sources as string[])],
+            query: JSON.stringify(query).slice(0, 2_000),
+            verificationQuery,
+            verificationOutput,
+          });
+          return out;
+        },
       });
     }
 
@@ -4835,6 +4949,7 @@ export class sportsclawEngine {
     const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const failedToolSignaturesThisTurn = new Map<string, string>();
     const succeededToolResultsThisTurn = new Map<string, string>();
+    const queryProvenanceThisTurn = new Map<string, QueryProvenance>();
 
     // Analytics tracking
     const analyticsStartTime = Date.now();
@@ -4852,6 +4967,7 @@ export class sportsclawEngine {
       options?.platform,
       options?.chatId,
       succeededToolResultsThisTurn,
+      queryProvenanceThisTurn,
     );
     if ((options?.delegationDepth ?? 0) > 0) {
       delete tools.spawn_subagent;
@@ -4894,13 +5010,25 @@ export class sportsclawEngine {
     // An explicit no_tools route answers from the main model with every
     // executor removed for this run only (see callTools below).
     const noTools = routingOutcome?.status === "no_tools";
-    if (routingOutcome && routingOutcome.status !== "selected" && !noTools) {
+    // Operator-approved public data reads: only installed, skill-owned SDK
+    // tools qualify. An MCP, engine-owned or unknown entry refuses the run.
+    // Validate even when the no-schema shortcut produced no routing metadata.
+    const poolSettings = resolveSkillRoutingSettings(this.config.routing);
+    const approvedPool = poolSettings.publicDataTools;
+    const skillToolNames = new Set(approvedPool.length > 0 ? this.registry.getAllToolSpecs().map((spec) => spec.name) : []);
+    const invalidPool = poolSettings.diagnostics.includes("invalid_publicDataTools") ||
+      (approvedPool.length > 0 && poolSettings.provider !== "jev") || approvedPool.some((name) =>
+      name.startsWith("mcp__") || !skillToolNames.has(name) || this.registry.getSkillName(name) === undefined);
+    if (invalidPool || (routingOutcome && routingOutcome.status !== "selected" && !noTools)) {
       if (this.config.verbose) {
         console.error(
-          `[sportsclaw] route status=${routingOutcome.status} source=${routingOutcome.source} reason=${routingOutcome.reasonCode} ms=${routingOutcome.latencyMs}`
+          `[sportsclaw] route status=${routingOutcome?.status ?? "unavailable"} source=${routingOutcome?.source ?? "configuration"} reason=${routingOutcome?.reasonCode ?? "invalid_publicDataTools"} ms=${routingOutcome?.latencyMs ?? 0}` +
+            (invalidPool ? " public_data_tools=invalid" : "")
         );
       }
-      const refusal = routingRefusalMessage(routingOutcome);
+      const refusal = routingRefusalMessage(
+        invalidPool ? { status: "unavailable", source: routingOutcome?.source ?? "deterministic", latencyMs: routingOutcome?.latencyMs ?? 0, reasonCode: "invalid_publicDataTools" } : routingOutcome!
+      );
       // Keep local history coherent: an orphaned user message corrupts the
       // next turn's LLM call.
       this.messages.push({ role: "assistant", content: [{ type: "text", text: refusal }] });
@@ -4925,9 +5053,10 @@ export class sportsclawEngine {
       }
     }
 
-    // An external_inputs route is advice, not admission: its shortlist is the
-    // most it may execute, and a low confidence never widens it.
-    const advisory = routingOutcome?.reasonCode === "advisory_selection" || routingOutcome?.reasonCode === "advisory_no_tools";
+    // Advice never grants unrelated execution. The operator-approved pool may
+    // supplement selected SDK tools; confidence never widens that authority.
+    // A code-only skill match does not reopen unrelated executors in public-data mode.
+    const advisory = routingOutcome?.reasonCode === "advisory_selection" || routingOutcome?.reasonCode === "advisory_no_tools" || this.publicDataMode();
     // An already-offered artifact collector is a pure data sink, not an external
     // action: it is the one executor a no_tools run keeps, together with the
     // already-offered public guide reader used to compose it.
@@ -4935,15 +5064,27 @@ export class sportsclawEngine {
     const noToolsExecutors = artifactOffered
       ? [ARTIFACT_OUTPUT_TOOL_NAME, ...(SKILL_READ_TOOL in tools ? [SKILL_READ_TOOL] : [])]
       : [];
+    // The approved pool joins advice on advisory turns only, within the tools
+    // still offered after the caller allowlist and delegation limits.
+    const publicPool = advisory ? approvedPool.filter((name) => name in tools) : [];
     // Advisory data inputs exclude legacy always-active external/business tools.
     const advisorySkills = new Set(routing.decision?.selectedSkills ?? []);
-    const advisoryTools = advisory ? (routing.activeTools ?? []).filter((name) => {
+    const advisoryTools = advisory ? [...new Set([...(routing.activeTools ?? []).filter((name) => {
       if (noToolsExecutors.includes(name)) return true;
       const skill = this.registry.getSkillName(name);
       return !name.startsWith("mcp__") && skill !== undefined && advisorySkills.has(skill);
-    }) : undefined;
-    // no_tools offers only the definitions history needs (widened below).
-    let routedTools = noTools ? noToolsExecutors : advisory ? advisoryTools : routing.activeTools;
+    }), ...publicPool])] : undefined;
+    // Public-data mode: the reader of this turn's stored results joins any route
+    // that keeps a schema-owned data executor, unless the caller allowlist removed
+    // it. It reads only results of its own call's executable tools (withExecutors).
+    const readerOffered = this.publicDataMode() && QUERY_TOOL_RESULT_TOOL in tools;
+    const withReader = (names: string[] | undefined): string[] | undefined =>
+      readerOffered && names && !names.includes(QUERY_TOOL_RESULT_TOOL) &&
+      names.some((name) => !name.startsWith("mcp__") && this.registry.getSkillName(name) !== undefined)
+        ? [...names, QUERY_TOOL_RESULT_TOOL]
+        : names;
+    // no_tools offers only the pool and the definitions history needs (widened below).
+    let routedTools = withReader(noTools ? [...noToolsExecutors, ...publicPool] : advisory ? advisoryTools : routing.activeTools);
     let activeTools = finalizeActiveTools({
       routedActiveTools: routedTools,
       isFollowUp,
@@ -4976,11 +5117,13 @@ export class sportsclawEngine {
         );
     const activeAgents = agentRoutes.map((r) => r.agent);
 
-    if (explicitAgents && !noTools) {
+    if (explicitAgents && (!noTools || publicPool.length > 0)) {
       const constrained = this.filterToolsForAgent(explicitAgents[0], Object.keys(tools));
       if (constrained !== undefined) {
-        // The agent's filter narrows advice; it never adds tools beyond the shortlist.
-        routedTools = advisory ? constrained.filter((name) => advisoryTools?.includes(name)) : constrained;
+        // The agent's filter narrows advice and the pool; it never adds tools beyond them.
+        routedTools = withReader(noTools
+          ? [...noToolsExecutors, ...publicPool.filter((name) => constrained.includes(name))]
+          : advisory ? constrained.filter((name) => advisoryTools?.includes(name)) : constrained);
         activeTools = finalizeActiveTools({
           routedActiveTools: routedTools,
           isFollowUp,
@@ -5042,20 +5185,32 @@ export class sportsclawEngine {
     // output executors; an advisory shortlist keeps only its own (already
     // allowed) tools, so a history-widened definition restores no executor.
     // Undefined: the existing strict behaviour, every offered tool executes.
-    const executable = noTools ? new Set(noToolsExecutors) : advisory ? new Set(routedTools ?? []) : undefined;
+    const executable = noTools || advisory ? new Set(routedTools ?? []) : undefined;
     // Definitions may stay for provider compatibility with history, but without
     // an executor a call the model attempts anyway (toolChoice is not a security
     // boundary) never runs SDK, MCP, agent or business code. Per-run only.
-    const withExecutors = (set: ToolSet): ToolSet =>
-      executable
+    const withExecutors = (set: ToolSet, permitted = executable): ToolSet => {
+      const out: ToolSet = permitted
         ? (Object.fromEntries(
             Object.entries(set).map(([name, def]) => {
-              if (executable.has(name)) return [name, def];
+              if (permitted.has(name)) return [name, def];
               const { execute: _execute, ...definition } = def as ToolSet[string] & { execute?: unknown };
               return [name, definition];
             })
           ) as ToolSet)
-        : set;
+        : { ...set };
+      // The reader gets this call's executable set out of band; the model never sees or sets it.
+      const execute = (out[QUERY_TOOL_RESULT_TOOL] as { execute?: ToolExecute } | undefined)?.execute;
+      if (readerOffered && execute) {
+        const authority = new Set(permitted ?? Object.keys(set));
+        out[QUERY_TOOL_RESULT_TOOL] = {
+          ...out[QUERY_TOOL_RESULT_TOOL],
+          execute: ((input, toolOptions) =>
+            execute(input, { ...toolOptions, experimental_context: { [READER_AUTHORITY]: authority } })) as ToolExecute,
+        } as ToolSet[string];
+      }
+      return out;
+    };
 
     // --- Parallel agent execution ---
     // When parallelAgents is enabled and multiple agents were routed,
@@ -5081,9 +5236,9 @@ export class sportsclawEngine {
           ceiling,
         });
         // An advisory lane stays inside the shortlist, whatever the agent's own filter.
-        const laneRoutedTools = advisory
+        const laneRoutedTools = withReader(advisory
           ? (agentRoutedTools ?? routedTools)?.filter((name) => routedTools?.includes(name))
-          : agentRoutedTools;
+          : agentRoutedTools);
         const agentActiveTools = finalizeActiveTools({
           routedActiveTools: laneRoutedTools?.filter((name) => name !== ARTIFACT_OUTPUT_TOOL_NAME),
           isFollowUp,
@@ -5114,7 +5269,7 @@ export class sportsclawEngine {
             ...(agentActiveTools !== undefined ? { activeToolNames: agentActiveTools } : {}),
           }) + slipSection,
           messages: this.messages,
-          tools: withExecutors(laneTools),
+          tools: withExecutors(laneTools, executable ? new Set(laneRoutedTools ?? []) : undefined),
           ...(agentActiveTools !== undefined ? { activeTools: agentActiveTools } : {}),
           abortSignal: options?.abortSignal,
           stopWhen: stepCountIs(parallelMaxTurns),
@@ -5211,8 +5366,9 @@ export class sportsclawEngine {
       // Parallel synthesis must satisfy the same caller policy and evidence gate.
       const parallelToolOutputs = laneResults.flatMap((lane) =>
         this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
-          new Set(succeededExternalTools.keys()), VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText)));
-      if (parallelToolOutputs.length > 0) {
+          new Set(succeededExternalTools.keys()), this.publicDataMode() ? DECISION_LIMITS.maxStateChars : VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText),
+          queryProvenanceThisTurn, true));
+      if (parallelToolOutputs.length > 0 || this.publicDataMode()) {
         responseText = await this.verifyWithTrace({
           userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
           callerSystemPrompt: options?.systemPrompt, abortSignal: options?.abortSignal,
@@ -5268,7 +5424,8 @@ export class sportsclawEngine {
 
     // Executors per `executable` above; `tools` and config are untouched for later turns.
     const callTools: ToolSet = withExecutors(tools);
-    const toolChoice = noTools && !artifactOffered ? ("none" as const) : undefined;
+    const poolOffered = (routedTools ?? []).some((name) => publicPool.includes(name));
+    const toolChoice = noTools && !artifactOffered && !poolOffered ? ("none" as const) : undefined;
 
     let mainSystemPromptSha256: string | undefined;
     let mainSystem = "";
@@ -5622,8 +5779,9 @@ export class sportsclawEngine {
 
     // --- Evidence Validation Gate (Hermes fact-checker pattern) ---
     // A captured document is always judged by the configured checker, even
-    // when no tool ran; plain chat with no evidence still makes no check.
-    if (successes.length > 0 || (jevCovers && netFailures.length > 0) || capturedArtifact) {
+    // when no tool ran; plain chat with no evidence makes no check unless a
+    // public data pool is approved, where source-free prose is checked too.
+    if (successes.length > 0 || (jevCovers && netFailures.length > 0) || capturedArtifact || this.publicDataMode()) {
       const successIds = new Set(succeededExternalTools.keys());
       const toolOutputs = this.collectToolOutputSnippets(
         result.steps as Array<{
@@ -5634,8 +5792,11 @@ export class sportsclawEngine {
           }>;
         }>,
         successIds,
-        VERIFICATION_EVIDENCE_CHARS,
-        draftClaimTerms(responseText)
+        // Do not discard a whole schedule that fits the existing verifier bound.
+        // Jev still refuses the complete request if its total state exceeds that bound.
+        this.publicDataMode() ? DECISION_LIMITS.maxStateChars : VERIFICATION_EVIDENCE_CHARS,
+        draftClaimTerms(responseText),
+        queryProvenanceThisTurn, true
       );
       responseText = await this.verifyWithTrace({
         userPrompt: sanitizedPrompt,
