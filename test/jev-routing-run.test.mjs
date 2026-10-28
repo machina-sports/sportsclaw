@@ -277,6 +277,21 @@ test('a nonempty advisory shortlist cannot execute unrelated external or busines
   assert.deepEqual(result, {executed:['nba_get_scores']});
 });
 
+test('explicit agents cannot restore executors excluded by advisory routing', () => {
+  const result = runIsolated('jev-run-explicit-advisory-isolation-', `
+    const {createAgent} = await import(${JSON.stringify(new URL('../dist/agents.js', import.meta.url).href)});
+    const agent = await createAgent({id:'nba-boundary-check',name:'Boundary check',body:'Use only permitted data tools.',skills:['nba']});
+    const {engine, counts} = harness({routing:{disposition:'select', required:['c0'], confidence:.3}, reply:'SHORTLIST_REPLY', attemptTools:true});
+    await engine.run('how did the Lakers do', {agentIds:[agent.id]});
+    assert.ok(counts.executed.includes('nba_get_scores'), 'the selected data tool still runs');
+    for (const name of ['spawn_subagent','mcp__unrelated','update_fan_profile']) {
+      assert.ok(!counts.executed.includes(name), name + ' must remain excluded for an explicit agent');
+    }
+    console.log(JSON.stringify({executed:[...new Set(counts.executed)]}));
+  `);
+  assert.deepEqual(result, {executed:['nba_get_scores']});
+});
+
 test('actual run never lets an advisory hint grant a tool outside the caller allowlist', () => {
   const result = runIsolated('jev-run-advisory-allowlist-', `
     const {engine, model, counts} = harness({routing:{disposition:'select', required:['c0'], confidence:.3}, reply:'ALLOWLIST_REPLY'});
