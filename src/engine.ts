@@ -4980,7 +4980,7 @@ export class sportsclawEngine {
       const constrained = this.filterToolsForAgent(explicitAgents[0], Object.keys(tools));
       if (constrained !== undefined) {
         // The agent's filter narrows advice; it never adds tools beyond the shortlist.
-        routedTools = advisory ? constrained.filter((name) => routing.activeTools?.includes(name)) : constrained;
+        routedTools = advisory ? constrained.filter((name) => advisoryTools?.includes(name)) : constrained;
         activeTools = finalizeActiveTools({
           routedActiveTools: routedTools,
           isFollowUp,
