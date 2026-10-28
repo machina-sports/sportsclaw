@@ -34,9 +34,25 @@ A trusted embedding may supply `deterministicSelectedIds` as a **complete rule r
 Valid rule selections return without credential lookup or network access. Without such a
 result, the deterministic provider returns clarification rather than guessing.
 
+### Scope: strict `whole_request`, advisory `external_inputs`
+
+`scope` (default `whole_request`) is fixed, trusted text stated on every question, never in
+the untrusted state. Any other value throws at construction.
+
+- `whole_request` is **strict task admission**: the outcomes, thresholds and refusals below.
+- `external_inputs` asks only for missing data, a specialized computation or an explicit
+  external action, and its answer is **advice, not admission**. After a valid Jev response it
+  returns the candidates marked `required`, ranked by their validated required probability
+  (catalog order on ties) and capped at `maxSelected`, as `selected` with reason code
+  `advisory_selection`; with none marked, `no_tools` with `advisory_no_tools`. No threshold
+  turns it into a refusal and a semantic clarify/unsupported never exposes the catalog. The
+  reported confidence and margin are the actual minima behind the advice, never raised.
+  Invalid input or config, withheld consent, credential, auth, transport or protocol failures
+  and cancellation stay `unavailable`, exactly as under `whole_request`.
+
 ### Outcomes
 
-- `selected`: validated caller IDs, in catalog order.
+- `selected`: validated caller IDs, in catalog order (`external_inputs`: in advisory rank order).
 - `clarify`: ambiguity, low confidence/margin, unknown requirements, an empty model-selected
   set, or too many selected capabilities. No arbitrary truncation.
 - `unsupported`: an empty eligible catalog or a confident unsupported disposition.
@@ -58,7 +74,8 @@ an asynchronous call from changing the mapping or result.
 
 The generic config accepts `provider`, `dataPolicy`, pinned `model` (default `jev-1.13.0`),
 `timeoutMs` (250–60,000; default 8,000), `confidenceThreshold` (0.5–1; default 0.9),
-`marginThreshold` (0–1; default 0.15), `maxSelected` (1–30; default 3), `transport` and `env`.
+`marginThreshold` (0–1; default 0.15), `maxSelected` (1–30; default 3), `scope`
+(`whole_request` or `external_inputs`; default `whole_request`), `transport` and `env`.
 Invalid generic constructor settings throw. There is **no fallback setting and no retry**.
 
 ### Selection policy
@@ -115,14 +132,24 @@ The adapter:
 2. Uses a conservative whole-request fast path for simple requests such as `NBA scores`
    or `NBA and NFL standings today`. Merely mentioning a sport in a longer request is not
    enough. Complete rule matches make no Jev or generative-router call.
-3. Otherwise supplies the installed capability catalog to one Jev request. Descriptions
-   contain skill/operation names, not argument schemas, credentials or memory documents.
-4. Validates the returned IDs, preserves multi-skill selections, and unions installed
-   deterministic helper skills only within the configured cap. Over-cap unions clarify.
-5. Carries distinct outcomes through `RouteMeta.routing`. A non-selected outcome returns a
-   fixed response from the engine **before history-tool widening or main/parallel generation**.
-   Follow-ups and yolo mode do not override this stop.
-6. On successful routes, retains the existing tool-history and provider-ceiling behavior.
+3. Otherwise supplies the installed capability catalog to one Jev request with
+   `scope: "external_inputs"`. Descriptions contain skill/operation names, not argument
+   schemas, credentials or memory documents.
+4. Uses the answer as an **advisory shortlist**: only the validated suggested skills, never an
+   inferred helper skill, and nothing beyond `maxSelected`.
+5. With a shortlist, the engine offers and executes only the shortlisted skills' tools within
+   the caller/agent allowlists and the provider ceiling. A low-confidence or follow-up turn
+   never widens it to the catalog, and a definition kept only for tool history has no
+   executor. With an empty shortlist (`advisory_no_tools`), the existing main answer runs
+   with every external executor removed: it answers from the supplied context or asks for
+   what is missing. Only an already-offered artifact collector, plus the already-offered
+   skill-guide reader when composing that artifact, keep executors; guide text is
+   instructions, never sports evidence. A shortlist is not proof that current facts were
+   fetched or that the whole task can be completed.
+6. Carries distinct outcomes through `RouteMeta.routing`. A refusal (invalid settings,
+   withheld consent, credential/auth/transport/protocol failure, cancellation) returns a
+   fixed response from the engine **before history-tool widening or main/parallel
+   generation**, with no other routing model. Follow-ups and yolo mode do not override it.
 
 Raw fan-profile/memory blocks never enter this adapter's Jev request. Recent conversation
 text is sent only with explicit `includeRecentContext: true`. This controls routing egress,
@@ -144,8 +171,9 @@ in-flight deadlines; the router cannot terminate arbitrary caller-provided code.
 
 Tests use synthetic data and mocked transports. They cover default compatibility, one-call
 multi-selection, rule shortcuts, admission failures, cancellation, catalog ordering, input
-mutation, privacy, and typed outcomes. The actual engine `run()` refusal path is exercised
-with isolated MCP/tool-construction fixtures across follow-up and yolo combinations.
+mutation, privacy, typed outcomes and the advisory shortlist. The actual engine `run()`
+refusal, empty-shortlist and low-confidence shortlist paths are exercised with isolated
+MCP/tool-construction fixtures across follow-up, yolo and allowlist combinations.
 
 No live Jev accuracy, matched latency/cost benchmark, relay HTTP decision endpoint, source
 argument resolver, downstream application integration, default activation, or deployment is

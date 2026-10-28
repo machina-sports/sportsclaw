@@ -44,7 +44,8 @@ describe("the fact-checker is told which tools failed", () => {
 describe("the evidence gate runs only when the checker cannot cover it (source check)", () => {
   const source = readFileSync(new URL("../dist/engine.js", import.meta.url), "utf8");
   it("skips the gate when tools succeeded and the default checker runs", () => {
-    assert.match(source, /successes\.length > 0 && resolveEvidenceVerifierSettings\(this\.config\.evidenceVerifier\)\.provider !== "jev"/);
+    assert.match(source, /const jevCovers = verifierSettings\.provider === "jev" && verifierSettings\.enabled/);
+    assert.match(source, /const checkerCoversFailures = jevCovers \|\| \(successes\.length > 0 && verifierSettings\.provider !== "jev"\)/);
     assert.match(source, /if \(netFailures\.length > 0 && !checkerCoversFailures\)/);
   });
   it("passes the failures to the checker", () => {

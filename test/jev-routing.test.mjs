@@ -16,6 +16,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import { DEFAULT_JEV_MODEL } from "../dist/decision-client.js";
 import { sportsclawEngine } from "../dist/engine.js";
 import { routePromptToSkills } from "../dist/router.js";
+import { CapabilityRouter } from "../dist/routing/capability-router.js";
 import {
   buildSkillCandidates,
   deterministicSkillMatch,
@@ -56,36 +57,39 @@ function choice(chosen, probabilities, confidence) {
   return { type: "choice", choice: chosen, confidence, probabilities };
 }
 
-function dispositionAnswer(chosen, confidence = 0.97) {
-  return choice(chosen, { select: 0, clarify: 0, unsupported: 0, [chosen]: 1 }, confidence);
-}
-
-function candidateAnswer(chosen, confidence = 0.97) {
-  return choice(chosen, { required: 0, not_required: 0, unknown: 0, [chosen]: 1 }, confidence);
+/**
+ * A choice answer over exactly the labels the question offered, so a fixture
+ * never assumes the router's option set. `probabilities` names the non-zero
+ * weights; every other offered label gets 0.
+ */
+function answerFor(question, chosen, confidence = 0.97, probabilities = { [chosen]: 1 }) {
+  const labels = Object.keys(question.criteria);
+  return choice(chosen, Object.fromEntries(labels.map((label) => [label, probabilities[label] ?? 0])), confidence);
 }
 
 /**
  * Answers by skill ID rather than by opaque ref: the mapping from `c0`/`c1` to
- * skills is exactly what these tests must not assume.
+ * skills is exactly what these tests must not assume. `plan` scripts the
+ * disposition and, optionally, one answer for every capability.
  */
-function jevTransport(requiredSkills, overrides = {}) {
+function jevTransport(requiredSkills, plan = {}) {
+  const { disposition = "select", confidence = 0.97, probabilities, capability } = plan;
   const calls = [];
   const transport = async (url, init) => {
     const body = JSON.parse(init.body);
     calls.push({ url, body, init, raw: init.body });
-    const refs = body.state.capabilities.map((c) => c.ref);
-    const answers = { disposition: dispositionAnswer("select") };
-    for (const ref of refs) {
-      const index = Number(ref.slice(1));
-      answers[ref] = candidateAnswer(requiredSkills.includes(index) ? "required" : "not_required");
+    const answers = {};
+    for (const [id, question] of Object.entries(body.questions)) {
+      answers[id] =
+        id === "disposition"
+          ? answerFor(question, disposition, confidence, probabilities)
+          : answerFor(
+              question,
+              capability ?? (requiredSkills.includes(Number(id.slice(1))) ? "required" : "not_required")
+            );
     }
     return new Response(
-      JSON.stringify({
-        model: DEFAULT_JEV_MODEL,
-        answers,
-        usage: { input_tokens: 100, output_tokens: 20 },
-        ...overrides,
-      }),
+      JSON.stringify({ model: body.model, answers, usage: { input_tokens: 100, output_tokens: 20 } }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
   };
@@ -172,6 +176,50 @@ describe("routePromptToSkills opt-in boundary", () => {
       env: { SPORTSCLAW_ROUTING_PROVIDER: "jev" },
     });
     assert.equal(explicit.provider, "generative");
+  });
+
+  it("pins the decision model from SPORTSCLAW_ROUTING_MODEL, explicit config first, malformed refused", async () => {
+    assert.equal(resolveSkillRoutingSettings({ env: {} }).model, DEFAULT_JEV_MODEL, "default unchanged");
+
+    const fromEnv = resolveSkillRoutingSettings({ env: { SPORTSCLAW_ROUTING_MODEL: "jev-1.14.0" } });
+    assert.equal(fromEnv.model, "jev-1.14.0");
+    assert.deepEqual(fromEnv.diagnostics, []);
+
+    for (const envModel of ["jev-1.14.0", "gpt-4"]) {
+      const explicit = resolveSkillRoutingSettings({
+        model: "jev-1.13.0",
+        env: { SPORTSCLAW_ROUTING_MODEL: envModel },
+      });
+      assert.equal(explicit.model, "jev-1.13.0", "explicit config wins over the environment");
+      assert.deepEqual(explicit.diagnostics, []);
+    }
+
+    // The pinned model is the one actually requested and reported.
+    const { calls, transport } = jevTransport([0]);
+    const pinned = await route({
+      prompt: "what should I look at tonight",
+      installedSkills: ["nba", "nfl"],
+      config: {
+        routing: jevRouting({ transport, env: { TYPESAFE_API_KEY: "test-key", SPORTSCLAW_ROUTING_MODEL: "jev-1.14.0" } }),
+      },
+    });
+    assert.equal(calls[0].body.model, "jev-1.14.0");
+    assert.equal(pinned.result.meta.routing.model, "jev-1.14.0");
+
+    const { result, model } = await route({
+      prompt: "what should I look at tonight",
+      installedSkills: ["nba", "nfl"],
+      config: {
+        routing: jevRouting({
+          transport: failTransport(),
+          env: { TYPESAFE_API_KEY: "test-key", SPORTSCLAW_ROUTING_MODEL: "gpt-4" },
+        }),
+      },
+    });
+    assert.equal(model.doGenerateCalls.length, 0);
+    assert.equal(result.meta.routing.status, "unavailable");
+    assert.equal(result.meta.routing.reasonCode, "invalid_model");
+    assert.deepEqual(result.decision.selectedSkills, []);
   });
 
   it("reports a misconfigured router as unavailable instead of quietly falling back", async () => {
@@ -292,32 +340,23 @@ describe("skill routing jev path", () => {
     assert.deepEqual(result.decision.selectedSkills, []);
   });
 
-  it("clarifies when deterministic helper skills push the union past the cap", async () => {
-    // "news" is inferred as a helper by the existing rules and unioned onto the
-    // decision; with maxSelected 1 the union no longer fits.
-    const { transport } = jevTransport([0]);
-    const { result } = await route({
-      prompt: "any news on the lakers roster situation",
-      installedSkills: ["nba", "news"],
-      config: { routing: jevRouting({ transport, maxSelected: 1 }) },
-    });
-    assert.equal(result.meta.routing.status, "clarify");
-    assert.equal(result.meta.routing.reasonCode, "too_many_required");
-    assert.deepEqual(result.decision.selectedSkills, []);
+  // Advisory shortlist (explicit user decision): the wrapper passes Jev's
+  // suggestions through and never adds inferred helper skills.
+  it("adds no inferred helper skill, even when it would fit or exceed the cap", async () => {
+    for (const maxSelected of [1, 3]) {
+      const { transport } = jevTransport([0]);
+      const { result } = await route({
+        prompt: "any news on the lakers roster situation",
+        installedSkills: ["nba", "news"],
+        config: { routing: jevRouting({ transport, maxSelected }) },
+      });
+      assert.equal(result.meta.routing.status, "selected", String(maxSelected));
+      assert.equal(result.meta.routing.reasonCode, "advisory_selection");
+      assert.deepEqual(result.decision.selectedSkills, ["nba"], String(maxSelected));
+    }
   });
 
-  it("unions an inferred helper skill onto a decision that still fits", async () => {
-    const { transport } = jevTransport([0]);
-    const { result } = await route({
-      prompt: "any news on the lakers roster situation",
-      installedSkills: ["nba", "news"],
-      config: { routing: jevRouting({ transport }) },
-    });
-    assert.equal(result.meta.routing.status, "selected");
-    assert.deepEqual(result.decision.selectedSkills, ["nba", "news"]);
-  });
-
-  it("refuses a helper skill that is not installed", async () => {
+  it("ignores a helper skill, installed or not, instead of adding or refusing on it", async () => {
     const { transport } = jevTransport([0]);
     const outcome = await routeSkillsWithJev(
       {
@@ -328,15 +367,118 @@ describe("skill routing jev path", () => {
       },
       resolveSkillRoutingSettings(jevRouting({ transport }))
     );
-    assert.equal(outcome.meta.routing.status, "unavailable");
-    assert.equal(outcome.meta.routing.reasonCode, "invalid_helper");
-    assert.deepEqual(outcome.decision.selectedSkills, []);
+    assert.equal(outcome.meta.routing.status, "selected");
+    assert.deepEqual(outcome.decision.selectedSkills, ["nba"]);
+  });
+
+  it("passes a low-confidence suggestion through as a bounded shortlist, keeping its uncertainty", async () => {
+    const { calls, transport } = jevTransport([0], { confidence: 0.67, probabilities: { select: 0.67, clarify: 0.33 } });
+    const { result, model } = await route({
+      prompt: "how did the lakers do",
+      installedSkills: ["nba", "nfl", "news"],
+      config: { routing: jevRouting({ transport }) },
+    });
+    assert.equal(calls.length, 1, "one decision request");
+    assert.equal(model.doGenerateCalls.length, 0, "no generative router call");
+    assert.equal(result.meta.routing.status, "selected");
+    assert.equal(result.meta.routing.reasonCode, "advisory_selection");
+    assert.deepEqual(result.decision.selectedSkills, ["nba"], "only the suggestion, not the catalog");
+    assert.equal(result.decision.needsClarification, false);
+    assert.ok(result.meta.routing.confidence < 0.9, `uncertainty kept, got ${result.meta.routing.confidence}`);
+    assert.ok(result.decision.confidence < 1, "never promoted to certainty");
   });
 });
 
 // ---------------------------------------------------------------------------
 // Failures — one attempt, never a weaker selection
 // ---------------------------------------------------------------------------
+
+describe("skill routing explicit no_tools", () => {
+  const CANDIDATES = [
+    { id: "nba", description: 'Sports data skill "nba". Available operations: get scores.' },
+    { id: "nfl", description: 'Sports data skill "nfl". Available operations: get scores.' },
+  ];
+
+  it("returns a confident no_tools from the generic router as its own outcome, never as an empty selection", async () => {
+    const { calls, transport } = jevTransport([], { disposition: "no_tools" });
+    const router = new CapabilityRouter({
+      provider: "jev",
+      dataPolicy: "cloud_allowed",
+      env: { TYPESAFE_API_KEY: "test-key" },
+      transport,
+    });
+    const outcome = await router.route({ prompt: "Hi, thanks!", candidates: CANDIDATES });
+    assert.equal(calls.length, 1);
+    assert.ok("no_tools" in calls[0].body.questions.disposition.criteria, "the disposition must offer no_tools");
+    assert.equal(outcome.status, "no_tools");
+    assert.equal(outcome.reasonCode, "model_no_tools");
+    assert.equal(outcome.source, "jev");
+    assert.equal(outcome.selectedIds, undefined);
+    assert.equal(outcome.confidence, 0.97);
+    assert.deepEqual(Object.keys(outcome).sort(), ["confidence", "margin", "model", "reasonCode", "receipt", "source", "status"]);
+  });
+
+  it("carries a confident no_tools through the wrapper with no skills and no helper union", async () => {
+    // "news" is an inferred helper for this prompt; no_tools must not union it.
+    const { calls, transport } = jevTransport([], { disposition: "no_tools" });
+    const { result, model } = await route({
+      prompt: "thanks, the latest news recap was great",
+      installedSkills: ["nba", "news"],
+      config: { routing: jevRouting({ transport }) },
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(model.doGenerateCalls.length, 0, "no generative router call");
+    assert.equal(result.meta.routing.status, "no_tools");
+    assert.equal(result.meta.routing.source, "jev");
+    assert.equal(result.meta.routing.reasonCode, "advisory_no_tools");
+    assert.equal(result.meta.routing.model, DEFAULT_JEV_MODEL);
+    assert.deepEqual(result.decision.selectedSkills, []);
+    assert.equal(result.decision.needsClarification, false);
+    assert.equal(result.meta.llmAttempted, false);
+  });
+
+  // Advisory shortlist (explicit user decision): an unconfident, thin or
+  // inconsistent answer, or a semantic clarify/unsupported, suggests no input.
+  // The engine then answers with external executors disabled; it is not a refusal.
+  it("suggests no input for an unconfident, thin or abstaining answer", async () => {
+    // 0.89 is the public probe's "Hi, thanks!" confidence; the 0.9 default stays.
+    for (const [label, plan] of [
+      ["low_confidence", { disposition: "no_tools", confidence: 0.89 }],
+      ["low_margin", { disposition: "no_tools", probabilities: { no_tools: 0.52, select: 0.48 } }],
+      ["unknown", { disposition: "no_tools", capability: "unknown" }],
+      ["select-with-nothing", { disposition: "select" }],
+      ["clarify", { disposition: "clarify" }],
+      ["unsupported", { disposition: "unsupported" }],
+    ]) {
+      const { calls, transport } = jevTransport([], plan);
+      const { result, model } = await route({
+        prompt: "Hi, thanks!",
+        installedSkills: ["nba", "nfl"],
+        config: { routing: jevRouting({ transport }) },
+      });
+      assert.equal(calls.length, 1, label);
+      assert.equal(model.doGenerateCalls.length, 0, label);
+      assert.equal(result.meta.routing.status, "no_tools", label);
+      assert.equal(result.meta.routing.reasonCode, "advisory_no_tools", label);
+      assert.equal(result.decision.needsClarification, false, label);
+      assert.deepEqual(result.decision.selectedSkills, [], label);
+    }
+  });
+
+  it("does not reinterpret an empty catalog or a failure as no_tools", async () => {
+
+    const router = (transport) =>
+      new CapabilityRouter({ provider: "jev", dataPolicy: "cloud_allowed", env: { TYPESAFE_API_KEY: "test-key" }, transport });
+    const empty = await router(failTransport()).route({ prompt: "Hi, thanks!", candidates: [] });
+    assert.equal(empty.status, "unsupported");
+    assert.equal(empty.reasonCode, "empty_catalog");
+    const failed = await router(
+      async () => new Response("{}", { status: 500, headers: { "content-type": "application/json" } })
+    ).route({ prompt: "Hi, thanks!", candidates: CANDIDATES });
+    assert.equal(failed.status, "unavailable");
+    assert.equal(failed.reasonCode, "upstream_error");
+  });
+});
 
 describe("skill routing failures", () => {
   it("never reaches a credential under a local-only policy", async () => {
@@ -388,13 +530,12 @@ describe("skill routing failures", () => {
     assert.equal(result.meta.routing.reasonCode, "aborted");
   });
 
-  it("clarifies rather than guessing when the decision is unconfident", async () => {
+  it("keeps an unconfident decision as advisory suggestions with its uncertainty, within the cap", async () => {
     const transport = async (_url, init) => {
       const body = JSON.parse(init.body);
       const answers = {};
-      for (const id of Object.keys(body.questions)) {
-        answers[id] =
-          id === "disposition" ? dispositionAnswer("select", 0.4) : candidateAnswer("required", 0.4);
+      for (const [id, question] of Object.entries(body.questions)) {
+        answers[id] = answerFor(question, id === "disposition" ? "select" : "required", 0.4);
       }
       return new Response(JSON.stringify({ model: DEFAULT_JEV_MODEL, answers }), {
         status: 200,
@@ -403,13 +544,57 @@ describe("skill routing failures", () => {
     };
     const { result } = await route({
       prompt: "what should I look at tonight",
-      installedSkills: ["nba", "nfl"],
-      config: { routing: jevRouting({ transport }) },
+      installedSkills: ["nba", "nfl", "mlb"],
+      config: { routing: jevRouting({ transport, maxSelected: 2 }) },
     });
-    assert.equal(result.meta.routing.status, "clarify");
-    assert.equal(result.meta.routing.reasonCode, "low_confidence");
-    assert.equal(result.decision.needsClarification, true);
-    assert.deepEqual(result.decision.selectedSkills, []);
+    assert.equal(result.meta.routing.status, "selected");
+    assert.equal(result.meta.routing.reasonCode, "advisory_selection");
+    assert.equal(result.meta.routing.confidence, 0.4, "the uncertainty is reported, not replaced");
+    assert.equal(result.decision.needsClarification, false);
+    // All tie on required probability: catalog order, capped at maxSelected.
+    assert.deepEqual(result.decision.selectedSkills, ["nba", "nfl"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Routing scope — skill routing judges external inputs, not the whole request
+// ---------------------------------------------------------------------------
+
+describe("skill routing scope", () => {
+  it("opts the generic router into external_inputs without altering the prompt, history or call count", async () => {
+    const prompt = "Explain what a rebound is and tidy the wording of my own draft";
+    const context = "earlier: my draft says we outrebounded them";
+    const wrapped = jevTransport([], { disposition: "no_tools" });
+    const { result, model } = await route({
+      prompt,
+      installedSkills: ["nba", "nfl"],
+      recentContext: context,
+      config: { routing: jevRouting({ transport: wrapped.transport, includeRecentContext: true }) },
+    });
+    assert.equal(wrapped.calls.length, 1, "one decision request, no additional provider call");
+    assert.equal(model.doGenerateCalls.length, 0, "no generative router call");
+    assert.equal(result.meta.routing.status, "no_tools");
+    const sent = wrapped.calls[0].body;
+    assert.equal(sent.state.request, prompt, "the untrusted request is sent verbatim");
+    assert.equal(sent.state.recentContext, context, "and so is the opted-in history");
+
+    // The same request through the generic router, under each scope.
+    const direct = async (extra) => {
+      const { calls, transport } = jevTransport([], { disposition: "no_tools" });
+      await new CapabilityRouter({
+        provider: "jev",
+        dataPolicy: "cloud_allowed",
+        env: { TYPESAFE_API_KEY: "test-key" },
+        transport,
+        ...extra,
+      }).route({ prompt, candidates: buildSkillCandidates(["nba", "nfl"], []), recentContext: context });
+      return calls[0].body;
+    };
+    const external = await direct({ scope: "external_inputs" });
+    const generic = await direct({});
+    assert.deepEqual(sent.questions, external.questions, "the wrapper asks the external_inputs questions");
+    assert.notDeepEqual(sent.questions, generic.questions, "not the whole-request ones");
+    assert.deepEqual(sent.state, external.state, "the scope policy lives in the questions, never in the state");
   });
 });
 

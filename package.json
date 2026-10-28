@@ -28,6 +28,7 @@
     "test:image-gen": "npm run build && node --test test/image-gen.test.mjs",
     "test:durability": "npm run build && node --test test/durability.test.mjs",
     "test:builtin-tools": "npm run build && node --test test/builtin-tools.test.mjs",
+    "test:artifact-output": "npm run build && node --test test/artifact-output.test.mjs",
     "test:version": "npm run build && node --test test/version-help.test.mjs",
     "test:tv-contracts": "npm run build && node --test test/tv-contracts.test.mjs",
     "test:operator-health": "npm run build && node --test test/operator-health.test.mjs",

@@ -6,6 +6,7 @@
 
 import type { ModelMessage } from "ai";
 import type { SlipTurnInput, SlipTurnResult } from "./slip-output.js";
+import type { ArtifactTurnInput, ArtifactTurnResult } from "./artifact-output.js";
 
 // ---------------------------------------------------------------------------
 // Supported LLM providers
@@ -458,7 +459,7 @@ export interface ResolvedSkillRoutingSettings {
 }
 
 /** Outcome of an opt-in routing decision. Mirrors the generic router. */
-export type SkillRoutingStatus = "selected" | "clarify" | "unsupported" | "unavailable";
+export type SkillRoutingStatus = "selected" | "no_tools" | "clarify" | "unsupported" | "unavailable";
 
 /**
  * Typed routing telemetry. Kept beside the legacy RouteMeta fields rather than
@@ -505,6 +506,13 @@ export interface EvidenceVerifierConfig {
    * to one correction plus the bounded recheck. Invalid values refuse.
    */
   generativeAction?: EvidenceGenerativeAction;
+  /**
+   * Exact tool IDs whose outputs (and failures) the operator verified as public
+   * and may reach the Jev verifier. Wins over SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS
+   * (a JSON array). Default: none, so any tool evidence refuses Jev
+   * verification. Invalid values refuse.
+   */
+  publicToolNames?: string[];
   /** HTTP seam for embedders and offline tests. Defaults to global fetch. */
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   /** Environment source for opt-in and credential lookup. Defaults to process.env. */
@@ -522,6 +530,8 @@ export interface ResolvedEvidenceVerifierSettings {
   confidenceThreshold: number;
   fallbackToGenerative: boolean;
   generativeAction: EvidenceGenerativeAction;
+  /** Approved public tool IDs; empty when none (or the setting was invalid). */
+  publicToolNames: string[];
   /** True only when the Jev verifier may run. Never carries the credential. */
   enabled: boolean;
   /** Why a requested verifier is not enabled, e.g. "local_only". */
@@ -820,6 +830,13 @@ export interface RunOptions {
   slip?: SlipTurnInput;
   /** Receives exactly one typed slip result per successful run with `slip`. */
   onSlipResult?: (result: SlipTurnResult) => void;
+  /**
+   * Opt-in `artifact-turn-v1` request: offers `submit_artifact` for this run.
+   * Requires `onArtifactResult` and caller-owned history (`historyMode: "caller"`).
+   */
+  artifact?: ArtifactTurnInput;
+  /** Receives exactly one typed artifact result per successful run with `artifact`. */
+  onArtifactResult?: (result: ArtifactTurnResult) => void;
 }
 
 // ---------------------------------------------------------------------------

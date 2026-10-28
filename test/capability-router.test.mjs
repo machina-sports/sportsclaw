@@ -30,7 +30,7 @@ function choice(chosen, probabilities, confidence) {
 }
 
 function dispositionAnswer(chosen, confidence = 0.97, probabilities) {
-  const base = { select: 0, clarify: 0, unsupported: 0, ...(probabilities ?? { [chosen]: 1 }) };
+  const base = { select: 0, no_tools: 0, clarify: 0, unsupported: 0, ...(probabilities ?? { [chosen]: 1 }) };
   return choice(chosen, base, confidence);
 }
 
@@ -639,5 +639,190 @@ describe("CapabilityRouter set mechanics (mocked answers, not measured accuracy)
     const outcome = await jevRouter({ transport }).route(request());
     assert.equal(outcome.status, "clarify");
     assert.equal(outcome.reasonCode, "no_required_capability");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Routing scope — trusted, caller-chosen; never written into untrusted text
+// ---------------------------------------------------------------------------
+
+describe("CapabilityRouter routing scope", () => {
+  /** The one request body a router sends for `req`. */
+  async function sentBody(config, req = request()) {
+    const { calls, transport } = jevTransport({ disposition: dispositionAnswer("clarify") });
+    await jevRouter({ transport, ...config }).route(req);
+    assert.equal(calls.length, 1, "exactly one provider call");
+    return calls[0].body;
+  }
+  const questionText = (question) => [question.instructions, ...Object.values(question.criteria)].join(" ");
+
+  it("defaults to whole_request and leaves the generic questions unchanged", async () => {
+    const byDefault = await sentBody({});
+    const explicit = await sentBody({ scope: "whole_request" });
+    assert.deepEqual(explicit.questions, byDefault.questions);
+    assert.deepEqual(explicit.state, byDefault.state);
+    assert.match(byDefault.questions.disposition.instructions, /covering the entire request/i);
+    for (const question of Object.values(byDefault.questions)) {
+      assert.doesNotMatch(questionText(question), /\bcomputation|\btopic/i);
+    }
+  });
+
+  it("states the external_inputs policy on the disposition and on every capability question", async () => {
+    const whole = await sentBody({});
+    const { questions } = await sentBody({ scope: "external_inputs" });
+    assert.deepEqual(Object.keys(questions).sort(), ["c0", "c1", "disposition"]);
+    // Same labels: unknown/abstain and the disposition options are preserved.
+    for (const id of Object.keys(questions)) {
+      assert.deepEqual(Object.keys(questions[id].criteria).sort(), Object.keys(whole.questions[id].criteria).sort(), id);
+    }
+    for (const [id, question] of Object.entries(questions)) {
+      const text = questionText(question);
+      // Each question is answered alone, so each carries the whole scope policy:
+      // missing data or specialized computation, not writing, formatting,
+      // explaining or revising supplied content; topic is not a need; nothing
+      // missing is assumed to be supplied.
+      assert.match(text, /\bdata\b/i, id);
+      assert.match(text, /\bcomputation/i, id);
+      assert.match(text, /\bwrit/i, id);
+      assert.match(text, /\bformat/i, id);
+      assert.match(text, /\bexplain|\bexplanation/i, id);
+      assert.match(text, /\brevis|\bedit/i, id);
+      assert.match(text, /\btopic/i, id);
+      assert.match(text, /\bassum/i, id);
+      assert.match(text, /untrusted content/i, id);
+    }
+    // An outside-world action the catalog cannot perform stays unsupported.
+    assert.match(questions.disposition.criteria.unsupported, /\baction/i);
+  });
+
+  it("never prefixes the scope policy into the untrusted request or recent context", async () => {
+    const req = request({ recentContext: "Earlier: the user pasted their own draft about the supplied fixture." });
+    const whole = await sentBody({}, req);
+    const external = await sentBody({ scope: "external_inputs" }, req);
+    assert.notDeepEqual(external.questions, whole.questions, "the scope changes the trusted questions");
+    assert.deepEqual(external.state, whole.state, "and nothing in the untrusted state");
+    assert.equal(external.state.request, req.prompt);
+    assert.equal(external.state.recentContext, req.recentContext);
+  });
+
+  it("rejects an invalid scope at construction, before any credential read or request", () => {
+    const build = (scope) =>
+      new CapabilityRouter({ provider: "jev", dataPolicy: "cloud_allowed", scope, transport: failTransport(), env: trapEnv() });
+    assert.doesNotThrow(() => build("external_inputs"));
+    assert.doesNotThrow(() => build("whole_request"));
+    for (const scope of ["", "external", "EXTERNAL_INPUTS", "whole", 1, true]) {
+      assert.throws(() => build(scope), TypeError, String(scope));
+    }
+  });
+
+  it("keeps the rule fast path and thresholds under external_inputs; an abstention suggests nothing", async () => {
+    const rule = await new CapabilityRouter({ scope: "external_inputs", transport: failTransport(), env: trapEnv() }).route(
+      request({ deterministicSelectedIds: ["fetch_scores"] })
+    );
+    assert.equal(rule.status, "selected");
+    assert.equal(rule.source, "deterministic");
+
+    const router = (transport) => jevRouter({ scope: "external_inputs", transport });
+    assert.equal(router(failTransport()).confidenceThreshold, ROUTING_LIMITS.defaultConfidenceThreshold);
+    assert.equal(router(failTransport()).marginThreshold, ROUTING_LIMITS.defaultMarginThreshold);
+    // Advisory scope (explicit user decision): an unknown or unconfident answer
+    // is not a gate, it just suggests no input — never the whole catalog.
+    for (const [label, plan] of [
+      ["unknown", { disposition: dispositionAnswer("select"), byRef: { c0: candidateAnswer("unknown") } }],
+      ["unconfident", { disposition: dispositionAnswer("no_tools", 0.4) }],
+    ]) {
+      const { calls, transport } = jevTransport(plan);
+      const outcome = await router(transport).route(request());
+      assert.equal(calls.length, 1, label);
+      assert.equal(outcome.status, "no_tools", label);
+      assert.equal(outcome.reasonCode, "advisory_no_tools", label);
+      assert.equal(outcome.selectedIds, undefined, label);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Advisory input shortlist — external_inputs only; whole_request stays strict
+// ---------------------------------------------------------------------------
+
+describe("CapabilityRouter advisory shortlist (external_inputs)", () => {
+  // Shaped like the observed native answers: one input confidently required,
+  // a hesitant disposition, an optional extra and two overlapping price sources.
+  const CANDIDATES = [
+    { id: "metadata", description: "Look up team metadata" },
+    { id: "football", description: "Retrieve football fixtures and results" },
+    { id: "prices_a", description: "Retrieve current prices" },
+    { id: "prices_b", description: "Retrieve current prices from a second provider" },
+  ];
+  const PROMPT = "Compare the current prices for the supplied football fixture";
+  const hesitant = () => ({
+    disposition: dispositionAnswer("select", 0.67, { select: 0.67, clarify: 0.33 }),
+    byRef: {
+      c0: candidateAnswer("required", 0.6, { required: 0.6, not_required: 0.4 }),
+      c1: candidateAnswer("required", 0.97, { required: 0.97, not_required: 0.03 }),
+      c2: candidateAnswer("required", 0.9, { required: 0.8, not_required: 0.2 }),
+      c3: candidateAnswer("required", 0.9, { required: 0.8, not_required: 0.2 }),
+    },
+  });
+
+  it("whole_request stays strict on the same answers", async () => {
+    const { calls, transport } = jevTransport(hesitant());
+    const outcome = await jevRouter({ transport }).route({ prompt: PROMPT, candidates: CANDIDATES });
+    assert.equal(calls.length, 1);
+    assert.equal(outcome.status, "clarify");
+    assert.equal(outcome.reasonCode, "low_confidence");
+    assert.equal(outcome.selectedIds, undefined);
+  });
+
+  it("suggests required inputs ranked by required probability, catalog order on ties, capped at maxSelected", async () => {
+    const { calls, transport } = jevTransport(hesitant());
+    const router = jevRouter({ scope: "external_inputs", transport, maxSelected: 3 });
+    const outcome = await router.route({ prompt: PROMPT, candidates: CANDIDATES });
+    assert.equal(calls.length, 1, "one decision call, no second classifier");
+    assert.equal(outcome.status, "selected");
+    assert.equal(outcome.reasonCode, "advisory_selection");
+    assert.equal(outcome.source, "jev");
+    // football 0.97 first; the two 0.8 price sources in catalog order; metadata 0.6 is past the cap.
+    assert.deepEqual(outcome.selectedIds, ["football", "prices_a", "prices_b"]);
+    // The uncertainty is kept, never promoted to a certainty.
+    assert.equal(typeof outcome.confidence, "number");
+    assert.ok(outcome.confidence < router.confidenceThreshold, `kept uncertainty, got ${outcome.confidence}`);
+  });
+
+  it("suggests nothing, rather than the catalog, when no input is marked required", async () => {
+    const notRequired = candidateAnswer("not_required", 0.95, { required: 0.05, not_required: 0.95 });
+    const byRef = { c0: notRequired, c1: notRequired, c2: notRequired, c3: notRequired };
+    for (const disposition of [
+      dispositionAnswer("clarify", 0.49, { clarify: 0.49, no_tools: 0.3, select: 0.21 }),
+      dispositionAnswer("no_tools", 0.76, { no_tools: 0.76, select: 0.24 }),
+      dispositionAnswer("unsupported"),
+      dispositionAnswer("clarify"),
+    ]) {
+      const { calls, transport } = jevTransport({ disposition, byRef });
+      const outcome = await jevRouter({ scope: "external_inputs", transport }).route({ prompt: PROMPT, candidates: CANDIDATES });
+      assert.equal(calls.length, 1, disposition.choice);
+      assert.equal(outcome.status, "no_tools", disposition.choice);
+      assert.equal(outcome.reasonCode, "advisory_no_tools", disposition.choice);
+      assert.equal(outcome.selectedIds, undefined, disposition.choice);
+      assert.notEqual(outcome.confidence, 1, "no invented certainty");
+    }
+  });
+
+  it("still reports policy, provider and protocol failures as unavailable, before any credential when local", async () => {
+    const local = await new CapabilityRouter({ provider: "jev", scope: "external_inputs", transport: failTransport(), env: trapEnv() })
+      .route({ prompt: PROMPT, candidates: CANDIDATES });
+    assert.equal(local.status, "unavailable");
+    assert.equal(local.reasonCode, "local_only");
+
+    const failing = async () => new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
+    const failed = await jevRouter({ scope: "external_inputs", transport: failing }).route({ prompt: PROMPT, candidates: CANDIDATES });
+    assert.equal(failed.status, "unavailable");
+    assert.equal(failed.reasonCode, "upstream_error");
+
+    const malformed = async () => new Response("not json", { status: 200, headers: { "content-type": "application/json" } });
+    const broken = await jevRouter({ scope: "external_inputs", transport: malformed }).route({ prompt: PROMPT, candidates: CANDIDATES });
+    assert.equal(broken.status, "unavailable");
+    assert.equal(broken.reasonCode, "malformed_response");
+    for (const outcome of [local, failed, broken]) assert.equal(outcome.selectedIds, undefined);
   });
 });

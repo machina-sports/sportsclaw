@@ -66,6 +66,12 @@ from decision_api import (
     register_decision_routes,
 )
 from watch_intent_api import register_watch_intent_routes
+from artifact_contract import (
+    TURN_CONTRACT as ARTIFACT_TURN_CONTRACT,
+    artifacts_enabled,
+    parse_artifact_turn_input,
+    parse_artifact_turn_result,
+)
 from slip_contract import (
     TURN_CONTRACT as SLIP_TURN_CONTRACT,
     parse_slip_turn_input,
@@ -232,11 +238,19 @@ def query_guard(handler):
                     raise ValueError("slip requires history_mode caller with history")
                 if parse_slip_turn_input(body["slip"]) is None:
                     raise ValueError("invalid slip")
+            if "artifact" in body:
+                # Opt-in artifact-turn-v1: caller history only, so artifact HTML never enters engine sessions.
+                if body.get("history_mode") != "caller" or "history" not in body:
+                    raise ValueError("artifact requires history_mode caller with history")
+                if parse_artifact_turn_input(body["artifact"]) is None:
+                    raise ValueError("invalid artifact")
         except (ValueError, TypeError) as error:
             return web.json_response({"status": False, "error": str(error)}, status=400)
-        # Server environment only: a request body can never enable slips.
+        # Server environment only: a request body can never enable slips or artifacts.
         if "slip" in body and not slip_enabled():
             return web.json_response({"status": False, "error": "slip contract unavailable"}, status=503)
+        if "artifact" in body and not artifacts_enabled():
+            return web.json_response({"status": False, "error": "artifact contract unavailable"}, status=503)
         app = request.app
         # No await between inspection and increment: admission is atomic on the event loop.
         if app.get("active_queries", 0) >= MAX_QUERY_CONCURRENCY:
@@ -285,6 +299,7 @@ async def capabilities(request):
             # Advertised only when this server's gates permit slips; every
             # response is still acknowledged per request by its input hash.
             **({"slip_contract": SLIP_TURN_CONTRACT} if slip_enabled() else {}),
+            **({"artifact_contract": ARTIFACT_TURN_CONTRACT} if artifacts_enabled() else {}),
         })
     except Exception:
         return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
@@ -517,6 +532,10 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
         # A slip needs a verified per-response acknowledgement; streams have none.
         return web.json_response(
             {"status": False, "error": "slip is only supported on /api/query/sync"}, status=400)
+    if "artifact" in body:
+        # Same rule for artifacts: no per-response acknowledgement on a stream.
+        return web.json_response(
+            {"status": False, "error": "artifact is only supported on /api/query/sync"}, status=400)
     if "history" in body:
         # A stream has no per-response contract ack, so a caller could not tell
         # whether this replica honored the history. Refuse rather than drop it.
@@ -631,6 +650,8 @@ async def query_sync(request: web.Request) -> web.Response:
     started_at = time.monotonic()
     # Validated by query_guard. Its request text, context and answer stay out of logs.
     slip_input = body.get("slip")
+    # Validated by query_guard. Artifact titles and HTML never reach the logs.
+    artifact_input = body.get("artifact")
 
     if slip_input is None:
         log(f"sync: user={user_id} prompt={prompt[:80]}")
@@ -730,6 +751,31 @@ async def query_sync(request: web.Request) -> web.Response:
                 "elapsed_ms": elapsed_ms,
             }, status=502)
 
+        # A requested artifact needs exactly one native result echoing this
+        # request's nonce; an unrequested one is never passed through.
+        artifact_result = None
+        if result_text is not None and artifact_input is not None:
+            if len(result_events) == 1:
+                artifact_result = parse_artifact_turn_result(result_events[0].get("artifact"), artifact_input)
+            if artifact_result is None:
+                log("sync: artifact acknowledgement missing or invalid")
+                return web.json_response({
+                    "status": False,
+                    "error": "artifact acknowledgement missing or invalid",
+                    "user_id": user_id,
+                    "elapsed_ms": elapsed_ms,
+                }, status=502)
+            outcome = "submitted" if artifact_result["artifact"] else (artifact_result["reasonCode"] or "none")
+            log(f"sync: artifact {outcome}")
+        elif any("artifact" in event for event in result_events):
+            log("sync: unrequested artifact result refused")
+            return web.json_response({
+                "status": False,
+                "error": "unrequested artifact result",
+                "user_id": user_id,
+                "elapsed_ms": elapsed_ms,
+            }, status=502)
+
         if result_text is not None:
             resp = {
                 "status": True,
@@ -743,6 +789,8 @@ async def query_sync(request: web.Request) -> web.Response:
                 resp["session_id"] = body.get("session_id")
             if slip_result is not None:
                 resp["slip"] = slip_result
+            if artifact_result is not None:
+                resp["artifact"] = artifact_result
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -933,7 +981,7 @@ def _build_cmd(body: dict) -> list[str]:
 
 
 def _build_stdin(body: dict) -> bytes | None:
-    """Caller history (with its images and opt-in slip) rides on the child's stdin, never argv, the environment or logs."""
+    """Caller history (with its images and opt-in slip/artifact) rides on the child's stdin, never argv, the environment or logs."""
     if body.get("history") is None:
         return None
     payload = {"history": body["history"]}
@@ -941,6 +989,8 @@ def _build_stdin(body: dict) -> bytes | None:
         payload["images"] = body["images"]
     if body.get("slip") is not None:
         payload["slip"] = body["slip"]
+    if body.get("artifact") is not None:
+        payload["artifact"] = body["artifact"]
     return json.dumps(payload).encode()
 
 

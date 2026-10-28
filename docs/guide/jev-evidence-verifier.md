@@ -13,6 +13,8 @@ Supply `TYPESAFE_API_KEY` through your normal secret manager or process environm
 ```bash
 export SPORTSCLAW_EVIDENCE_VERIFIER=jev
 export SPORTSCLAW_EVIDENCE_DATA_POLICY=cloud_allowed
+# Exact tool IDs you verified as public. Without them, any tool evidence refuses the check.
+export SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS='["nba_get_scoreboard"]'
 # Optional: use the existing verifier for inconclusive or eligible failed calls.
 export SPORTSCLAW_EVIDENCE_FALLBACK=generative
 sportsclaw "Summarize the supplied match evidence"
@@ -28,6 +30,7 @@ const engine = new sportsclawEngine({
   evidenceVerifier: {
     provider: "jev",
     dataPolicy: "cloud_allowed",
+    publicToolNames: ["nba_get_scoreboard"],
     fallbackToGenerative: true,
   },
 });
@@ -50,8 +53,13 @@ Explicit programmatic settings take precedence over environment settings. `env` 
 | `SPORTSCLAW_EVIDENCE_CONFIDENCE` | `confidenceThreshold` | `0.9` |
 | `SPORTSCLAW_EVIDENCE_FALLBACK` | `fallbackToGenerative` | disabled |
 | `SPORTSCLAW_EVIDENCE_ACTION` | `generativeAction` | `retain` |
+| `SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS` (JSON array) | `publicToolNames` | none |
 
 Models must use a pinned `jev-X.Y.Z` identifier. Timeout accepts 250–60000 milliseconds and confidence accepts 0.5–1. Invalid settings resolve to conservative defaults and are reported by `resolveEvidenceVerifierSettings().diagnostics`. No key is stored by the settings resolver.
+
+### Public evidence admission
+
+`publicToolNames` lists the exact tool IDs whose outputs and failures you have verified as public. Nothing is inferred from a tool's name or topic. If even one source (successful or failed) in a turn is not on the list, the whole check is refused (`blocked`, `unapproved_evidence`) before any credential read or request; the approved remainder is never certified alone. An invalid value (not a JSON array of non-empty, exact strings) refuses verification and never falls back to the environment.
 
 ### Generative action
 
@@ -70,11 +78,15 @@ This isn't the legacy correction algorithm, it adds no provider route or vendor 
 - **Missing key or HTTP 401/403:** do not retry or switch verification providers.
 - **Caller abort:** do not start a new request or fallback; do not return a completed verification.
 - **Oversized state/request:** refuse the check before reading credentials or opening a connection; do not truncate it into a successful decision or evade the bound with fallback.
+- **Private or binary content:** a slip ID or a reserved `rpt_` report reference (any letter case, also when percent-encoded, well-formed or not), the caller's artifact nonce, a signed link or a credential field anywhere in the state refuses as `private_content`; a data-URI or inline image refuses as `unsupported_content`. Both happen before credentials or connections, never fall back, and never cut the value out to certify the rest. Percent-decoding is one bounded pass used only to refuse; nothing is normalized for lookup or logged.
+- **Failure-only turns:** when the enabled Jev verifier covers the turn, it also judges turns whose only evidence is a failed public source; no separate generative evidence gate runs first.
+- **Artifact turns:** a captured HTML report is judged even when no tool ran; values the user explicitly supplied in the request are premises, not verified sports facts, and a question that merely mentions a value does not establish it. Plain chat with no tool evidence and no report makes no verification call.
+- **Source-free reports:** Jev judges external evidence. A report with no tool output and no failed source is a faithful transformation of the user's own input, so the existing primary generative checker takes the same single check slot: it judges the prose and the complete HTML against the explicitly supplied premises. All refusals above (invalid settings, `local_only`, unapproved evidence, private or binary content, the 32,000-character state limit) run first, and a refused report never reaches either checker. The route is chosen before any key read or request; it is not a fallback, so `fallbackToGenerative` plays no part. Only a passing verdict publishes the exact HTML it judged. `generativeAction` and the correction limits are unchanged, and the recheck of a correction stays on the primary checker. Turns with source data or a failed source stay on Jev.
 - **Known-bad correction chain:** if the correction cannot be verified, return the existing refusal rather than shipping a known unsupported draft or unchecked correction.
 
 `fallbackToGenerative` governs fallback verification, not correction generation. A confirmed contradiction still needs the configured main generative model to rewrite the answer.
 
-The state includes the request, supplied evidence window, draft and trusted caller policy. The final state limit is 32,000 characters; the encoded request and response are also bounded. This verifier introduces no additional state truncation. Upstream evidence collection retains its existing bounded-window behavior.
+The state includes only the current request, a fixed public answer policy (which forbids claiming that this application saved, published, placed or confirmed anything; a sourced report that a league confirmed something or an outlet published something is an ordinary factual claim), the public partial-view, failed-source and supplied-input status, the supplied evidence window, the draft (with any personalization it shows the user) and, in artifact mode, the complete HTML report as part of the answer, never as a source. The caller's system prompt, profile and history are never sent; the correction pass on the main model still receives the caller policy. The final state limit is 32,000 characters; the encoded request and response are also bounded. This verifier introduces no additional state truncation. Upstream evidence collection retains its existing bounded-window behavior.
 
 These are fixed checks over a complete supplied draft, **not exhaustive atomic-claim extraction or an independent truth oracle**. A supported decision only concerns the supplied evidence. Scores alone do not establish tactics or causation; absent optional coverage does not invalidate unrelated supported reporting.
 
@@ -88,9 +100,11 @@ These are fixed checks over a complete supplied draft, **not exhaustive atomic-c
 - nonnegative provider-reported token counts when available;
 - whether fallback was selected and whether this was a correction recheck.
 
+A source-free report records provider `generative` with reason code `source_free`, the main model's ID and the primary checker's verdict as its status. It never claims a Jev decision.
+
 Receipts contain no API key, draft, source text, caller policy or raw provider error. They are not written to disk by this feature and are not appended to answers. A confidence value is distribution-derived; it is not the winning probability and is not a correctness guarantee.
 
-Enabling `cloud_allowed` authorizes sending the verification state to TypeSafe. Confirm that every included source, derived text and caller-policy excerpt may leave your environment. No-training terms are not equivalent to zero retention; review [TypeSafe's data handling terms](https://docs.typesafe.ai/legal.md).
+Enabling `cloud_allowed` authorizes sending the verification state to TypeSafe. Confirm that every tool in `publicToolNames`, and the answers derived from them, may leave your environment. No-training terms are not equivalent to zero retention; review [TypeSafe's data handling terms](https://docs.typesafe.ai/legal.md).
 
 ## Verification and rollout
 
