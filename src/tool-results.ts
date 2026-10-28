@@ -27,7 +27,7 @@ const PREVIEW_FIELDS = 25;
 const CONTAINER_ARRAY_MAX = 10;
 const MAX_WALK_DEPTH = 8;
 const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 200;
+export const MAX_LIMIT = 200;
 
 // ---------------------------------------------------------------------------
 // Store

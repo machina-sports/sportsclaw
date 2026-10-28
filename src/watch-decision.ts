@@ -332,7 +332,8 @@ export async function runWatchDecision(body: unknown, options: WatchDecisionOpti
   if (request.stage === "intent") {
     const intent = INTENT_OF[answer.choice];
     if (!intent) return watchDecisionFailure("invalid_response");
-    return { contract: WATCH_DECISION_CONTRACT, ok: true, stage: "intent", intent: decided ? intent : "clarify", ...scored };
+    // Ordinary chat grants no watch operation; uncertainty must not turn it into one.
+    return { contract: WATCH_DECISION_CONTRACT, ok: true, stage: "intent", intent: intent === "none" || decided ? intent : "clarify", ...scored };
   }
   let selection: { status: "selected" | "no_match" | "clarify"; targetId: string | null };
   if (!decided) selection = { status: "clarify", targetId: null };

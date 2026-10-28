@@ -246,6 +246,54 @@ describe("routePromptToSkills opt-in boundary", () => {
       assert.equal(result.meta.llmAttempted, false);
     }
   });
+
+  // Operator-approved public data pool (explicit user decision): exact SDK tool
+  // names, execution approval only — never inferred from the evidence verifier's list.
+  const POOL_ENV = "SPORTSCLAW_ROUTING_PUBLIC_DATA_TOOLS";
+
+  it("approves no public data tool by default; exact names from config or a JSON-array env, config first, deduplicated", () => {
+    assert.deepEqual(resolveSkillRoutingSettings({ env: {} }).publicDataTools, []);
+    assert.deepEqual(resolveSkillRoutingSettings(jevRouting()).publicDataTools, []);
+    assert.deepEqual(
+      resolveSkillRoutingSettings({ env: { SPORTSCLAW_EVIDENCE_PUBLIC_TOOLS: '["nba_get_scores"]' } }).publicDataTools,
+      [],
+      "evidence admission is not execution approval"
+    );
+    const fromEnv = resolveSkillRoutingSettings({ env: { [POOL_ENV]: '["nba_get_scores","nba_get_scores"]' } });
+    assert.deepEqual(fromEnv.publicDataTools, ["nba_get_scores"]);
+    assert.deepEqual(fromEnv.diagnostics, []);
+    const explicit = resolveSkillRoutingSettings({ publicDataTools: ["nfl_get_scores"], env: { [POOL_ENV]: '["nba_get_scores"]' } });
+    assert.deepEqual(explicit.publicDataTools, ["nfl_get_scores"], "explicit config wins over the environment");
+    assert.deepEqual(explicit.diagnostics, []);
+  });
+
+  it("refuses a malformed public data pool instead of widening or falling back to the env", async () => {
+    const invalid = {
+      "env not JSON": { env: { [POOL_ENV]: "nba_get_scores" } },
+      "env not an array": { env: { [POOL_ENV]: '{"nba_get_scores":true}' } },
+      "env non-string entry": { env: { [POOL_ENV]: "[1]" } },
+      "config not an array": { publicDataTools: "nba_get_scores", env: {} },
+      "config empty name": { publicDataTools: [""], env: {} },
+      "wildcard": { publicDataTools: ["*"], env: {} },
+      "prefix wildcard": { publicDataTools: ["nba_*"], env: {} },
+      "invalid config over a valid env": { publicDataTools: "x", env: { [POOL_ENV]: '["nba_get_scores"]' } },
+    };
+    for (const [label, config] of Object.entries(invalid)) {
+      const settings = resolveSkillRoutingSettings(config);
+      assert.ok(settings.diagnostics.includes("invalid_publicDataTools"), label);
+      assert.deepEqual(settings.publicDataTools, [], `${label}: nothing approved`);
+    }
+
+    const { result, model } = await route({
+      prompt: "who is playing today",
+      installedSkills: ["nba", "nfl"],
+      config: { routing: jevRouting({ publicDataTools: ["*"], transport: failTransport(), env: trapEnv() }) },
+    });
+    assert.equal(model.doGenerateCalls.length, 0, "no generative fallback");
+    assert.equal(result.meta.routing.status, "unavailable");
+    assert.equal(result.meta.routing.reasonCode, "invalid_publicDataTools");
+    assert.deepEqual(result.decision.selectedSkills, []);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -750,7 +798,7 @@ describe("engine routing boundary", () => {
    */
   it("places the refusal return before history widening and the main model call (source order only)", () => {
     const source = readFileSync(new URL("../dist/engine.js", import.meta.url), "utf8");
-    const refusal = source.indexOf("const refusal = routingRefusalMessage(routingOutcome)");
+    const refusal = source.indexOf("const refusal = routingRefusalMessage(");
     const resolve = source.indexOf("this.resolveActiveToolsForPrompt(");
     const widening = source.indexOf("const historyToolNames = new Set()");
     assert.ok(refusal > 0 && resolve > 0 && widening > 0, "expected all three markers in dist/engine.js");

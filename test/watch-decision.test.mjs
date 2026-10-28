@@ -18,8 +18,9 @@
  * Operator gates: SPORTSCLAW_WATCH_INTENT_ENABLED (route) plus
  * SPORTSCLAW_WATCH_JEV_ENABLED=true and SPORTSCLAW_WATCH_JEV_DATA_POLICY=cloud_allowed,
  * TYPESAFE_API_KEY, pinned jev-1.14.0. A native-only route config blocks egress.
- * Policy: confidence >= 0.80 AND top-two margin >= 0.15, else clarify; the
- * semantic abstain option is always clarify. No generative fallback.
+ * Watch actions need confidence >= 0.80 AND top-two margin >= 0.15.
+ * Ordinary chat grants no watch action and hands off even below that gate.
+ * Semantic abstention still clarifies. No generative fallback.
  */
 
 import assert from "node:assert/strict";
@@ -242,6 +243,8 @@ const PROBE = [
   ["Which matches am I following?", "en", "list_following", 1, p({ list_following: 1 }), "list_following"],
   ["Acompanhe o jogo do Chelsea para mim", "pt", "follow", 0.99, p({ follow: 0.99, uncertain: 0.01 }), "follow"],
   ["¿Dónde puedo ver el partido del Chelsea?", "es", "ordinary", 1, p({ ordinary: 1 }), "none"],
+  ["You said previously Real Madrid and Arsenal", "en", "ordinary", 0.79,
+    p({ follow: 0.03, list_following: 0.01, ordinary: 0.82, uncertain: 0.14 }), "none"],
 ];
 
 describe("watch-decision intent stage", () => {
@@ -284,10 +287,16 @@ describe("watch-decision intent stage", () => {
     assertDecision(result, "intent", "clarify", j.answers[0]);
   });
 
-  it("clarifies rather than answering ordinarily when 'ordinary' is uncertain", async () => {
+  it("hands ordinary chat back without granting a watch action even at low confidence", async () => {
     const j = jev((q) => choice(q, "ordinary", { confidence: 0.6, top: 0.6, second: 0.3, runnerUp: "follow" }));
     const { result } = await decide(intentBody("Chelsea later?"), { transport: j.transport });
-    assertDecision(result, "intent", "clarify", j.answers[0]);
+    assertDecision(result, "intent", "none", j.answers[0]);
+  });
+
+  it("does not turn a narrow ordinary-chat margin into a watch menu", async () => {
+    const j = jev((q) => choice(q, "ordinary", { confidence: 0.95, top: 0.51, second: 0.49, runnerUp: "uncertain" }));
+    const { result } = await decide(intentBody("That contradicts your earlier answer"), { transport: j.transport });
+    assertDecision(result, "intent", "none", j.answers[0]);
   });
 });
 

@@ -34,6 +34,18 @@ describe("skill guides follow the route", () => {
   });
 });
 
+describe("ordinary conversation corrections", () => {
+  it("requires acknowledgement and narrow scope outside tool-failure instructions", () => {
+    const prompt = buildSystemPrompt(context({userPrompt:"You said previously Real Madrid and Arsenal",recentContext:"Earlier answers contradicted each other about October 27."}));
+    const conversation = prompt.split("## Conversation\n")[1]?.split("\n## ")[0] ?? "";
+    assert.match(conversation, /earlier assistant answers.*claims.*not.*evidence/i);
+    assert.match(conversation, /acknowledg.*earlier error/i);
+    assert.match(conversation, /date and competition/i);
+    assert.match(conversation, /general slate/i);
+    assert.match(conversation, /other competitions/i);
+  });
+});
+
 describe("the tool list names only offered tools", () => {
   it("the engine passes the offered tools to both prompt builders (source check)", () => {
     const source = readFileSync(new URL("../dist/engine.js", import.meta.url), "utf8");
