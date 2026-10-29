@@ -906,3 +906,55 @@ describe("engine.run slip mode: parallel lanes and routing refusal", () => {
     }));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Exact deterministic lookups skip the extraction (installed football schema)
+// ---------------------------------------------------------------------------
+
+describe("engine.run slip mode: exact deterministic lookups", () => {
+  const ANSWER = "Arsenal 2-1 Chelsea, full time.";
+
+  it("an exact whole lookup with no context or images: same answer, null decision, no extraction", async () => {
+    await withEnv(GATES, () => withFootball({}, async () => {
+      for (const request of ["Football scores today", "Soccer standings"]) {
+        // Count the needless extraction without allowing a side-effect decision.
+        const m = scripted([[say(ANSWER)]], { extract: [envelope("none")] });
+        const engine = newEngine(m.model);
+        const input = turn(request);
+        const ledgerBefore = tokensUsedToday();
+        const { text, results } = await runSlip(engine, input, { userId: "slip-exact-user" });
+        assert.equal(text, ANSWER, request);
+        assert.deepEqual(results, [{ contract: "slip-turn-v1", inputHash: hashOf(input), decision: null }], request);
+        assert.equal(m.extraction.length, 0, `${request}: no extraction`);
+        assert.equal(jevCalls.length, 0, request);
+        assert.equal(lastAssistantText(engine.history), ANSWER, request);
+        const calls = m.all.length;
+        assert.deepEqual(engine.lastTokenUsage, { inputTokens: 10 * calls, outputTokens: 5 * calls, totalTokens: 15 * calls },
+          `${request}: zero extraction tokens`);
+        const lookupLedger = tokensUsedToday() - ledgerBefore;
+        const ordinary = newEngine(scripted([[say(ANSWER)]]).model);
+        const ordinaryBefore = tokensUsedToday();
+        await ordinary.run(request, {userId:"slip-exact-reference"});
+        assert.deepEqual(engine.lastTokenUsage, ordinary.lastTokenUsage, request);
+        assert.equal(lookupLedger, tokensUsedToday() - ordinaryBefore, `${request}: same ledger as ordinary chat`);
+      }
+    }));
+  });
+
+  it("current context, request images or a mixed request keep the extraction", async () => {
+    await withEnv(GATES, () => withFootball({}, async () => {
+      const cases = {
+        "current draft": [turn("Football scores", CONTEXT), {}],
+        "request image": [turn("Football scores"), { images: [{ data: PNG_B64, mimeType: "image/png" }] }],
+        "mixed request": [turn("Football scores and make me a slip: Chelsea to beat Arsenal at 2.10"), {}],
+      };
+      for (const [label, [input, extra]] of Object.entries(cases)) {
+        const m = scripted([[say(ANSWER)]], { extract: [envelope("none")] });
+        const { text, results } = await runSlip(newEngine(m.model), input, extra);
+        assert.equal(text, ANSWER, label);
+        assert.equal(m.extraction.length, 1, `${label}: the existing extraction runs`);
+        assert.deepEqual(results, [{ contract: "slip-turn-v1", inputHash: hashOf(input), decision: null }], label);
+      }
+    }));
+  });
+});

@@ -511,10 +511,10 @@ const REAL = `
   const call = (toolName, input) => ({type:'tool-call', toolCallId:toolName + '-' + Math.random().toString(36).slice(2), toolName, input:JSON.stringify(input)});
   const reply = (content) => ({content, finishReason:{unified:content.some((p) => p.type === 'tool-call') ? 'tool-calls' : 'stop', raw:undefined}, usage, warnings:[]});
 
-  function realHarness({pool, disposition = 'clarify', required = [], allowlist, publicToolNames, parallelAgents = false, payloads, script}) {
-    const counts = {routingHttp:0, dispatched:[], evidenceStates:[], mainPrompts:[]};
+  function realHarness({pool, disposition = 'clarify', required = [], allowlist, publicToolNames, parallelAgents = false, payloads, script, toolNames, noToolsReply = 'SYNTHESIZED'}) {
+    const counts = {routingHttp:0, dispatched:[], dispatchArgs:[], modelCalls:0, evidenceStates:[], mainPrompts:[]};
     const skills = ['nba','nfl'];
-    const specs = skills.map((s) => ({name:s + '_get_scores', description:'scores', parameters:{}, input_schema:{type:'object', properties:{}}}));
+    const specs = (toolNames ?? skills.map((s) => s + '_get_scores')).map((name) => ({name, description:'scores', parameters:{}, input_schema:{type:'object', properties:{}}}));
     const routingTransport = jevAnswer((id) => id === 'disposition' ? disposition : required.includes(id) ? 'required' : 'not_required');
     const engine = Object.create(sportsclawEngine.prototype);
     engine.config = {...DEFAULT_CONFIG, maxTurns:8, parallelAgents,
@@ -526,15 +526,16 @@ const REAL = `
     engine.messages = [];
     engine.mainModelId = 'synthetic-main-model';
     engine.mainModel = new MockLanguageModelV3({doGenerate: async (options) => {
+      counts.modelCalls++;
       const text = JSON.stringify(options.prompt);
       // Tool-less calls are the checker (answered clean) or lane synthesis.
-      if (!options.tools?.length) return reply([{type:'text', text:/isValid/.test(text) ? VERDICT_OK() : 'SYNTHESIZED'}]);
+      if (!options.tools?.length) return reply([{type:'text', text:/isValid/.test(text) ? VERDICT_OK() : noToolsReply}]);
       counts.mainPrompts.push({offered:options.tools.map((t) => t.name), text});
       return reply(await script(shown(options), options, text));
     }});
     engine.registry = {getInstalledSkills:() => skills, getAllToolSpecs:() => specs,
       getSkillName:(name) => skills.includes(name.split('_')[0]) ? name.split('_')[0] : undefined,
-      dispatchToolCall:async (name) => { counts.dispatched.push(name); return {isError:false, content:payloads[name]}; }};
+      dispatchToolCall:async (name, ...args) => { counts.dispatched.push(name); counts.dispatchArgs.push(JSON.stringify(args)); return {isError:false, content:payloads[name]}; }};
     engine.mcpManager = {serverCount:0, setUserId(){}, getToolSpecs:() => [], getMachinaLoopServer:() => undefined};
     engine.initAsync = async () => {};
     engine.buildSystemPrompt = (args) => 'SYNTHETIC_MAIN_SYSTEM LANE:' + (args.agents ?? []).map((a) => a.id).join(',');
@@ -837,4 +838,130 @@ test('an empty filtered result reaches the checker with its actual filter and ma
     console.log(JSON.stringify({scoped:true}));
   `);
   assert.deepEqual(result, {scoped:true});
+});
+
+// ---------------------------------------------------------------------------
+// Fast single-league scoreboard lookup (public-data opt-in): one authorized
+// native read and a fixed formatter, no generation; anything else falls back.
+// Synthetic identities and numbers in the observed native scoreboard shape.
+// ---------------------------------------------------------------------------
+
+const SCOREBOARD = `
+  ${REAL}
+  const today = new Intl.DateTimeFormat('en-CA', {timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const side = (id, name, abbreviation, home_away, score) => ({team:{id, name, abbreviation}, home_away, score});
+  const board = (status, status_detail, home, away) => JSON.stringify({status:true, data:{events:[{id:'g1',
+    name:'Synthetic Away at Synthetic Home', short_name:'SAW @ SHM', status, status_detail, start_time:today + 'T20:00:00Z',
+    competitors:[side('h','Synthetic Home','SHM','home',home), side('a','Synthetic Away','SAW','away',away)]}]}});
+  const FINAL_BOARD = board('closed', 'Final', '101', '99');
+  const UPCOMING_BOARD = board('not_started', '10/29 - 8:00 PM EDT', '0', '0');
+  const scoreboard = (payload, extra = {}) => realHarness({pool:['nba_get_scoreboard'], toolNames:['nba_get_scoreboard', 'nfl_get_scoreboard'],
+    noToolsReply:'NORMAL_PATH_REPLY',
+    payloads:{nba_get_scoreboard:payload, nfl_get_scoreboard:payload},
+    script:async (results) => results.length === 0 ? [call('nba_get_scoreboard', {})] : [{type:'text', text:'NORMAL_PATH_REPLY'}], ...extra});
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+`;
+
+test('an exact single-league scores lookup answers from one native read with no model call', () => {
+  const result = runIsolated('jev-fast-scoreboard-', `
+    ${SCOREBOARD}
+    Object.assign(process.env, {SPORTSCLAW_SLIP_ENABLED:'true', SPORTSCLAW_SLIP_JEV_DATA_POLICY:'cloud_allowed', TYPESAFE_API_KEY:'synthetic-key'});
+    const {engine, counts} = scoreboard(FINAL_BOARD);
+    const slipResults = [];
+    const artifactResults = [], progress = [];
+    const request = 'NBA scores today';
+    const answer = await engine.run(request, {historyMode:'caller',history:[],slip:{contract:'slip-turn-v1', requestText:request, context:null}, onSlipResult:(r) => slipResults.push(r),
+      artifact:{contract:'artifact-turn-v1', nonce:'synthetic_speed_artifact'}, onArtifactResult:r=>artifactResults.push(r),onProgress:r=>progress.push(r)});
+    assert.equal(counts.modelCalls, 0, 'no primary generation, checker or extraction');
+    assert.equal(counts.routingHttp, 0, 'deterministic route');
+    assert.deepEqual(counts.dispatched, ['nba_get_scoreboard'], 'exactly one data read');
+    assert.match(counts.dispatchArgs[0], /\\d{4}-\\d{2}-\\d{2}/, 'the date is computed in code');
+    for (const fact of ['Synthetic Home', 'Synthetic Away', '101', '99']) assert.ok(answer.includes(fact), fact);
+    assert.doesNotMatch(answer, /odds|bet|result_id/i, 'short, no unsolicited odds or internals');
+    assert.equal(slipResults.length, 1, 'one typed slip result');
+    assert.equal(slipResults[0].decision, null);
+    assert.equal(artifactResults.length,1);assert.equal(artifactResults[0].artifact,null);
+    assert.equal(progress.filter(e=>e.type==='tool_start').length,1);
+    assert.equal(progress.filter(e=>e.type==='tool_finish' && e.success).length,1);
+    assert.equal(engine.messages.at(-1).role, 'assistant');
+    assert.ok(JSON.stringify(engine.messages.at(-1)).includes('Synthetic Home'), 'history keeps the returned answer');
+    assert.ok(JSON.stringify(engine.messages.at(-2)).includes(request));
+    console.log(JSON.stringify({fast:true}));
+  `);
+  assert.deepEqual(result, {fast:true});
+});
+
+test('an upcoming 0-0 game is listed as scheduled, never as a result', () => {
+  const result = runIsolated('jev-fast-upcoming-', `
+    ${SCOREBOARD}
+    let cases = 0;
+    for (const request of ['NBA scores today', 'NBA schedule today']) {
+      const {engine, counts} = scoreboard(UPCOMING_BOARD);
+      const answer = await engine.run(request);
+      assert.equal(counts.modelCalls, 0, request);
+      assert.deepEqual(counts.dispatched, ['nba_get_scoreboard'], request);
+      assert.ok(answer.includes('Synthetic Home') && answer.includes('Synthetic Away'), request);
+      assert.doesNotMatch(answer, /\\b0\\s*[-–]\\s*0\\b/, request + ': no 0-0 score');
+      assert.doesNotMatch(answer, /no games/i, request);
+      cases++;
+    }
+    console.log(JSON.stringify({cases}));
+  `);
+  assert.deepEqual(result, {cases:2});
+});
+
+test('a failed, empty, malformed or partial scoreboard falls back to the normal answer path', () => {
+  const result = runIsolated('jev-fast-fallback-', `
+    ${SCOREBOARD}
+    const partial = JSON.parse(FINAL_BOARD);
+    delete partial.data.events[0].competitors;
+    let cases = 0;
+    for (const payload of ['not json', JSON.stringify({status:false, error:'feed down'}), JSON.stringify({status:true, data:{events:[]}}),
+      JSON.stringify({status:true, data:{events:'oops'}}), JSON.stringify(partial)]) {
+      const {engine, counts} = scoreboard(payload);
+      const answer = await engine.run('NBA scores today');
+      assert.ok(counts.mainPrompts.length >= 1, payload + ': the normal read/answer path ran');
+      assert.match(answer, /NORMAL_PATH_REPLY/, payload);
+      assert.doesNotMatch(answer, /no games/i, payload);
+      cases++;
+    }
+    console.log(JSON.stringify({cases}));
+  `);
+  assert.deepEqual(result, {cases:5});
+});
+
+test('the fast lookup stays behind every gate and never dispatches an unauthorized read', () => {
+  const result = runIsolated('jev-fast-gates-', `
+    ${SCOREBOARD}
+    const {createAgent} = await import(${JSON.stringify(new URL('../dist/agents.js', import.meta.url).href)});
+    const agent = await createAgent({id:'nba-fast-check', name:'Fast check', body:'NBA only', skills:['nba']});
+    const normal = {
+      'no public-data opt-in': [scoreboard(FINAL_BOARD, {pool:undefined}), 'NBA scores today', {}],
+      'multiple leagues': [scoreboard(FINAL_BOARD), 'NBA and NFL scores', {}],
+      'explicit agent': [scoreboard(FINAL_BOARD), 'NBA scores today', {agentIds:[agent.id]}],
+      'request image': [scoreboard(FINAL_BOARD), 'NBA scores today', {images:[{data:PNG, mimeType:'image/png'}]}],
+      'evening scope': [scoreboard(FINAL_BOARD), 'NBA schedule tonight', {}],
+    };
+    let cases = 0;
+    for (const [label, [{engine, counts}, request, options]] of Object.entries(normal)) {
+      const answer = await engine.run(request, options);
+      assert.ok(counts.mainPrompts.length >= 1, label + ': the normal path ran');
+      assert.match(answer, /NORMAL_PATH_REPLY/, label);
+      cases++;
+    }
+    const denied = scoreboard(FINAL_BOARD, {allowlist:['nfl_get_scoreboard']});
+    await denied.engine.run('NBA scores today');
+    assert.ok(!denied.counts.dispatched.includes('nba_get_scoreboard'), 'outside the caller allowlist');
+    const invalid = scoreboard(FINAL_BOARD);
+    invalid.engine.config.routing.model = 'gpt-4';
+    assert.match(await invalid.engine.run('NBA scores today'), /could not route/);
+    const aborted = scoreboard(FINAL_BOARD);
+    await aborted.engine.run('NBA scores today', {abortSignal:AbortSignal.abort()});
+    for (const h of [invalid, aborted]) {
+      assert.deepEqual(h.counts.dispatched, [], 'no read after a refusal');
+      assert.equal(h.counts.modelCalls, 0, 'no generation after a refusal');
+    }
+    console.log(JSON.stringify({cases}));
+  `);
+  assert.deepEqual(result, {cases:5});
 });
