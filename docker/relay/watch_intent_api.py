@@ -220,7 +220,8 @@ def _typed_decision(stdout: bytes, request: dict) -> dict:
         value = result["intent"]
         if not isinstance(value, str) or value not in _DECISION_INTENTS:
             raise ValueError("untyped")
-        decided = value != "clarify"
+        # Ordinary chat grants no watch action, so it needs no action threshold.
+        decided = value not in ("clarify", "none")
     else:
         selection = result["selection"]
         if not isinstance(selection, dict) or set(selection) != {"status", "targetId"}:
