@@ -237,12 +237,20 @@ export function deterministicSkillMatch(
   prompt: string,
   installedSkills: readonly string[]
 ): string[] | undefined {
+  return parseDeterministicLookup(prompt, installedSkills)?.skills;
+}
+
+/** The same whole-request grammar as deterministicSkillMatch, with its parsed intent. */
+export function parseDeterministicLookup(
+  prompt: string,
+  installedSkills: readonly string[]
+): { skills: string[]; intent: string; timeWord?: string } | undefined {
   const installed = new Set(installedSkills);
   const normalized = prompt.toLowerCase().replace(/[?.!]+$/, "").replace(/\s+/g, " ").trim();
   if (normalized.length === 0) return undefined;
 
   const words = normalized.split(" ");
-  if (TIME_WORDS.has(words[words.length - 1])) words.pop();
+  const timeWord = TIME_WORDS.has(words[words.length - 1]) ? words.pop() : undefined;
   const intent = words.pop();
   if (intent === undefined || !INTENT_WORDS.has(intent) || words.length === 0) return undefined;
 
@@ -254,7 +262,7 @@ export function deterministicSkillMatch(
     if (skill === undefined || !installed.has(skill)) return undefined;
     if (!selected.includes(skill)) selected.push(skill);
   }
-  return selected.length > 0 ? selected : undefined;
+  return selected.length > 0 ? { skills: selected, intent, timeWord } : undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -72,7 +72,8 @@ import {
 import { loadConfig, saveConfig, SPORTS_SKILLS_DISCLAIMER } from "./config.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import { routePromptToSkills, routeToAgents } from "./router.js";
-import { resolveSkillRoutingSettings } from "./routing/skill-routing.js";
+import { deterministicSkillMatch, parseDeterministicLookup, resolveSkillRoutingSettings } from "./routing/skill-routing.js";
+import { renderScoreboard, scoreboardDate } from "./fast-lookup.js";
 import {
   finalizeActiveTools,
   providerToolCeiling,
@@ -253,6 +254,9 @@ function tagQueryableJson(store: ToolResultStore, toolName: string, content: str
   if (id === undefined) return content;
   return `${content}\n[result_id "${id}": ${QUERY_TOOL_RESULT_TOOL} can filter, sort or aggregate these rows, alone or together with other results (result_ids).]`;
 }
+
+/** The footer tagQueryableJson appends; removing it restores the original content. */
+const RESULT_ID_FOOTER = /\n\[result_id "[^"\n]+": [^\n]*\]$/;
 
 const QUERY_TOOL_RESULT_DESCRIPTION =
   "Query data-tool results by result_id (each tool output with rows ends with one; a truncated output gives one " +
@@ -4538,7 +4542,11 @@ export class sportsclawEngine {
   ): Promise<{ text: string; tokens: number; unsuccessful: boolean }> {
     if (!slip) return { text: responseText, tokens: 0, unsuccessful: false };
     if (slip.denied) return { text: SLIP_UNAVAILABLE_TEXT, tokens: 0, unsuccessful: true };
-    if (skipExtraction) {
+    // An exact whole lookup ("NBA scores today") with no current draft or image
+    // cannot be a slip change: no extraction, the same answer, a null decision.
+    const exactLookup = slip.input.context === null && !options?.images?.length &&
+      deterministicSkillMatch(slip.input.requestText, this.registry.getInstalledSkills()) !== undefined;
+    if (skipExtraction || exactLookup) {
       slip.decision = null;
       return { text: responseText, tokens: 0, unsuccessful: false };
     }
@@ -5212,6 +5220,40 @@ export class sportsclawEngine {
       return out;
     };
 
+    // --- Exact single-league scoreboard lookup (public-data mode only) ---
+    // After every authority, routing, allowlist and agent gate: one approved,
+    // executable native read and a fixed formatter instead of generation. Any
+    // read or payload it cannot fully validate continues on the normal path.
+    const fast = this.publicDataMode() && !noTools && !explicitAgents && !options?.images?.length &&
+      !slip?.input.context
+      ? await this.fastScoreboardLookup(sanitizedPrompt, tools, executable, activeTools, selectedSkills, options?.abortSignal, emitProgress)
+      : undefined;
+    if (fast) {
+      recordToolCall({ toolName: fast.toolName, success: true, latencyMs: fast.latencyMs });
+      toolCallsForAnalytics.push({ name: fast.toolName, success: true, latencyMs: fast.latencyMs });
+      this._lastRunTrace = {
+        servedModelId: undefined,
+        offeredTools: [fast.toolName],
+        toolSurfaceSha256: hashToolSurface(tools, [fast.toolName]),
+        providerWarnings: [],
+        parallelAgents: false,
+        ...routedSkillsOf(routing),
+      };
+      this._lastUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+      let responseText = fast.text;
+      if (slip) {
+        const finalized = await this.finalizeSlip(slip, responseText, options);
+        recordTokens(finalized.tokens);
+        responseText = finalized.text;
+      }
+      this.finalizeArtifact(artifact);
+      this.messages.push({ role: "assistant", content: [{ type: "text", text: responseText }] });
+      return this.completeTurn({
+        memory, options, sanitizedPrompt, responseText, sessionId, analyticsSessionId, analyticsStartTime,
+        detectedSports: selectedSkills, clarificationNeeded: routing.decision?.mode === "ambiguous", toolsCalled: toolCallsForAnalytics,
+      });
+    }
+
     // --- Parallel agent execution ---
     // When parallelAgents is enabled and multiple agents were routed,
     // run each agent as an independent lane and synthesize the results.
@@ -5840,6 +5882,76 @@ export class sportsclawEngine {
       }
     }
 
+    if (stepCount >= this.config.maxTurns && !result.text) {
+      console.error(
+        `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
+      );
+    }
+
+    return this.completeTurn({
+      memory, options, sanitizedPrompt, responseText, sessionId, analyticsSessionId, analyticsStartTime,
+      detectedSports: routing.decision?.selectedSkills ?? [], clarificationNeeded: routing.decision?.mode === "ambiguous",
+      toolsCalled: toolCallsForAnalytics,
+    });
+  }
+
+  /**
+   * One approved native `<skill>_get_scoreboard` read for an exact whole
+   * single-league scores/schedule request, rendered by a fixed formatter.
+   * Undefined whenever the read is not permitted this call or its result
+   * cannot be fully validated; the caller then takes the normal path.
+   */
+  private async fastScoreboardLookup(
+    prompt: string,
+    tools: ToolSet,
+    permitted: Set<string> | undefined,
+    activeTools: string[] | undefined,
+    selectedSkills: readonly string[],
+    abortSignal?: AbortSignal,
+    onProgress?: RunOptions["onProgress"],
+  ): Promise<{ text: string; toolName: string; latencyMs: number } | undefined> {
+    const lookup = parseDeterministicLookup(prompt, this.registry.getInstalledSkills());
+    // "Tonight" requires a contextual evening window, not the whole day's slate.
+    if (!lookup || lookup.timeWord === "tonight" || lookup.skills.length !== 1 || !["score", "scores", "schedule", "schedules"].includes(lookup.intent)) return undefined;
+    const [skill] = lookup.skills;
+    const toolName = `${skill}_get_scoreboard`;
+    if (selectedSkills.length !== 1 || selectedSkills[0] !== skill || this.registry.getSkillName(toolName) !== skill) return undefined;
+    if (!permitted?.has(toolName) || (activeTools && !activeTools.includes(toolName))) return undefined;
+    const execute = tools[toolName]?.execute as ToolExecute | undefined;
+    if (!execute || abortSignal?.aborted) return undefined;
+    const date = scoreboardDate();
+    const startedAt = Date.now();
+    const toolCallId = `fast_${toolName}`;
+    onProgress?.({ type: "tool_start", toolName, toolCallId, skillName: skill });
+    let output: unknown;
+    try {
+      output = await execute({ date }, { toolCallId, messages: [], ...(abortSignal ? { abortSignal } : {}) });
+    } catch (err) {
+      onProgress?.({ type: "tool_finish", toolName, toolCallId, durationMs: Date.now() - startedAt, success: false, skillName: skill });
+      if (isHalt(err)) throw err;
+      return undefined;
+    }
+    const text = abortSignal?.aborted || typeof output !== "string" || output.startsWith(TOOL_OUTPUT_TRUNCATED_MARKER) || refusedEvidenceContent(output)
+      ? undefined : renderScoreboard(skill, date, output.replace(RESULT_ID_FOOTER, ""));
+    onProgress?.({ type: "tool_finish", toolName, toolCallId, durationMs: Date.now() - startedAt, success: text !== undefined, skillName: skill });
+    return text === undefined ? undefined : { text, toolName, latencyMs: Date.now() - startedAt };
+  }
+
+  /** Shared completion tail: memory, session, analytics and output hygiene. */
+  private async completeTurn(params: {
+    memory: MemoryManager | undefined;
+    options: RunOptions | undefined;
+    sanitizedPrompt: string;
+    responseText: string;
+    sessionId: string | undefined;
+    analyticsSessionId: string;
+    analyticsStartTime: number;
+    detectedSports: readonly string[];
+    clarificationNeeded: boolean;
+    toolsCalled: Array<{ name: string; success: boolean; latencyMs: number }>;
+  }): Promise<string> {
+    const { memory, options, sanitizedPrompt, sessionId, analyticsSessionId, analyticsStartTime } = params;
+    let { responseText } = params;
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {
       try {
@@ -5850,12 +5962,6 @@ export class sportsclawEngine {
           `[sportsclaw] memory write error: ${err instanceof Error ? err.message : err}`
         );
       }
-    }
-
-    if (stepCount >= this.config.maxTurns && !result.text) {
-      console.error(
-        `[sportsclaw] max turns (${this.config.maxTurns}) reached, returning partial result`
-      );
     }
 
     // --- Session: persist updated conversation history ---
@@ -5875,10 +5981,10 @@ export class sportsclawEngine {
           userId: options.userId,
           sessionId: analyticsSessionId,
           promptLength: sanitizedPrompt.length,
-          detectedSports: routing.decision?.selectedSkills ?? [],
-          toolsCalled: toolCallsForAnalytics,
+          detectedSports: [...params.detectedSports],
+          toolsCalled: params.toolsCalled,
           totalLatencyMs: Date.now() - analyticsStartTime,
-          clarificationNeeded: routing.decision?.mode === "ambiguous",
+          clarificationNeeded: params.clarificationNeeded,
           usage: this._lastUsage ?? undefined,
         });
         logQuery(queryEvent);
