@@ -274,6 +274,10 @@ class ResultValidation(_Base):
         for name, body, result in [
             ("intent clarify", INTENT, {**INTENT_OK, "intent": "clarify", "confidence": 0.59, "margin": 0.46}),
             ("intent none", INTENT, {**INTENT_OK, "intent": "none"}),
+            ("ordinary below action confidence", {**INTENT, "text": "what do i like?"},
+             {**INTENT_OK, "intent": "none", "confidence": 0.76, "margin": 0.60}),
+            ("ordinary below action margin", {**INTENT, "text": "what are my interests?"},
+             {**INTENT_OK, "intent": "none", "confidence": 0.76, "margin": 0.02}),
             ("target no_match", TARGET, {**TARGET_OK, "selection": {"status": "no_match", "targetId": None}}),
             ("target clarify", TARGET, {**TARGET_OK, "selection": {"status": "clarify", "targetId": None}}),
             ("typed failure", INTENT, {"contract": D, "ok": False, "reasonCode": "inference_unavailable"}),
