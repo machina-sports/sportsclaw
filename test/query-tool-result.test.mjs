@@ -225,6 +225,46 @@ test("an oversized event list overview carries a bounded nested market preview t
   }
 });
 
+// The SDK event-list shape with its reported scope beside the rows. Four games
+// start on Nov 1 UTC but Oct 31 in Los Angeles; two of them are past the preview.
+const LATE = "2026-11-01T02:30:00Z";
+const scopedEventList = () => JSON.stringify({ status: true, data: {
+  events: Array.from({ length: 7 }, (_, e) => {
+    const start = e >= 3 ? LATE : "2026-10-31T23:00:00Z";
+    return { id: `ev${e}`, title: `Synthetic Away ${e} at Synthetic Home ${e}`, start_time: start, markets: [
+      market(e * 2, { question: `Synthetic Home ${e} vs Synthetic Away ${e}: winner?`, game_start_time: start,
+        outcomes: [{ name: `Synthetic Home ${e}`, price: 0.55, clob_token_id: `tok-${e}-h` }, { name: `Synthetic Away ${e}`, price: 0.45, clob_token_id: `tok-${e}-a` }] }),
+      market(e * 2 + 1, { game_start_time: start }),
+    ], rules: RULES.repeat(3) };
+  }),
+  count: 7, sport: "nba", date: "2026-10-31", timezone: "America/Los_Angeles", offset: 0, scanned: 30, next_offset: 30,
+  truncated: true, unknown_start: [], unknown_market_state: [], complete: false,
+} });
+const COVERAGE = [/"absence_claims_supported":false/, /"complete":false/, /"truncated":true/, /"offset":0/, /"next_offset":30/,
+  /"date":"2026-10-31"/, /"timezone":"America\/Los_Angeles"/, /"unknown_start_count":0/];
+
+test("an oversized market overview carries its scope metadata, false and zero included, to every view before the preview", async () => {
+  const content = scopedEventList();
+  assert.ok(content.length > TOOL_OUTPUT_CHAR_CAP);
+  const { tools, narrator, views } = await marketViews(content);
+  assert.ok(narrator.length < TOOL_OUTPUT_CHAR_CAP);
+  assert.equal(isTruncatedEvidence(narrator), true);
+  assert.ok(narrator.indexOf('"market_coverage"') >= 0 && narrator.indexOf('"market_coverage"') < narrator.indexOf('"preview"'));
+  assert.ok(!narrator.includes('"ev6"'), "rows beyond the preview are not shown");
+  for (const [label, text] of Object.entries(views)) {
+    for (const re of COVERAGE) assert.match(text, re, `${label}: ${re}`);
+    assert.match(text, pair("Synthetic Home 0", 0.55), label);
+    assert.match(text, pair("Synthetic Away 0", 0.45), label);
+  }
+  // The full reader still has the rows the preview left out.
+  const late = JSON.parse(await tools.query_tool_result.execute({ result_id: "r1", path: "data.events",
+    where: [{ field: "start_time", op: "eq", value: LATE }], fields: ["id"] }, opts));
+  assert.deepEqual(late.rows.map((r) => r.id), ["ev3", "ev4", "ev5", "ev6"]);
+
+  const { engine } = engineWithRegistry(() => ({ isError: false, content: bigStats() }));
+  assert.doesNotMatch(await turnTools(engine).nfl_get_stats.execute({}, opts), /market_coverage/, "ordinary overviews unchanged");
+});
+
 test("public-data mode gets the same market preview and still refuses an unauthorized reader", async () => {
   const { tools, views } = await marketViews(marketDetail(), (engine) => {
     engine.config.routing = { provider: "jev", dataPolicy: "cloud_allowed", publicDataTools: ["polymarket_get_market"], env: {} };

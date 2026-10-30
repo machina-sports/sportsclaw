@@ -280,6 +280,66 @@ test("the stored market result stays lossless for query_tool_result", () => {
   assert.equal(out.total_rows, 409);
 });
 
+// Synthetic event list in the SDK shape: the reported scope sits beside the rows.
+// Four games start on Nov 1 UTC but Oct 31 in Los Angeles; two are past the preview.
+const LATE = "2026-11-01T02:30:00Z";
+function scopedEvents(scope) {
+  const events = Array.from({ length: 7 }, (_, e) => {
+    const start = e >= 3 ? LATE : "2026-10-31T23:00:00Z";
+    return { id: `ev${e}`, title: `Synthetic Away ${e} at Synthetic Home ${e}`, start_time: start, markets: [
+      market(e * 2, { question: `Synthetic Home ${e} vs Synthetic Away ${e}: winner?`, game_start_time: start,
+        outcomes: [{ name: `Synthetic Home ${e}`, price: 0.55 }, { name: `Synthetic Away ${e}`, price: 0.45 }] }),
+      market(e * 2 + 1, { game_start_time: start }),
+    ] };
+  });
+  return { status: true, data: { events, ...scope } };
+}
+const SDK_SCOPE = { count: 7, sport: "nba", date: "2026-10-31", timezone: "America/Los_Angeles", offset: 0, scanned: 30,
+  next_offset: 30, truncated: true, unknown_start: [], unknown_market_state: [{ id: "m-unknown" }], complete: false };
+
+test("a market overview states its reported scope early and never supports an absence claim", () => {
+  const value = scopedEvents(SDK_SCOPE);
+  const before = structuredClone(value);
+  const overview = JSON.parse(buildResultOverview("r1", value, JSON.stringify(value).length));
+  assert.deepEqual(overview.market_coverage, {
+    shown_rows: 5, total_rows: 7, absence_claims_supported: false,
+    source_scope: { count: 7, sport: "nba", date: "2026-10-31", timezone: "America/Los_Angeles", offset: 0, scanned: 30,
+      next_offset: 30, truncated: true, complete: false, unknown_start_count: 0, unknown_market_state_count: 1 },
+  });
+  const keys = Object.keys(overview);
+  assert.ok(keys.indexOf("market_coverage") < keys.indexOf("preview"), "before the preview, so a head cut keeps it");
+  assert.ok(JSON.stringify(overview.market_coverage).length < 600, "small and bounded");
+  assert.deepEqual(overview.preview.first_rows.map((r) => r.id), ["ev0", "ev1", "ev2", "ev3", "ev4"]);
+  assert.ok(pairsIn(overview.preview.first_rows[0]).some((p) => p.name === "Synthetic Home 0" && p.price === 0.55), "pairs kept");
+  assert.deepEqual(value, before, "the stored original is unchanged");
+  const late = q(value, { path: "data.events", where: [{ field: "start_time", op: "eq", value: LATE }], fields: ["id"] });
+  assert.deepEqual(late.rows.map((r) => r.id), ["ev3", "ev4", "ev5", "ev6"], "the full reader still sees every row");
+});
+
+test("market coverage never invents completeness or totals, keeps false, zero and null, and bounds values", () => {
+  const scope = JSON.parse(buildResultOverview("r1",
+    scopedEvents({ limit: null, has_more: false, offset: 0, sport: { id: "nba" }, timezone: "z".repeat(300) }), 1)).market_coverage;
+  assert.equal(scope.absence_claims_supported, false);
+  assert.equal(scope.total_rows, 7);
+  assert.deepEqual(Object.keys(scope.source_scope).sort(), ["has_more", "limit", "offset", "timezone"], "scalars only, none invented");
+  assert.equal(scope.source_scope.limit, null);
+  assert.equal(scope.source_scope.has_more, false);
+  assert.equal(scope.source_scope.offset, 0);
+  assert.ok(scope.source_scope.timezone.startsWith("zzz") && scope.source_scope.timezone.length <= 101, "the preview's string bound");
+
+  const plain = JSON.parse(buildResultOverview("r1", detail, 1)).market_coverage;
+  assert.deepEqual([plain.shown_rows, plain.total_rows, plain.absence_claims_supported], [5, 409, false]);
+  assert.deepEqual(plain.source_scope ?? {}, {}, "nothing reported, nothing claimed");
+});
+
+test("ordinary overviews, even with date and completeness fields, are unchanged", () => {
+  const games = { data: { date: "2026-10-31", timezone: "America/Los_Angeles", complete: false, games: players } };
+  for (const value of [doc, games]) {
+    const overview = JSON.parse(buildResultOverview("r1", value, 1));
+    assert.deepEqual(Object.keys(overview), ["result_id", "total_chars", "top_level", "arrays", "preview"]);
+  }
+});
+
 test("the store evicts oldest entries by count and by total size, and rejects one oversized value", () => {
   const byCount = new ToolResultStore(2, 1_000);
   const a = byCount.put("t", 1, 10);

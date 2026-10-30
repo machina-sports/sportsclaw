@@ -201,6 +201,26 @@ function previewRow(row: unknown, rowPath: string): unknown {
   return shown;
 }
 
+// Scope a market source reported beside its rows (page, date, completeness).
+// Copied only when present and scalar: nothing is inferred when it is absent.
+const SCOPE_FIELDS = ["count", "sport", "date", "timezone", "offset", "limit", "scanned", "next_offset", "truncated", "complete", "has_more"];
+const SCOPE_LISTS = ["unknown_start", "unknown_market_state"];
+
+function reportedScope(value: unknown): Record<string, unknown> {
+  const root = isPlainObject(value) && isPlainObject(value.data) ? value.data : value;
+  if (!isPlainObject(root)) return {};
+  const scope: Record<string, unknown> = {};
+  for (const key of SCOPE_FIELDS) {
+    const v = root[key];
+    if (Object.hasOwn(root, key) && (v === null || ["string", "number", "boolean"].includes(typeof v))) scope[key] = describeValue(v);
+  }
+  for (const key of SCOPE_LISTS) {
+    const v = root[key];
+    if (Array.isArray(v)) scope[`${key}_count`] = v.length;
+  }
+  return scope;
+}
+
 /** Display form of a path ("" is the root). */
 function showPath(path: string): string {
   return path === "" ? "$" : path;
@@ -221,11 +241,15 @@ export function buildResultOverview(resultId: string, value: unknown, totalChars
     path: showPath(largest.path),
     first_rows: firstRows.map((row, i) => previewRow(row, joinPath(largest.path, i))),
   };
-  // Market quotes go first, so a head-and-tail evidence cut still keeps them.
+  // Market quotes go first, so a head-and-tail evidence cut still keeps them,
+  // after their coverage: a preview omits rows and fields, so it never shows absence.
   const markets = firstRows.some((row) => isMarketRow(row) || (isPlainObject(row) && isMarketList(row.markets)));
   const overview = {
     result_id: resultId,
     total_chars: totalChars,
+    ...(markets
+      ? { market_coverage: { shown_rows: firstRows.length, total_rows: largest.rows, absence_claims_supported: false, source_scope: reportedScope(value) } }
+      : {}),
     ...(markets ? { preview } : {}),
     ...(isPlainObject(value)
       ? { top_level: Object.fromEntries(Object.entries(value).slice(0, MAX_LISTED_COLUMNS).map(([k, v]) => [k, describeValue(v)])) }

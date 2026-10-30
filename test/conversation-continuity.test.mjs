@@ -313,6 +313,33 @@ describe("market follow-ups keep venue, date and saved context", () => {
     }
     for (const [label, contract] of Object.entries(CONTRACTS)) assert.match(system, contract, label);
   });
+
+  it("calendar-date lookups pass the user's latest explicit IANA timezone, never a UTC default, as a generic instruction", async () => {
+    const history = [
+      { role: "user", content: "I'm in America/Los_Angeles. Polymarket NBA markets tonight?" },
+      { role: "assistant", content: "Polymarket NBA tonight: Synthetic Home 0.55." },
+      { role: "user", content: "Use America/Sao_Paulo from now on." },
+      { role: "assistant", content: "Noted: America/Sao_Paulo." },
+    ];
+    const { engine, state, mainCalls } = makeEngine();
+    state.route = route(["polymarket", "nba"], "focused", 0.9, { intent: "odds" });
+    state.answer = "Polymarket NBA tomorrow: Synthetic Home 0.55.";
+
+    await engine.run("And tomorrow?", { historyMode: "caller", history });
+
+    const call = mainCalls().at(-1);
+    const system = textOf(call.prompt.filter((m) => m.role === "system"));
+    // One line each; wording may differ, the rule may not.
+    const TIMEZONE = {
+      "the user's IANA timezone is passed when the tool offers one": /\bIANA\b[^\n]*\btime ?zones?\b|\btime ?zones?\b[^\n]*\bIANA\b/i,
+      "for calendar-date queries": /\bdates?\b[^\n]*\btime ?zones?\b|\btime ?zones?\b[^\n]*\bdates?\b/i,
+      "not a UTC default for a non-UTC user": /\b(never|not|don't|do not|instead of)\b[^\n]*\bUTC\b/i,
+      "the latest explicit timezone wins": /\blatest\b[^\n]*\btime ?zones?\b|\btime ?zones?\b[^\n]*\blatest\b/i,
+    };
+    for (const [label, contract] of Object.entries(TIMEZONE)) assert.match(system, contract, label);
+    assert.ok(!system.includes("America/Sao_Paulo"), "the user's timezone stays user content, never system text");
+    assert.ok(turnsOf(call).some((t) => t.role === "user" && t.text.includes("America/Sao_Paulo")));
+  });
 });
 
 describe("routePromptToSkills keeps every explicitly requested venue", () => {

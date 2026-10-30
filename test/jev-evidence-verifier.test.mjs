@@ -22,6 +22,7 @@ import {
   resolveEvidenceVerifierSettings,
   runJevDecision,
 } from "../dist/evidence-verifier.js";
+import { buildResultOverview, TOOL_OUTPUT_TRUNCATED_MARKER } from "../dist/tool-results.js";
 
 const CLEAN = '{"isValid":true,"discrepancies":[]}';
 const input = {
@@ -1326,5 +1327,41 @@ describe("a malformed first verdict keeps the full checker policy on the retry",
     assert.match(system(correction), /CALLER_POLICY_MARKER/);
     for (const re of POLICY) assert.match(system(recheck), re, `recheck: ${re}`);
     assert.ok(!rest(recheck).includes(wrongVenue.draft), "the recheck judges the correction, not the rejected draft");
+  });
+});
+
+describe("a market preview or an incomplete provider page never proves a negative", () => {
+  const LATE = "2026-11-01T02:30:00Z";
+  const events = Array.from({ length: 7 }, (_, e) => ({
+    id: `ev${e}`, title: `Synthetic Away ${e} at Synthetic Home ${e}`, start_time: e >= 3 ? LATE : "2026-10-31T23:00:00Z",
+    markets: [{ id: `m${e}`, question: `Synthetic Home ${e} vs Synthetic Away ${e}: winner?`, status: "active", accepting_orders: true,
+      outcomes: [{ name: `Synthetic Home ${e}`, price: 0.55 }, { name: `Synthetic Away ${e}`, price: 0.45 }] }],
+  }));
+  const value = { status: true, data: { events, count: 7, sport: "nba", date: "2026-10-31", timezone: "America/Los_Angeles",
+    offset: 0, scanned: 30, next_offset: 30, truncated: true, complete: false } };
+  // The narrator's view of an oversized result: the stable marker, then the real overview.
+  const negative = {
+    userPrompt: "Polymarket NBA markets for tomorrow?",
+    draft: "Polymarket NBA tomorrow: Synthetic Home 0 0.55. Synthetic Home 6 was not returned and its market has not opened.",
+    toolOutputs: [{ toolName: "polymarket_get_events", output: `${TOOL_OUTPUT_TRUNCATED_MARKER}: synthetic overview.]\n${buildResultOverview("r1", value, 45_000)}` }],
+    callerSystemPrompt: input.callerSystemPrompt,
+  };
+  // Wording contracts: negative claims from a preview or complete:false are rejected,
+  // a scope-limited positive answer is fine, complete exact-scope evidence may prove absence.
+  const POLICY = [/absence_claims_supported/, /\bcomplete\b[^\n]{0,40}\bfalse\b/i, /\bnegative\b/i, /not returned/i, /not opened/i,
+    /\bno market\b/i, /\bpositive\b/i, /\bcomplete\b[^\n]*\bexact\b[^\n]*\bscope\b|\bexact\b[^\n]*\bscope\b[^\n]*\bcomplete\b/i];
+  const system = (call) => call.prompt.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+  const userText = (call) => call.prompt.filter((m) => m.role !== "system")
+    .map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join(""))).join("\n");
+
+  it("the first check and its malformed-verdict retry state the policy and see the metadata; the model, not code, decides", async () => {
+    const { engine, model } = fixture({ replies: ["not json", CLEAN] });
+    assert.equal(await engine.validateResponseEvidence(negative), negative.draft, "no deterministic rewriting of the draft");
+    assert.equal(model.doGenerateCalls.length, 2, "one check, one retry");
+    for (const [label, call] of [["first", model.doGenerateCalls[0]], ["retry", model.doGenerateCalls[1]]]) {
+      for (const re of POLICY) assert.match(system(call), re, `${label}: ${re}`);
+      assert.match(userText(call), /"absence_claims_supported":false/, `${label}: preview metadata reaches the checker`);
+      assert.match(userText(call), /"complete":false/, `${label}: provider completeness reaches the checker`);
+    }
   });
 });
