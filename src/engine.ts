@@ -1921,12 +1921,9 @@ export class sportsclawEngine {
         return null;
       }
     };
-    try {
-      // Step 1: LLM-driven verification pass to detect conflicts
-      const validationRes = await generate({ purpose: "verification" }, {
-        model: this.mainModel,
-        ...this.samplingOptions(),
-        system:
+    // One complete policy for the check and its malformed-verdict retry: the
+    // retry only adds a format reminder, never a reduced set of constraints.
+    const checkerSystem =
           "You are a strict sports fact-checker. Compare the draft response against the raw source data.\n" +
           partialViewRule +
           failedToolsRule +
@@ -1945,6 +1942,10 @@ export class sportsclawEngine {
           "Also check coverage of the request: flag a draft that silently drops or substitutes a requested venue, sport, date or market scope, " +
           "or that presents a failed, partial or uninspected lookup as an empty result. A successful empty result supports absence only " +
           "within the scope that was actually queried. Flag an internal cause or a promise of future availability the data does not state. " +
+          "isValid requires both supported claims and faithful coverage of the requested venue, sport, date and market scope: " +
+          "true data from another venue or bookmaker, or a schedule without the requested prices, does not fulfil a request for one " +
+          "venue's prices. An explicit, bounded statement that a requested scope or price is unavailable is an honest limitation, " +
+          "not a fulfilled price request and not a discrepancy by itself. " +
           "Conversation context, when given, shows what the user asked earlier; it is background, never evidence.\n" +
           "Respond in strict JSON with the following format:\n" +
           "{\n" +
@@ -1961,16 +1962,23 @@ export class sportsclawEngine {
           "Do not require a separate unavailable section when the caller asks for a useful brief. " +
           "Headline-only evidence supports only its explicit claim, not medical clearance, tactical attributes, a full lineup or officiating tendencies. " +
           "Questions and conditional analysis are allowed, but their factual premises must be supported. " +
-          "Return only the JSON verdict with isValid and discrepancies; no user-facing answer, markdown, tools or proposals.",
-        prompt: [
-          ...contextLines,
-          `User request: ${userPrompt}`,
-          `Raw source data (Source of Truth):`,
-          serializedToolOutputs || "(none)",
-          `Draft response to check:`,
-          draft,
-          ...reportLines,
-        ].join("\n\n"),
+          "Return only the JSON verdict with isValid and discrepancies; no user-facing answer, markdown, tools or proposals.";
+    const checkerPrompt = [
+      ...contextLines,
+      `User request: ${userPrompt}`,
+      `Raw source data (Source of Truth):`,
+      serializedToolOutputs || "(none)",
+      `Draft response to check:`,
+      draft,
+      ...reportLines,
+    ].join("\n\n");
+    try {
+      // Step 1: LLM-driven verification pass to detect conflicts
+      const validationRes = await generate({ purpose: "verification" }, {
+        model: this.mainModel,
+        ...this.samplingOptions(),
+        system: checkerSystem,
+        prompt: checkerPrompt,
         ...this.checkerCallOptions(),
         abortSignal: params.abortSignal,
         maxRetries: 1,
@@ -1982,18 +1990,10 @@ export class sportsclawEngine {
         const retryRes = await generate({ purpose: "verification" }, {
           model: this.mainModel,
           ...this.samplingOptions(),
-          system: partialViewRule + failedToolsRule + suppliedInputRule + reportRule + "Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+          system: checkerSystem + "\n\nThe previous reply was not a usable verdict. Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
-          prompt: [
-            ...contextLines,
-            `User request: ${userPrompt}`,
-            `Raw source data (Source of Truth):`,
-            serializedToolOutputs || "(none)",
-            `Draft response to check:`,
-            draft,
-            ...reportLines,
-          ].join("\n\n"),
+          prompt: checkerPrompt,
           ...this.checkerCallOptions(),
           abortSignal: params.abortSignal,
           maxRetries: 1,

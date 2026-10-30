@@ -149,10 +149,54 @@ function describeValue(v: unknown): unknown {
   return v;
 }
 
-function previewRow(row: unknown): unknown {
+// Prediction-market rows: a quote is its outcome name and price, which
+// "array(2)" hides. Their preview keeps a bounded list of literal pairs; every
+// other array keeps the generic description. The stored result is unchanged.
+const PREVIEW_OUTCOMES = 10;
+const PREVIEW_NESTED_MARKETS = 2;
+/** Fields that identify a nested market and say whether its quotes are live. */
+const NESTED_MARKET_FIELDS = ["id", "question", "status", "sports_market_type", "game_start_time", "accepting_orders", "enable_order_book"];
+
+/** A market row: a question with a non-empty outcomes list of named entries. */
+function isMarketRow(v: unknown): v is Record<string, unknown> & { outcomes: Record<string, unknown>[] } {
+  return isPlainObject(v) && typeof v.question === "string" && Array.isArray(v.outcomes) && v.outcomes.length > 0 &&
+    v.outcomes.every((o) => isPlainObject(o) && typeof o.name === "string");
+}
+
+function isMarketList(v: unknown): v is Array<Record<string, unknown> & { outcomes: Record<string, unknown>[] }> {
+  return Array.isArray(v) && v.length > 0 && v.every(isMarketRow);
+}
+
+/** The first outcomes as given (null stays null, a missing price stays missing), with the total when cut. */
+function previewOutcomes(outcomes: Record<string, unknown>[]): Record<string, unknown> {
+  const pairs = outcomes.slice(0, PREVIEW_OUTCOMES).map((o) =>
+    Object.hasOwn(o, "price") ? { name: describeValue(o.name), price: describeValue(o.price) } : { name: describeValue(o.name) });
+  return { outcomes: pairs, ...(outcomes.length > PREVIEW_OUTCOMES ? { outcomes_count: outcomes.length } : {}) };
+}
+
+/** The first markets of an event row, with their count and the exact path to read them all. */
+function previewNestedMarkets(markets: Array<Record<string, unknown> & { outcomes: Record<string, unknown>[] }>, path: string): unknown {
+  return {
+    count: markets.length,
+    shown: Math.min(markets.length, PREVIEW_NESTED_MARKETS),
+    query_path: path,
+    first: markets.slice(0, PREVIEW_NESTED_MARKETS).map((m) => ({
+      ...Object.fromEntries(NESTED_MARKET_FIELDS.filter((k) => Object.hasOwn(m, k)).map((k) => [k, describeValue(m[k])])),
+      ...previewOutcomes(m.outcomes),
+    })),
+  };
+}
+
+function previewRow(row: unknown, rowPath: string): unknown {
   if (!isPlainObject(row)) return describeValue(row);
   const entries = Object.entries(row);
-  const shown = Object.fromEntries(entries.slice(0, PREVIEW_FIELDS).map(([k, v]) => [k, describeValue(v)]));
+  const market = isMarketRow(row);
+  const shown: Record<string, unknown> = {};
+  for (const [k, v] of entries.slice(0, PREVIEW_FIELDS)) {
+    if (market && k === "outcomes") Object.assign(shown, previewOutcomes(row.outcomes as Record<string, unknown>[]));
+    else if (k === "markets" && isMarketList(v)) shown[k] = previewNestedMarkets(v, joinPath(rowPath, k));
+    else shown[k] = describeValue(v);
+  }
   if (entries.length > PREVIEW_FIELDS) shown["…"] = `${entries.length - PREVIEW_FIELDS} more fields`;
   return shown;
 }
@@ -172,9 +216,17 @@ export function buildResultOverview(resultId: string, value: unknown, totalChars
   if (arrays.length === 0) return undefined;
   const largest = arrays[0];
   const largestRows = resolvePath(value, largest.path) as unknown[];
+  const firstRows = largestRows.slice(0, PREVIEW_ROWS);
+  const preview = {
+    path: showPath(largest.path),
+    first_rows: firstRows.map((row, i) => previewRow(row, joinPath(largest.path, i))),
+  };
+  // Market quotes go first, so a head-and-tail evidence cut still keeps them.
+  const markets = firstRows.some((row) => isMarketRow(row) || (isPlainObject(row) && isMarketList(row.markets)));
   const overview = {
     result_id: resultId,
     total_chars: totalChars,
+    ...(markets ? { preview } : {}),
     ...(isPlainObject(value)
       ? { top_level: Object.fromEntries(Object.entries(value).slice(0, MAX_LISTED_COLUMNS).map(([k, v]) => [k, describeValue(v)])) }
       : {}),
@@ -185,10 +237,7 @@ export function buildResultOverview(resultId: string, value: unknown, totalChars
       ...(a.columns.length > MAX_LISTED_COLUMNS ? { more_columns: a.columns.length - MAX_LISTED_COLUMNS } : {}),
     })),
     ...(arrays.length > MAX_LISTED_ARRAYS ? { more_arrays: arrays.length - MAX_LISTED_ARRAYS } : {}),
-    preview: {
-      path: showPath(largest.path),
-      first_rows: largestRows.slice(0, PREVIEW_ROWS).map(previewRow),
-    },
+    ...(markets ? {} : { preview }),
   };
   return JSON.stringify(overview);
 }
