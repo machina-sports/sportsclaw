@@ -234,6 +234,39 @@ describe("opt-in support path", () => {
   });
 });
 
+describe("failed-only evidence on the default checker", () => {
+  const failedOnly = {
+    userPrompt: "Are NFL markets available on Polymarket?",
+    draft: "There are no NFL markets.",
+    toolOutputs: [],
+    failedTools: ["polymarket_get_events"],
+  };
+
+  it("checks and uses the opted-in correction and recheck", async () => {
+    const honest = "I could not check those markets because the lookup failed.";
+    const { engine, model } = fixture({ verifier: { provider: "generative", generativeAction: "correct" }, replies: [
+      JSON.stringify({ isValid: false, discrepancies: [{ claim: failedOnly.draft, evidence: "The lookup failed; absence is not established.", severity: "high", kind: "unsupported" }] }),
+      honest,
+      CLEAN,
+    ] });
+    assert.equal(engine.publicDataMode(), false);
+    assert.equal(await engine.validateResponseEvidence(failedOnly), honest);
+    assert.equal(model.doGenerateCalls.length, 3);
+    const first = JSON.stringify(model.doGenerateCalls[0].prompt);
+    assert.match(first, /failed this turn/);
+    assert.doesNotMatch(first, /No source data was fetched this turn/);
+  });
+
+  it("does not ship the failed-only draft when the checker is unavailable", async () => {
+    const { engine } = fixture();
+    engine.mainModel = new MockLanguageModelV3({ doGenerate: async () => { throw new Error("synthetic offline"); } });
+    assert.equal(engine.publicDataMode(), false);
+    const answer = await engine.validateResponseEvidence(failedOnly);
+    assert.notEqual(answer, failedOnly.draft);
+    assert.match(answer, /could not verify/i);
+  });
+});
+
 describe("contradiction reaches correction", () => {
   it("corrects and rechecks a confirmed contradiction", async () => {
     const { transport, calls } = recorder((n) =>
@@ -1166,5 +1199,79 @@ describe("an opt-in public data pool checks fresh facts instead of assuming them
     const { engine } = pooled({ replies: [CLEAN, CLEAN] });
     const ack = "Glad that helped — enjoy the game!";
     assert.equal(await engine.validateResponseEvidence({ ...chat, userPrompt: "Thanks!", draft: ack }), ack);
+  });
+});
+
+describe("conversation context and source scope reach only the primary checker and correction", () => {
+  const PM = "polymarket_get_events";
+  /** Strict public-data mode with the Polymarket reader approved. */
+  const pooled = (options) => {
+    const made = fixture(options);
+    made.engine.config.routing = { provider: "jev", dataPolicy: "cloud_allowed", publicDataTools: [PM], env: {} };
+    return made;
+  };
+  const CONTEXT = "PRIVATE_CONTEXT_MARKER Earlier: Polymarket markets for NBA and NFL; the user asked why NFL was omitted.";
+  const NBA_EVENTS = JSON.stringify({ status: true, data: { events: [{ id: "e1", title: "NBA synthetic matchup", slug: "nba-synthetic", status: "active",
+    markets: [{ id: "m1", question: "Synthetic Home to win?", status: "active", sports_market_type: "moneyline",
+      outcomes: [{ name: "Synthetic Home", price: 0.55, clob_token_id: "t1" }, { name: "Synthetic Away", price: 0.45, clob_token_id: "t2" }] }] }], count: 1 } });
+  // The same reader succeeded for NBA and failed for NFL this turn.
+  const scoped = {
+    userPrompt: "And tomorrow?",
+    draft: "Polymarket NBA tomorrow: Synthetic Home 0.55. There are no NFL markets on Polymarket tomorrow.",
+    toolOutputs: [{ toolName: PM, output: NBA_EVENTS }],
+    failedTools: [PM],
+    callerSystemPrompt: input.callerSystemPrompt,
+    conversationContext: CONTEXT,
+  };
+  const FLAG = JSON.stringify({
+    isValid: false,
+    discrepancies: [{ claim: "There are no NFL markets on Polymarket tomorrow", evidence: "The NFL read failed", severity: "high", kind: "unsupported" }],
+  });
+  const CORRECTED = "Polymarket NBA tomorrow: Synthetic Home 0.55. The NFL read failed, so NFL markets are unavailable here.";
+  const system = (call) => call.prompt.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+  const rest = (call) => JSON.stringify(call.prompt.filter((m) => m.role !== "system"));
+
+  it("hands the context as user content and the source-scope rules to the checker and the one correction", async () => {
+    const { engine, model } = pooled({ replies: [FLAG, CORRECTED, CLEAN], verifier: { generativeAction: "correct" } });
+    assert.equal(await engine.validateResponseEvidence(scoped), CORRECTED);
+    assert.equal(model.doGenerateCalls.length, 3, "check, one correction, recheck");
+    const [check, correction] = model.doGenerateCalls;
+    for (const [label, call] of [["check", check], ["correction", correction]]) {
+      assert.ok(rest(call).includes("PRIVATE_CONTEXT_MARKER"), `${label}: context reaches the primary model as user content`);
+    }
+    for (const call of model.doGenerateCalls) assert.doesNotMatch(system(call), /PRIVATE_CONTEXT_MARKER/, "never with system authority");
+    // The checker judges requested-venue and source-scope completion, not only claims.
+    assert.match(system(check), /venue/i);
+    assert.match(system(check), /scope/i);
+    const editor = system(correction);
+    assert.match(editor, /failed this turn/, "the correction keeps the failed-source rule");
+    assert.match(editor, /partial/i, "partial coverage stays distinct");
+    assert.match(editor, /not (inspected|checked)|uninspected/i, "uninspected coverage stays distinct");
+    assert.match(editor, /\bcause\b/i, "no invented internal cause");
+  });
+
+  it("keeps the single correction and refuses a failed recheck", async () => {
+    const { engine, model } = pooled({ replies: [FLAG, CORRECTED, FLAG], verifier: { generativeAction: "correct" } });
+    assert.match(await engine.validateResponseEvidence(scoped), /could not verify/i);
+    assert.equal(model.doGenerateCalls.length, 3, "no second correction because context is present");
+
+    const recheck = pooled({ replies: [FLAG], verifier: { generativeAction: "correct" } });
+    assert.match(await recheck.engine.validateResponseEvidence({ ...scoped, correctionAttempted: true }), /could not verify/i);
+    assert.equal(recheck.model.doGenerateCalls.length, 1, "a recheck never corrects again");
+  });
+
+  it("never sends the context to Jev, while the primary correction gets it", async () => {
+    const { transport, calls } = recorder((n) =>
+      jsonResponse(n === 1 ? jevBody({ coverage_freshness: { choice: "contradicted", confidence: 1 } }) : jevBody())
+    );
+    const { engine, model } = fixture({ replies: [CORRECTED], verifier: optIn(transport, { publicToolNames: [PM] }) });
+    assert.equal(await engine.validateResponseEvidence(scoped), CORRECTED);
+    assert.equal(calls.length, 2, "check and recheck");
+    for (const call of calls) assert.doesNotMatch(JSON.stringify(call.body), /PRIVATE_CONTEXT_MARKER|why NFL was omitted/);
+    assert.equal(model.doGenerateCalls.length, 1, "one correction on the main model");
+    const [correction] = model.doGenerateCalls;
+    assert.ok(rest(correction).includes("PRIVATE_CONTEXT_MARKER"));
+    assert.doesNotMatch(system(correction), /PRIVATE_CONTEXT_MARKER/);
+    assert.match(system(correction), /failed this turn/);
   });
 });

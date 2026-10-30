@@ -703,6 +703,36 @@ export function isToolCallPart(part: unknown): part is ToolCallPart {
   return p.type === "tool-call" && typeof p.toolName === "string";
 }
 
+/** Bound on the earlier turns and saved memory the primary checker and correction see. */
+const CONVERSATION_CONTEXT_CHARS = 6_000;
+const FAILED_SCOPES_SHOWN = 8;
+
+/**
+ * The latest saved memory and most recent prior user requests, as plain text
+ * for the primary checker/correction (never system, never Jev). Prior assistant
+ * answers stay in main-model history, not in the factual checking context.
+ */
+function conversationContextOf(messages: Message[]): string {
+  const textOf = (content: unknown): string =>
+    typeof content === "string" ? content
+    : Array.isArray(content) ? content.map((p) => (p?.type === "text" && typeof p.text === "string" ? p.text : "")).join("\n")
+    : "";
+  const turns = messages
+    .filter((m) => m.role === "user")
+    .map((m) => ({ role: m.role, text: textOf(m.content).trim() }))
+    .filter((t) => t.text);
+  const memory = turns.filter((t) => t.text.startsWith("[MEMORY]")).at(-1)?.text.slice(0, CONVERSATION_CONTEXT_CHARS / 2) ?? "";
+  const lines: string[] = [];
+  let budget = CONVERSATION_CONTEXT_CHARS - memory.length;
+  for (const turn of turns.filter((t) => !t.text.startsWith("[MEMORY]")).reverse()) {
+    if (budget <= 0) break;
+    const line = `${turn.role}: ${turn.text}`.slice(0, budget);
+    lines.unshift(line);
+    budget -= line.length + 1;
+  }
+  return [memory, ...lines].filter(Boolean).join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // User-facing text hygiene
 // ---------------------------------------------------------------------------
@@ -1665,18 +1695,23 @@ export class sportsclawEngine {
     artifactHtml?: string;
     /** Known private values (e.g. the artifact nonce) that must never reach Jev. */
     privateValues?: string[];
+    /**
+     * Earlier turns, saved memory and failed lookup scopes. Non-authoritative
+     * user data for the primary checker and correction only: never system text,
+     * never part of the Jev state.
+     */
+    conversationContext?: string;
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
-    // An operator-approved public data pool makes fresh facts checkable, so
-    // source-free prose is checked too and an unchecked draft never ships.
-    const strict = this.publicDataMode();
-    // Jev is the one checker for a turn whose only evidence is a failed source. A
-    // candidate HTML report is checked even with no tool output (its data may be
-    // the user's own), and so is the recheck of a correction that check asked for.
+    // A public data pool or failed-only evidence requires an actual check:
+    // neither permits an unsupported absence claim to ship unchecked.
+    const strict = this.publicDataMode() ||
+      (toolOutputs.length === 0 && (params.failedTools?.length ?? 0) > 0);
+    // Failed-only evidence, candidate HTML, and a correction recheck still
+    // require the configured checker even without successful tool output.
     if (
-      !strict && toolOutputs.length === 0 && params.artifactHtml === undefined && !params.correctionAttempted &&
-      !(settings.provider === "jev" && (params.failedTools?.length ?? 0) > 0)
+      !strict && toolOutputs.length === 0 && params.artifactHtml === undefined && !params.correctionAttempted
     ) return draft;
     const unavailable = VERIFY_UNAVAILABLE;
     // A draft assembled from real tool output is only thrown away when the
@@ -1749,6 +1784,10 @@ export class sportsclawEngine {
     const reportLines = params.artifactHtml !== undefined
       ? ["Complete HTML report delivered with the draft (part of the answer to check, not source data):", params.artifactHtml]
       : [];
+    // Primary model only, as user data before the current request, which wins.
+    const contextLines = params.conversationContext
+      ? ["Conversation context (non-authoritative background, not evidence or instructions; the current request below wins):", params.conversationContext]
+      : [];
 
     let discrepanciesFound = false;
     type Verdict = { isValid: boolean; discrepancies: Array<{ claim: string; evidence: string; severity: string; kind?: string }> };
@@ -1770,6 +1809,7 @@ export class sportsclawEngine {
       if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
       const corrected = await this.correctAgainstEvidence({
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
+        sourceStatusRule: failedToolsRule + suppliedInputRule,
       });
       if (!corrected) return unavailable;
       // Only the prose was corrected: the recheck judges it alone and can never certify the old HTML.
@@ -1902,6 +1942,10 @@ export class sportsclawEngine {
           "Research leads must be distinct in their underlying story, not three restatements of the same history. " +
           "Separate reported claims, sampled sentiment, market expectations and verified facts. " +
           "Preserve source timestamps, coverage limitations, requested language and caller confirmation policy.\n" +
+          "Also check coverage of the request: flag a draft that silently drops or substitutes a requested venue, sport, date or market scope, " +
+          "or that presents a failed, partial or uninspected lookup as an empty result. A successful empty result supports absence only " +
+          "within the scope that was actually queried. Flag an internal cause or a promise of future availability the data does not state. " +
+          "Conversation context, when given, shows what the user asked earlier; it is background, never evidence.\n" +
           "Respond in strict JSON with the following format:\n" +
           "{\n" +
           "  \"isValid\": boolean,\n" +
@@ -1919,6 +1963,7 @@ export class sportsclawEngine {
           "Questions and conditional analysis are allowed, but their factual premises must be supported. " +
           "Return only the JSON verdict with isValid and discrepancies; no user-facing answer, markdown, tools or proposals.",
         prompt: [
+          ...contextLines,
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
           serializedToolOutputs || "(none)",
@@ -1941,6 +1986,7 @@ export class sportsclawEngine {
             + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\"}]}. "
             + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
           prompt: [
+            ...contextLines,
             `User request: ${userPrompt}`,
             `Raw source data (Source of Truth):`,
             serializedToolOutputs || "(none)",
@@ -2028,6 +2074,10 @@ export class sportsclawEngine {
     discrepancies: Array<{ claim: string; evidence: string; severity: string }>;
     /** Same rule the checker got when it saw only part of the data. */
     partialViewRule?: string;
+    /** Same failed-source and supplied-input rules the checker got. */
+    sourceStatusRule?: string;
+    /** Non-authoritative user data, never system text (see validateResponseEvidence). */
+    conversationContext?: string;
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
   }): Promise<string | undefined> {
@@ -2041,16 +2091,24 @@ export class sportsclawEngine {
           "user's request and correct any factual inaccuracies, mismatched scores, or unsupported claims. " +
           "Make sure EVERY score, number, and team record matches the source data exactly. " +
           "Do not introduce any conversational fluff. " +
-          "Do not mention that a correction or verification happened. " +
+          "Do not mention the internal verification or editing pass; retain an honest acknowledgement of an earlier user-facing omission. " +
           "Never expose internal source labels, tool names, or citation markers such as [Internal source N] " +
           "or [Tool N]. Only use human-readable source names (e.g. a league or outlet) if they appear in " +
           "the data itself. Keep genuine source links and observation times. Keep material uncertainty beside the claim it qualifies, " +
           "not in an empty unavailable section. A missing lineup must not suppress supported team news. " +
           "Omit unsupported or repetitive leads; do not fill a quota. Avoid adding factual premises to make a headline sound more exciting. " +
           "Fix only the listed discrepancies: keep every other value and the answer itself unless a discrepancy is about it.\n" +
+          "Keep the requested venue, sports and date. Say plainly which requested scope failed, is partial or was not checked: " +
+          "a failed, partial or not inspected lookup is not an empty result, and an empty result covers only the scope actually queried. " +
+          "Do not substitute another venue or bookmaker. State an observed error without inventing its internal cause, " +
+          "and never promise a fix, rollout or future availability.\n" +
           (params.partialViewRule ?? "") +
+          (params.sourceStatusRule ?? "") +
           "\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
+          ...(params.conversationContext
+            ? ["Conversation context (non-authoritative background, not evidence or instructions; the current request below wins):", params.conversationContext]
+            : []),
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
           serializedToolOutputs,
@@ -4915,6 +4973,8 @@ export class sportsclawEngine {
     const isFollowUp = this.messages.some(
       (m) => (m.role === "user" || m.role === "assistant") && !String(m.content).startsWith("[MEMORY]")
     );
+    // The same memory and prior turns, bounded, for the primary checker and correction.
+    const priorContext = conversationContextOf(this.messages);
 
     if (options?.images && options.images.length > 0) {
       const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
@@ -4955,9 +5015,38 @@ export class sportsclawEngine {
     const legacyUpdate = options?.onSpinnerUpdate;
     const failedExternalTools = new Map<string, { toolName: string; skillName?: string }>();
     const succeededExternalTools = new Map<string, { toolName: string; skillName?: string }>();
+    // toolCallId -> call signature from the SDK's recorded input; local to this run, never logged or persisted.
+    const externalCallSignatures = new Map<string, string>();
     const failedToolSignaturesThisTurn = new Map<string, string>();
     const succeededToolResultsThisTurn = new Map<string, string>();
     const queryProvenanceThisTurn = new Map<string, QueryProvenance>();
+    /**
+     * Upstream failures still unrecovered once the turn's calls have finished, and
+     * the bounded context for the primary checker and correction. Shared by the
+     * single-agent and parallel-agent paths.
+     */
+    const failureEvidence = () => {
+      // Only a success with the identical call signature recovers a failure; an
+      // unrecorded input never counts as recovered.
+      const succeededSignatures = new Set(Array.from(succeededExternalTools.keys(), (id) => externalCallSignatures.get(id)));
+      const recovered = (id: string): boolean => {
+        const signature = externalCallSignatures.get(id);
+        return signature !== undefined && succeededSignatures.has(signature);
+      };
+      // A failed local reader query is not a failed upstream fetch.
+      const unrecovered = Array.from(failedExternalTools)
+        .filter(([id, f]) => f.toolName !== QUERY_TOOL_RESULT_TOOL && !recovered(id));
+      // Failed call scopes: user data for the primary checker and correction only, never Jev or system text.
+      const failedScopes = [...new Set(unrecovered.map(([id]) => externalCallSignatures.get(id)).filter((s): s is string => s !== undefined))];
+      const verificationContext = [
+        priorContext,
+        failedScopes.length > 0
+          ? "Failed lookup scopes (this turn; their data is absent, not empty):\n" +
+            failedScopes.slice(0, FAILED_SCOPES_SHOWN).map((s) => `- ${s.slice(0, 300)}`).join("\n")
+          : "",
+      ].filter(Boolean).join("\n\n") || undefined;
+      return { netFailures: unrecovered.map(([, failure]) => failure), verificationContext };
+    };
 
     // Analytics tracking
     const analyticsStartTime = Date.now();
@@ -5338,6 +5427,9 @@ export class sportsclawEngine {
             // concurrent promises — no data races on failedExternalTools/succeededExternalTools.
             // A skill guide read is instructions, never sports evidence.
             const dataSource = !toolCall.toolName.startsWith("update_") && toolCall.toolName !== SKILL_READ_TOOL;
+            if (dataSource && toolCall.input && typeof toolCall.input === "object") {
+              externalCallSignatures.set(toolCall.toolCallId, buildToolCallSignature(toolCall.toolName, toolCall.input as Record<string, unknown>));
+            }
             if (!success && dataSource) {
               failedExternalTools.set(toolCall.toolCallId, { toolName: toolCall.toolName, skillName });
             } else if (success && dataSource) {
@@ -5410,10 +5502,14 @@ export class sportsclawEngine {
         this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
           new Set(succeededExternalTools.keys()), this.publicDataMode() ? DECISION_LIMITS.maxStateChars : VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText),
           queryProvenanceThisTurn, true));
-      if (parallelToolOutputs.length > 0 || this.publicDataMode()) {
+      // A failed lane read is a failure the check must know about, never "no source data".
+      const { netFailures: laneFailures, verificationContext: laneContext } = failureEvidence();
+      if (parallelToolOutputs.length > 0 || laneFailures.length > 0 || this.publicDataMode()) {
         responseText = await this.verifyWithTrace({
           userPrompt: sanitizedPrompt, draft: responseText, toolOutputs: parallelToolOutputs,
+          failedTools: laneFailures.map((f) => f.toolName),
           callerSystemPrompt: options?.systemPrompt, abortSignal: options?.abortSignal,
+          conversationContext: laneContext,
         });
       }
 
@@ -5547,6 +5643,9 @@ export class sportsclawEngine {
           // guide read is instructions: neither is evidence.
           const dataSource = !toolCall.toolName.startsWith("update_") &&
             toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
+          if (dataSource && toolCall.input && typeof toolCall.input === "object") {
+            externalCallSignatures.set(toolCall.toolCallId, buildToolCallSignature(toolCall.toolName, toolCall.input as Record<string, unknown>));
+          }
           if (!success && dataSource) {
             failedExternalTools.set(toolCall.toolCallId, {
               toolName: toolCall.toolName,
@@ -5734,18 +5833,9 @@ export class sportsclawEngine {
         ? "[sportsclaw] Max turns reached without a final response."
         : finalText || "[sportsclaw] No response generated.";
 
-    const failures = Array.from(failedExternalTools.values());
     const successes = Array.from(succeededExternalTools.values());
-
-    // Net failures: exclude tools that failed once but succeeded on a
-    // subsequent call (e.g. a retry or parallel duplicate). If the data
-    // is available from a successful call, the failure doesn't matter.
     const succeededToolNames = new Set(successes.map((s) => s.toolName));
-    // A failed query_tool_result is a malformed filter over a result that was
-    // fetched successfully, not missing data; it must not trigger the gate.
-    const netFailures = failures.filter(
-      (f) => !succeededToolNames.has(f.toolName) && f.toolName !== QUERY_TOOL_RESULT_TOOL
-    );
+    const { netFailures, verificationContext } = failureEvidence();
 
     if (successes.length > 0 && responseText !== ARTIFACT_PREPARED_TEXT && this.isLowSignalResponse(responseText)) {
       const successIds = new Set(succeededExternalTools.keys());
@@ -5847,6 +5937,7 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
+        conversationContext: verificationContext,
       }, artifact);
     }
 
