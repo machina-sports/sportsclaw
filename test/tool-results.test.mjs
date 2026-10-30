@@ -190,6 +190,96 @@ test("an oversized query answer keeps fewer rows and carries the truncation mark
   assert.ok(json.rows.length > 0 && json.rows.length < 200);
 });
 
+// Synthetic rows in the normalized prediction-market shape: the paired outcome
+// name/price is the answer, so the overview must not reduce it to "array(2)".
+const RULES = "Synthetic resolution rules. ".repeat(40);
+function market(i, extra = {}) {
+  return {
+    id: `m${i}`, question: `Synthetic Team ${i} to win?`, description: RULES, slug: `synthetic-team-${i}`,
+    condition_id: `0xsynthetic${i}`,
+    outcomes: [
+      { name: `Synthetic Team ${i}`, price: 0.6, clob_token_id: `tok-${i}-a` },
+      { name: `Synthetic Rival ${i}`, price: 0.4, clob_token_id: `tok-${i}-b` },
+    ],
+    status: "active", sports_market_type: "moneyline", game_start_time: "2026-10-31T23:30:00Z",
+    accepting_orders: true, enable_order_book: true, volume: 1000 + i, liquidity: 250 + i,
+    ...extra,
+  };
+}
+const HEAD = [
+  market(0, { outcomes: [{ name: "Synthetic Home", price: 0.55, clob_token_id: "tok-h" }, { name: "Synthetic Away", price: 0.45, clob_token_id: "tok-a" }] }),
+  market(1, { outcomes: [{ name: "Synthetic Draw", price: null, clob_token_id: "tok-d" }, { name: "Synthetic Field", clob_token_id: "tok-f" }] }),
+  market(2, { status: "closed", sports_market_type: "spreads", accepting_orders: false, enable_order_book: false,
+    outcomes: [{ name: "Synthetic Home -3.5", price: 0.52 }, { name: "Synthetic Away +3.5", price: 0.48 }] }),
+];
+const detail = { status: true, data: { event: { id: "e1", title: "Synthetic night" },
+  markets: [...HEAD, ...Array.from({ length: 406 }, (_, i) => market(i + 3))] } };
+/** Name and price exactly as given: a missing price stays missing. */
+const pairOf = (o) => (Object.hasOwn(o, "price") ? { name: o.name, price: o.price } : { name: o.name });
+/** Every {name, ...} object anywhere in a value, as its literal pair. */
+function pairsIn(node, out = []) {
+  if (Array.isArray(node)) node.forEach((n) => pairsIn(n, out));
+  else if (node && typeof node === "object") {
+    if (typeof node.name === "string") out.push(pairOf(node));
+    Object.values(node).forEach((n) => pairsIn(n, out));
+  }
+  return out;
+}
+const IDENTITY = ["id", "question", "slug", "condition_id", "status", "sports_market_type", "game_start_time", "accepting_orders", "enable_order_book"];
+
+test("a market overview keeps paired outcome names and prices, identity, status, type, time and trading flags", () => {
+  const text = buildResultOverview("r1", detail, JSON.stringify(detail).length);
+  assert.ok(text.length < 30_000, "bounded by the output cap");
+  const overview = JSON.parse(text);
+  assert.equal(overview.preview.path, "data.markets");
+  assert.equal(overview.preview.first_rows.length, 5);
+  HEAD.forEach((source, i) => {
+    const row = overview.preview.first_rows[i];
+    assert.ok(Array.isArray(row.outcomes), `row ${i}: outcomes kept, not ${row.outcomes}`);
+    assert.deepEqual(row.outcomes.map(pairOf), source.outcomes.map(pairOf), `row ${i}: literal pairs, null kept, missing not invented`);
+    for (const key of IDENTITY) assert.deepEqual(row[key], source[key], `row ${i}: ${key}`);
+  });
+});
+
+test("a market with many outcomes previews a bounded literal prefix and says how many there are", () => {
+  const many = Array.from({ length: 400 }, (_, k) => ({ name: `Synthetic Futures ${k}`, price: (k + 1) / 1000, clob_token_id: `fut-${k}` }));
+  const futures = { data: { markets: Array.from({ length: 12 }, (_, i) => market(i, { outcomes: many })) } };
+  const text = buildResultOverview("r1", futures, JSON.stringify(futures).length);
+  assert.ok(text.length < 30_000, "bounded by the output cap");
+  const row = JSON.parse(text).preview.first_rows[0];
+  assert.ok(Array.isArray(row.outcomes) && row.outcomes.length > 0 && row.outcomes.length < 400, "a bounded preview, not the full array");
+  assert.deepEqual(row.outcomes.map(pairOf), many.slice(0, row.outcomes.length).map(pairOf));
+  assert.match(JSON.stringify(row), /\b400\b/, "the total is stated, never implied complete");
+});
+
+test("an event list overview previews bounded nested markets with literal pairs, not raw arrays", () => {
+  const events = { status: true, data: { count: 50, events: Array.from({ length: 50 }, (_, e) => ({
+    id: `e${e}`, title: `Synthetic Event ${e}`, slug: `synthetic-event-${e}`, status: "active", start_date: "2026-10-31",
+    markets: e === 0 ? [HEAD[0], ...Array.from({ length: 8 }, (_, k) => market(k + 10))] : Array.from({ length: 9 }, (_, k) => market(e * 9 + k)),
+  })) } };
+  const text = buildResultOverview("r1", events, JSON.stringify(events).length);
+  assert.ok(text.length < 30_000, "bounded by the output cap");
+  const row = JSON.parse(text).preview.first_rows[0];
+  const shown = JSON.stringify(row);
+  assert.ok(shown.includes(HEAD[0].question), "the first nested market is identified");
+  const pairs = pairsIn(row);
+  for (const pair of HEAD[0].outcomes.map(pairOf)) assert.ok(pairs.some((p) => JSON.stringify(p) === JSON.stringify(pair)), JSON.stringify(pair));
+  assert.ok(shown.length < JSON.stringify(events.data.events[0]).length / 2, "a bounded preview, not the raw nested arrays");
+});
+
+test("ordinary arrays, including name/price lists outside market outcomes, keep the generic description", () => {
+  // Keep the parent rows as the largest array, which the existing overview selects.
+  const rows = Array.from({ length: 3 }, () => ({ name: "a", legs: [{ name: "x", price: 1 }], tags: ["t", "u"] }));
+  const row = JSON.parse(buildResultOverview("r1", rows, 1)).preview.first_rows[0];
+  assert.deepEqual(row, { name: "a", legs: "array(1)", tags: "array(2)" });
+});
+
+test("the stored market result stays lossless for query_tool_result", () => {
+  const out = q(detail, { path: "data.markets", where: [{ field: "id", op: "eq", value: "m1" }], fields: ["id", "outcomes"] });
+  assert.deepEqual(out.rows, [{ id: "m1", outcomes: HEAD[1].outcomes }]);
+  assert.equal(out.total_rows, 409);
+});
+
 test("the store evicts oldest entries by count and by total size, and rejects one oversized value", () => {
   const byCount = new ToolResultStore(2, 1_000);
   const a = byCount.put("t", 1, 10);

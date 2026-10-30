@@ -7,6 +7,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import {
   REPEATED_CALL_NOTE,
   TOOL_OUTPUT_CHAR_CAP,
+  draftClaimTerms,
   isTruncatedEvidence,
   sportsclawEngine,
   summarizeToolOutputForEvidence,
@@ -152,6 +153,84 @@ test("query_tool_result is a data tool whenever a registry tool exists, and abse
   const { engine: empty } = engineWithRegistry(() => ({ isError: false, content: "{}" }), []);
   assert.equal("query_tool_result" in turnTools(empty), false);
   assert.deepEqual(empty.listDataToolNames(), []);
+});
+
+// Synthetic rows in the normalized prediction-market shape. The overview is the
+// only view the narrator, the checker and synthesis get of an oversized result.
+const RULES = "Synthetic resolution rules. ".repeat(40);
+const market = (i, extra = {}) => ({
+  id: `m${i}`, question: `Synthetic Team ${i} to win?`, description: RULES, slug: `synthetic-team-${i}`, condition_id: `0xsynthetic${i}`,
+  outcomes: [{ name: `Synthetic Team ${i}`, price: 0.6, clob_token_id: `tok-${i}-a` }, { name: `Synthetic Rival ${i}`, price: 0.4, clob_token_id: `tok-${i}-b` }],
+  status: "active", sports_market_type: "moneyline", game_start_time: "2026-10-31T23:30:00Z",
+  accepting_orders: true, enable_order_book: true, volume: 1000 + i, liquidity: 250 + i, ...extra,
+});
+const HOME_AWAY = market(0, { question: "Synthetic Home vs Synthetic Away: winner?",
+  outcomes: [{ name: "Synthetic Home", price: 0.55, clob_token_id: "tok-h" }, { name: "Synthetic Away", price: 0.45, clob_token_id: "tok-a" }] });
+const DRAW_FIELD = market(1, { outcomes: [{ name: "Synthetic Draw", price: null, clob_token_id: "tok-d" }, { name: "Synthetic Field", clob_token_id: "tok-f" }] });
+const marketDetail = () => JSON.stringify({ status: true, data: { event: { id: "e1", title: "Synthetic night" },
+  markets: [HOME_AWAY, DRAW_FIELD, ...Array.from({ length: 407 }, (_, i) => market(i + 2))] } });
+const eventList = () => JSON.stringify({ status: true, data: { count: 50, events: Array.from({ length: 50 }, (_, e) => ({
+  id: `e${e}`, title: `Synthetic Event ${e}`, slug: `synthetic-event-${e}`, status: "active", start_date: "2026-10-31",
+  markets: e === 0 ? [HOME_AWAY, ...Array.from({ length: 8 }, (_, k) => market(k + 10))] : Array.from({ length: 9 }, (_, k) => market(e * 9 + k)),
+})) } });
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** The literal pair as compact JSON: `"name":"Synthetic Home","price":0.55`. */
+const pair = (name, price) => new RegExp(`"name":${esc(JSON.stringify(name))},"price":${esc(JSON.stringify(price))}`);
+const MARKET_TOOL = [{ name: "polymarket_get_market" }];
+const DRAFT = "Polymarket: Synthetic Home 0.55, Synthetic Away 0.45.";
+
+/** The narrator's tool output and the checker's and synthesis's views of it, through the real paths. */
+async function marketViews(content, engineSetup = () => {}) {
+  const { engine } = engineWithRegistry(() => ({ isError: false, content }), MARKET_TOOL);
+  engineSetup(engine);
+  const tools = turnTools(engine);
+  const narrator = await tools.polymarket_get_market.execute({}, opts);
+  const steps = [{ toolResults: [{ toolCallId: "c1", toolName: "polymarket_get_market", output: narrator }] }];
+  // 8_000 is the engine's VERIFICATION_EVIDENCE_CHARS; synthesis uses the default budget.
+  const [checker] = engine.collectToolOutputSnippets(steps, new Set(["c1"]), 8_000, draftClaimTerms(DRAFT), new Map(), true);
+  const [synthesis] = engine.collectToolOutputSnippets(steps, new Set(["c1"]));
+  return { engine, tools, narrator, views: { narrator, checker: checker.output, synthesis: synthesis.output } };
+}
+
+test("an oversized market detail overview carries the same literal outcome pairs to the narrator, checker and synthesis", async () => {
+  const { tools, narrator, views } = await marketViews(marketDetail());
+  assert.ok(narrator.length < TOOL_OUTPUT_CHAR_CAP);
+  assert.equal(isTruncatedEvidence(narrator), true, "still a partial view, never complete coverage");
+  for (const [label, text] of Object.entries(views)) {
+    assert.match(text, pair("Synthetic Home", 0.55), label);
+    assert.match(text, pair("Synthetic Away", 0.45), label);
+    assert.doesNotMatch(text, /"outcomes":"array\(2\)"/, label);
+  }
+  for (const label of ["narrator", "checker"]) {
+    assert.match(views[label], pair("Synthetic Draw", null), `${label}: null stays null`);
+    assert.match(views[label], /"name":"Synthetic Field"/, label);
+    assert.doesNotMatch(views[label], /"name":"Synthetic Field","price"/, `${label}: a missing price is not invented`);
+  }
+  // The stored original is unchanged and still read losslessly.
+  const read = JSON.parse(await tools.query_tool_result.execute({ result_id: "r1", path: "data.markets",
+    where: [{ field: "id", op: "eq", value: "m1" }], fields: ["outcomes"] }, opts));
+  assert.deepEqual(read.rows, [{ outcomes: DRAW_FIELD.outcomes }]);
+});
+
+test("an oversized event list overview carries a bounded nested market preview to every view", async () => {
+  const content = eventList();
+  const { narrator, views } = await marketViews(content);
+  assert.ok(narrator.length < TOOL_OUTPUT_CHAR_CAP);
+  assert.equal(isTruncatedEvidence(narrator), true);
+  assert.ok(!narrator.includes("Synthetic Event 49"), "rows beyond the preview are not shown");
+  for (const [label, text] of Object.entries(views)) {
+    assert.ok(text.includes(HOME_AWAY.question), `${label}: the nested market is identified`);
+    assert.match(text, pair("Synthetic Home", 0.55), label);
+    assert.match(text, pair("Synthetic Away", 0.45), label);
+  }
+});
+
+test("public-data mode gets the same market preview and still refuses an unauthorized reader", async () => {
+  const { tools, views } = await marketViews(marketDetail(), (engine) => {
+    engine.config.routing = { provider: "jev", dataPolicy: "cloud_allowed", publicDataTools: ["polymarket_get_market"], env: {} };
+  });
+  assert.match(views.narrator, pair("Synthetic Home", 0.55));
+  await assert.rejects(tools.query_tool_result.execute({ result_id: "r1" }, opts), /not available for this call/);
 });
 
 test("runDirect (bench baseline arms) offers query_tool_result with the skills' tools and it answers from the stored result", async () => {

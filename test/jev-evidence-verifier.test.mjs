@@ -1275,3 +1275,56 @@ describe("conversation context and source scope reach only the primary checker a
     assert.match(system(correction), /failed this turn/);
   });
 });
+
+describe("a malformed first verdict keeps the full checker policy on the retry", () => {
+  const PM = "polymarket_get_events";
+  const CONTEXT = "PRIVATE_CONTEXT_MARKER Earlier: the user asked for Polymarket NBA moneyline prices.";
+  const CALLER = "CALLER_POLICY_MARKER Use Portuguese. Never substitute another bookmaker.";
+  const EVENTS = JSON.stringify({ status: true, data: { events: [{ id: "e1", title: "NBA synthetic matchup", status: "active",
+    markets: [{ id: "m1", question: "Synthetic Home to win?", status: "active", sports_market_type: "moneyline",
+      outcomes: [{ name: "Synthetic Home", price: 0.55 }, { name: "Synthetic Away", price: 0.45 }] }] }] } });
+  // True facts elsewhere do not excuse the wrong venue and the missing requested prices.
+  const wrongVenue = {
+    userPrompt: "Polymarket NBA moneyline prices for tomorrow?",
+    draft: "NBA tomorrow: Synthetic Home vs Synthetic Away. DraftKings has Synthetic Home at -120.",
+    toolOutputs: [{ toolName: PM, output: EVENTS }],
+    callerSystemPrompt: CALLER,
+    conversationContext: CONTEXT,
+  };
+  const FLAG = JSON.stringify({ isValid: false, discrepancies: [{ claim: "DraftKings has Synthetic Home at -120",
+    evidence: "Polymarket was requested; its prices are Synthetic Home 0.55 and Synthetic Away 0.45", severity: "high", kind: "unsupported" }] });
+  const CORRECTED = "Polymarket NBA tomorrow: Synthetic Home 0.55, Synthetic Away 0.45.";
+  const POLICY = [/venue/i, /\bsport\b/i, /\bdate\b/i, /market scope/i, /uninspected/i, /empty result/i, /CALLER_POLICY_MARKER/, /Never substitute another bookmaker/];
+  const system = (call) => call.prompt.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+  const rest = (call) => JSON.stringify(call.prompt.filter((m) => m.role !== "system"));
+  const assertSamePolicy = (first, retry) => {
+    for (const re of POLICY) {
+      assert.match(system(first), re, `first check: ${re}`);
+      assert.match(system(retry), re, `retry: ${re}`);
+    }
+    assert.match(system(retry), /Return only the JSON verdict/);
+    for (const call of [first, retry]) {
+      assert.ok(rest(call).includes("PRIVATE_CONTEXT_MARKER"), "context stays user content");
+      assert.doesNotMatch(system(call), /PRIVATE_CONTEXT_MARKER/, "never with system authority");
+    }
+  };
+
+  it("monitor: the retry judges coverage and caller policy like the first check, then keeps the flagged draft", async () => {
+    const { engine, model } = fixture({ replies: ["not json", FLAG] });
+    assert.equal(await engine.validateResponseEvidence(wrongVenue), wrongVenue.draft, "configured monitor semantics");
+    assert.equal(model.doGenerateCalls.length, 2, "one check, one retry");
+    assertSamePolicy(...model.doGenerateCalls);
+  });
+
+  it("correct: a retried flag gets exactly one correction and one recheck under the same policy", async () => {
+    const { engine, model } = fixture({ replies: ["not json", FLAG, CORRECTED, CLEAN], verifier: { generativeAction: "correct" } });
+    assert.equal(await engine.validateResponseEvidence(wrongVenue), CORRECTED);
+    assert.equal(model.doGenerateCalls.length, 4, "check, retry, one correction, recheck");
+    const [first, retry, correction, recheck] = model.doGenerateCalls;
+    assertSamePolicy(first, retry);
+    assert.match(system(correction), /Do not substitute another venue/);
+    assert.match(system(correction), /CALLER_POLICY_MARKER/);
+    for (const re of POLICY) assert.match(system(recheck), re, `recheck: ${re}`);
+    assert.ok(!rest(recheck).includes(wrongVenue.draft), "the recheck judges the correction, not the rejected draft");
+  });
+});
