@@ -60,6 +60,6 @@ describe("evidence gate", () => {
   });
   it("is not triggered by a failed query_tool_result (source check)", () => {
     const source = readFileSync(new URL("../dist/engine.js", import.meta.url), "utf8");
-    assert.match(source, /!succeededToolNames\.has\(f\.toolName\) && f\.toolName !== QUERY_TOOL_RESULT_TOOL/);
+    assert.match(source, /f\.toolName !== QUERY_TOOL_RESULT_TOOL && !recovered\(id\)/);
   });
 });

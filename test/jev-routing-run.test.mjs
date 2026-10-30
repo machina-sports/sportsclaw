@@ -511,31 +511,44 @@ const REAL = `
   const call = (toolName, input) => ({type:'tool-call', toolCallId:toolName + '-' + Math.random().toString(36).slice(2), toolName, input:JSON.stringify(input)});
   const reply = (content) => ({content, finishReason:{unified:content.some((p) => p.type === 'tool-call') ? 'tool-calls' : 'stop', raw:undefined}, usage, warnings:[]});
 
-  function realHarness({pool, disposition = 'clarify', required = [], allowlist, publicToolNames, parallelAgents = false, payloads, script, toolNames, noToolsReply = 'SYNTHESIZED'}) {
-    const counts = {routingHttp:0, dispatched:[], dispatchArgs:[], modelCalls:0, evidenceStates:[], mainPrompts:[]};
-    const skills = ['nba','nfl'];
+  // skills, dispatch (per-call result), toolless (checker/editor reply; undefined keeps the default),
+  // evidenceVerifier (used as given) and evidenceChoose (per Jev check) are optional fixtures.
+  function realHarness({pool, disposition = 'clarify', required = [], allowlist, publicToolNames, parallelAgents = false, payloads, script, toolNames, noToolsReply = 'SYNTHESIZED',
+    skills = ['nba','nfl'], dispatch, toolless, evidenceVerifier, evidenceChoose = () => 'supported'}) {
+    const counts = {routingHttp:0, routingBodies:[], dispatched:[], dispatchArgs:[], dispatchInputs:[], modelCalls:0, evidenceStates:[], evidenceBodies:[], mainPrompts:[], toolless:[]};
     const specs = (toolNames ?? skills.map((s) => s + '_get_scores')).map((name) => ({name, description:'scores', parameters:{}, input_schema:{type:'object', properties:{}}}));
     const routingTransport = jevAnswer((id) => id === 'disposition' ? disposition : required.includes(id) ? 'required' : 'not_required');
     const engine = Object.create(sportsclawEngine.prototype);
     engine.config = {...DEFAULT_CONFIG, maxTurns:8, parallelAgents,
       routing:{provider:'jev', dataPolicy:'cloud_allowed', env:{TYPESAFE_API_KEY:'synthetic-key'}, publicDataTools:pool,
-        transport:async (url, init) => { counts.routingHttp++; return routingTransport(url, init); }},
+        transport:async (url, init) => { counts.routingHttp++; counts.routingBodies.push(init.body); return routingTransport(url, init); }},
       ...(publicToolNames ? {evidenceVerifier:{provider:'jev', dataPolicy:'cloud_allowed', publicToolNames, env:{TYPESAFE_API_KEY:'synthetic-key'},
-        transport:async (url, init) => { counts.evidenceStates.push(JSON.parse(init.body).state); return jevAnswer(() => 'supported')(url, init); }}} : {}),
+        transport:async (url, init) => {
+          counts.evidenceStates.push(JSON.parse(init.body).state); counts.evidenceBodies.push(init.body);
+          const n = counts.evidenceStates.length;
+          return jevAnswer((id) => evidenceChoose(n, id))(url, init);
+        }}} : {}),
+      ...(evidenceVerifier ? {evidenceVerifier} : {}),
       ...(allowlist ? {toolAllowlist:allowlist} : {})};
     engine.messages = [];
     engine.mainModelId = 'synthetic-main-model';
     engine.mainModel = new MockLanguageModelV3({doGenerate: async (options) => {
       counts.modelCalls++;
       const text = JSON.stringify(options.prompt);
-      // Tool-less calls are the checker (answered clean) or lane synthesis.
-      if (!options.tools?.length) return reply([{type:'text', text:/isValid/.test(text) ? VERDICT_OK() : noToolsReply}]);
+      // Tool-less calls are the checker (answered clean), the editor or lane synthesis.
+      if (!options.tools?.length) {
+        counts.toolless.push(options);
+        return reply([{type:'text', text:toolless?.(options) ?? (/isValid/.test(text) ? VERDICT_OK() : noToolsReply)}]);
+      }
       counts.mainPrompts.push({offered:options.tools.map((t) => t.name), text});
       return reply(await script(shown(options), options, text));
     }});
     engine.registry = {getInstalledSkills:() => skills, getAllToolSpecs:() => specs,
       getSkillName:(name) => skills.includes(name.split('_')[0]) ? name.split('_')[0] : undefined,
-      dispatchToolCall:async (name, ...args) => { counts.dispatched.push(name); counts.dispatchArgs.push(JSON.stringify(args)); return {isError:false, content:payloads[name]}; }};
+      dispatchToolCall:async (name, ...args) => {
+        counts.dispatched.push(name); counts.dispatchArgs.push(JSON.stringify(args)); counts.dispatchInputs.push(args[0]);
+        return dispatch ? dispatch(name, args[0]) : {isError:false, content:payloads[name]};
+      }};
     engine.mcpManager = {serverCount:0, setUserId(){}, getToolSpecs:() => [], getMachinaLoopServer:() => undefined};
     engine.initAsync = async () => {};
     engine.buildSystemPrompt = (args) => 'SYNTHETIC_MAIN_SYSTEM LANE:' + (args.agents ?? []).map((a) => a.id).join(',');
@@ -838,6 +851,242 @@ test('an empty filtered result reaches the checker with its actual filter and ma
     console.log(JSON.stringify({scoped:true}));
   `);
   assert.deepEqual(result, {scoped:true});
+});
+
+// ---------------------------------------------------------------------------
+// Prediction-market answers: one approved public Polymarket reader, a failed
+// scope beside a successful one, and caller-owned conversation context that
+// reaches only the primary checker and correction. Synthetic data in the public
+// SDK shape; registry dispatch, Jev transports and the model are fixtures.
+// ---------------------------------------------------------------------------
+
+const MARKETS = `
+  ${REAL}
+  const PM = 'polymarket_get_events';
+  const pmEvents = (league) => JSON.stringify({status:true, data:{events:[{id:league + '-e1', title:league.toUpperCase() + ' synthetic matchup',
+    slug:league + '-synthetic-matchup', status:'active', markets:[
+      {id:league + '-m1', question:'Synthetic Home to win?', status:'active', sports_market_type:'moneyline',
+        outcomes:[{name:'Synthetic Home', price:0.55, clob_token_id:'tok-' + league + '-1'}, {name:'Synthetic Away', price:0.45, clob_token_id:'tok-' + league + '-2'}]},
+      {id:league + '-m0', question:'Synthetic earlier line?', status:'closed', sports_market_type:'moneyline',
+        outcomes:[{name:'Synthetic Home', price:1, clob_token_id:'tok-' + league + '-0'}]}]}], count:1}});
+  const pmFailure = {isError:true, content:JSON.stringify({error:'synthetic upstream error'})};
+  const sysOf = (prompt) => prompt.filter((m) => m.role === 'system').map((m) => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\\n');
+  const restOf = (prompt) => JSON.stringify(prompt.filter((m) => m.role !== 'system'));
+  /** The text around a rule, so a scope assertion reads that rule rather than the whole prompt. */
+  const near = (text, needle, span = 400) => { const i = text.indexOf(needle); return i < 0 ? '' : text.slice(Math.max(0, i - span), i + span); };
+  /** Only the failed-scope section, up to the current request, so a scope match is not the request's own wording. */
+  const scopesOf = (text) => { const i = text.indexOf('Failed lookup scopes'); if (i < 0) return ''; const j = text.indexOf('User request:', i); return text.slice(i, j < 0 ? undefined : j); };
+  const isChecker = (options) => /isValid/.test(sysOf(options.prompt));
+  const isCorrection = (options) => /expert sports editor/.test(sysOf(options.prompt));
+  const FLAG_VERDICT = JSON.stringify({isValid:false, discrepancies:[{claim:'There are no NFL markets on Polymarket',
+    evidence:'The NFL read returned no data', severity:'high', kind:'unsupported'}]});
+`;
+
+test('a failed NFL read of the public Polymarket reader stays failed beside its successful NBA read', () => {
+  const result = runIsolated('jev-market-scope-', `
+    ${MARKETS}
+    const DATE = '2026-10-29';
+    const DRAFT = 'Polymarket NBA: Synthetic Home 0.55. There are no NFL markets on Polymarket today.';
+    const HONEST = 'Polymarket NBA: Synthetic Home 0.55. The Polymarket NFL read failed this turn, so NFL markets are unavailable here.';
+    /**
+     * nflCalls identical NFL reads beside one NBA read in the same step; only the first NFL read fails.
+     * parallelAgents: one NBA and one NFL Polymarket lane (agents created below) each make their own read,
+     * and the lane synthesis returns DRAFT. nbaFails: the NBA read fails too (no successful read at all).
+     */
+    const run = async (nflCalls, {parallelAgents = false, nbaFails = false, mode = 'generative', history} = {}) => {
+      const seen = {};
+      let checks = 0;
+      const PROMPT = 'Polymarket NBA and NFL markets today';
+      const lane = (text) => text.includes('LANE:pm-nfl-lane') ? 'nfl' : 'nba';
+      const h = realHarness({pool:[PM], skills:['polymarket','nba','nfl'], toolNames:[PM, 'nba_get_scores', 'nfl_get_scores'],
+        parallelAgents, ...(parallelAgents ? {disposition:'select', required:['c0']} : {}), noToolsReply:DRAFT,
+        ...(mode === 'jev'
+          ? {publicToolNames:[PM], evidenceChoose:(n, id) => n === 1 && id === 'coverage_freshness' ? 'contradicted' : 'supported'}
+          : {evidenceVerifier:{generativeAction:'correct'}}),
+        dispatch:(_name, input) => {
+          seen[input.league] = (seen[input.league] ?? 0) + 1;
+          return (input.league === 'nfl' && seen.nfl === 1) || (input.league === 'nba' && nbaFails)
+            ? pmFailure : {isError:false, content:pmEvents(input.league)};
+        },
+        toolless:(options) => isCorrection(options) ? HONEST
+          : isChecker(options) ? (checks++ === 0 && nflCalls === 1 ? FLAG_VERDICT : VERDICT_OK()) : undefined,
+        script:async (results, _options, text) => {
+          if (parallelAgents) {
+            if (results.length === 0) return [call(PM, {league:lane(text), date:DATE})];
+            return [{type:'text', text:lane(text) === 'nfl' ? 'There are no NFL markets on Polymarket today.' : 'Polymarket NBA: Synthetic Home 0.55.'}];
+          }
+          return results.length === 0
+            ? [...Array.from({length:nflCalls}, () => call(PM, {league:'nfl', date:DATE})), call(PM, {league:'nba', date:DATE})]
+            : [{type:'text', text:DRAFT}];
+        }});
+      const answer = await h.engine.run(PROMPT, history ? {historyMode:'caller', history:[...history, {role:'user', content:PROMPT}]} : undefined);
+      assert.equal(h.engine.lastRunTrace.parallelAgents, parallelAgents, 'the intended lane path ran');
+      const checkers = h.counts.toolless.filter(isChecker);
+      const corrections = h.counts.toolless.filter(isCorrection);
+      // Reader ownership and permissions are unchanged: only the approved reader and its result reader.
+      for (const prompt of h.counts.mainPrompts) {
+        assert.ok(prompt.offered.includes(PM));
+        assert.deepEqual(prompt.offered.filter((name) => name !== PM && name !== 'query_tool_result'), [], 'no other executor offered');
+      }
+      assert.ok(h.counts.dispatched.every((name) => name === PM), 'only the approved reader dispatched');
+      // The actual SDK tool-call input reached dispatch unchanged.
+      for (const input of h.counts.dispatchInputs) assert.deepEqual(Object.keys(input).sort(), ['date', 'league']);
+      assert.ok(h.counts.dispatchInputs.every((input) => input.date === DATE));
+      return {answer, checkers, corrections, counts:h.counts, engine:h.engine};
+    };
+
+    // A different scope: NFL failed, NBA succeeded with the same reader.
+    const scoped = await run(1);
+    assert.deepEqual(scoped.counts.dispatchInputs.map((input) => input.league).sort(), ['nba', 'nfl']);
+    assert.ok(scoped.checkers.length >= 1);
+    const checkerSystem = sysOf(scoped.checkers[0].prompt);
+    assert.match(checkerSystem, /failed this turn/, 'the checker keeps the NFL failure although NBA succeeded');
+    assert.match(near(restOf(scoped.checkers[0].prompt), 'Failed lookup scopes'), /nfl/i, 'failed scope is user-context data, not system authority');
+    assert.ok(!checkerSystem.includes('\"league\"'), 'raw lookup arguments never enter system authority');
+    assert.equal(scoped.corrections.length, 1, 'the existing single correction');
+    const editorSystem = sysOf(scoped.corrections[0].prompt);
+    assert.match(editorSystem, /failed this turn/, 'the correction keeps the failed-source rule');
+    assert.match(near(restOf(scoped.corrections[0].prompt), 'Failed lookup scopes'), /nfl/i, 'correction gets the failed scope as context');
+    assert.ok(!editorSystem.includes('\"league\"'), 'correction scope is not system authority');
+    assert.equal(scoped.answer, HONEST);
+
+    // The same signature recovered in parallel: no remaining failure is invented.
+    const recovered = await run(2);
+    assert.equal(recovered.counts.dispatched.length, 3);
+    for (const checker of recovered.checkers) assert.doesNotMatch(sysOf(checker.prompt), /failed this turn/, 'an identical successful call clears its failure');
+    assert.equal(recovered.corrections.length, 0);
+    assert.equal(recovered.answer, DRAFT);
+
+    // Parallel lanes: the same failed scope, failed-source rule and owned context reach the
+    // primary checker and correction; Jev gets the public failure rule but never the context.
+    const {createAgent} = await import(${JSON.stringify(new URL('../dist/agents.js', import.meta.url).href)});
+    await createAgent({id:'pm-nba-lane', name:'Polymarket NBA lane', body:'Polymarket NBA only', skills:['polymarket']});
+    await createAgent({id:'pm-nfl-lane', name:'Polymarket NFL lane', body:'Polymarket NFL only', skills:['polymarket']});
+    const PREFERENCE = 'Only Polymarket, not Kalshi, for my NBA and NFL teams';
+    const HISTORY = [{role:'user', content:'PRIVATE_HISTORY_MARKER ' + PREFERENCE}, {role:'assistant', content:'Understood.'}];
+    for (const mode of ['generative', 'jev']) {
+      const lanes = await run(1, {parallelAgents:true, mode, history:HISTORY});
+      assert.deepEqual(lanes.counts.dispatchInputs.map((input) => input.league).sort(), ['nba', 'nfl'], mode + ': each lane made its own read');
+      assert.equal(lanes.corrections.length, 1, mode + ': the existing single correction');
+      const editor = lanes.corrections[0].prompt;
+      assert.match(sysOf(editor), /failed this turn/, mode + ': lane correction keeps the failed-source rule');
+      assert.match(scopesOf(restOf(editor)), /nfl/i, mode + ': lane correction gets the failed scope');
+      assert.doesNotMatch(scopesOf(restOf(editor)), /nba/i, mode + ': the successful NBA read is not listed as failed');
+      assert.ok(restOf(editor).includes(PREFERENCE), mode + ': lane correction keeps the venue preference');
+      assert.ok(!sysOf(editor).includes('PRIVATE_HISTORY_MARKER') && !sysOf(editor).includes('\"league\"'), mode + ': as user data only');
+      if (mode === 'generative') {
+        const checkerSystem = sysOf(lanes.checkers[0].prompt);
+        assert.match(checkerSystem, /failed this turn/, 'lane checker keeps the NFL failure beside the NBA success');
+        assert.match(scopesOf(restOf(lanes.checkers[0].prompt)), /nfl/i);
+        assert.ok(restOf(lanes.checkers[0].prompt).includes(PREFERENCE), 'lane checker sees the owned context');
+        assert.ok(!checkerSystem.includes('\"league\"'));
+      } else {
+        assert.equal(lanes.counts.evidenceStates.length, 2, 'check and recheck');
+        assert.match(lanes.counts.evidenceStates[0], /failed this turn/, 'Jev gets the public failed-source rule');
+        assert.deepEqual(lanes.engine.evidenceReceipts.map((r) => r.status), ['contradicted', 'supported']);
+      }
+      for (const body of [...lanes.counts.routingBodies, ...lanes.counts.evidenceBodies]) {
+        for (const text of ['PRIVATE_HISTORY_MARKER', PREFERENCE, 'Failed lookup scopes']) assert.ok(!body.includes(text), mode + ': ' + text + ' reached Jev');
+      }
+    }
+
+    // No successful lane read at all: the check still knows both reads failed, not that nothing was fetched.
+    const none = await run(1, {parallelAgents:true, nbaFails:true});
+    assert.equal(none.counts.dispatched.length, 2);
+    const noneSystem = sysOf(none.checkers[0].prompt);
+    assert.match(noneSystem, /failed this turn/, 'a failed parallel read is a failure, never a source-free answer');
+    assert.doesNotMatch(noneSystem, /No source data was fetched this turn/);
+    const noneScopes = scopesOf(restOf(none.checkers[0].prompt));
+    assert.match(noneScopes, /nfl/i);
+    assert.match(noneScopes, /nba/i);
+    console.log(JSON.stringify({scoped:true}));
+  `);
+  assert.deepEqual(result, {scoped:true});
+});
+
+test('a four-turn Polymarket conversation reaches the primary checker and correction as user context, never Jev', () => {
+  const result = runIsolated('jev-market-context-', `
+    ${MARKETS}
+    const {MemoryManager} = await import(${JSON.stringify(new URL('../dist/memory.js', import.meta.url).href)});
+    const TOMORROW = '2026-10-30';
+    const HISTORY = [
+      {role:'user', content:'PRIVATE_HISTORY_MARKER Show my Polymarket markets for my teams tonight'},
+      {role:'assistant', content:'Polymarket tonight: Lakers moneyline 0.55. NFL markets were not shown.'},
+      {role:'user', content:'Only Polymarket, not Kalshi. What about the NBA ones?'},
+      {role:'assistant', content:'Polymarket NBA tonight: Lakers 0.55, Celtics 0.48.'},
+      {role:'user', content:'Why did you omit the NFL ones?'},
+      {role:'assistant', content:'The NFL read did not return data, so I left it out.'},
+    ];
+    const CURRENT = 'And tomorrow?';
+    const DRAFT = 'Tomorrow on Polymarket: Synthetic Home 0.55. There are no NFL markets tomorrow.';
+    const HONEST = 'Tomorrow on Polymarket: Synthetic Home 0.55. The Polymarket NFL read failed this turn, so NFL markets are unavailable here.';
+    const PRIVATE = ['PRIVATE_PROFILE_MARKER', 'PRIVATE_HISTORY_MARKER', 'Why did you omit the NFL ones?'];
+    let cases = 0;
+    for (const mode of ['jev', 'generative']) {
+      const userId = 'market-user-' + mode;
+      await new MemoryManager(userId).writeFanProfile('PRIVATE_PROFILE_MARKER follows NBA (Lakers) and NFL (Chiefs); older venue preference: Kalshi');
+      let checks = 0;
+      const {engine, counts} = realHarness({pool:[PM], skills:['polymarket','kalshi','nba','nfl'],
+        toolNames:[PM, 'kalshi_get_markets', 'nba_get_scores', 'nfl_get_scores'],
+        ...(mode === 'jev'
+          ? {publicToolNames:[PM], evidenceChoose:(n, id) => n === 1 && id === 'coverage_freshness' ? 'contradicted' : 'supported'}
+          : {evidenceVerifier:{generativeAction:'correct'}}),
+        dispatch:(_name, input) => input.league === 'nfl' ? pmFailure : {isError:false, content:pmEvents(input.league)},
+        toolless:(options) => isCorrection(options) ? HONEST : isChecker(options) ? (checks++ === 0 ? FLAG_VERDICT : VERDICT_OK()) : undefined,
+        script:async (results) => results.length === 0
+          ? [call(PM, {league:'nba', date:TOMORROW}), call(PM, {league:'nfl', date:TOMORROW})]
+          : [{type:'text', text:DRAFT}]});
+      const answer = await engine.run(CURRENT, {userId, historyMode:'caller', history:[...HISTORY, {role:'user', content:CURRENT}]});
+
+      // The main model already sees the owned history and memory as user context.
+      const main = JSON.parse(counts.mainPrompts[0].text);
+      const mainTurns = restOf(main);
+      let at = -1;
+      for (const turn of HISTORY) { const next = mainTurns.indexOf(JSON.stringify(turn.content).slice(1, -1)); assert.ok(next > at, mode + ': history in order'); at = next; }
+      assert.equal(main.at(-1).role, 'user');
+      assert.ok(JSON.stringify(main.at(-1).content).includes(CURRENT), mode + ': current turn last');
+      assert.ok(mainTurns.includes('PRIVATE_PROFILE_MARKER'), mode + ': saved profile reaches the main model');
+      for (const marker of PRIVATE) assert.ok(!sysOf(main).includes(marker), mode + ': never with system authority');
+
+      // Tool arguments keep the venue and the new date, for both sports; nothing outside the approved reader.
+      assert.ok(counts.dispatched.every((name) => name === PM), mode + ': only the Polymarket reader');
+      assert.deepEqual(counts.dispatchInputs.map((input) => input.league).sort(), ['nba', 'nfl']);
+      assert.ok(counts.dispatchInputs.every((input) => input.date === TOMORROW));
+      for (const prompt of counts.mainPrompts) {
+        for (const name of ['kalshi_get_markets', 'nba_get_scores', 'nfl_get_scores']) {
+          assert.ok(!prompt.offered.includes(name), mode + ': history naming ' + name + ' grants nothing');
+        }
+      }
+
+      // The one correction gets the conversation as user content plus the failed-source rule.
+      const corrections = counts.toolless.filter(isCorrection);
+      assert.equal(corrections.length, 1, mode + ': the existing single correction');
+      const editor = corrections[0].prompt;
+      for (const text of ['Why did you omit the NFL ones?', 'Only Polymarket, not Kalshi', 'PRIVATE_PROFILE_MARKER', CURRENT]) {
+        assert.ok(restOf(editor).includes(text), mode + ': correction sees ' + text);
+      }
+      for (const marker of PRIVATE) assert.ok(!sysOf(editor).includes(marker), mode + ': correction context is never system authority');
+      assert.match(sysOf(editor), /failed this turn/, mode + ': correction keeps the failed-source rule');
+      assert.match(near(restOf(editor), 'Failed lookup scopes'), /nfl/i, mode + ': failed scope is context data');
+
+      if (mode === 'generative') {
+        const checker = counts.toolless.filter(isChecker)[0].prompt;
+        assert.ok(restOf(checker).includes('Why did you omit the NFL ones?'), 'the primary checker sees the conversation');
+        for (const marker of PRIVATE) assert.ok(!sysOf(checker).includes(marker), 'as user content only');
+      } else {
+        assert.equal(counts.evidenceStates.length, 2, 'check and recheck');
+        assert.deepEqual(engine.evidenceReceipts.map((r) => r.status), ['contradicted', 'supported']);
+      }
+      // Jev never receives profile or history, for routing or evidence.
+      for (const body of [...counts.routingBodies, ...counts.evidenceBodies]) {
+        for (const marker of PRIVATE) assert.ok(!body.includes(marker), mode + ': ' + marker + ' reached Jev');
+      }
+      assert.equal(answer, HONEST, mode);
+      cases++;
+    }
+    console.log(JSON.stringify({cases}));
+  `);
+  assert.deepEqual(result, {cases:2});
 });
 
 // ---------------------------------------------------------------------------

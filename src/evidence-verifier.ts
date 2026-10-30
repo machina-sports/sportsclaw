@@ -178,9 +178,10 @@ const CRITERION_SPECS: Record<EvidenceCriterion, { instructions: string; support
   },
   coverage_freshness: {
     instructions:
-      "Judge coverage and freshness handling. Missing optional coverage does not invalidate independently supported reporting. Dated, attributed reporting is usable as background, not proof of current availability. Headline-only evidence supports only its explicit claim, not medical clearance, tactical attributes, a full lineup or officiating tendencies. Material uncertainty belongs beside the claim it qualifies, not in an empty unavailable section.",
+      "Judge coverage and freshness handling. Missing optional coverage does not invalidate independently supported reporting. Dated, attributed reporting is usable as background, not proof of current availability. Headline-only evidence supports only its explicit claim, not medical clearance, tactical attributes, a full lineup or officiating tendencies. Material uncertainty belongs beside the claim it qualifies, not in an empty unavailable section. " +
+      "A negative claim (no games, no market) is supported only by a successful result for that venue, sport and date in the source data; a failed, partial or unqueried scope does not establish absence.",
     supported: "Coverage gaps, source timestamps and the limits of headline-only evidence are handled honestly.",
-    contradicted: "The candidate hides a coverage gap, treats dated or headline-only reporting as current proof, or misstates observation times.",
+    contradicted: "The candidate hides a coverage gap, presents a failed, partial or unqueried scope as empty, treats dated or headline-only reporting as current proof, or misstates observation times.",
     correctionClaim: "criterion coverage_freshness: coverage limits or source recency are misrepresented.",
     correctionEvidence: "Keep genuine source links and observation times, and keep material uncertainty beside the claim it qualifies.",
   },

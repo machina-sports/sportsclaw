@@ -261,6 +261,60 @@ describe("caller history and in-memory follow-ups stay supported", () => {
   });
 });
 
+describe("market follow-ups keep venue, date and saved context", () => {
+  // One line of the composed system prompt each; wording may differ, the rule may not.
+  const CONTRACTS = {
+    "a follow-up keeps the named venue and the date": /\bvenues?\b[^\n]*\bdates?\b|\bdates?\b[^\n]*\bvenues?\b/i,
+    "the latest explicit correction beats older saved preferences":
+      /\blatest\b[^\n]*\b(correction|instruction)s?\b[^\n]*\b(memory|preferences?|profile)\b|\b(memory|preferences?|profile)\b[^\n]*\blatest\b[^\n]*\b(correction|instruction)s?\b/i,
+    "relevant interests across several sports stay in scope":
+      /\binterests?\b[^\n]*\b(every|each|all|several|multiple)\b[^\n]*\b(sports?|leagues?)\b|\b(every|each|all|several|multiple)\b[^\n]*\b(sports?|leagues?)\b[^\n]*\binterests?\b/i,
+    "an empty result covers only the scope that was read": /\bempty\b[^\n]*\b(only|just)\b[^\n]*\b(scope|source|venue)\b/i,
+    "a failed or partial read is not an empty one": /\b(fail\w*|partial)\b[^\n]*\b(not|never)\b[^\n]*\bempty\b|\bempty\b[^\n]*\b(not|never)\b[^\n]*\b(fail\w*|partial)\b/i,
+    "no invented internal cause": /\b(never|do not|don't)\b[^\n]*\b(invent|guess|speculate)\b[^\n]*\bcauses?\b/i,
+    "no product or rollout promises": /\b(never|do not|don't)\b[^\n]*\b(promise|rollout)s?\b/i,
+  };
+
+  it("a four-turn Polymarket conversation keeps owned context as user turns and states the scope contracts", async () => {
+    const userId = "market-scope-user";
+    await new MemoryManager(userId).writeFanProfile(
+      "PRIVATE_PROFILE_MARKER follows NBA (Lakers) and NFL (Chiefs); older venue preference: Kalshi"
+    );
+    const history = [
+      { role: "user", content: "PRIVATE_HISTORY_MARKER Show my Polymarket markets for my teams tonight" },
+      { role: "assistant", content: "Polymarket tonight: Lakers moneyline 0.55. NFL markets were not shown." },
+      { role: "user", content: "Only Polymarket, not Kalshi. What about the NBA ones?" },
+      { role: "assistant", content: "Polymarket NBA tonight: Lakers 0.55, Celtics 0.48." },
+      { role: "user", content: "Why did you omit the NFL ones?" },
+      { role: "assistant", content: "The NFL read did not return data, so I left it out." },
+    ];
+    const { engine, state, mainCalls } = makeEngine();
+    state.route = route(["polymarket"], "focused", 0.9, { intent: "odds" });
+    state.answer = "Tomorrow on Polymarket: Lakers 0.55. The NFL read failed, so NFL markets are unavailable here.";
+
+    await engine.run("And tomorrow?", { userId, historyMode: "caller", history });
+
+    const call = mainCalls().at(-1);
+    const turns = turnsOf(call);
+    let at = -1;
+    for (const turn of history) {
+      const next = turns.findIndex((t, i) => i > at && t.role === turn.role && t.text === turn.content);
+      assert.ok(next > at, `history turn missing or out of order: ${turn.content}`);
+      at = next;
+    }
+    assert.deepEqual(turns.at(-1), { role: "user", text: "And tomorrow?" });
+    assert.ok(
+      turns.some((t) => t.role === "user" && t.text.startsWith(MEMORY_SENTINEL) && t.text.includes("PRIVATE_PROFILE_MARKER")),
+      "saved profile is injected as user-role memory"
+    );
+    const system = textOf(call.prompt.filter((m) => m.role === "system"));
+    for (const marker of ["PRIVATE_PROFILE_MARKER", "PRIVATE_HISTORY_MARKER", "Why did you omit the NFL ones?"]) {
+      assert.ok(!system.includes(marker), `${marker} must not be promoted to the system prompt`);
+    }
+    for (const [label, contract] of Object.entries(CONTRACTS)) assert.match(system, contract, label);
+  });
+});
+
 describe("routePromptToSkills keeps every explicitly requested venue", () => {
   const baseConfig = {
     routingMode: "soft_lock",
