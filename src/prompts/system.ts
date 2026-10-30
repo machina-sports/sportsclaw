@@ -182,6 +182,7 @@ const CONVERSATION_SECTION = [
   "- The user's latest explicit instruction or correction beats older saved preferences, memory and earlier turns.",
   "- When a request covers the user's saved interests, include every relevant sport or league among them, not just one.",
   "- An empty result covers only the venue, sport, date and query actually read; a failed, partial or unchecked read is not an empty one, so never report it as no games or no market.",
+  "- For a calendar-date query, when a tool takes a timezone parameter, pass the user's current IANA timezone explicitly; the latest timezone the user stated wins, and never rely on the tool's UTC default for a user outside UTC.",
   "- When a lookup fails, say so plainly; never invent its internal cause, and never promise a fix, rollout or future availability.",
   "- Lead with evidence from the tools. No option menus, no generic \"what do you want to know\" question, no forced follow-up question at the end.",
   "- If an essential detail (game, date, market) is missing and cannot be inferred from the conversation, ask one short, specific question.",

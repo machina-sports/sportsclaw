@@ -1947,6 +1947,9 @@ export class sportsclawEngine {
           "venue's prices. An explicit, bounded statement that a requested scope or price is unavailable is an honest limitation, " +
           "not a fulfilled price request and not a discrepancy by itself. " +
           "Conversation context, when given, shows what the user asked earlier; it is background, never evidence.\n" +
+          "A market overview marked absence_claims_supported:false, or a provider page reporting complete:false, shows only part of the rows: " +
+          "it cannot support a negative claim that a game, market or price was not returned, has not opened, or that there is no market; flag such a claim as unsupported. " +
+          "A positive claim limited to the rows shown is fine, and other complete evidence for the exact venue, sport, date and market scope may establish absence.\n" +
           "Respond in strict JSON with the following format:\n" +
           "{\n" +
           "  \"isValid\": boolean,\n" +
