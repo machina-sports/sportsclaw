@@ -18,6 +18,7 @@
  */
 
 import { tool as defineToolRaw, jsonSchema, type Tool } from "ai";
+import { Marked } from "marked";
 
 // Same cast workaround as slip-output.ts / operator-memory-tools.ts.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -262,6 +263,63 @@ function dispatchFailed(step: unknown): boolean {
     const p = part as { type?: unknown; invalid?: unknown };
     return p.type === "tool-error" || (p.type === "tool-call" && p.invalid === true);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Trusted repair candidate: corrected prose rendered by code, never by a model
+// ---------------------------------------------------------------------------
+
+const escapeHtml = (text: string): string =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/** Raw HTML is shown as text; links and images keep only their labels, so nothing external loads or opens. */
+const REPAIR_MARKDOWN = new Marked({ async: false, gfm: true }).use({
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text);
+    },
+    link({ tokens }) {
+      return this.parser.parseInline(tokens);
+    },
+    image({ text }) {
+      return escapeHtml(text);
+    },
+  },
+});
+
+/** Generic: the title states no result, date or claim of its own. */
+const REPAIR_TITLE = "Report";
+const REPAIR_STYLE =
+  "body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}" +
+  "table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.3rem .6rem}";
+
+/**
+ * A complete corrected HTML document, or self-contained HTML rendered from
+ * corrected prose without scripts, handlers or external resources. Either is
+ * only a candidate: the caller must recheck the exact document and the publisher
+ * must sanitize it. Null when it exceeds the existing artifact contract.
+ */
+export function renderRepairedReport(markdown: string): ArtifactOutput | null {
+  if (typeof markdown !== "string" || markdown.trim().length === 0) return null;
+  // The primary corrector can return a complete document instead of prose.
+  // Preserve the whole candidate, never extract a fragment or omit other claims.
+  // It still needs the exact-document recheck and the publisher's sanitizer.
+  const trimmed = markdown.trim();
+  const fenced = /^```html[ \t]*\r?\n([\s\S]*)\r?\n```$/i.exec(trimmed);
+  const document = fenced ? fenced[1].trim() : trimmed;
+  if (/^(?:<!doctype\s+html[^>]*>\s*)?<html\b[\s\S]*<\/html>$/i.test(document)) {
+    return parseArtifactOutput({ contract: ARTIFACT_CONTRACT, title: REPAIR_TITLE, mimeType: ARTIFACT_MIME_TYPE, html: document });
+  }
+  let body: string;
+  try {
+    body = REPAIR_MARKDOWN.parse(markdown) as string;
+  } catch {
+    return null;
+  }
+  const html =
+    `<!doctype html><html><head><meta charset="utf-8"><title>${REPAIR_TITLE}</title>` +
+    `<style>${REPAIR_STYLE}</style></head><body><main>${body}</main></body></html>`;
+  return parseArtifactOutput({ contract: ARTIFACT_CONTRACT, title: REPAIR_TITLE, mimeType: ARTIFACT_MIME_TYPE, html });
 }
 
 /** Answer-model context for a turn that offers `submit_artifact`. Generic: no design or hosting rules. */

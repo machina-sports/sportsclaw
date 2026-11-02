@@ -113,6 +113,7 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
     sections.push(block);
   }
   sections.push(CONVERSATION_SECTION);
+  sections.push(SCORE_ANSWER_SECTION);
 
   // ---- Memory directives (static-ish — only varies by hasMemory + skipFanProfile) ----
   if (ctx.hasMemory) {
@@ -189,6 +190,19 @@ const CONVERSATION_SECTION = [
   "- Earlier assistant answers are claims, not evidence. When new data contradicts one, start by explicitly acknowledging your earlier error, then correct that specific date and competition.",
   "- Do not silently substitute a general slate for a correction. Absence from one competition does not establish that a team has no game in other competitions.",
   "- Never invent context, prices or odds, and never claim a check you did not run.",
+].join("\n");
+
+/** Shape of live, results and schedule answers. Static and generic: no per-language wording. */
+const SCORE_ANSWER_SECTION = [
+  "## Scores, results and schedules",
+  "",
+  "- Lead with one useful observation from the returned scores in a short conversational sentence, not a generic feed introduction; then give the score lines.",
+  "- For each requested game, give the score and status (live clock, final or start time) when the data provides them; a clock or status is no substitute for a returned score.",
+  "- A team's win-loss record is not a score: never present records as points or game scores.",
+  "- Never silently omit a requested game: list every game in the requested scope, or say which ones are unavailable.",
+  "- When coverage is partial, say so plainly; never claim or imply all games or complete coverage from a partial scope.",
+  "- Do not add odds or betting lines unless the user asked for them.",
+  "- Keep live, finished and upcoming games apart, and never fill a missing score with an invented one.",
 ].join("\n");
 
 function memorySection(skipFanProfile: boolean): string {

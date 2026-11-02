@@ -73,6 +73,9 @@ INTENT_OK = {"contract": D, "ok": True, "stage": "intent", "intent": "follow", "
 TARGET_OK = {"contract": D, "ok": True, "stage": "target",
              "selection": {"status": "selected", "targetId": "pub_take_lakers_clutch"},
              "model": MODEL, "confidence": 0.93, "margin": 0.84}
+WORKLOAD = {"contract": D, "stage": "workload", "text": "Monte um relatório completo do Flamengo", "locale": "pt"}
+WORKLOAD_OK = {"contract": D, "ok": True, "stage": "workload", "mode": "report", "model": MODEL,
+               "confidence": 0.95, "margin": 0.9}
 LEGACY_BODY = {"contract": LEGACY, "text": "follow the Lakers clutch take", "locale": "en",
                "eligible": {"takes": [{"id": "take_lakers_clutch", "label": "Lakers"}], "subscriptions": []}}
 LEGACY_OK = {"contract": LEGACY, "ok": True, "intent": {"action": "follow", "targetId": "take_lakers_clutch"}}
@@ -347,6 +350,75 @@ class ResultValidation(_Base):
         self.assertLessEqual(api.WATCH_INTENT_PROCESS_TIMEOUT_SEC, 30)
 
 
+class WorkloadStage(_Base):
+    """Additive stage on the same route and worker: exact request, typed advisory result."""
+
+    def test_workload_is_forwarded_with_exact_keys_in_server_order(self):
+        reordered = dict(reversed(list(WORKLOAD.items())))
+        response, calls, _, app = call(reordered, stdout=worker_says(WORKLOAD_OK))
+        self.assertEqual(response.status, 200, response.data)
+        self.assertEqual(response.data, WORKLOAD_OK)
+        self.assertEqual(calls[0]["cmd"], [NODE_BIN, api.worker_path(ENTRY)], "the same native worker")
+        self.assertEqual(calls[0]["env"], BUILD_ENV)
+        self.assertEqual(calls[0]["stdin"], compact(WORKLOAD))
+        self.assertEqual(app["active_queries"], 0)
+
+    def test_invalid_workload_bodies_are_refused_without_dispatch(self):
+        bad = {
+            "candidates": {**WORKLOAD, "candidates": CANDIDATES},
+            "referenceIds": {**WORKLOAD, "referenceIds": []},
+            "history": {**WORKLOAD, "history": []},
+            "profile": {**WORKLOAD, "profile": {}},
+            "html": {**WORKLOAD, "html": "<p>x</p>"},
+            "request-owned mode": {**WORKLOAD, "mode": "report"},
+            "text over 4000": {**WORKLOAD, "text": "x" * 4001},
+            "locale fr": {**WORKLOAD, "locale": "fr"},
+        }
+        for label, body in bad.items():
+            with self.subTest(label):
+                response, calls, _, _ = call(body)
+                self.assertRefusal(response, 400, "invalid_request", label=label)
+                self.assertEqual(calls, [], label)
+
+    def test_valid_workload_results_pass_through(self):
+        for mode in ("chat", "sports_update", "analysis", "report"):
+            with self.subTest(mode):
+                result = {**WORKLOAD_OK, "mode": mode}
+                self.assertEqual(call(WORKLOAD, stdout=worker_says(result))[0].data, result)
+        for name, result in [
+            ("uncertain below policy", {**WORKLOAD_OK, "mode": "uncertain", "confidence": 0.4, "margin": 0.01}),
+            ("typed failure", {"contract": D, "ok": False, "reasonCode": "inference_unavailable"}),
+            ("typed disabled", {"contract": D, "ok": False, "reasonCode": "disabled"}),
+        ]:
+            with self.subTest(name):
+                response, _, _, _ = call(WORKLOAD, stdout=worker_says(result))
+                self.assertEqual(response.status, 200, name)
+                self.assertEqual(response.data, result, name)
+
+    def test_untyped_workload_results_are_invalid_response(self):
+        for name, body, result in [
+            ("unknown mode", WORKLOAD, {**WORKLOAD_OK, "mode": "publish"}),
+            ("mode list", WORKLOAD, {**WORKLOAD_OK, "mode": ["report"]}),
+            ("report below confidence", WORKLOAD, {**WORKLOAD_OK, "confidence": 0.79}),
+            ("chat below margin", WORKLOAD, {**WORKLOAD_OK, "mode": "chat", "margin": 0.1}),
+            ("extra key", WORKLOAD, {**WORKLOAD_OK, "tools": ["publish"]}),
+            ("other model", WORKLOAD, {**WORKLOAD_OK, "model": "jev-1.13.0"}),
+            ("intent answer to workload", WORKLOAD, INTENT_OK),
+            ("workload answer to intent", INTENT, WORKLOAD_OK),
+            ("workload answer to target", TARGET, WORKLOAD_OK),
+        ]:
+            with self.subTest(name):
+                response, _, _, app = call(body, stdout=worker_says(result))
+                self.assertRefusal(response, 502, "invalid_response", label=name)
+                self.assertEqual(app["active_queries"], 0, name)
+
+    def test_auth_still_runs_first(self):
+        response, calls, request, _ = call(WORKLOAD, auth=denier)
+        self.assertEqual(response.status, 401)
+        self.assertEqual(request.content.reads, 0)
+        self.assertEqual(calls, [])
+
+
 class LegacyUnchanged(_Base):
     def test_legacy_request_and_result_still_round_trip(self):
         response, calls, _, _ = call(LEGACY_BODY, stdout=worker_says(LEGACY_OK))
@@ -393,6 +465,12 @@ class CompiledWorkerInterop(_Base):
                                           "SPORTSCLAW_WATCH_JEV_DATA_POLICY": "local_only"})
         self.assertEqual(response.status, 200, response.data)
         self.assertEqual(response.data, {"contract": D, "ok": False, "reasonCode": "disabled"})
+
+    def test_workload_missing_credential_is_typed_unavailable(self):
+        response = self.run_real(WORKLOAD, {"SPORTSCLAW_WATCH_JEV_ENABLED": "true",
+                                            "SPORTSCLAW_WATCH_JEV_DATA_POLICY": "cloud_allowed"})
+        self.assertEqual(response.status, 200, response.data)
+        self.assertEqual(response.data, {"contract": D, "ok": False, "reasonCode": "inference_unavailable"})
 
 
 if __name__ == "__main__":

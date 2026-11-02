@@ -143,6 +143,8 @@ import {
   artifactPromptSection,
   createArtifactOutputCollector,
   parseArtifactTurnInput,
+  renderRepairedReport,
+  type ArtifactOutput,
   type ArtifactOutputCollector,
   type ArtifactTurnInput,
   type ArtifactTurnResult,
@@ -1028,6 +1030,8 @@ interface ArtifactRun {
   result: ArtifactTurnResult | null;
   /** sha256 of the HTML a passing evidence check actually judged; only that document may be published. */
   checkedSha256?: string;
+  /** Code-rendered report of the corrected prose, set only when the one recheck passed this exact document. */
+  repaired?: ArtifactOutput;
 }
 
 /** A real submit_artifact call happened (accepted or refused); merely offering or denying the tool is not one. */
@@ -1068,7 +1072,7 @@ export class sportsclawEngine {
   }
   private _evidenceReceipts: EvidenceVerificationReceipt[] = [];
   /** Set while verifyWithTrace runs: whether the check could not run, the draft before any correction, the HTML a pass judged. */
-  private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string };
+  private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string; repair?: ArtifactOutput };
   private _lastRunTrace: RunTrace | null = null;
 
   /** Sanitized evidence-verification receipts from the last run(). */
@@ -1645,7 +1649,7 @@ export class sportsclawEngine {
     params: Parameters<sportsclawEngine["validateResponseEvidence"]>[0],
     artifact?: ArtifactRun,
   ): Promise<string> {
-    const notes: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string } = {};
+    const notes: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string; repair?: ArtifactOutput } = {};
     this._verifyNotes = notes;
     // The candidate document is judged with the prose, never as source evidence;
     // the caller's nonce is a known private value that must not leave.
@@ -1672,6 +1676,11 @@ export class sportsclawEngine {
       };
     }
     if (artifact && outcome === "kept" && notes.artifactSha256 !== undefined) artifact.checkedSha256 = notes.artifactSha256;
+    // A corrected answer may carry only the repair the recheck passed, bound by its exact hash.
+    if (artifact && outcome === "corrected" && notes.repair && notes.artifactSha256 === sha256(notes.repair.html)) {
+      artifact.repaired = notes.repair;
+      artifact.checkedSha256 = notes.artifactSha256;
+    }
     return out;
   }
 
@@ -1812,8 +1821,11 @@ export class sportsclawEngine {
         sourceStatusRule: failedToolsRule + suppliedInputRule,
       });
       if (!corrected) return unavailable;
-      // Only the prose was corrected: the recheck judges it alone and can never certify the old HTML.
-      return this.validateResponseEvidence({ ...params, artifactHtml: undefined, draft: corrected, correctionAttempted: true });
+      // The rejected HTML never reaches the recheck. When a valid document was judged, the only
+      // candidate is a code-rendered report of the corrected prose, checked beside it in the same recheck.
+      const repair = params.artifactHtml !== undefined ? renderRepairedReport(corrected) : null;
+      if (repair && this._verifyNotes) this._verifyNotes.repair = repair;
+      return this.validateResponseEvidence({ ...params, artifactHtml: repair?.html, draft: corrected, correctionAttempted: true });
     };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
     /** Set when admitted Jev mode routes a source-free report to the primary checker below. */
@@ -4731,6 +4743,11 @@ export class sportsclawEngine {
     const captured = artifact.collector.finish();
     if (!captured) {
       artifact.result = { ...base, artifact: null, reasonCode: null };
+      return;
+    }
+    // A repair replaces the rejected submission only when the recheck passed that exact document.
+    if (artifact.repaired && artifact.checkedSha256 === sha256(artifact.repaired.html)) {
+      artifact.result = { ...base, artifact: { ...artifact.repaired }, reasonCode: null };
       return;
     }
     // Only a passing check that judged this exact document publishes it; a

@@ -56,6 +56,8 @@ _DECISION_LIMITS = {"text": 4000, "candidates": 100, "label": 160, "references":
 _DECISION_INTENTS = {"follow", "pause", "resume", "unfollow", "list_takes",
                      "list_following", "none", "clarify"}
 _DECISION_STATUSES = {"selected", "no_match", "clarify"}
+# Advisory workload modes; none grants a tool, publication or account operation.
+_DECISION_MODES = {"chat", "sports_update", "analysis", "report", "uncertain"}
 _DECISION_REASONS = _REASONS - {"unknown_id"}
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
@@ -113,7 +115,7 @@ def _decision_request(body: dict) -> dict:
     """Exact ``watch-decision-v1`` request, rebuilt in server-owned key order."""
     invalid = _Invalid(DECISION_CONTRACT)
     stage = body.get("stage")
-    if stage == "intent":
+    if stage in ("intent", "workload"):
         keys = ("contract", "stage", "text", "locale")
     elif stage == "target":
         keys = ("contract", "stage", "text", "locale", "candidates") + (
@@ -125,7 +127,7 @@ def _decision_request(body: dict) -> dict:
     if not isinstance(body["locale"], str) or body["locale"] not in _LOCALES:
         raise invalid
     out = {"contract": DECISION_CONTRACT, "stage": stage, "text": body["text"], "locale": body["locale"]}
-    if stage == "intent":
+    if stage != "target":
         return out
     candidates = body["candidates"]
     if not isinstance(candidates, list) or not 1 <= len(candidates) <= _DECISION_LIMITS["candidates"]:
@@ -210,13 +212,19 @@ def _typed_decision(stdout: bytes, request: dict) -> dict:
     if result.get("ok") is not True:
         raise ValueError("untyped")
     stage = request["stage"]
-    field = "intent" if stage == "intent" else "selection"
+    field = {"intent": "intent", "target": "selection", "workload": "mode"}[stage]
     if set(result) != {"contract", "ok", "stage", field, "model", "confidence", "margin"}:
         raise ValueError("untyped")
     if result["stage"] != stage or result["model"] != DECISION_MODEL:
         raise ValueError("untyped")
     confidence, margin = _unit(result["confidence"]), _unit(result["margin"])
-    if stage == "intent":
+    if stage == "workload":
+        value = result["mode"]
+        if not isinstance(value, str) or value not in _DECISION_MODES:
+            raise ValueError("untyped")
+        # The worker already demotes a low-confidence mode to uncertain.
+        decided = value != "uncertain"
+    elif stage == "intent":
         value = result["intent"]
         if not isinstance(value, str) or value not in _DECISION_INTENTS:
             raise ValueError("untyped")
