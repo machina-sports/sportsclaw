@@ -114,7 +114,7 @@ function runIsolated(prefix, body) {
       const model = new MockLanguageModelV3({doGenerate: async (options) => {
         n++;
         // verdict, when given, answers the tool-less checker/editor calls.
-        if (verdict && !options.tools?.length && /isValid|expert sports editor/.test(JSON.stringify(options.prompt))) {
+        if (verdict && /isValid|expert sports editor/.test(JSON.stringify(options.prompt.filter((m) => m.role === 'system')))) {
           return {content:[{type:'text', text:verdict(options)}], finishReason:{unified:'stop', raw:undefined}, usage, warnings:[]};
         }
         const content = [{type:'text', text:reply}];
@@ -535,8 +535,8 @@ const REAL = `
     engine.mainModel = new MockLanguageModelV3({doGenerate: async (options) => {
       counts.modelCalls++;
       const text = JSON.stringify(options.prompt);
-      // Tool-less calls are the checker (answered clean), the editor or lane synthesis.
-      if (!options.tools?.length) {
+      // The editor can have approved read tools; identify its owned system role, not tool absence.
+      if (!options.tools?.length || /expert sports editor/.test(JSON.stringify(options.prompt.filter((m) => m.role === 'system')))) {
         counts.toolless.push(options);
         return reply([{type:'text', text:toolless?.(options) ?? (/isValid/.test(text) ? VERDICT_OK() : noToolsReply)}]);
       }
