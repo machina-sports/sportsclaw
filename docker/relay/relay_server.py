@@ -672,6 +672,7 @@ async def query_sync(request: web.Request) -> web.Response:
         # Parse NDJSON lines from engine output
         result_text = None
         result_events = []
+        manifest_events = []
         error_text = None
         images = []
         videos = []
@@ -694,6 +695,8 @@ async def query_sync(request: web.Request) -> web.Response:
                     result_events.append(event)
                 elif etype == "error":
                     error_text = event.get("error", "Unknown error")
+                elif etype == "manifest":
+                    manifest_events.append(event)
                 elif etype == "image":
                     images.append({
                         "data": event.get("data", ""),
@@ -791,6 +794,10 @@ async def query_sync(request: web.Request) -> web.Response:
                 resp["slip"] = slip_result
             if artifact_result is not None:
                 resp["artifact"] = artifact_result
+                # Non-authoritative diagnostics, only after the typed nonce gate passed.
+                verification = _report_verification(manifest_events)
+                if verification is not None:
+                    resp["report_verification"] = verification
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -978,6 +985,32 @@ def _build_cmd(body: dict) -> list[str]:
         cmd.append(f"--format={fmt}")
 
     return cmd
+
+
+# Mirrors VerificationOutcome in src/run-manifest.ts.
+_VERIFICATION_OUTCOMES = {"kept", "flagged", "corrected", "withheld", "unverified"}
+
+
+def _report_verification(manifest_events: list) -> dict | None:
+    """Closed outcome and flagged-claim count from the one flat native manifest event.
+
+    Never copies claims, the draft, HTML or any other value; anything malformed is omitted.
+    """
+    if len(manifest_events) != 1:
+        return None
+    run = manifest_events[0].get("run")
+    verification = run.get("verification") if isinstance(run, dict) else None
+    if not isinstance(verification, dict):
+        return None
+    outcome = verification.get("outcome")
+    if not isinstance(outcome, str) or outcome not in _VERIFICATION_OUTCOMES:
+        return None
+    claims = verification.get("flagged_claims")
+    if claims is None:
+        return {"outcome": outcome}
+    if not isinstance(claims, list):
+        return None
+    return {"outcome": outcome, "flagged_claim_count": len(claims)}
 
 
 def _build_stdin(body: dict) -> bytes | None:

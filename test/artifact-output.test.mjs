@@ -21,6 +21,11 @@
  *     that primary checker even when Jev is configured, after the same
  *     refusals and with no Jev key read or request (the request is input, not
  *     fetched evidence); plain chat runs no check;
+ *   - a rejected document is never published; after the existing one
+ *     correction, a deterministic marked report of the corrected prose is
+ *     published only when the one existing recheck passed that exact text and
+ *     document; failures, refusals, cancellation and invalid/conflicting
+ *     submissions stay closed;
  *   - an artifact attempt replaces the secondary slip extraction, and empty
  *     prose with a valid artifact gets neutral text and no recovery generation.
  *
@@ -37,6 +42,26 @@ import { generateText, stepCountIs, tool, jsonSchema } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 
 globalThis.AI_SDK_LOG_WARNINGS = false;
+
+describe("actual corrected-output formats", () => {
+  const doc = '<!doctype html><html><head><title>Report</title></head><body><h1>Verified board</h1><p>Home 10–9 Away</p></body></html>';
+  it("treats a single complete HTML fence as a document candidate, not source code to display", async () => {
+    const { renderRepairedReport } = await import("../dist/artifact-output.js");
+    const result = renderRepairedReport('```html\n' + doc + '\n```');
+    assert.equal(result?.html, doc);
+    assert.ok(!result.html.includes('language-html'));
+  });
+  it("preserves a complete bare HTML correction for the exact-document recheck", async () => {
+    const { renderRepairedReport } = await import("../dist/artifact-output.js");
+    assert.equal(renderRepairedReport(doc)?.html, doc);
+  });
+  it("does not extract an HTML fragment out of a mixed correction and discard its other claims", async () => {
+    const { renderRepairedReport } = await import("../dist/artifact-output.js");
+    const result = renderRepairedReport('Additional claim requiring verification.\n```html\n' + doc + '\n```');
+    assert.notEqual(result?.html, doc);
+    assert.ok(result.html.includes('Additional claim requiring verification.'));
+  });
+});
 
 const home = mkdtempSync(join(tmpdir(), "sportsclaw-artifact-"));
 const ENV_KEYS = [
@@ -458,14 +483,22 @@ describe("the document in the evidence judgment", () => {
     assert.deepEqual(results, [ACCEPTED]);
   });
 
-  it("correct prose cannot carry contradictory HTML, and a prose-only correction does not certify it", async () => {
-    const contradicting = { ...ARTIFACT, html: HTML.replace("Comparação", "Palmeiras venceu por 3 a 0") };
+  it("correct prose cannot carry contradictory HTML; only a rechecked repair from the corrected prose can publish", async () => {
+    const marker = "Palmeiras venceu por 3 a 0";
+    const contradicting = { ...ARTIFACT, html: HTML.replace("Comparação", marker) };
     // A checker that objects only when it actually sees the contradicting document.
-    const jev = jevRecorder((body) => (body.state.includes("Palmeiras venceu por 3 a 0") ? "contradicted" : "supported"));
-    const { model } = scripted([[scoresCall()], [artifactCall(contradicting)], [say(PROSE)]]);
-    const { results } = await runArtifact(evidenceEngine(model, jev));
+    const jev = jevRecorder((body) => (body.state.includes(marker) ? "contradicted" : "supported"));
+    const { model, all } = scripted([[scoresCall()], [artifactCall(contradicting)], [say(PROSE)]], { verdict: judge(marker) });
+    const { text, results } = await runArtifact(evidenceEngine(model, jev));
     assert.ok(jev.bodies[0]?.state.includes(contradicting.html), "the first judgment saw the document");
-    assert.deepEqual(results, [WITHHELD]);
+    assert.equal(editorCalls(all).length, 1, "one correction");
+    assert.equal(jev.bodies.length, 2, "one recheck");
+    assert.equal(text, CORRECTED);
+    const [result] = results;
+    assert.equal(results.length, 1);
+    assert.notEqual(result.artifact?.html, contradicting.html, "the rejected document is never published");
+    assert.ok(result.artifact && !result.artifact.html.includes(marker), "a repaired document from the corrected prose");
+    assert.ok(jev.bodies[1].state.includes(CORRECTED) && jev.bodies[1].state.includes(result.artifact.html), "the recheck judged this exact text and document");
   });
 
   const SIGNED = "https://reports.example.test/r/SYNTHETIC_REPORT?X-Amz-Signature=SYNTHETICSIG&X-Amz-Expires=300";
@@ -527,8 +560,124 @@ describe("the document with the configured generative checker", () => {
       assert.ok(first && promptText(first).includes(contradicting.html), `${generativeAction}: the first check saw the document`);
       assert.equal(editorCalls(all).length, generativeAction === "correct" ? 1 : 0, `${generativeAction}: correction pass`);
       assert.equal(jev.bodies.length, 0, generativeAction);
-      assert.deepEqual(results, [WITHHELD], generativeAction);
+      assert.equal(results.length, 1, generativeAction);
+      assert.notEqual(results[0].artifact?.html, contradicting.html, `${generativeAction}: never the rejected document`);
+      if (generativeAction === "retain") assert.deepEqual(results, [WITHHELD], generativeAction);
+      // "correct": the repaired document, covered in detail below.
+      else assert.ok(results[0].artifact && !results[0].artifact.html.includes(marker), generativeAction);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Repair: a rejected report rebuilt from the corrected prose, inside the existing correction + recheck
+// ---------------------------------------------------------------------------
+
+describe("a rejected report repaired from the corrected prose", () => {
+  const MARKER = "Palmeiras venceu por 3 a 0";
+  const CONTRA = Object.freeze({ ...ARTIFACT, html: HTML.replace("Comparação", MARKER) });
+  // Markdown plus raw HTML the deterministic renderer must escape.
+  const CORRECTED_MD = "## Resultado\n\nFlamengo venceu o Palmeiras por **2 a 1**.\n\n<script>alert(1)</script><img src=x onerror=alert(1)>";
+  const flag = (claim) => JSON.stringify({ isValid: false, discrepancies: [{ claim, evidence: "not in the data", severity: "high", kind: "contradicted" }] });
+  /** Editor returns `editor`; the first check flags MARKER; the recheck answers per `recheck`. */
+  const repairJudge = ({ editor = CORRECTED_MD, recheck = "pass", onEditor } = {}) => (options) => {
+    const text = promptText(options);
+    if (text.includes("expert sports editor")) {
+      onEditor?.();
+      return editor;
+    }
+    if (text.includes(MARKER)) return flag(MARKER);
+    return recheck === "pass" ? VERDICT_OK : recheck === "fail" ? flag("Flamengo venceu") : "not json";
+  };
+  const STEPS = (doc = CONTRA, prose = PROSE) => [[scoresCall()], ...(doc ? [[artifactCall(doc)]] : []), [say(prose)]];
+  const correcting = (jev) => generative(jev, { generativeAction: "correct" });
+
+  it("publishes a deterministic marked report of the corrected prose only after the one recheck passes that exact document", async () => {
+    const jev = jevRecorder();
+    const { model, chat, all } = scripted(STEPS(), { verdict: repairJudge() });
+    const engine = evidenceEngine(model, jev, correcting(jev));
+    const { text, results } = await runArtifact(engine);
+    assert.equal(text, CORRECTED_MD);
+    assert.equal(editorCalls(all).length, 1, "one correction");
+    const checks = checkerCalls(all);
+    assert.equal(checks.length, 2, "the first check and one recheck");
+    assert.equal(all.length, chat.length + 3, "no other model call");
+    assert.equal(jev.bodies.length, 0);
+    assert.equal(results.length, 1);
+    const [{ artifact: repaired, reasonCode }] = results;
+    assert.equal(reasonCode, null);
+    assert.deepEqual(wire.parseArtifactOutput(clone(repaired)), repaired, "a valid artifact-v1 document");
+    assert.notEqual(repaired.html, CONTRA.html, "never the rejected document");
+    assert.ok(!repaired.html.includes(MARKER));
+    const recheck = promptText(checks[1]);
+    assert.ok(recheck.includes(CORRECTED_MD), "the recheck judged the exact corrected text");
+    assert.ok(recheck.includes(repaired.html), "and the exact repaired document");
+    assert.match(repaired.html, /<strong>2 a 1<\/strong>/, "rendered from the corrected markdown");
+    assert.match(repaired.html, /&lt;script&gt;/, "raw HTML escaped");
+    assert.doesNotMatch(repaired.html, /<(script|img|iframe|object|embed|link|form|base|meta\s+http-equiv)\b/i);
+    assert.doesNotMatch(repaired.html, /<[^>]*\b(src|href|srcset|on\w+)\s*=|url\(|@import/i, "no external resources or handlers");
+    assert.notEqual(repaired.title, CONTRA.title, "a generic title, not the rejected submission's");
+    assert.doesNotMatch(repaired.title, /\d/, "the title states no result");
+    assert.equal(engine.lastRunTrace.verification.outcome, "corrected");
+  });
+
+  for (const [label, judgeOptions, checks] of [
+    ["a recheck that flags the repaired report", { recheck: "fail" }, 2],
+    ["a recheck with no usable verdict", { recheck: "garbage" }, 3],
+    ["an empty correction", { editor: "" }, 1],
+  ]) {
+    it(`stays closed on ${label}, with no second correction`, async () => {
+      const jev = jevRecorder();
+      const { model, all } = scripted(STEPS(), { verdict: repairJudge(judgeOptions) });
+      const { results } = await runArtifact(evidenceEngine(model, jev, correcting(jev)));
+      assert.equal(editorCalls(all).length, 1);
+      assert.equal(checkerCalls(all).length, checks);
+      assert.deepEqual(results, [WITHHELD]);
+    });
+  }
+
+  for (const [label, steps, reasonCode] of [
+    ["an invalid submission", STEPS({ ...CONTRA, html: "" }, `${PROSE} ${MARKER}.`), "invalid_artifact"],
+    ["conflicting submissions", [[scoresCall()], [artifactCall(ARTIFACT)], [artifactCall(OTHER)], [say(`${PROSE} ${MARKER}.`)]], "conflicting_artifact"],
+    ["a text-only answer", STEPS(null, `${PROSE} ${MARKER}.`), null],
+  ]) {
+    it(`never repairs around ${label}`, async () => {
+      const jev = jevRecorder();
+      const { model, all } = scripted(steps, { verdict: repairJudge() });
+      const { results } = await runArtifact(evidenceEngine(model, jev, correcting(jev)));
+      assert.equal(editorCalls(all).length, 1, "the prose is still corrected");
+      assert.deepEqual(results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode }]);
+    });
+  }
+
+  const unauthorized = async () => new Response(JSON.stringify({ error: "denied" }), { status: 401, headers: { "content-type": "application/json" } });
+  for (const [label, override, html] of [
+    ["withheld cloud consent", { dataPolicy: "local_only" }, CONTRA.html],
+    ["an auth refusal", { transport: unauthorized }, CONTRA.html],
+    ["an oversized candidate", {}, `<!doctype html><html><body>${`<p>${MARKER}.</p>`.repeat(1_500)}</body></html>`],
+    ["a private value", {}, CONTRA.html.replace("</h1>", `</h1><p>${NONCE}</p>`)],
+  ]) {
+    it(`makes no repair after ${label}`, async () => {
+      const jev = jevRecorder((body) => (body.state.includes(MARKER) ? "contradicted" : "supported"));
+      const { model, all } = scripted(STEPS({ ...CONTRA, html }), { verdict: repairJudge() });
+      const { results } = await runArtifact(evidenceEngine(model, jev, { evidenceVerifier: { ...jev.config, ...override } }));
+      assert.equal(editorCalls(all).length, 0, "no correction");
+      assert.deepEqual(results, [WITHHELD]);
+    });
+  }
+
+  it("makes no repair or recheck after the caller cancels during the correction", async () => {
+    const controller = new AbortController();
+    const jev = jevRecorder();
+    const { model, all } = scripted(STEPS(), { verdict: repairJudge({ onEditor: () => controller.abort() }) });
+    const results = [];
+    try {
+      results.push(...(await runArtifact(evidenceEngine(model, jev, correcting(jev)), { abortSignal: controller.signal })).results);
+    } catch {
+      // A cancelled run may reject; it must still publish nothing.
+    }
+    assert.equal(checkerCalls(all).length, 1, "no recheck");
+    assert.ok(results.every((r) => r.artifact === null), "nothing published");
   });
 });
 
@@ -593,7 +742,11 @@ describe("an artifact built from user-supplied data", () => {
         assert.equal(editorCalls(all).length, generativeAction === "correct" ? 1 : 0, `${label}: correction limits unchanged`);
         assert.equal(jev.bodies.length, 0, `${label}: no Jev request, recheck included`);
         assert.equal(jev.reads(), 0, `${label}: no Jev credential read`);
-        assert.deepEqual(results, [WITHHELD], label);
+        assert.equal(checkerCalls(all).length, generativeAction === "correct" ? 2 : 1, `${label}: at most one recheck`);
+        assert.equal(results.length, 1, label);
+        assert.notEqual(results[0].artifact?.html, doc.html, `${label}: the document stating the premise never publishes`);
+        if (generativeAction === "retain") assert.deepEqual(results, [WITHHELD], label);
+        else assert.ok(results[0].artifact === null || !results[0].artifact.html.includes(marker), label);
       }
     }
   });

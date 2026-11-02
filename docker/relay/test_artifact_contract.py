@@ -294,6 +294,71 @@ class ArtifactSync(RelayCase):
                 self.child_prints(*events)
                 self.assertEqual(self.query(body()).status, 502)
 
+    def test_report_verification_is_closed_metadata_from_the_native_manifest(self):
+        # Actual CLI shape: the run manifest fields are spread beside type, not nested.
+        self.enable()
+        private = ("PRIVATE_CLAIM", "PRIVATE_DRAFT", *PRIVATE_MARKERS)
+
+        def manifest(verification):
+            return {"type": "manifest", "manifest_version": 1, "run": {"verification": verification}}
+
+        for label, verification, expected in [
+            ("corrected with flags", {"outcome": "corrected", "draft_before_correction": "PRIVATE_DRAFT " + HTML,
+                                      "flagged_claims": ["PRIVATE_CLAIM a", "PRIVATE_CLAIM b"]},
+             {"outcome": "corrected", "flagged_claim_count": 2}),
+            ("kept, count unknown", {"outcome": "kept", "draft_before_correction": None, "flagged_claims": None},
+             {"outcome": "kept"}),
+            ("withheld", {"outcome": "withheld", "draft_before_correction": None, "flagged_claims": []},
+             {"outcome": "withheld", "flagged_claim_count": 0}),
+        ]:
+            with self.subTest(label):
+                self.child_prints(manifest(verification),
+                                  {"type": "result", "text": PROSE, "artifact": result(reason="evidence_unverified")})
+                response = self.query(body())
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.data["report_verification"], expected)
+                self.assertEqual(response.data["artifact"], result(reason="evidence_unverified"))
+                serialized = json.dumps(response.data, ensure_ascii=False)
+                for marker in private:
+                    self.assertNotIn(marker, serialized)
+
+        for label, verification in [
+            ("unknown outcome", {"outcome": "published", "flagged_claims": None}),
+            ("raw string", "PRIVATE_CLAIM"),
+            ("claims not a list", {"outcome": "flagged", "flagged_claims": "PRIVATE_CLAIM"}),
+        ]:
+            with self.subTest(label):
+                self.child_prints(manifest(verification), {"type": "result", "text": PROSE, "artifact": result(ARTIFACT)})
+                response = self.query(body())
+                self.assertEqual(response.status, 200)
+                self.assertNotIn("report_verification", response.data)
+                self.assertNotIn("PRIVATE_CLAIM", json.dumps(response.data))
+
+    def test_report_verification_never_bypasses_the_typed_artifact_gate(self):
+        self.enable()
+        verified = {"type": "manifest", "run": {"verification": {"outcome": "kept", "flagged_claims": None}}}
+        for label, events in {
+            "other nonce": [verified, {"type": "result", "text": PROSE, "artifact": result(ARTIFACT, nonce="nonce_other12345678")}],
+            "missing ack": [verified, {"type": "result", "text": PROSE}],
+        }.items():
+            with self.subTest(label):
+                self.child_prints(*events)
+                response = self.query(body())
+                self.assertEqual(response.status, 502)
+                self.assertNotIn("report_verification", response.data)
+
+    def test_report_verification_is_optional_and_legacy_responses_are_unchanged(self):
+        self.enable()
+        self.child_prints({"type": "result", "text": PROSE, "artifact": result(ARTIFACT)})
+        response = self.query(body())
+        self.assertEqual(response.status, 200)
+        self.assertNotIn("report_verification", response.data, "no manifest, no metadata")
+        self.child_prints({"type": "manifest", "run": {"verification": {"outcome": "corrected", "flagged_claims": ["x"]}}},
+                          {"type": "result", "text": PROSE})
+        legacy = self.query({"prompt": "Who won?"})
+        self.assertEqual(legacy.status, 200)
+        self.assertEqual(set(legacy.data), {"status", "text", "user_id", "elapsed_ms"})
+
     def test_unrequested_artifact_is_refused(self):
         self.child_prints({"type": "result", "text": PROSE, "artifact": result(ARTIFACT)})
         request_body = {k: v for k, v in body().items() if k != "artifact"}

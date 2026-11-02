@@ -25,6 +25,17 @@ for (const key of ["SPORTSCLAW_SKILLS", "sportsclaw_SKILLS", "SPORTSCLAW_MEMORY_
 }
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
+it("live and schedule templates preserve complete scores without unsolicited betting metadata", async () => {
+  const { buildTemplatePrompt } = await import("../dist/response-templates.js");
+  for (const intent of ["live_scores", "schedule"]) {
+    const hint = buildTemplatePrompt(intent);
+    assert.match(hint, /observation/i);
+    assert.match(hint, /requested scope/i);
+    assert.match(hint, /odds.*only.*asked/i);
+    assert.doesNotMatch(hint, /under 5 lines/i);
+  }
+});
+
 // Imported after the env is set: memory, schema and session paths resolve at import.
 const { MockLanguageModelV3 } = await import("ai/test");
 const { tool, jsonSchema } = await import("ai");
@@ -340,6 +351,31 @@ describe("market follow-ups keep venue, date and saved context", () => {
     assert.ok(!system.includes("America/Sao_Paulo"), "the user's timezone stays user content, never system text");
     assert.ok(turnsOf(call).some((t) => t.role === "user" && t.text.includes("America/Sao_Paulo")));
   });
+});
+
+describe("live, results and schedule answers", () => {
+  // Each rule must be one line of the composed system prompt carrying every listed term; wording may differ.
+  const RULES = {
+    "a brief conversational lead": [/\b(short|brief)\b/i, /\b(lead|open|start)\w*\b/i, /\b(scores?|results?|schedules?|updates?)\b/i],
+    "score and status for each game when provided": [/\bscores?\b/i, /\bstatus\b/i, /\b(each|every|per)\b[^\n]*\bgames?\b/i],
+    "a W-L record is not a score": [/\brecords?\b/i, /\b(not|never)\b/i, /\b(scores?|points)\b/i],
+    "no silently omitted requested game": [/\b(omit|drop|skip)\w*\b/i, /\b(requested|asked)\b/i, /\bgames?\b/i],
+    "no global coverage from a partial scope": [/\bpartial\b/i, /\b(all|every|complete|global)\b/i, /\b(coverage|games|scope)\b/i, /\b(claim|imply|say|present)\w*\b/i],
+    "no unsolicited odds": [/\b(odds|betting lines?)\b/i, /\b(unless|only when|only if|unsolicited|unrequested|not asked)\b/i],
+  };
+  const lineWith = (system, terms) => system.split("\n").some((line) => terms.every((term) => term.test(line)));
+
+  // The same rules hold for any wording or language: they are not keyed on the user's words.
+  for (const prompt of ["How’s playing today", "Como estão os jogos de hoje?", "Resultados de anoche"]) {
+    it(`${JSON.stringify(prompt)}: the composed main prompt states the score-answer rules`, async () => {
+      const { engine, state, mainCalls } = makeEngine();
+      state.route = route(["nba", "nfl"], "focused", 0.9, { intent: "live_scores" });
+      state.answer = "Busy night: Lakers 112-104 Celtics (Final); Chiefs 21-17 Bills (Q3 4:12).";
+      await engine.run(prompt);
+      const system = textOf(mainCalls().at(-1).prompt.filter((m) => m.role === "system"));
+      for (const [label, terms] of Object.entries(RULES)) assert.ok(lineWith(system, terms), label);
+    });
+  }
 });
 
 describe("routePromptToSkills keeps every explicitly requested venue", () => {

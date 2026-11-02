@@ -38,7 +38,7 @@ interface ResponseTemplate {
 
 const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
   live_scores: {
-    hint: "Lead with the current score and game status (quarter/period/half/inning). Include key performers. Keep it under 5 lines unless asked for more.",
+    hint: "Start with one useful observation from the returned scores, like a friend catching the user up, not a generic feed introduction. Then give one compact score-and-status line per game in the requested scope; never let a length cap silently omit games. Show actual points/goals and clock or final status, not win-loss records. State which sports/leagues are covered and any missing scores. Include odds only if the user asked for betting information in the current task; do not copy betting or standings metadata merely because the source returned it.",
     expectedToolPatterns: ["score", "live", "game"],
     requiredKeywords: [],
   },
@@ -48,7 +48,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   schedule: {
-    hint: "List games chronologically: date/time, matchup, venue if relevant. Use TODAY or TONIGHT for today's games. Keep it scannable — one game per line.",
+    hint: "Open with a useful observation about today's action rather than a generic feed introduction. For a today update, put live scores first, then finals and upcoming games as relevant; keep one compact matchup/score/status or local start-time line per game in the requested scope. Say which sports/leagues you checked and label partial coverage. Do not omit completed games when the user asks for today's results. Include odds only if the user asked for betting information in the current task; omit unasked team win-loss records and betting metadata.",
     expectedToolPatterns: ["schedule", "fixture", "game"],
     requiredKeywords: [],
   },
