@@ -7,6 +7,9 @@
  *     generateText dispatch: a malformed or refused `submit_artifact` call
  *     invalidates it, another tool's failure does not, a second different
  *     document conflicts, reset() starts clean;
+ *   - code-owned metadata: the model tool requires only title/html and code
+ *     fills only absent constants; wrong/undefined metadata stays refused and
+ *     the wire still demands all four fields;
  *   - `sportsclawEngine.run(prompt, {artifact, onArtifactResult})` with a
  *     scripted AI SDK model: validation before any model work, the tool is
  *     offered only to opted-in caller-history runs, never to parallel lanes,
@@ -565,6 +568,106 @@ describe("the document with the configured generative checker", () => {
       if (generativeAction === "retain") assert.deepEqual(results, [WITHHELD], generativeAction);
       // "correct": the repaired document, covered in detail below.
       else assert.ok(results[0].artifact && !results[0].artifact.html.includes(marker), generativeAction);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Code-owned metadata: the model sends title/html; code fills only absent constants
+// ---------------------------------------------------------------------------
+
+describe("code-owned artifact metadata", () => {
+  const { contract: _c, mimeType: _m, ...MINIMAL } = ARTIFACT;
+  const NO_MIME = Object.freeze({ contract: ARTIFACT.contract, title: ARTIFACT.title, html: HTML });
+  const canonical = (value) => JSON.stringify(value) === JSON.stringify(ARTIFACT);
+  const offeredSchema = (options) => (options.tools ?? []).find((t) => t.name === "submit_artifact")?.inputSchema;
+
+  it("the offered schema requires only title and html, still closed to other keys", () => {
+    const schema = wire.createArtifactOutputCollector().tool.inputSchema.jsonSchema;
+    assert.deepEqual([...schema.required].sort(), ["html", "title"]);
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(Object.keys(schema.properties).sort(), ["contract", "html", "mimeType", "title"]);
+    assert.deepEqual(schema.properties.contract.enum, ["artifact-v1"]);
+    assert.deepEqual(schema.properties.mimeType.enum, ["text/html"]);
+  });
+
+  it("the collector fills absent constants into the canonical document; the old shape still works", async () => {
+    for (const [label, input] of [["missing mimeType", NO_MIME], ["both constants omitted", MINIMAL], ["legacy 4-field", ARTIFACT]]) {
+      const collector = wire.createArtifactOutputCollector();
+      await drive(collector, [[artifactCall(input)]]);
+      assert.equal(collector.problem(), null, label);
+      assert.ok(canonical(collector.finish()), `${label}: exact canonical artifact-v1`);
+    }
+    // Same canonical content is not a conflict; different content still is.
+    const collector = wire.createArtifactOutputCollector();
+    await drive(collector, [[artifactCall(MINIMAL)], [artifactCall(ARTIFACT)]]);
+    assert.ok(canonical(collector.finish()));
+    await drive(collector, [[artifactCall({ title: OTHER.title, html: OTHER.html })]]);
+    assert.equal(collector.problem(), "conflicting_artifact");
+  });
+
+  it("explicit wrong, unknown or undefined metadata, extra keys and bad HTML are still refused", async () => {
+    const max = wire.MAX_ARTIFACT_HTML_BYTES;
+    const refused = {
+      "wrong mime": { ...MINIMAL, mimeType: "text/plain" },
+      "wrong contract": { ...MINIMAL, contract: "artifact-v2" },
+      "null mime": { ...MINIMAL, mimeType: null },
+      "null contract": { ...MINIMAL, contract: null },
+      "explicit undefined mime": { ...MINIMAL, mimeType: undefined },
+      "explicit undefined contract": { ...MINIMAL, contract: undefined },
+      "extra url": { ...MINIMAL, url: "https://reports.example/abc" },
+      "missing title": { html: HTML },
+      "missing html": { title: ARTIFACT.title },
+      "blank html": { ...MINIMAL, html: " \n" },
+      "NUL in html": { ...MINIMAL, html: "<p>a\u0000b</p>" },
+      "lone surrogate": { ...MINIMAL, html: "<p>\ud800</p>" },
+      "oversized html": { ...MINIMAL, html: `<p>${"x".repeat(max)}</p>` },
+    };
+    for (const [label, input] of Object.entries(refused)) {
+      const collector = wire.createArtifactOutputCollector();
+      // execute directly: JSON transport would drop an explicit undefined.
+      const out = await collector.tool.execute(input, { toolCallId: "t", messages: [] });
+      assert.deepEqual(out, { accepted: false, published: false, reasonCode: "invalid_artifact" }, label);
+      assert.equal(collector.finish(), undefined, label);
+      assert.equal(collector.problem(), "invalid_artifact", label);
+    }
+  });
+
+  it("the wire and the turn result still demand all four fields", () => {
+    for (const value of [MINIMAL, NO_MIME, { ...ARTIFACT, mimeType: undefined }]) {
+      assert.equal(wire.parseArtifactOutput(clone(value)), null);
+      const result = { contract: "artifact-turn-v1", nonce: NONCE, artifact: { ...value }, reasonCode: null };
+      assert.equal(wire.parseArtifactTurnResult(result, TURN), null);
+    }
+  });
+
+  it("engine.run offers the narrow schema, judges the canonical HTML, and publishes it bound to the nonce", async () => {
+    for (const input of [NO_MIME, MINIMAL]) {
+      const jev = jevRecorder();
+      const { model, chat, all } = scripted([[scoresCall()], [artifactCall(input)], [say(PROSE)]]);
+      const { text, results } = await runArtifact(evidenceEngine(model, jev, generative(jev)));
+      assert.deepEqual([...offeredSchema(chat[0]).required].sort(), ["html", "title"]);
+      const checks = checkerCalls(all);
+      assert.equal(checks.length, 1, "one check");
+      assert.ok(promptText(checks[0]).includes(HTML), "the complete document was judged");
+      assert.equal(text, PROSE);
+      assert.deepEqual(results, [ACCEPTED]);
+      assert.ok(canonical(results[0].artifact), "canonical artifact-v1 on the result");
+    }
+  });
+
+  it("engine.run still withholds an unverified minimal document and refuses wrong metadata", async () => {
+    const marker = "Palmeiras venceu por 3 a 0";
+    const jev = jevRecorder();
+    const contradicting = { title: ARTIFACT.title, html: HTML.replace("Comparação", marker) };
+    const { model } = scripted([[scoresCall()], [artifactCall(contradicting)], [say(PROSE)]], { verdict: judge(marker) });
+    const { results } = await runArtifact(evidenceEngine(model, jev, generative(jev, { generativeAction: "retain" })));
+    assert.deepEqual(results, [WITHHELD]);
+
+    for (const wrong of [{ ...MINIMAL, mimeType: "text/plain" }, { ...MINIMAL, contract: "artifact-v2" }]) {
+      const { model: m } = scripted([[artifactCall(wrong)], [say(FINAL)]]);
+      const out = await runArtifact(newEngine(m));
+      assert.deepEqual(out.results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "invalid_artifact" }]);
     }
   });
 });
