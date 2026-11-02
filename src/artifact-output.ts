@@ -171,12 +171,14 @@ export interface ArtifactOutputCollector {
 const ARTIFACT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: [...ARTIFACT_KEYS],
+  // Code owns the fixed contract/mimeType; the model sends only title and html.
+  required: ["title", "html"],
   properties: {
     // Typed singleton enums, not untyped consts (see slip-output.ts CHANGE_SCHEMA).
-    contract: { type: "string", enum: [ARTIFACT_CONTRACT] },
+    // Optional, kept so legacy four-field calls stay valid.
+    contract: { type: "string", enum: [ARTIFACT_CONTRACT], description: "Optional; filled by code when omitted." },
     title: { type: "string", minLength: 1, maxLength: MAX_ARTIFACT_TITLE_CHARS, description: "Short human title of the document." },
-    mimeType: { type: "string", enum: [ARTIFACT_MIME_TYPE] },
+    mimeType: { type: "string", enum: [ARTIFACT_MIME_TYPE], description: "Optional; filled by code when omitted." },
     html: {
       type: "string",
       minLength: 1,
@@ -189,6 +191,7 @@ const ARTIFACT_SCHEMA = {
 
 const TOOL_DESCRIPTION =
   "Submit ONE complete, self-contained HTML document (a visual report: analysis, charts, tables) for this turn. " +
+  "Send only title and html; the contract and MIME type are fixed and filled in by code. " +
   "Use it only when a page clearly serves the user better than a chat reply. Build the whole document first and " +
   "submit it once; a second, different document invalidates the turn and a rejected one cannot be repaired by " +
   "submitting again. Only use data you actually obtained in this conversation; never invent numbers, sources, IDs " +
@@ -210,7 +213,9 @@ export function createArtifactOutputCollector(): ArtifactOutputCollector {
 
   const submit = (input: unknown): ArtifactToolResult => {
     if (invalidated) return { accepted: false, published: false, reasonCode: "collector_invalid" };
-    const artifact = parseArtifactOutput(input);
+    // Fill only absent constants; any explicit field (wrong, null, undefined or unknown) reaches the strict parser.
+    const filled = isPlainObject(input) ? { contract: ARTIFACT_CONTRACT, mimeType: ARTIFACT_MIME_TYPE, ...input } : input;
+    const artifact = parseArtifactOutput(filled);
     if (!artifact) return refuse("invalid_artifact");
     // parseArtifactOutput builds keys in a fixed order, so equal JSON is equal content.
     const key = JSON.stringify(artifact);
