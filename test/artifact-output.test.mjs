@@ -144,7 +144,8 @@ function scripted(steps, { synthesis, verdict = () => VERDICT_OK, mainWithoutToo
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
       const auxiliary = /isValid|expert sports editor|Combine the following agent responses/.test(JSON.stringify(options.prompt));
-      if ((!options.tools || options.tools.length === 0) && (!mainWithoutTools || auxiliary)) {
+      // The editor may now have approved readers; its phase is not defined by an empty tool list.
+      if (auxiliary || ((!options.tools || options.tools.length === 0) && !mainWithoutTools)) {
         const lanes = synthesis !== undefined && JSON.stringify(options.prompt).includes("Combine the following agent responses");
         return generated([say(lanes ? synthesis : verdict(options))]);
       }

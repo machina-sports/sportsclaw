@@ -190,6 +190,9 @@ const CONVERSATION_SECTION = [
   "- Earlier assistant answers are claims, not evidence. When new data contradicts one, start by explicitly acknowledging your earlier error, then correct that specific date and competition.",
   "- Do not silently substitute a general slate for a correction. Absence from one competition does not establish that a team has no game in other competitions.",
   "- Never invent context, prices or odds, and never claim a check you did not run.",
+  "- Resolve a follow-up against the board, venue, date and market the conversation already established; do not ask again for scope the conversation already fixed.",
+  "- Earlier prices are claims: before calling an earlier board's data missing or unavailable, refresh the same venue and date with the tools.",
+  "- Prices alone are market expectations, not proof of positive expected value: offer a qualified lean with its basis, never proven value without one.",
 ].join("\n");
 
 /** Shape of live, results and schedule answers. Static and generic: no per-language wording. */

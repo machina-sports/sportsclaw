@@ -285,6 +285,31 @@ interface QueryProvenance {
 
 type ToolExecute = NonNullable<ToolSet[string]["execute"]>;
 
+/** Fields consumed from the installed SDK's (non-exported) finish event. */
+type ToolFinishEvent = Parameters<typeof toolFinishDetails>[0] & {
+  toolCall: { toolName: string; toolCallId: string; input?: unknown };
+  durationMs: number;
+  success: boolean;
+};
+
+/** Model steps of the one correction pass when it may read (system prompt included). */
+const CORRECTION_READ_STEPS = 3;
+
+/**
+ * Public reads the single correction pass may make (public-data mode only):
+ * already-authorized executors of this call, the run's own tool-finish
+ * tracking, and the evidence rebuilt after the reads for the one recheck.
+ */
+interface CorrectionReads {
+  tools: ToolSet;
+  onToolCallFinish: (event: ToolFinishEvent) => void;
+  refresh: (steps: unknown[], draft: string) => {
+    toolOutputs: Array<{ toolName: string; output: string; truncated?: boolean; sourceToolNames?: string[] }>;
+    failedTools: string[];
+    conversationContext?: string;
+  };
+}
+
 const SCALAR_VALUE_SCHEMA ={ anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] };
 
 const QUERY_TOOL_RESULT_SCHEMA = {
@@ -1710,6 +1735,8 @@ export class sportsclawEngine {
      * never part of the Jev state.
      */
     conversationContext?: string;
+    /** Public-data mode: bounded reads for the one correction; its recheck gets the refreshed evidence. */
+    correctionReads?: CorrectionReads;
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
@@ -1816,16 +1843,21 @@ export class sportsclawEngine {
       if (params.correctionAttempted || params.abortSignal?.aborted) return unavailable;
       discrepanciesFound = true;
       if (this._verifyNotes) this._verifyNotes.firstDraft ??= draft;
-      const corrected = await this.correctAgainstEvidence({
+      const correction = await this.correctAgainstEvidence({
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
         sourceStatusRule: failedToolsRule + suppliedInputRule,
+        reads: params.correctionReads,
       });
-      if (!corrected) return unavailable;
+      if (!correction) return unavailable;
+      const corrected = correction.text;
+      // Reads made by the correction join the turn's evidence and failures for the one recheck.
+      const readSteps = correction.steps.some((step) => ((step as { toolCalls?: unknown[] }).toolCalls?.length ?? 0) > 0);
+      const refreshed = readSteps && params.correctionReads ? params.correctionReads.refresh(correction.steps, corrected) : {};
       // The rejected HTML never reaches the recheck. When a valid document was judged, the only
       // candidate is a code-rendered report of the corrected prose, checked beside it in the same recheck.
       const repair = params.artifactHtml !== undefined ? renderRepairedReport(corrected) : null;
       if (repair && this._verifyNotes) this._verifyNotes.repair = repair;
-      return this.validateResponseEvidence({ ...params, artifactHtml: repair?.html, draft: corrected, correctionAttempted: true });
+      return this.validateResponseEvidence({ ...params, ...refreshed, artifactHtml: repair?.html, draft: corrected, correctionAttempted: true });
     };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
     /** Set when admitted Jev mode routes a source-free report to the primary checker below. */
@@ -2095,12 +2127,29 @@ export class sportsclawEngine {
     conversationContext?: string;
     callerSystemPrompt?: string;
     abortSignal?: AbortSignal;
-  }): Promise<string | undefined> {
+    /** Public-data mode: approved public reads this pass may make, bounded to CORRECTION_READ_STEPS model steps. */
+    reads?: CorrectionReads;
+  }): Promise<{ text: string; steps: unknown[] } | undefined> {
     const { userPrompt, draft, serializedToolOutputs } = params;
+    const reads = params.reads && Object.keys(params.reads.tools).length > 0 ? params.reads : undefined;
+    // With reads, the source status the checker saw is a snapshot from before them.
+    const sourceStatus = params.sourceStatusRule && reads
+      ? "Source status before any read in this correction (a snapshot; results you read now add to it):\n" + params.sourceStatusRule
+      : params.sourceStatusRule ?? "";
     try {
       const correctionRes = await generate({ purpose: "correction" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
+        ...(reads
+          ? {
+              tools: reads.tools,
+              stopWhen: stepCountIs(CORRECTION_READ_STEPS),
+              // The last step answers with tools off.
+              prepareStep: ({ stepNumber }: { stepNumber: number }) =>
+                stepNumber >= CORRECTION_READ_STEPS - 1 ? { activeTools: [], toolChoice: "none" as const } : undefined,
+              experimental_onToolCallFinish: reads.onToolCallFinish,
+            }
+          : {}),
         system:
           "You are an expert sports editor. Rewrite the draft response so it stays focused on the " +
           "user's request and correct any factual inaccuracies, mismatched scores, or unsupported claims. " +
@@ -2118,7 +2167,12 @@ export class sportsclawEngine {
           "Do not substitute another venue or bookmaker. State an observed error without inventing its internal cause, " +
           "and never promise a fix, rollout or future availability.\n" +
           (params.partialViewRule ?? "") +
-          (params.sourceStatusRule ?? "") +
+          sourceStatus +
+          (reads
+            ? "Public data tools are available for this rewrite. When a discrepancy is a requested venue, board, date or market " +
+              "the source data lacks, read that same scope with them before rewriting, instead of declining or substituting. " +
+              "Use only what they return; a failed read is not an empty result.\n"
+            : "") +
           "\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           ...(params.conversationContext
@@ -2139,7 +2193,7 @@ export class sportsclawEngine {
 
       this.notePass("correction", usageOf(correctionRes));
       const corrected = correctionRes.text?.trim();
-      return corrected ? stripInternalEvidenceArtifacts(corrected) : undefined;
+      return corrected ? { text: stripInternalEvidenceArtifacts(corrected), steps: correctionRes.steps ?? [] } : undefined;
     } catch (e) {
       if (this.config.verbose) {
         console.error(`[sportsclaw] evidence correction failed: ${e}`);
@@ -5592,6 +5646,54 @@ export class sportsclawEngine {
       mainSystem = system;
       return system;
     };
+    // Tool-finish tracking shared by the main loop and the correction's public reads.
+    const trackToolFinish = (event: ToolFinishEvent) => {
+      const { toolCall, durationMs, success } = event;
+      const skillName = this.registry.getSkillName(toolCall.toolName);
+      emitProgress?.({
+        type: "tool_finish",
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        durationMs,
+        success,
+        skillName,
+        ...toolFinishDetails(event),
+      });
+
+      // Analytics: record tool call metrics (skip internal tools)
+      if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
+        recordToolCall({
+          toolName: toolCall.toolName,
+          success,
+          latencyMs: durationMs ?? 0,
+        });
+        // Track for query-level analytics
+        toolCallsForAnalytics.push({
+          name: toolCall.toolName,
+          success,
+          latencyMs: durationMs ?? 0,
+        });
+      }
+
+      // The artifact output tool echoes the model's own document and a skill
+      // guide read is instructions: neither is evidence.
+      const dataSource = !toolCall.toolName.startsWith("update_") &&
+        toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
+      if (dataSource && toolCall.input && typeof toolCall.input === "object") {
+        externalCallSignatures.set(toolCall.toolCallId, buildToolCallSignature(toolCall.toolName, toolCall.input as Record<string, unknown>));
+      }
+      if (!success && dataSource) {
+        failedExternalTools.set(toolCall.toolCallId, {
+          toolName: toolCall.toolName,
+          skillName,
+        });
+      } else if (success && dataSource) {
+        succeededExternalTools.set(toolCall.toolCallId, {
+          toolName: toolCall.toolName,
+          skillName,
+        });
+      }
+    };
     const callLLM = (messagesOverride?: Message[]) =>
       generate({ purpose: "chat" }, {
         model: this.mainModel,
@@ -5631,53 +5733,7 @@ export class sportsclawEngine {
           });
           legacyUpdate?.(`Running ${toolCall.toolName}`);
         },
-        experimental_onToolCallFinish: (event) => {
-          const { toolCall, durationMs, success } = event;
-          const skillName = this.registry.getSkillName(toolCall.toolName);
-          emitProgress?.({
-            type: "tool_finish",
-            toolName: toolCall.toolName,
-            toolCallId: toolCall.toolCallId,
-            durationMs,
-            success,
-            skillName,
-            ...toolFinishDetails(event),
-          });
-
-          // Analytics: record tool call metrics (skip internal tools)
-          if (!toolCall.toolName.startsWith("update_") && !toolCall.toolName.startsWith("get_agent")) {
-            recordToolCall({
-              toolName: toolCall.toolName,
-              success,
-              latencyMs: durationMs ?? 0,
-            });
-            // Track for query-level analytics
-            toolCallsForAnalytics.push({
-              name: toolCall.toolName,
-              success,
-              latencyMs: durationMs ?? 0,
-            });
-          }
-
-          // The artifact output tool echoes the model's own document and a skill
-          // guide read is instructions: neither is evidence.
-          const dataSource = !toolCall.toolName.startsWith("update_") &&
-            toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
-          if (dataSource && toolCall.input && typeof toolCall.input === "object") {
-            externalCallSignatures.set(toolCall.toolCallId, buildToolCallSignature(toolCall.toolName, toolCall.input as Record<string, unknown>));
-          }
-          if (!success && dataSource) {
-            failedExternalTools.set(toolCall.toolCallId, {
-              toolName: toolCall.toolName,
-              skillName,
-            });
-          } else if (success && dataSource) {
-            succeededExternalTools.set(toolCall.toolCallId, {
-              toolName: toolCall.toolName,
-              skillName,
-            });
-          }
-        },
+        experimental_onToolCallFinish: trackToolFinish,
         onStepFinish: (step) => {
           const { toolCalls } = step;
           artifact?.collector.observeStep(step);
@@ -5950,6 +6006,41 @@ export class sportsclawEngine {
         draftClaimTerms(responseText),
         queryProvenanceThisTurn, true
       );
+      // Public-data mode only: the one correction may re-read operator-approved
+      // public tools that this call already offered and may execute (the caller
+      // allowlist is already applied to `tools`), plus this turn's result reader
+      // when offered with them. Never MCP, engine-owned, slip, artifact or action tools.
+      const offeredNow = new Set(activeTools ?? []);
+      const mayRun = (name: string): boolean =>
+        offeredNow.has(name) && executable?.has(name) === true &&
+        typeof (callTools[name] as { execute?: unknown } | undefined)?.execute === "function";
+      const publicReads = this.publicDataMode()
+        ? approvedPool.filter((name) =>
+            mayRun(name) && !name.startsWith("mcp__") && this.registry.getSkillName(name) !== undefined &&
+            name !== ARTIFACT_OUTPUT_TOOL_NAME && name !== SLIP_OUTPUT_TOOL_NAME && name !== SKILL_READ_TOOL)
+        : [];
+      if (publicReads.length > 0 && mayRun(QUERY_TOOL_RESULT_TOOL)) publicReads.push(QUERY_TOOL_RESULT_TOOL);
+      const mainSteps = result.steps;
+      const correctionReads: CorrectionReads | undefined = publicReads.length > 0
+        ? {
+            tools: Object.fromEntries(publicReads.map((name) => [name, callTools[name]])),
+            onToolCallFinish: trackToolFinish,
+            refresh: (steps, draft) => {
+              const { netFailures: failures, verificationContext: context } = failureEvidence();
+              return {
+                toolOutputs: this.collectToolOutputSnippets(
+                  [...mainSteps, ...steps] as Parameters<typeof this.collectToolOutputSnippets>[0],
+                  new Set(succeededExternalTools.keys()),
+                  DECISION_LIMITS.maxStateChars,
+                  draftClaimTerms(draft),
+                  queryProvenanceThisTurn, true
+                ),
+                failedTools: failures.map((f) => f.toolName),
+                conversationContext: context,
+              };
+            },
+          }
+        : undefined;
       responseText = await this.verifyWithTrace({
         userPrompt: sanitizedPrompt,
         draft: responseText,
@@ -5958,6 +6049,7 @@ export class sportsclawEngine {
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
         conversationContext: verificationContext,
+        ...(correctionReads ? { correctionReads } : {}),
       }, artifact);
     }
 

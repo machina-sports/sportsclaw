@@ -427,6 +427,287 @@ describe("routePromptToSkills keeps every explicitly requested venue", () => {
   });
 });
 
+describe("main prompt: refresh the retained scope before calling it missing", () => {
+  it("one generic line tells the model to read the earlier board or scope again before reporting its data unavailable", async () => {
+    const { engine, state, mainCalls } = makeEngine();
+    state.route = route(["polymarket"], "focused", 0.9, { intent: "odds" });
+    state.answer = "Lakers on Polymarket at 0.57.";
+    await engine.run("Which of them should I choose?", {
+      historyMode: "caller",
+      history: [
+        { role: "user", content: "Show me tonight's Polymarket NBA board" },
+        { role: "assistant", content: "Polymarket NBA tonight: Lakers 0.55, Celtics 0.48." },
+      ],
+    });
+    const lines = textOf(mainCalls().at(-1).prompt.filter((m) => m.role === "system")).split("\n");
+    assert.ok(
+      lines.some((line) =>
+        /\b(refresh|re-?read|re-?fetch|read again|fetch again)\w*\b/i.test(line) &&
+        /\b(earlier|prior|previous|history)\b/i.test(line) &&
+        /\b(missing|unavailable|absent)\b/i.test(line)),
+      "no generic instruction to refresh the retained board/scope before claiming its data is missing"
+    );
+  });
+});
+
+// Public-data mode (Jev routing advice + operator pool, Jev evidence checks).
+// Mirrors the native probe: the main model reads only nba_get_scoreboard, then
+// picks from the earlier Polymarket board plus the new DraftKings spread. Only
+// the model (SDK mock), the Jev HTTP transport, the registry and tool bodies are
+// stubbed; routing, pool authority, verification and correction are real.
+describe("public-data correction refreshes the retained board through approved readers", () => {
+  const POLY_READERS = ["polymarket_get_sports_events", "polymarket_get_todays_events"];
+  // Fixture-only names: a same-skill write tool and a private pod tool, never in the pool.
+  const WRITE_TOOL = "polymarket_place_order";
+  const PRIVATE_TOOL = "mcp__pod__search_documents";
+  const OTHER_SPORT = "nfl_get_scoreboard";
+  const SPECS = ["nba_get_scoreboard", OTHER_SPORT, ...POLY_READERS, WRITE_TOOL, PRIVATE_TOOL];
+  const FORBIDDEN = [WRITE_TOOL, PRIVATE_TOOL, OTHER_SPORT];
+  const POLY_MARKER = "POLY_FRESH_ROW";
+  const HISTORY = [
+    { role: "user", content: "PRIOR_REQUEST_MARKER Show me tonight's Polymarket NBA board" },
+    { role: "assistant", content: "PRIOR_BOARD_MARKER Polymarket NBA tonight: Lakers 0.55, Celtics 0.48." },
+  ];
+  const SCOREBOARD = JSON.stringify({ events: [{ name: "Lakers at Celtics", odds: { provider: "DraftKings", spread: "LAL -4.5" } }] });
+  const POLY_ROWS = JSON.stringify({ events: [{ title: `${POLY_MARKER} Lakers vs Celtics`, outcomes: [{ name: "Lakers", price: 0.57 }] }] });
+  const STALE_DRAFT = "Take the Lakers on Polymarket at 0.55 from the earlier board; DraftKings has them -4.5.";
+  const FRESH_PICK = "Take the Lakers on Polymarket at 0.57; DraftKings has them -4.5.";
+  // What the probe's pure correction produced: the DraftKings pick plus an unchecked Polymarket absence.
+  const OLD_REFUSAL = "Take the DraftKings spread, Lakers -4.5. Polymarket is unavailable right now.";
+  const FAILED_PICK = "The Polymarket read failed this turn, so its prices could not be checked; DraftKings has the Lakers -4.5.";
+  const ABSENCE = /\bno (polymarket )?markets?\b|\bpolymarket (has|had) no\b/i;
+
+  const systemOf = (call) => textOf(call.prompt.filter((m) => m.role === "system"));
+  const toolResultsOf = (call) =>
+    call.prompt
+      .filter((m) => m.role === "tool" && Array.isArray(m.content))
+      .flatMap((m) => m.content)
+      .filter((p) => p?.type === "tool-result")
+      .map((p) => ({
+        toolName: p.toolName,
+        failed: String(p.output?.type ?? "").startsWith("error"),
+        text: JSON.stringify(p.output ?? ""),
+      }));
+  let seq = 0;
+  const callTools = (names, input = {}) => ({
+    content: names.map((toolName) => ({ type: "tool-call", toolCallId: `call-${++seq}`, toolName, input: JSON.stringify(input) })),
+    finishReason: { unified: "tool-calls", raw: "tool_calls" },
+    usage: { inputTokens: { total: 4, noCache: 4 }, outputTokens: { total: 2, text: 2 } },
+    warnings: [],
+  });
+  /** Same rule for Jev and the generative checker: a Polymarket claim needs fresh Polymarket rows or a recorded Polymarket failure. */
+  const needsFreshPoly = (raw, draft, status) =>
+    /polymarket/i.test(draft) && !raw.includes(POLY_MARKER) && !/failed this turn[^\n]*polymarket_/i.test(status);
+
+  function scenarioModel(state) {
+    return new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        const system = systemOf(call);
+        const offered = offeredTools(call);
+        const results = toolResultsOf(call);
+        if (system.startsWith("You route sports queries")) {
+          return reply(JSON.stringify(route(["nba", "polymarket"], "focused", 0.9, { intent: "odds" })));
+        }
+        if (system.startsWith("You are a strict sports fact-checker")) {
+          const body = textOf(call.prompt.filter((m) => m.role !== "system"));
+          const rawAt = body.indexOf("Raw source data");
+          const draftAt = body.indexOf("Draft response to check:");
+          state.checks.push({ body, raw: body.slice(rawAt, draftAt) });
+          const bad = needsFreshPoly(body.slice(rawAt, draftAt), body.slice(draftAt), system);
+          return reply(JSON.stringify(bad
+            ? { isValid: false, discrepancies: [{ claim: "Polymarket pick", evidence: "no current Polymarket rows", severity: "high", kind: "unsupported" }] }
+            : { isValid: true, discrepancies: [] }));
+        }
+        if (system.startsWith("You are an expert sports editor")) {
+          state.corrections.push({ offered, prompt: textOf(call.prompt.filter((m) => m.role !== "system")) });
+          // Observational: ask for every interesting tool actually offered; with none, emit the probe's old refusal.
+          const wanted = offered.filter((name) => [...POLY_READERS, ...FORBIDDEN].includes(name));
+          if (wanted.length > 0 && (state.greedy || results.length === 0)) {
+            return callTools(wanted, state.greedy ? { page: state.corrections.length } : {});
+          }
+          if (results.some((r) => !r.failed && r.text.includes(POLY_MARKER))) return reply(FRESH_PICK);
+          if (results.some((r) => r.failed && r.toolName.startsWith("polymarket_"))) return reply(FAILED_PICK);
+          return reply(OLD_REFUSAL);
+        }
+        state.mains.push({ offered });
+        if (results.length === 0) {
+          const reads = state.mainReads.filter((name) => offered.includes(name));
+          if (reads.length > 0) return callTools(reads);
+        }
+        return reply(results.some((r) => r.text.includes(POLY_MARKER)) ? FRESH_PICK : STALE_DRAFT);
+      },
+    });
+  }
+
+  /** Jev decision endpoint stub: routing advises nba only; evidence applies needsFreshPoly to coverage_freshness. */
+  function jevTransport(state) {
+    const choice = (criteria, picked) => {
+      const keys = Object.keys(criteria);
+      const rest = 0.03 / (keys.length - 1);
+      return { type: "choice", choice: picked, confidence: 0.99, probabilities: Object.fromEntries(keys.map((k) => [k, k === picked ? 0.97 : rest])) };
+    };
+    return async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const answers = {};
+      if ("disposition" in body.questions) {
+        const described = new Map(body.state.capabilities.map((c) => [c.ref, c.description]));
+        for (const [id, q] of Object.entries(body.questions)) {
+          answers[id] = choice(q.criteria, id === "disposition" ? "select" : described.get(id).includes('"nba"') ? "required" : "not_required");
+        }
+      } else {
+        const s = body.state;
+        const rawAt = s.indexOf("Raw source data (");
+        const draftAt = s.indexOf("Draft response to judge:");
+        const entry = { state: s, status: s.slice(0, rawAt), raw: s.slice(rawAt, draftAt), draft: s.slice(draftAt) };
+        state.evidence.push(entry);
+        const bad = needsFreshPoly(entry.raw, entry.draft, entry.status);
+        for (const [id, q] of Object.entries(body.questions)) {
+          answers[id] = choice(q.criteria, bad && id === "coverage_freshness" ? "contradicted" : "supported");
+        }
+      }
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+  }
+
+  function makePublicEngine({ pool = POLY_READERS, allowlist, publicData = true, mainReads = ["nba_get_scoreboard"], failPoly = false, greedy = false } = {}) {
+    const state = { evidence: [], checks: [], corrections: [], mains: [], executed: [], mainReads, greedy };
+    const env = { TYPESAFE_API_KEY: "test-only" };
+    const transport = jevTransport(state);
+    const engine = new sportsclawEngine({
+      thinkingBudget: 0,
+      ...(publicData
+        ? {
+            routing: { provider: "jev", dataPolicy: "cloud_allowed", publicDataTools: pool, transport, env },
+            evidenceVerifier: { provider: "jev", dataPolicy: "cloud_allowed", publicToolNames: ["nba_get_scoreboard", ...POLY_READERS], transport, env },
+          }
+        : { evidenceVerifier: { provider: "generative", generativeAction: "correct" } }),
+    });
+    engine.mainModel = scenarioModel(state);
+    const installed = ["nba", "nfl", "polymarket"];
+    const specs = SPECS.map((name) => ({ name, description: `${name} data`, input_schema: { type: "object", properties: {} } }));
+    engine.registry = {
+      getInstalledSkills: () => [...installed],
+      getAllToolSpecs: () => specs,
+      getSkillName: (name) => (name.startsWith("mcp__") ? undefined : installed.find((skill) => name.startsWith(`${skill}_`))),
+    };
+    engine.buildTools = () => Object.fromEntries([...SPECS, "get_agent_config"].map((name) => [name, tool({
+      description: name,
+      inputSchema: jsonSchema({ type: "object", properties: {} }),
+      execute: async () => {
+        state.executed.push({ name, phase: state.corrections.length > 0 ? "correction" : "main" });
+        if (name === "nba_get_scoreboard") return SCOREBOARD;
+        if (POLY_READERS.includes(name)) {
+          if (failPoly) throw new Error("upstream 503");
+          return POLY_ROWS;
+        }
+        return "{}";
+      },
+    })]));
+    if (allowlist) engine.setToolAllowlist(allowlist);
+    return { engine, state };
+  }
+  const run = (engine, prompt = "Which of them should I choose?") => engine.run(prompt, { historyMode: "caller", history: HISTORY });
+  const correctionReads = (state) => state.executed.filter((e) => e.phase === "correction").map((e) => e.name);
+  const correctionOffered = (state) => new Set(state.corrections.flatMap((c) => c.offered));
+
+  // Any wording or language: nothing here is keyed on the user's phrasing.
+  for (const prompt of ["Which of them should I choose?", "Qual delas devo escolher?"]) {
+    it(`${JSON.stringify(prompt)}: wrong-source board -> coverage fault -> correction reads an approved Polymarket reader -> recheck judges fresh rows`, async () => {
+      const { engine, state } = makePublicEngine();
+      const answer = await run(engine, prompt);
+
+      // Fixture fidelity with the probe: pool offered the readers, main read only the scoreboard.
+      assert.ok(POLY_READERS.every((name) => state.mains[0]?.offered.includes(name)), `pool readers not offered to main: ${state.mains[0]?.offered}`);
+      assert.deepEqual(state.executed.filter((e) => e.phase === "main").map((e) => e.name), ["nba_get_scoreboard"]);
+      assert.ok(state.evidence[0]?.draft.includes(STALE_DRAFT), "the first check judges the stale-board draft");
+
+      // The correction keeps the user's intent from user turns only.
+      assert.ok(state.corrections[0]?.prompt.includes("PRIOR_REQUEST_MARKER"), "prior user request missing from correction context");
+      const firstRaw = state.corrections[0].prompt.slice(
+        state.corrections[0].prompt.indexOf("Raw source data"), state.corrections[0].prompt.indexOf("Original draft response"));
+      assert.ok(!firstRaw.includes("PRIOR_BOARD_MARKER"), "stale assistant board entered the correction's source data");
+
+      const offered = correctionOffered(state);
+      assert.ok(POLY_READERS.some((name) => offered.has(name)), `no approved Polymarket reader offered to the correction: [${[...offered]}]`);
+      for (const name of FORBIDDEN) assert.ok(!offered.has(name), `${name} offered to the correction`);
+      const reads = correctionReads(state);
+      assert.ok(reads.length > 0 && reads.every((name) => POLY_READERS.includes(name)), `correction reads: [${reads}]`);
+      assert.ok(state.corrections.length <= 3, `correction steps: ${state.corrections.length}`);
+
+      // One check plus one bounded recheck, and the recheck sees the fresh source.
+      assert.equal(state.evidence.length, 2, "exactly one check and one recheck");
+      assert.ok(state.evidence[1].raw.includes(POLY_MARKER), "the recheck did not receive the fresh Polymarket output");
+      for (const e of state.evidence) {
+        assert.ok(!e.state.includes("PRIOR_BOARD_MARKER"), "stale assistant board reached Jev");
+        assert.ok(!e.raw.includes("0.55"), "a stale assistant price was counted as raw source data");
+      }
+      assert.equal(answer, FRESH_PICK, "the corrected pick keeps the Polymarket venue with the fresh price");
+    });
+  }
+
+  it("an already supported draft is not corrected", async () => {
+    const { engine, state } = makePublicEngine({ mainReads: ["nba_get_scoreboard", "polymarket_get_sports_events"] });
+    const answer = await run(engine);
+    assert.equal(answer, FRESH_PICK);
+    assert.equal(state.corrections.length, 0, "a supported draft must not be corrected");
+    assert.equal(state.evidence.length, 1);
+    assert.deepEqual(correctionReads(state), []);
+  });
+
+  it("a failed correction lookup stays a failure: the recheck gets the updated failures and the answer claims no absence", async () => {
+    const { engine, state } = makePublicEngine({ failPoly: true });
+    const answer = await run(engine);
+    const reads = correctionReads(state);
+    assert.ok(reads.some((name) => POLY_READERS.includes(name)), `the approved reader was never attempted: [${reads}]`);
+    assert.equal(state.evidence.length, 2);
+    assert.match(state.evidence[1].status, /failed this turn[^\n]*polymarket_/i, "the recheck did not receive the correction's failed reads");
+    assert.doesNotMatch(answer, ABSENCE);
+    assert.equal(answer, FAILED_PICK);
+  });
+
+  it("bounded: a correction that keeps asking for reads stops within 3 steps, one recheck, no scope creep", async () => {
+    const { engine, state } = makePublicEngine({ greedy: true });
+    const answer = await run(engine);
+    assert.ok(state.corrections.length <= 3, `correction steps: ${state.corrections.length}`);
+    assert.ok(state.evidence.length <= 2, `checks: ${state.evidence.length}`);
+    const reads = correctionReads(state);
+    assert.ok(reads.length > 0, "the correction executed no approved read");
+    assert.ok(reads.every((name) => POLY_READERS.includes(name)), `scope creep: [${reads}]`);
+    assert.ok(!state.executed.some((e) => FORBIDDEN.includes(e.name)), "forbidden tool executed");
+    assert.doesNotMatch(answer, ABSENCE);
+  });
+
+  it("an unapproved reader stays out of the correction even when another reader is approved", async () => {
+    const { engine, state } = makePublicEngine({ pool: ["polymarket_get_todays_events"] });
+    await run(engine);
+    const offered = correctionOffered(state);
+    assert.ok(!offered.has("polymarket_get_sports_events"), "unapproved reader offered to the correction");
+    assert.ok(!state.executed.some((e) => e.name === "polymarket_get_sports_events"), "unapproved reader executed");
+    assert.ok(correctionReads(state).includes("polymarket_get_todays_events"), "the approved reader was not used by the correction");
+  });
+
+  it("caller-denied readers are never executed by the correction", async () => {
+    const allowlist = [...SPECS, "get_agent_config"].filter((name) => !POLY_READERS.includes(name));
+    const { engine, state } = makePublicEngine({ allowlist });
+    const answer = await run(engine);
+    for (const name of POLY_READERS) assert.ok(!correctionOffered(state).has(name), `${name} offered despite the caller allowlist`);
+    assert.ok(!state.executed.some((e) => POLY_READERS.includes(e.name)), "a caller-denied reader executed");
+    assert.ok(!state.executed.some((e) => FORBIDDEN.includes(e.name)));
+    assert.ok(state.evidence.length <= 2);
+    assert.doesNotMatch(answer, ABSENCE);
+  });
+
+  it("outside public-data mode the correction stays a pure rewrite: no tools offered or executed", async () => {
+    const { engine, state } = makePublicEngine({ publicData: false });
+    await run(engine);
+    assert.ok(state.checks.length >= 1, "the generative checker ran");
+    assert.ok(state.corrections.length >= 1, "the opt-in correction ran");
+    assert.deepEqual([...correctionOffered(state)], [], "tools offered to a non-public-data correction");
+    assert.deepEqual(correctionReads(state), []);
+    for (const check of state.checks) assert.ok(!check.raw.includes("PRIOR_BOARD_MARKER"), "stale assistant board counted as checker source data");
+  });
+});
+
 describe("provider tool ceiling is not weakened by follow-up widening", () => {
   it("an oversized registry keeps the routed filter on a low-confidence follow-up and never truncates", () => {
     const routed = ["nba_get_scores"];
