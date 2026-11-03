@@ -19,6 +19,13 @@
 
 import { tool as defineToolRaw, jsonSchema, type Tool } from "ai";
 import { Marked } from "marked";
+import {
+  MONEYLINE_REPORT_SCHEMA,
+  MONEYLINE_TOOL_DESCRIPTION,
+  parseMoneylineScope,
+  renderMoneylineReport,
+  type MoneylineScope,
+} from "./moneyline-report.js";
 
 // Same cast workaround as slip-output.ts / operator-memory-tools.ts.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,6 +173,17 @@ export interface ArtifactOutputCollector {
   finish(): ArtifactOutput | undefined;
   /** The reason the collector was invalidated, or null. */
   problem(): "invalid_artifact" | "conflicting_artifact" | null;
+  /** The engine scope of a code-owned moneyline report collector, or null in generic HTML mode. */
+  readonly moneylineScope: MoneylineScope | null;
+}
+
+export interface ArtifactCollectorOptions {
+  /**
+   * Engine-owned scope from a trusted resolved task brief. When present the
+   * tool takes closed moneyline data instead of HTML and code renders the
+   * document; an invalid scope refuses every submission. Never client input.
+   */
+  moneylineScope?: unknown;
 }
 
 const ARTIFACT_SCHEMA = {
@@ -198,11 +216,33 @@ const TOOL_DESCRIPTION =
   "or URLs. Calling this does not save or publish anything and returns no link: never write a URL for it and " +
   "never say it was saved or published. Keep your chat reply short and do not paste the HTML into it.";
 
+/**
+ * A structured-mode correction: closed moneyline data JSON (bare, or one ```json
+ * fence), parsed and rendered by the same pure module. HTML, markdown or any
+ * other text is never accepted. Null when invalid.
+ */
+export function renderMoneylineCorrection(text: unknown, scope: unknown): ArtifactOutput | null {
+  if (typeof text !== "string" || !parseMoneylineScope(scope)) return null;
+  const trimmed = text.trim();
+  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/i.exec(trimmed);
+  let value: unknown;
+  try {
+    value = JSON.parse(fenced ? fenced[1] : trimmed);
+  } catch {
+    return null;
+  }
+  const rendered = renderMoneylineReport(value, scope);
+  return rendered ? parseArtifactOutput(rendered) : null;
+}
+
 /** One collector per request. */
-export function createArtifactOutputCollector(): ArtifactOutputCollector {
+export function createArtifactOutputCollector(options?: ArtifactCollectorOptions): ArtifactOutputCollector {
   let captured: ArtifactOutput | undefined;
   let captureKey: string | undefined;
   let invalidated: "invalid_artifact" | "conflicting_artifact" | null = null;
+  const structured = options !== undefined && options !== null && Object.hasOwn(options, "moneylineScope");
+  // An invalid engine scope fails closed: every submission is refused.
+  const scope = structured ? parseMoneylineScope(options!.moneylineScope) : null;
 
   const refuse = (reasonCode: "invalid_artifact" | "conflicting_artifact"): ArtifactToolResult => {
     invalidated = reasonCode;
@@ -213,9 +253,16 @@ export function createArtifactOutputCollector(): ArtifactOutputCollector {
 
   const submit = (input: unknown): ArtifactToolResult => {
     if (invalidated) return { accepted: false, published: false, reasonCode: "collector_invalid" };
-    // Fill only absent constants; any explicit field (wrong, null, undefined or unknown) reaches the strict parser.
-    const filled = isPlainObject(input) ? { contract: ARTIFACT_CONTRACT, mimeType: ARTIFACT_MIME_TYPE, ...input } : input;
-    const artifact = parseArtifactOutput(filled);
+    let artifact: ArtifactOutput | null;
+    if (structured) {
+      // Closed data only; raw HTML, narration and unknown keys are refused by the parser.
+      const rendered = scope && isPlainObject(input) ? renderMoneylineReport(input, scope) : null;
+      artifact = rendered ? parseArtifactOutput(rendered) : null;
+    } else {
+      // Fill only absent constants; any explicit field (wrong, null, undefined or unknown) reaches the strict parser.
+      const filled = isPlainObject(input) ? { contract: ARTIFACT_CONTRACT, mimeType: ARTIFACT_MIME_TYPE, ...input } : input;
+      artifact = parseArtifactOutput(filled);
+    }
     if (!artifact) return refuse("invalid_artifact");
     // parseArtifactOutput builds keys in a fixed order, so equal JSON is equal content.
     const key = JSON.stringify(artifact);
@@ -226,13 +273,14 @@ export function createArtifactOutputCollector(): ArtifactOutputCollector {
   };
 
   const tool: Tool = defineTool({
-    description: TOOL_DESCRIPTION,
-    inputSchema: jsonSchema(ARTIFACT_SCHEMA as Parameters<typeof jsonSchema>[0]),
+    description: structured ? MONEYLINE_TOOL_DESCRIPTION : TOOL_DESCRIPTION,
+    inputSchema: jsonSchema((structured ? MONEYLINE_REPORT_SCHEMA : ARTIFACT_SCHEMA) as unknown as Parameters<typeof jsonSchema>[0]),
     execute: async (input: unknown) => submit(input),
   });
 
   return {
     tool,
+    moneylineScope: scope,
     observeStep: (step: unknown) => {
       if (!invalidated && dispatchFailed(step)) refuse("invalid_artifact");
     },

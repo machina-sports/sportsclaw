@@ -139,10 +139,23 @@ function generated(content) {
  * One scripted step per tool-bearing call; tool-less calls (fact-check, router, synthesis) get a clean
  * verdict, or `verdict(options)` when given.
  */
-function scripted(steps, { synthesis, verdict = () => VERDICT_OK, mainWithoutTools = false } = {}) {
+/** A tool-less call's phase, by its system prompt: factual check, focused task review or correction. */
+const systemText = (call) =>
+  call.prompt.filter((m) => m.role === "system").map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+const phaseOf = (call) => {
+  const system = systemText(call);
+  if (system.startsWith("You are a strict sports fact-checker")) return "fact";
+  if (system.startsWith("You are a task-completion reviewer")) return "scope";
+  if (system.startsWith("You are an expert sports editor")) return "editor";
+  return "other";
+};
+
+/** `scope(options)` answers the focused task review (clean by default); factual verdicts stay with `verdict`. */
+function scripted(steps, { synthesis, verdict = () => VERDICT_OK, scope = () => VERDICT_OK, mainWithoutTools = false } = {}) {
   const chat = [];
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
+      if (phaseOf(options) === "scope") return generated([say(scope(options))]);
       const auxiliary = /isValid|expert sports editor|Combine the following agent responses/.test(JSON.stringify(options.prompt));
       // The editor may now have approved readers; its phase is not defined by an empty tool list.
       if (auxiliary || ((!options.tools || options.tools.length === 0) && !mainWithoutTools)) {
@@ -430,7 +443,16 @@ const CHECKERS = [["generative", (jev) => generative(jev)], ["jev", () => ({})]]
 const promptText = (call) =>
   call.prompt.map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join("\n"))).join("\n");
 /** Tool-less generative fact-check calls (first verdict and its retry). */
-const checkerCalls = (all) => all.filter((call) => !call.tools?.length && promptText(call).includes("isValid"));
+const checkerCalls = (all) => all.filter((call) => !call.tools?.length && phaseOf(call) === "fact");
+/** Focused task reviews: after factual support, with no raw source batch. */
+const scopeCalls = (all) => all.filter((call) => !call.tools?.length && phaseOf(call) === "scope");
+/** Ordered verification phases of the run (fact, scope, editor). */
+const phases = (all) => all.map(phaseOf).filter((phase) => phase !== "other");
+const assertNoRawBatch = (call, raw) => {
+  const text = promptText(call);
+  assert.ok(!text.includes("Raw source data") && !/\[Internal source \d+/.test(text), "no raw source batch in the task review");
+  if (raw) assert.ok(!text.includes(raw), "the source output stays out of the task review");
+};
 const editorCalls = (all) => all.filter((call) => !call.tools?.length && promptText(call).includes("expert sports editor"));
 const CORRECTED = "Flamengo venceu o Palmeiras por 2 a 1.";
 /** A generative checker that flags only when it actually sees `marker`; the editor returns corrected prose. */
@@ -545,6 +567,10 @@ describe("the document with the configured generative checker", () => {
     assert.equal(jev.reads(), 0, "no Jev credential read");
     const checks = checkerCalls(all);
     assert.equal(checks.length, 1, "one check");
+    // A caller-history turn adds one focused task review, after the factual pass.
+    assert.deepEqual(phases(all), ["fact", "scope"]);
+    assert.ok(promptText(scopeCalls(all)[0]).includes(HTML), "the task review judges the complete document");
+    assertNoRawBatch(scopeCalls(all)[0], SOURCE);
     const judged = promptText(checks[0]);
     assert.ok(judged.includes(HTML), "the complete document");
     assert.ok(judged.includes(PROSE), "beside the prose");
@@ -650,6 +676,8 @@ describe("code-owned artifact metadata", () => {
       assert.deepEqual([...offeredSchema(chat[0]).required].sort(), ["html", "title"]);
       const checks = checkerCalls(all);
       assert.equal(checks.length, 1, "one check");
+      assert.deepEqual(phases(all), ["fact", "scope"], "one factual check, then one focused task review");
+      assertNoRawBatch(scopeCalls(all)[0], SOURCE);
       assert.ok(promptText(checks[0]).includes(HTML), "the complete document was judged");
       assert.equal(text, PROSE);
       assert.deepEqual(results, [ACCEPTED]);
@@ -705,7 +733,10 @@ describe("a rejected report repaired from the corrected prose", () => {
     assert.equal(editorCalls(all).length, 1, "one correction");
     const checks = checkerCalls(all);
     assert.equal(checks.length, 2, "the first check and one recheck");
-    assert.equal(all.length, chat.length + 3, "no other model call");
+    // The recheck's factual pass is followed by the one focused task review on the same exact document.
+    assert.deepEqual(phases(all.filter((call) => !call.tools?.length)), ["fact", "editor", "fact", "scope"]);
+    assert.equal(all.length, chat.length + 4, "no other model call: check, correction, recheck, task review");
+    assert.ok(promptText(scopeCalls(all)[0]).includes(CORRECTED_MD), "the task review judges the corrected text");
     assert.equal(jev.bodies.length, 0);
     assert.equal(results.length, 1);
     const [{ artifact: repaired, reasonCode }] = results;
@@ -782,6 +813,99 @@ describe("a rejected report repaired from the corrected prose", () => {
     }
     assert.equal(checkerCalls(all).length, 1, "no recheck");
     assert.ok(results.every((r) => r.artifact === null), "nothing published");
+  });
+});
+
+// A complete corrected HTML document is a report candidate, never chat text: it may leave the
+// engine only as the artifact the one recheck bound by its exact hash. Partial view, non-strict
+// (no public pool), generative "correct": the recheck's only flag is an "unsupported" fact the
+// partial-view filter drops, so the verdict is neither clean nor actionable.
+describe("a complete corrected HTML document never reaches the chat text unbound", () => {
+  const MARKER = "Palmeiras venceu por 3 a 0";
+  const CONTRA = Object.freeze({ ...ARTIFACT, html: HTML.replace("Comparação", MARKER) });
+  const FIXED_HTML =
+    "<!doctype html><html><head><title>Flamengo x Palmeiras</title><style>h1{font-size:1.4rem}</style></head>" +
+    "<body><h1>Comparação</h1><p>Flamengo venceu o Palmeiras por 2 a 1.</p></body></html>";
+  const PREPARED = "I prepared the requested report as a separate document.";
+  const PARTIAL = `${SOURCE}\n...[truncated middle]...\n{"more":true}`;
+  const flagged = (kind) =>
+    JSON.stringify({ isValid: false, discrepancies: [{ claim: "Flamengo venceu", evidence: "not in the data shown", severity: "high", kind }] });
+  /** The editor returns one complete document; the first check contradicts MARKER; the recheck answers `recheck`. */
+  const htmlJudge = (recheck) => (options) => {
+    const text = promptText(options);
+    if (text.includes("expert sports editor")) return FIXED_HTML;
+    if (text.includes(MARKER)) return flagged("contradicted");
+    return recheck;
+  };
+  /** The real engine, generative "correct", no public pool, one truncated scores source. */
+  const partialEngine = (model) => {
+    const engine = newEngine(model, { evidenceVerifier: { provider: "generative", generativeAction: "correct" } });
+    const offered = engine.buildTools.bind(engine);
+    engine.buildTools = (...args) => ({
+      ...offered(...args),
+      get_scores: tool({
+        description: "Scores",
+        inputSchema: jsonSchema({ type: "object", properties: { team: { type: "string" } }, required: ["team"] }),
+        execute: async () => PARTIAL,
+      }),
+    });
+    return engine;
+  };
+  const STEPS = () => [[scoresCall()], [artifactCall(CONTRA)], [say(PROSE)]];
+
+  it("withholds when the recheck is not a clean pass: no raw HTML in the chat, no document, trace withheld", async () => {
+    const { model, all } = scripted(STEPS(), { verdict: htmlJudge(flagged("unsupported")) });
+    const engine = partialEngine(model);
+    const { text, results } = await runArtifact(engine);
+    const [editor] = editorCalls(all);
+    assert.ok(editor, "one correction");
+    assert.match(promptText(editor), /\b(complete|full)\b[^\n]*\bHTML\b[^\n]*\bdocument\b/i, "the full-HTML corrector directive");
+    assert.equal(editorCalls(all).length, 1, "one correction");
+    assert.equal(checkerCalls(all).length, 2, "the first check and one recheck");
+    // The non-clean partial factual recheck may still get the one task review; a passing review never binds it.
+    assert.deepEqual(phases(all), ["fact", "editor", "fact", "scope"]);
+    assertNoRawBatch(scopeCalls(all)[0], PARTIAL);
+    assert.doesNotMatch(text, /<!doctype|<html\b|<body\b/i, "the unbound corrected document never becomes chat text");
+    assert.ok(!text.includes(FIXED_HTML));
+    assert.match(text, /could not verify/i, "the existing safe refusal");
+    assert.deepEqual(results, [WITHHELD]);
+    assert.equal(engine.lastRunTrace.verification.outcome, "withheld");
+  });
+
+  it("refuses an invalid HTML repair before any ordinary-text recheck", async () => {
+    const invalid = FIXED_HTML.replace("</body>", "\u0000</body>");
+    const { model, all } = scripted(STEPS(), { verdict: (options) => {
+      const text = promptText(options);
+      if (text.includes("expert sports editor")) return invalid;
+      return text.includes(MARKER) ? flagged("contradicted") : VERDICT_OK;
+    } });
+    const engine = partialEngine(model);
+    const { text, results } = await runArtifact(engine);
+    assert.doesNotMatch(text, /<!doctype|<html\b|<body\b/i);
+    assert.match(text, /could not verify/i);
+    assert.equal(checkerCalls(all).length, 1, "invalid report cannot be reclassified as ordinary prose");
+    assert.deepEqual(results, [WITHHELD]);
+    assert.equal(engine.lastRunTrace.verification.outcome, "withheld");
+  });
+
+  it("control: a clean recheck of that exact document publishes it, with the neutral prepared-output text", async () => {
+    const { model, all } = scripted(STEPS(), { verdict: htmlJudge(VERDICT_OK) });
+    const engine = partialEngine(model);
+    engine.config.tokenBudgets = { ...(engine.config.tokenBudgets ?? {}), main: 12_000 };
+    const { text, results } = await runArtifact(engine);
+    assert.equal(editorCalls(all)[0].maxOutputTokens, 12_000, "a complete HTML repair gets the configured main output budget, not the smaller verdict budget");
+    assert.equal(editorCalls(all).length, 1);
+    const checks = checkerCalls(all);
+    assert.equal(checks.length, 2);
+    assert.deepEqual(phases(all), ["fact", "editor", "fact", "scope"]);
+    assert.ok(promptText(scopeCalls(all)[0]).includes(FIXED_HTML), "the task review judged the exact complete document");
+    assertNoRawBatch(scopeCalls(all)[0], PARTIAL);
+    assert.ok(promptText(checks[1]).includes(FIXED_HTML), "the recheck judged the exact complete document");
+    assert.equal(text, PREPARED);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].reasonCode, null);
+    assert.equal(results[0].artifact?.html, FIXED_HTML, "the complete corrected document, not a prose wrapper");
+    assert.equal(engine.lastRunTrace.verification.outcome, "corrected");
   });
 });
 

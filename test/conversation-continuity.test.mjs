@@ -25,6 +25,15 @@ for (const key of ["SPORTSCLAW_SKILLS", "sportsclaw_SKILLS", "SPORTSCLAW_MEMORY_
 }
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
+it("pick guidance keeps the established market and permits evidence-based uncertainty", async () => {
+  const { buildTemplatePrompt } = await import("../dist/response-templates.js");
+  const hint = buildTemplatePrompt("best_bets");
+  assert.doesNotMatch(hint, /no hedging/i);
+  assert.match(hint, /venue.*market.*conversation/i);
+  assert.match(hint, /qualified lean/i);
+  assert.match(hint, /edge.*evidence/i);
+});
+
 it("live and schedule templates preserve complete scores without unsolicited betting metadata", async () => {
   const { buildTemplatePrompt } = await import("../dist/response-templates.js");
   for (const intent of ["live_scores", "schedule"]) {
@@ -508,6 +517,13 @@ describe("public-data correction refreshes the retained board through approved r
         if (system.startsWith("You route sports queries")) {
           return reply(JSON.stringify(route(["nba", "polymarket"], "focused", 0.9, { intent: "odds" })));
         }
+        if (system.startsWith("You are a task-completion reviewer")) {
+          // The focused task review after factual support: no raw batches here; this suite's
+          // venue rule is factual (fresh rows), so the review accepts.
+          const body = textOf(call.prompt.filter((m) => m.role !== "system"));
+          state.scopes.push({ body });
+          return reply(JSON.stringify({ isValid: true, discrepancies: [] }));
+        }
         if (system.startsWith("You are a strict sports fact-checker")) {
           const body = textOf(call.prompt.filter((m) => m.role !== "system"));
           const rawAt = body.indexOf("Raw source data");
@@ -570,7 +586,7 @@ describe("public-data correction refreshes the retained board through approved r
   }
 
   function makePublicEngine({ pool = POLY_READERS, allowlist, publicData = true, mainReads = ["nba_get_scoreboard"], failPoly = false, greedy = false } = {}) {
-    const state = { evidence: [], checks: [], corrections: [], mains: [], executed: [], mainReads, greedy };
+    const state = { evidence: [], checks: [], scopes: [], corrections: [], mains: [], executed: [], mainReads, greedy };
     const env = { TYPESAFE_API_KEY: "test-only" };
     const transport = jevTransport(state);
     const engine = new sportsclawEngine({
@@ -641,6 +657,14 @@ describe("public-data correction refreshes the retained board through approved r
         assert.ok(!e.state.includes("PRIOR_BOARD_MARKER"), "stale assistant board reached Jev");
         assert.ok(!e.raw.includes("0.55"), "a stale assistant price was counted as raw source data");
       }
+      // Jev supported only the recheck: exactly one focused task review, then, with no raw batch or prior board.
+      assert.equal(state.checks.length, 0, "no duplicate primary factual check after Jev");
+      assert.equal(state.scopes.length, 1, "one task review after the supported recheck");
+      for (const s of state.scopes) {
+        assert.ok(s.body.includes(FRESH_PICK), "the task review judges the corrected pick");
+        assert.ok(s.body.includes("PRIOR_REQUEST_MARKER"), "with the prior user request");
+        assert.ok(!s.body.includes("PRIOR_BOARD_MARKER") && !s.body.includes(POLY_MARKER) && !s.body.includes("Raw source data"), "no prior board or raw batch");
+      }
       assert.equal(answer, FRESH_PICK, "the corrected pick keeps the Polymarket venue with the fresh price");
     });
   }
@@ -705,6 +729,482 @@ describe("public-data correction refreshes the retained board through approved r
     assert.deepEqual([...correctionOffered(state)], [], "tools offered to a non-public-data correction");
     assert.deepEqual(correctionReads(state), []);
     for (const check of state.checks) assert.ok(!check.raw.includes("PRIOR_BOARD_MARKER"), "stale assistant board counted as checker source data");
+  });
+});
+
+// Truth is not fulfilment. The prior user turn asked for the Polymarket NBA
+// moneyline board; the current turn asks for a shareable report with picks and
+// team stats. The main model reads only true DraftKings odds and standings and
+// writes an honestly disclaimed DraftKings report. Jev supports every fact
+// (it judges facts and gets no history), so the existing primary checker, with
+// the user context already approved for the main model, is the bounded task
+// fidelity gate: one correction that may read the approved same venue, one
+// recheck, otherwise withhold. The latest explicit instruction still wins.
+// Only the model, the Jev transport, the registry and tool bodies are stubbed.
+describe("contextual report fidelity: a true substitute venue is not the requested one", () => {
+  const POLY_READERS = ["polymarket_get_sports_events", "polymarket_get_todays_events"];
+  const NBA_READS = ["nba_get_scoreboard", "nba_get_standings"];
+  const SPECS = [...NBA_READS, ...POLY_READERS];
+  const POLY_MARKER = "POLY_FIDELITY_ROW";
+  const PRIOR_REQUEST = "PRIOR_FIDELITY_REQUEST Show me tonight's Polymarket NBA moneyline board";
+  const PRIOR_BOARD = "PRIOR_FIDELITY_BOARD Polymarket NBA moneylines tonight: Lakers 0.55, Celtics 0.48.";
+  const HISTORY = [
+    { role: "user", content: PRIOR_REQUEST },
+    { role: "assistant", content: PRIOR_BOARD },
+  ];
+  const PROFILE_MARKER = "PRIVATE_FIDELITY_PROFILE";
+  const REPORT_ASK = "Make me a shareable report with picks and team stats";
+  const SWITCHED_ASK = "Make me a shareable report with picks and team stats, using DraftKings odds this time";
+  const STANDALONE_ASK = "Make me a shareable report with DraftKings NBA moneyline picks and team stats";
+  const SCOREBOARD = JSON.stringify({ events: [{ name: "Lakers at Celtics", odds: { provider: "DraftKings", moneyline: { LAL: -150, BOS: 130 } } }] });
+  const STANDINGS = JSON.stringify({ standings: [{ team: "Lakers", wins: 30, losses: 10 }, { team: "Celtics", wins: 28, losses: 12 }] });
+  const POLY_ROWS = JSON.stringify({ events: [{ title: `${POLY_MARKER} Lakers vs Celtics`, market: "moneyline", outcomes: [{ name: "Lakers", price: 0.57 }] }] });
+  // True, Jev-supportable and honestly disclaimed, and still not what the conversation asked for.
+  const SUBSTITUTED = "Report: Polymarket prices were not available here, so these picks use DraftKings: Lakers moneyline -150. Standings: Lakers 30-10, Celtics 28-12.";
+  const SUBSTITUTED_PICK = "Pick the Lakers: DraftKings has them at -150. Polymarket prices were not available here.";
+  const FAITHFUL = "Report: Polymarket moneyline picks: Lakers at 0.57. Standings: Lakers 30-10, Celtics 28-12.";
+  const SWITCHED = "Report: DraftKings moneyline picks: Lakers -150. Standings: Lakers 30-10, Celtics 28-12.";
+  const reportHtml = (lead) =>
+    "<!doctype html><html><head><title>NBA picks</title><style>table{border-collapse:collapse}td{padding:.3rem}</style></head>" +
+    `<body><h1>Shareable NBA report</h1>${lead}<table><tr><td>Lakers</td><td>30-10</td></tr><tr><td>Celtics</td><td>28-12</td></tr></table></body></html>`;
+  const SUBSTITUTED_HTML = reportHtml("<p>Polymarket prices were not available here; DraftKings picks: Lakers moneyline -150.</p>");
+  const FAITHFUL_HTML = reportHtml("<p>Polymarket moneyline picks: Lakers at 0.57.</p>");
+  const NONCE = "nonce_fidelity0123456789";
+  // One line of the corrector's instructions; wording may differ, the rule may not.
+  const FULL_HTML_DIRECTIVE = /\b(complete|full|whole|entire)\b[^\n]*\bHTML\b[^\n]*\bdocument\b|\bHTML\b[^\n]*\bdocument\b[^\n]*\b(complete|full|whole|entire)\b/i;
+  const WITHHELD_TEXT = /could not verify/i;
+
+  const systemOf = (call) => textOf(call.prompt.filter((m) => m.role === "system"));
+  const toolResultsOf = (call) =>
+    call.prompt
+      .filter((m) => m.role === "tool" && Array.isArray(m.content))
+      .flatMap((m) => m.content)
+      .filter((p) => p?.type === "tool-result")
+      .map((p) => ({ toolName: p.toolName, failed: String(p.output?.type ?? "").startsWith("error"), text: JSON.stringify(p.output ?? "") }));
+  let seq = 0;
+  const step = (content) => ({
+    content,
+    finishReason: { unified: "tool-calls", raw: "tool_calls" },
+    usage: { inputTokens: { total: 4, noCache: 4 }, outputTokens: { total: 2, text: 2 } },
+    warnings: [],
+  });
+  const callTools = (names) =>
+    step(names.map((toolName) => ({ type: "tool-call", toolCallId: `fid-${++seq}`, toolName, input: "{}" })));
+  const submitReport = (html) =>
+    step([{ type: "tool-call", toolCallId: `fid-${++seq}`, toolName: "submit_artifact", input: JSON.stringify({ title: "Shareable NBA report", html }) }]);
+
+  /**
+   * The primary checker's semantic judgment, fixture-side: the retained user
+   * context asked for Polymarket, the current request names no other venue, and
+   * the answer does not carry a fresh Polymarket price. Facts alone never pass it.
+   */
+  // The factual checker and the task-completion reviewer are separate primary calls:
+  // facts are true here, so only the scope reviewer can object, and it sees no raw source batches.
+  const scopeParts = (body) => {
+    const requestAt = body.indexOf("User request:");
+    const request = requestAt >= 0 ? body.slice(requestAt).split("\n")[0] : "";
+    return {
+      context: requestAt >= 0 ? body.slice(0, requestAt) : "",
+      request,
+      answer: requestAt >= 0 ? body.slice(requestAt + request.length) : body,
+    };
+  };
+  const scopeFault = (body) => {
+    const { context, request, answer } = scopeParts(body);
+    return /polymarket/i.test(context) && !/draftkings/i.test(request) && !answer.includes("0.57");
+  };
+  /** Raw factual-source batches and labels: the fact prompt keeps them, the scope prompt never carries them. */
+  const RAW_BATCH = /"wins":30|"provider":"DraftKings"|POLY_FIDELITY_ROW|Raw source data|\[Internal source/;
+  const isScopeSystem = (system) => system.startsWith("You are a task-completion reviewer");
+
+  function fidelityModel(state) {
+    return new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        const system = systemOf(call);
+        const offered = offeredTools(call);
+        const results = toolResultsOf(call);
+        if (system.startsWith("You route sports queries")) {
+          return reply(JSON.stringify(route(["nba", "polymarket"], "focused", 0.9, { intent: "odds" })));
+        }
+        if (isScopeSystem(system)) {
+          const body = textOf(call.prompt.filter((m) => m.role !== "system"));
+          state.scopes.push({ body, system });
+          state.order.push("scope");
+          if (state.scope === "garbage") return reply("not json");
+          return reply(JSON.stringify(scopeFault(body)
+            ? { isValid: false, discrepancies: [{ claim: "DraftKings picks in the report", evidence: "the user asked for the Polymarket moneyline board", severity: "high", kind: "scope" }] }
+            : { isValid: true, discrepancies: [] }));
+        }
+        if (system.startsWith("You are a strict sports fact-checker")) {
+          const body = textOf(call.prompt.filter((m) => m.role !== "system"));
+          state.checks.push({ body, system });
+          state.order.push("fact");
+          if (state.checker === "garbage") return reply("not json");
+          // Every fact in every draft here is true: the factual checker accepts it.
+          return reply(JSON.stringify({ isValid: true, discrepancies: [] }));
+        }
+        if (system.startsWith("You are an expert sports editor")) {
+          const prompt = textOf(call.prompt.filter((m) => m.role !== "system"));
+          state.corrections.push({ offered, system, prompt });
+          // "stubborn": keeps the substitute and its disclaimer, never reads.
+          if (state.editor === "stubborn") return reply(state.artifact ? SUBSTITUTED_HTML : SUBSTITUTED);
+          const wanted = offered.filter((name) => POLY_READERS.includes(name));
+          if (wanted.length > 0 && results.length === 0) return callTools(wanted);
+          if (results.some((r) => !r.failed && r.text.includes(POLY_MARKER))) {
+            return reply(FULL_HTML_DIRECTIVE.test(system) ? FAITHFUL_HTML : FAITHFUL);
+          }
+          return reply(SUBSTITUTED);
+        }
+        state.mains.push({ offered });
+        if (results.length === 0) {
+          const reads = state.mainReads.filter((name) => offered.includes(name));
+          if (reads.length > 0) return callTools(reads);
+        }
+        if (state.artifact && offered.includes("submit_artifact") && !results.some((r) => r.toolName === "submit_artifact")) {
+          return submitReport(state.artifactHtml);
+        }
+        return reply(state.draft);
+      },
+    });
+  }
+
+  /** Jev: routing advises nba; every evidence question is supported, unless told to refuse. */
+  function fidelityJev(state) {
+    const json = { "content-type": "application/json" };
+    const choice = (criteria, picked) => {
+      const keys = Object.keys(criteria);
+      const rest = 0.03 / (keys.length - 1);
+      return { type: "choice", choice: picked, confidence: 0.99, probabilities: Object.fromEntries(keys.map((k) => [k, k === picked ? 0.97 : rest])) };
+    };
+    return async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const answers = {};
+      if ("disposition" in body.questions) {
+        const described = new Map(body.state.capabilities.map((c) => [c.ref, c.description]));
+        for (const [id, q] of Object.entries(body.questions)) {
+          answers[id] = choice(q.criteria, id === "disposition" ? "select" : described.get(id).includes('"nba"') ? "required" : "not_required");
+        }
+      } else {
+        const s = body.state;
+        state.evidence.push({ state: s, draft: s.slice(s.indexOf("Draft response to judge:")) });
+        if (state.jev === "unauthorized") return new Response(JSON.stringify({ error: "denied" }), { status: 401, headers: json });
+        if (state.jev === "hostile") return new Response("{not json", { status: 200, headers: json });
+        for (const [id, q] of Object.entries(body.questions)) answers[id] = choice(q.criteria, "supported");
+      }
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200, headers: json });
+    };
+  }
+
+  function makeFidelityEngine({ draft = SUBSTITUTED, editor = "read", checker = "judge", scope = "judge", jev = "supported", evidence = {}, artifact = false } = {}) {
+    const state = {
+      evidence: [], checks: [], scopes: [], order: [], corrections: [], mains: [], executed: [],
+      mainReads: NBA_READS, draft, editor, checker, scope, jev, artifact, artifactHtml: SUBSTITUTED_HTML,
+    };
+    const env = { TYPESAFE_API_KEY: "test-only" };
+    const transport = fidelityJev(state);
+    const engine = new sportsclawEngine({
+      thinkingBudget: 0,
+      routing: { provider: "jev", dataPolicy: "cloud_allowed", publicDataTools: POLY_READERS, transport, env },
+      evidenceVerifier: { provider: "jev", dataPolicy: "cloud_allowed", publicToolNames: SPECS, transport, env, ...evidence },
+    });
+    engine.mainModel = fidelityModel(state);
+    const installed = ["nba", "polymarket"];
+    const specs = SPECS.map((name) => ({ name, description: `${name} data`, input_schema: { type: "object", properties: {} } }));
+    engine.registry = {
+      getInstalledSkills: () => [...installed],
+      getAllToolSpecs: () => specs,
+      getSkillName: (name) => installed.find((skill) => name.startsWith(`${skill}_`)),
+    };
+    const bodies = { nba_get_scoreboard: SCOREBOARD, nba_get_standings: STANDINGS };
+    engine.buildTools = () => Object.fromEntries([...SPECS, "get_agent_config"].map((name) => [name, tool({
+      description: name,
+      inputSchema: jsonSchema({ type: "object", properties: {} }),
+      execute: async () => {
+        state.executed.push({ name, phase: state.corrections.length > 0 ? "correction" : "main" });
+        return bodies[name] ?? (POLY_READERS.includes(name) ? POLY_ROWS : "{}");
+      },
+    })]));
+    return { engine, state };
+  }
+
+  async function runReport(engine, { prompt = REPORT_ASK, history = HISTORY, userId, artifact = false } = {}) {
+    const results = [];
+    const text = await engine.run(prompt, {
+      historyMode: "caller",
+      history: structuredClone(history),
+      ...(userId ? { userId } : {}),
+      ...(artifact
+        ? { artifact: { contract: "artifact-turn-v1", nonce: NONCE }, onArtifactResult: (r) => results.push(structuredClone(r)) }
+        : {}),
+    });
+    return { text, results };
+  }
+  const correctionReads = (state) => state.executed.filter((e) => e.phase === "correction").map((e) => e.name);
+  const assertNoHistoryAtJev = (state) => {
+    for (const e of state.evidence) {
+      for (const marker of ["PRIOR_FIDELITY_REQUEST", "PRIOR_FIDELITY_BOARD", PROFILE_MARKER]) {
+        assert.ok(!e.state.includes(marker), `${marker} reached Jev`);
+      }
+    }
+  };
+  const assertBounded = (state) => {
+    assert.ok(state.corrections.length <= 3, `one correction pass of at most 3 steps, got ${state.corrections.length}`);
+    assert.ok(state.checks.length <= 2, `one primary check and at most one recheck, got ${state.checks.length}`);
+    assert.ok(state.scopes.length <= 2, `one scope check and at most one scope recheck, got ${state.scopes.length}`);
+    assert.ok(state.evidence.length <= 2, `one Jev judgment and at most one recheck, got ${state.evidence.length}`);
+  };
+  /** Jev judged the facts: the primary model adds only the scope check, never a duplicate factual check. */
+  const assertNoPrimaryFactCheck = (state) => assert.equal(state.checks.length, 0, "no duplicate primary factual check after Jev");
+  /** Scope prompts: current request, prior user context, the answer; no raw factual batches, no prior assistant claim. */
+  const assertScopePrompt = (scope, { request = REPORT_ASK, answer } = {}) => {
+    const { context, request: line } = scopeParts(scope.body);
+    assert.ok(line.includes(request), `the scope check sees the current request: ${line}`);
+    assert.ok(context.includes("PRIOR_FIDELITY_REQUEST"), "the scope check sees the prior user request");
+    if (answer) assert.ok(scope.body.includes(answer), "the scope check sees the answer or report");
+    assert.ok(!scope.body.includes("PRIOR_FIDELITY_BOARD"), "a prior assistant claim is not scope context");
+    assert.doesNotMatch(scope.body, RAW_BATCH, "no raw factual-source batch in the scope prompt");
+  };
+
+  it("a Jev-supported wrong-venue report gets the primary fidelity gate; the one correction reads the approved Polymarket reader and the recheck passes the fresh report", async () => {
+    const { engine, state } = makeFidelityEngine();
+    const { text } = await runReport(engine);
+
+    // Fixture fidelity: the main pass read only true DraftKings odds and standings, and Jev supported them.
+    assert.deepEqual(state.executed.filter((e) => e.phase === "main").map((e) => e.name).sort(), [...NBA_READS].sort());
+    assert.ok(state.evidence[0]?.draft.includes(SUBSTITUTED), "Jev judged the substituted report first");
+
+    // Jev supported every fact, so the primary model goes directly to the scope check.
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1, "the primary scope checker ran as the fidelity gate even though Jev supported every fact");
+    assertScopePrompt(state.scopes[0], { answer: SUBSTITUTED });
+
+    const reads = correctionReads(state);
+    assert.ok(reads.length > 0 && reads.every((name) => POLY_READERS.includes(name)), `correction reads: [${reads}]`);
+    assertBounded(state);
+    assert.equal(state.evidence.length, 2, "one Jev check and one Jev recheck");
+    assert.ok(state.evidence.at(-1).state.includes(POLY_MARKER), "the factual recheck saw the fresh Polymarket rows");
+    assert.equal(state.scopes.length, 2, "one scope check and one scope recheck");
+    assertScopePrompt(state.scopes[1], { answer: FAITHFUL });
+    assert.equal(text, FAITHFUL, "the same requested venue, refreshed, not the disclaimed substitute");
+    assertNoHistoryAtJev(state);
+  });
+
+  it("withholds when the one correction still substitutes the venue: an honest disclaimer is not fulfilment", async () => {
+    const { engine, state } = makeFidelityEngine({ editor: "stubborn" });
+    const { text } = await runReport(engine);
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1, "the scope gate ran");
+    assert.equal(state.corrections.length, 1, "exactly one correction");
+    assertBounded(state);
+    assert.notEqual(text, SUBSTITUTED);
+    assert.match(text, WITHHELD_TEXT);
+    assertNoHistoryAtJev(state);
+  });
+
+  it("an ordinary contextual follow-up with a Jev-supported wrong venue gets the same fidelity check", async () => {
+    const { engine, state } = makeFidelityEngine({ draft: SUBSTITUTED_PICK });
+    const { text } = await runReport(engine, { prompt: "Which one should I pick?" });
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1, "the scope gate ran on a plain follow-up");
+    assertScopePrompt(state.scopes[0], { request: "Which one should I pick?", answer: SUBSTITUTED_PICK });
+    assertBounded(state);
+    assert.notEqual(text, SUBSTITUTED_PICK, "the substituted pick never ships");
+    assert.ok(text === FAITHFUL || WITHHELD_TEXT.test(text), `refreshed or withheld, got ${text}`);
+    assertNoHistoryAtJev(state);
+  });
+
+  it("the latest explicit venue change wins: a DraftKings report requested now is not corrected back", async () => {
+    const { engine, state } = makeFidelityEngine({ draft: SWITCHED });
+    const { text } = await runReport(engine, { prompt: SWITCHED_ASK });
+    assert.equal(text, SWITCHED);
+    assert.equal(state.corrections.length, 0, "no correction");
+    assertNoPrimaryFactCheck(state);
+    assert.equal(state.scopes.length, 1, "the one scope check, which accepts the latest explicit venue");
+    assert.ok(!state.executed.some((e) => POLY_READERS.includes(e.name)), "no Polymarket refetch against the user's latest instruction");
+    assert.equal(state.evidence.length, 1);
+  });
+
+  it("a new standalone valid answer Jev supports gets no extra task check", async () => {
+    const { engine, state } = makeFidelityEngine({ draft: SWITCHED });
+    const { text } = await runReport(engine, { prompt: STANDALONE_ASK, history: [] });
+    assert.equal(text, SWITCHED);
+    assert.equal(state.checks.length, 0, "no primary fidelity check without retained context");
+    assert.equal(state.scopes.length, 0, "no scope check without retained context");
+    assert.equal(state.corrections.length, 0);
+    assert.equal(state.evidence.length, 1, "the one Jev judgment");
+  });
+
+  it("private profile and history reach only the primary gate, never Jev", async () => {
+    const userId = "fidelity-profile-user";
+    await new MemoryManager(userId).writeFanProfile(`${PROFILE_MARKER} follows NBA (Lakers); prefers Polymarket boards`);
+    const { engine, state } = makeFidelityEngine();
+    await runReport(engine, { userId });
+    assert.ok(state.evidence.length >= 1, "Jev was asked");
+    assertNoHistoryAtJev(state);
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1 && state.scopes[0].body.includes("PRIOR_FIDELITY_REQUEST"), "the approved context reached the primary scope gate");
+  });
+
+  it("a hostile or unusable primary fidelity verdict never ships the substitute", async () => {
+    const { engine, state } = makeFidelityEngine({ scope: "garbage" });
+    const { text } = await runReport(engine);
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1, "the gate was attempted");
+    assert.ok(state.scopes.length <= 2, "one check and its one malformed-verdict retry");
+    assert.equal(state.corrections.length, 0, "fails closed, no correction from an unusable verdict");
+    assert.notEqual(text, SUBSTITUTED);
+    assert.match(text, WITHHELD_TEXT);
+  });
+
+  for (const [label, options] of [
+    ["an auth refusal", { jev: "unauthorized" }],
+    ["withheld cloud consent", { evidence: { dataPolicy: "local_only" } }],
+    ["a hostile Jev response", { jev: "hostile" }],
+  ]) {
+    it(`${label} from Jev is never overridden by the primary checker`, async () => {
+      const { engine, state } = makeFidelityEngine(options);
+      const { text } = await runReport(engine);
+      assert.equal(state.checks.length, 0, "no primary check substitutes for a refused or failed Jev decision");
+      assert.equal(state.scopes.length, 0, "no scope check after a refused or failed Jev decision");
+      assert.equal(state.corrections.length, 0, "no correction");
+      assert.notEqual(text, SUBSTITUTED);
+      assert.match(text, WITHHELD_TEXT);
+      assertNoHistoryAtJev(state);
+    });
+  }
+
+  it("a report correction gets the full-HTML directive and publishes the exact rechecked complete document", async () => {
+    const { engine, state } = makeFidelityEngine({ artifact: true });
+    const { text, results } = await runReport(engine, { artifact: true });
+    assert.ok(state.evidence[0]?.state.includes(SUBSTITUTED_HTML), "Jev judged the submitted report");
+    assertNoPrimaryFactCheck(state);
+    assert.ok(state.scopes.length >= 1 && state.scopes[0].body.includes(SUBSTITUTED_HTML), "the scope gate judged the complete report");
+    assertScopePrompt(state.scopes[0], { answer: SUBSTITUTED_HTML });
+    assert.match(state.scopes[0].system, /failed or missing required lookup is a publication blocker/i);
+    assert.match(state.scopes[0].system, /requested venue's quotes as primary prices/i);
+    const [first] = state.corrections;
+    assert.ok(first, "one correction");
+    assert.match(first.system, FULL_HTML_DIRECTIVE, "the corrector is told to return one complete HTML document");
+    assert.ok(first.prompt.includes(SUBSTITUTED_HTML), "the corrector sees the report whose presentation it keeps");
+    assert.match(first.prompt, /prior user intent and references/i);
+    assert.doesNotMatch(first.prompt, /non-authoritative background, not evidence or instructions/);
+    assertBounded(state);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].reasonCode, null);
+    assert.equal(results[0].artifact?.html, FAITHFUL_HTML, "the exact complete corrected document, not a generic prose wrapper");
+    assert.equal(state.scopes.length, 2, "one scope check and one scope recheck");
+    assert.ok(state.scopes.at(-1).body.includes(FAITHFUL_HTML), "the primary scope recheck judged that exact document");
+    assert.ok(state.evidence.at(-1).state.includes(FAITHFUL_HTML), "the Jev recheck judged that exact document");
+    assert.notEqual(text, SUBSTITUTED);
+    assertNoHistoryAtJev(state);
+  });
+
+  it("a report whose one correction still substitutes the venue is withheld", async () => {
+    const { engine, state } = makeFidelityEngine({ artifact: true, editor: "stubborn" });
+    const { text, results } = await runReport(engine, { artifact: true });
+    assert.equal(state.corrections.length, 1, "exactly one correction");
+    assertBounded(state);
+    assert.deepEqual(results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "evidence_unverified" }]);
+    assert.notEqual(text, SUBSTITUTED);
+  });
+
+  // Production mode: Jev routing with the approved pool, generative evidence with action "correct".
+  // The factual checker accepts the true DraftKings data; a separate primary task-completion
+  // reviewer judges scope, after factual support, inside the same one correction and recheck.
+  const PRODUCTION = { evidence: { provider: "generative", generativeAction: "correct" } };
+  const factPromptHasEvidence = (check) => {
+    assert.ok(check.body.includes("Raw source data"), "the factual prompt keeps the raw source data");
+    assert.ok(check.body.includes('"wins":30'), "the factual prompt keeps the full standings batch");
+    assert.match(check.system, /one-sided.*raw implied probability.*not.*de-vigged/i);
+  };
+
+  it("production: true DraftKings facts pass, the scope reviewer flags the substitute, the one correction refreshes Polymarket, both rechecks pass", async () => {
+    const { engine, state } = makeFidelityEngine(PRODUCTION);
+    const { text } = await runReport(engine);
+    assert.equal(state.evidence.length, 0, "no Jev evidence call in production mode");
+    assert.equal(state.checks.length, 2, "one factual check and one factual recheck");
+    assert.equal(state.scopes.length, 2, "one scope check and one scope recheck");
+    assert.deepEqual(state.order.slice(0, 2), ["fact", "scope"], "scope is judged after factual support");
+    factPromptHasEvidence(state.checks[0]);
+    assert.ok(state.checks[0].body.includes(SUBSTITUTED));
+    assertScopePrompt(state.scopes[0], { answer: SUBSTITUTED });
+    assert.equal(state.scopes[0].body.match(/PRIOR_FIDELITY_REQUEST/g)?.length, 1);
+    const reads = correctionReads(state);
+    assert.ok(reads.length > 0 && reads.every((name) => POLY_READERS.includes(name)), `correction reads: [${reads}]`);
+    assertBounded(state);
+    assert.ok(state.checks[1].body.includes(POLY_MARKER), "the factual recheck sees the fresh Polymarket rows");
+    assert.ok(state.checks[1].body.includes(FAITHFUL), "the factual recheck judges the corrected answer");
+    assertScopePrompt(state.scopes[1], { answer: FAITHFUL });
+    assert.equal(text, FAITHFUL);
+  });
+
+  it("production: withholds when the one correction still substitutes the venue", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, editor: "stubborn" });
+    const { text } = await runReport(engine);
+    assert.equal(state.corrections.length, 1, "exactly one correction");
+    assert.ok(state.scopes.length >= 1, "the scope reviewer ran");
+    assertBounded(state);
+    assert.notEqual(text, SUBSTITUTED);
+    assert.match(text, WITHHELD_TEXT);
+  });
+
+  it("production: an ordinary contextual follow-up with a true wrong-venue pick gets the scope check", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, draft: SUBSTITUTED_PICK });
+    const { text } = await runReport(engine, { prompt: "Which one should I pick?" });
+    assert.ok(state.checks.length >= 1, "the factual check ran");
+    assert.ok(state.scopes.length >= 1, "the scope check ran on a plain follow-up");
+    assertScopePrompt(state.scopes[0], { request: "Which one should I pick?", answer: SUBSTITUTED_PICK });
+    assertBounded(state);
+    assert.notEqual(text, SUBSTITUTED_PICK);
+    assert.ok(text === FAITHFUL || WITHHELD_TEXT.test(text), `refreshed or withheld, got ${text}`);
+  });
+
+  it("production: the latest explicit venue override is permitted, with no correction or Polymarket refetch", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, draft: SWITCHED });
+    const { text } = await runReport(engine, { prompt: SWITCHED_ASK });
+    assert.equal(text, SWITCHED);
+    assert.equal(state.checks.length, 1, "one factual check");
+    assert.equal(state.scopes.length, 1, "one scope check, which accepts the latest instruction");
+    assertScopePrompt(state.scopes[0], { request: SWITCHED_ASK, answer: SWITCHED });
+    assert.equal(state.corrections.length, 0);
+    assert.ok(!state.executed.some((e) => POLY_READERS.includes(e.name)));
+  });
+
+  it("production: a standalone ordinary answer adds no scope check", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, draft: SWITCHED });
+    const { text } = await runReport(engine, { prompt: STANDALONE_ASK, history: [] });
+    assert.equal(text, SWITCHED);
+    assert.equal(state.checks.length, 1, "the existing factual check only");
+    factPromptHasEvidence(state.checks[0]);
+    assert.equal(state.scopes.length, 0, "no scope check without retained context or a report");
+    assert.equal(state.corrections.length, 0);
+  });
+
+  it("production: a malformed scope verdict fails closed and never falls back to the already-valid facts", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, scope: "garbage" });
+    const { text } = await runReport(engine);
+    assert.equal(state.checks.length, 1, "the facts were checked and valid");
+    assert.ok(state.scopes.length >= 1 && state.scopes.length <= 2, "one scope check and its one malformed-verdict retry");
+    assert.equal(state.corrections.length, 0, "no correction from an unusable verdict");
+    assert.notEqual(text, SUBSTITUTED);
+    assert.match(text, WITHHELD_TEXT);
+  });
+
+  it("production: a report correction keeps the full-HTML directive, and both rechecks judge the exact published document", async () => {
+    const { engine, state } = makeFidelityEngine({ ...PRODUCTION, artifact: true });
+    const { results } = await runReport(engine, { artifact: true });
+    factPromptHasEvidence(state.checks[0]);
+    assert.ok(state.checks[0].body.includes(SUBSTITUTED_HTML), "the factual check judged the complete report");
+    assertScopePrompt(state.scopes[0], { answer: SUBSTITUTED_HTML });
+    const [first] = state.corrections;
+    assert.ok(first, "one correction");
+    assert.match(first.system, FULL_HTML_DIRECTIVE);
+    assertBounded(state);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].reasonCode, null);
+    assert.equal(results[0].artifact?.html, FAITHFUL_HTML);
+    assert.ok(state.checks.at(-1).body.includes(FAITHFUL_HTML), "the factual recheck judged that exact document");
+    assert.ok(state.scopes.at(-1).body.includes(FAITHFUL_HTML), "the scope recheck judged that exact document");
   });
 });
 

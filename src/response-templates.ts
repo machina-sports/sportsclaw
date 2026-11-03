@@ -58,7 +58,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   best_bets: {
-    hint: "Give up to 3 picks. Format each as: '[Pick] [Line] — [1-sentence reason based on actual data]'. Lead with the strongest pick. No hedging.",
+    hint: "Answer with the requested number of picks, normally one for a short follow-up. Keep the venue, market and candidate board established by the conversation; use that venue's current quote as the recommendation's primary price. Other venues may appear only as explicitly requested comparisons, not substitute selections. Give a qualified lean with its factual basis and relevant uncertainty. Do not claim a pricing edge without supporting evidence: a cheap contract, team record or point cushion alone does not establish mispricing. If the evidence cannot justify a pick, state the specific limitation without asking the user to repeat the known board.",
     expectedToolPatterns: ["odds", "bet", "stat", "form"],
     requiredKeywords: [],
   },

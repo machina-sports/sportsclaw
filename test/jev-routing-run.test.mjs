@@ -1032,7 +1032,9 @@ test('a four-turn Polymarket conversation reaches the primary checker and correc
           ? {publicToolNames:[PM], evidenceChoose:(n, id) => n === 1 && id === 'coverage_freshness' ? 'contradicted' : 'supported'}
           : {evidenceVerifier:{generativeAction:'correct'}}),
         dispatch:(_name, input) => input.league === 'nfl' ? pmFailure : {isError:false, content:pmEvents(input.league)},
-        toolless:(options) => isCorrection(options) ? HONEST : isChecker(options) ? (checks++ === 0 ? FLAG_VERDICT : VERDICT_OK()) : undefined,
+        // Generative: the first primary check flags the absence claim. Jev: Jev judges the facts, and the only
+        // primary call is the task-fidelity gate after its supported recheck, which passes the honest Polymarket answer.
+        toolless:(options) => isCorrection(options) ? HONEST : isChecker(options) ? (checks++ === 0 && mode !== 'jev' ? FLAG_VERDICT : VERDICT_OK()) : undefined,
         script:async (results) => results.length === 0
           ? [call(PM, {league:'nba', date:TOMORROW}), call(PM, {league:'nfl', date:TOMORROW})]
           : [{type:'text', text:DRAFT}]});
@@ -1076,6 +1078,12 @@ test('a four-turn Polymarket conversation reaches the primary checker and correc
       } else {
         assert.equal(counts.evidenceStates.length, 2, 'check and recheck');
         assert.deepEqual(engine.evidenceReceipts.map((r) => r.status), ['contradicted', 'supported']);
+        // New semantic gate: one primary task-fidelity check, only after Jev supported the corrected answer.
+        const fidelity = counts.toolless.filter(isChecker);
+        assert.equal(fidelity.length, 1, 'jev: one primary fidelity check, none before or instead of Jev');
+        assert.ok(restOf(fidelity[0].prompt).includes(HONEST), 'jev: the gate judges the corrected answer Jev supported');
+        assert.ok(restOf(fidelity[0].prompt).includes('Why did you omit the NFL ones?'), 'jev: the gate sees the conversation');
+        for (const marker of PRIVATE) assert.ok(!sysOf(fidelity[0].prompt).includes(marker), 'jev: as user content only');
       }
       // Jev never receives profile or history, for routing or evidence.
       for (const body of [...counts.routingBodies, ...counts.evidenceBodies]) {

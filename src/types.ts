@@ -397,6 +397,12 @@ export interface sportsclawConfig {
    * `engine.listToolNames()` first (the bench runner does).
    */
   toolAllowlist?: string[] | null;
+  /**
+   * Opt-in task brief: resolve one bounded intent brief before primary
+   * generation (see `task-brief.ts`). It may only narrow already-offered
+   * tools and never authorizes a write. Default: false.
+   */
+  taskBrief?: boolean;
 }
 
 /**
@@ -622,6 +628,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   routing: {},
   sampling: {},
   toolAllowlist: null,
+  taskBrief: false,
 };
 
 // ---------------------------------------------------------------------------
