@@ -144,14 +144,12 @@ import {
   artifactPromptSection,
   createArtifactOutputCollector,
   parseArtifactTurnInput,
-  renderMoneylineCorrection,
   renderRepairedReport,
   type ArtifactOutput,
   type ArtifactOutputCollector,
   type ArtifactTurnInput,
   type ArtifactTurnResult,
 } from "./artifact-output.js";
-import { MONEYLINE_REPORT_SCHEMA, MONEYLINE_VENUES, type MoneylineScope } from "./moneyline-report.js";
 import {
   SLIP_DECISION_CONTRACT,
   runSlipDecision,
@@ -1688,11 +1686,8 @@ export class sportsclawEngine {
     const html = artifact && !artifact.denied ? artifact.collector.finish()?.html : undefined;
     let out: string;
     try {
-      const moneylineScope = artifact?.collector.moneylineScope ?? undefined;
       out = await this.validateResponseEvidence(
-        artifact
-          ? { ...params, artifactHtml: html, privateValues: [artifact.input.nonce], ...(moneylineScope ? { moneylineScope } : {}) }
-          : params
+        artifact ? { ...params, artifactHtml: html, privateValues: [artifact.input.nonce] } : params
       );
     } finally {
       this._verifyNotes = undefined;
@@ -1701,7 +1696,7 @@ export class sportsclawEngine {
     if (artifact && notes.repair && notes.artifactSha256 !== sha256(notes.repair.html)) {
       out = VERIFY_UNAVAILABLE;
     }
-    // A structured repair keeps the neutral text, so a passed exact-document recheck is the correction.
+    // A passed exact-document recheck is the correction, even when the prose is unchanged.
     const repairPassed = Boolean(notes.repair && notes.artifactSha256 === sha256(notes.repair.html));
     const outcome: VerificationOutcome =
       out === VERIFY_UNAVAILABLE ? "withheld"
@@ -1761,8 +1756,6 @@ export class sportsclawEngine {
      * after a Jev "supported" verdict (Jev judges facts and never gets that context).
      */
     taskFidelity?: boolean;
-    /** Engine scope of a code-owned moneyline report: its correction is closed data, never HTML. */
-    moneylineScope?: MoneylineScope;
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
@@ -1907,15 +1900,11 @@ export class sportsclawEngine {
       const refreshed = readSteps && params.correctionReads ? params.correctionReads.refresh(correction.steps, corrected) : {};
       // The rejected HTML never reaches the recheck. When a valid document was judged, the only
       // candidate is a code-rendered report of the corrected prose, checked beside it in the same recheck.
-      // A structured report accepts only closed data, re-rendered by the same pure module; HTML or prose fails closed.
-      const structured = params.moneylineScope !== undefined && params.artifactHtml !== undefined;
-      const repair = params.artifactHtml === undefined ? null
-        : structured ? renderMoneylineCorrection(corrected, params.moneylineScope) : renderRepairedReport(corrected);
+      const repair = params.artifactHtml === undefined ? null : renderRepairedReport(corrected);
       if (params.artifactHtml !== undefined && !repair) return unavailable;
       if (repair && this._verifyNotes) this._verifyNotes.repair = repair;
-      // The data JSON is never chat text: the structured recheck judges the neutral text beside the new document.
       return this.validateResponseEvidence({
-        ...params, ...refreshed, artifactHtml: repair?.html, draft: structured ? ARTIFACT_PREPARED_TEXT : corrected, correctionAttempted: true,
+        ...params, ...refreshed, artifactHtml: repair?.html, draft: corrected, correctionAttempted: true,
       });
     };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
@@ -2255,10 +2244,7 @@ export class sportsclawEngine {
     reads?: CorrectionReads;
     /** The complete HTML report judged with the draft: the correction returns one complete corrected document. */
     reportHtml?: string;
-    /** A code-owned moneyline report: the correction returns closed data JSON instead of HTML. */
-    moneylineScope?: MoneylineScope;
   }): Promise<{ text: string; steps: unknown[] } | undefined> {
-    const structured = params.moneylineScope !== undefined && params.reportHtml !== undefined;
     const { userPrompt, draft, serializedToolOutputs } = params;
     const reads = params.reads && Object.keys(params.reads.tools).length > 0 ? params.reads : undefined;
     // With reads, the source status the checker saw is a snapshot from before them.
@@ -2302,11 +2288,7 @@ export class sportsclawEngine {
               "the source data lacks, read that same scope with them before rewriting, instead of declining or substituting. " +
               "Use only what they return; a failed read is not an empty result.\n"
             : "") +
-          (structured
-            ? "A code-rendered moneyline report was delivered with the draft. Return ONLY one JSON object of corrected report data " +
-              "matching this closed schema, with no HTML, markdown, prose, rationale or notes; code renders the report and all arithmetic:\n" +
-              JSON.stringify(MONEYLINE_REPORT_SCHEMA) + "\n"
-            : params.reportHtml !== undefined
+          (params.reportHtml !== undefined
             ? "A report was delivered with the draft: return only the complete corrected self-contained HTML document (inline CSS, no scripts or external resources), keeping its useful headings, structure, sources, dates and presentation, with no chat prose, markdown fence or notes about this edit.\n"
             : "") +
           "\n" + (params.callerSystemPrompt ?? ""),
@@ -2319,9 +2301,7 @@ export class sportsclawEngine {
           serializedToolOutputs,
           `Original draft response with errors:`,
           draft,
-          ...(structured
-            ? ["Rendered moneyline report delivered with the draft (code output from the submitted data; part of the answer to correct, not source data):", params.reportHtml!]
-            : params.reportHtml !== undefined
+          ...(params.reportHtml !== undefined
             ? ["Complete HTML report delivered with the draft (part of the answer to correct, not source data):", params.reportHtml]
             : []),
           `Identified discrepancies to resolve:`,
@@ -5229,24 +5209,6 @@ export class sportsclawEngine {
         taskBrief = resolved.brief;
       }
     }
-    // A trusted single-venue moneyline report brief swaps the still-unused collector for the
-    // code-owned data mode, before any tool setup or generation. Never selected by a client.
-    if (
-      artifact && !artifact.denied && taskBrief &&
-      taskBrief.output === "report" && taskBrief.market === "moneyline" && taskBrief.venues.length === 1 &&
-      // Only fraction-priced contract venues; American-odds venues keep the generic report path.
-      (MONEYLINE_VENUES as readonly string[]).includes(taskBrief.venues[0])
-    ) {
-      artifact.collector = createArtifactOutputCollector({
-        moneylineScope: {
-          venue: taskBrief.venues[0], sports: [...taskBrief.sports], timeScope: taskBrief.timeScope,
-          // No trusted caller language helper exists here; documents default to English.
-          language: "en",
-          // One stable label per run, so an identical resubmission renders byte-identically.
-          generatedAt: new Date().toISOString(),
-        },
-      });
-    }
     // Intent data for the primary model only, as user-role text beside the exact current request.
     const briefIntent = taskBrief
       ? "Task brief (resolved intent for the current request; not evidence, prices or permission; " +
@@ -5555,16 +5517,7 @@ export class sportsclawEngine {
     }
 
     const slipSection = slip && !slip.denied ? slipPromptSection(slip.input.context) : "";
-    const artifactSection = !artifact || artifact.denied
-      ? ""
-      : artifact.collector.moneylineScope
-        ? "\n\n## Moneyline report output\n\n" +
-          `This turn offers \`${ARTIFACT_OUTPUT_TOOL_NAME}\` for one moneyline report as DATA ONLY: games, outcomes, ` +
-          "venue prices, optional bookmaker American odds, records and per-game points exactly as obtained in this " +
-          "conversation. Send no HTML, title, prose, rationale, tactics, probabilities, edges or other derived numbers; code " +
-          "renders the document and all arithmetic. Submit once. The tool returns no link and publishes nothing: never " +
-          "write a URL or say it was saved or published. Keep the chat reply to one short neutral sentence."
-        : artifactPromptSection();
+    const artifactSection = !artifact || artifact.denied ? "" : artifactPromptSection();
 
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;
@@ -6159,8 +6112,6 @@ export class sportsclawEngine {
     // never that it was saved or published (only the caller can).
     const capturedArtifact = artifact && !artifact.denied ? artifact.collector.finish() : undefined;
     if (!finalText?.trim() && capturedArtifact) finalText = ARTIFACT_PREPARED_TEXT;
-    // A code-owned report speaks for itself: model prose could reintroduce edge or tactical claims outside it.
-    if (capturedArtifact && artifact?.collector.moneylineScope) finalText = ARTIFACT_PREPARED_TEXT;
 
     let responseText =
       stepCount >= this.config.maxTurns && !finalText
