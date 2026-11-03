@@ -8,14 +8,14 @@
  *     legacy compatibility; identical data is stable, different data conflicts,
  *     and an invalidated collector stays invalid. No scope: the generic HTML
  *     collector is unchanged;
- *   - sportsclawEngine.run with config.taskBrief: a resolved single-venue
- *     moneyline report brief selects the mode before primary generation; a
- *     client cannot select it; other briefs keep the generic path;
- *   - the rendered document still goes through the existing factual check
- *     (data-schema validity is not grounding): a contradicted report is
- *     withheld, private values refuse before any request, and a structured
- *     correction must return the same closed data — an HTML repair never
- *     publishes or leaks into chat.
+ *   - sportsclawEngine.run with config.taskBrief: a moneyline report brief no
+ *     longer switches authoring into the data schema. First-turn and follow-up
+ *     reports keep the generic title/html submission and the brief's venue
+ *     scope; a data-only payload is refused; a client cannot select a mode;
+ *   - the submitted document still goes through the existing factual check:
+ *     a contradicted report is withheld, private values refuse before any
+ *     request, and an HTML correction publishes only the exact rechecked
+ *     document.
  *
  * HOME is a fresh temp dir; any network call fails the run and is counted.
  * Every model reply is a scripted synthetic fixture.
@@ -306,10 +306,12 @@ function jevRecorder(choose = () => "supported") {
 }
 
 /** The real engine with task briefs on, two installed skills and one public market read returning SOURCE. */
-function briefEngine(model, { taskBrief = true, checker = { provider: "generative" } } = {}) {
+function briefEngine(model, { taskBrief = true, checker = { provider: "generative" }, toolAllowlist } = {}) {
   const engine = new sportsclawEngine({
     provider: "anthropic", model: "fake-answer-model", thinkingBudget: 0, maxTurns: 6, taskBrief, evidenceVerifier: checker,
   });
+  // Runtime caller policy is applied through the public setter, as in the CLI.
+  if (toolAllowlist) engine.setToolAllowlist(toolAllowlist);
   engine.mainModel = model;
   for (const sport of ["polymarket", "nba"]) {
     engine.registry.injectSchema({
@@ -318,9 +320,11 @@ function briefEngine(model, { taskBrief = true, checker = { provider: "generativ
     });
   }
   const offered = engine.buildTools.bind(engine);
+  let sourceReads = 0;
+  engine.fixtureSourceReads = () => sourceReads;
   engine.buildTools = (...args) => ({
     ...offered(...args),
-    [SOURCE_TOOL]: tool({ description: "Polymarket markets", inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => SOURCE }),
+    [SOURCE_TOOL]: tool({ description: "Polymarket markets", inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => { sourceReads++; return SOURCE; } }),
   });
   return engine;
 }
@@ -336,74 +340,73 @@ async function runReport(engine, extra = {}) {
 const WITHHELD = Object.freeze({ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "evidence_unverified" });
 const isData = (schema) => Boolean(schema?.properties?.games) && !schema?.properties?.html;
 
-describe("engine task-brief moneyline mode", () => {
+const MONEY_HTML =
+  "<!doctype html><html><head><title>Polymarket NBA moneylines</title></head>" +
+  "<body><h1>Tonight</h1><p>Celtics 81.5c, Knicks 65.5c.</p></body></html>";
+const MONEY = Object.freeze({ title: "Polymarket NBA moneylines", html: MONEY_HTML });
+const published = (input) => ({ contract: "artifact-v1", title: input.title, mimeType: "text/html", html: input.html });
+const accepted = (input) => ({ contract: "artifact-turn-v1", nonce: NONCE, artifact: published(input), reasonCode: null });
+const isGeneric = (schema) =>
+  Boolean(schema?.properties?.html) && [...(schema?.required ?? [])].sort().join(",") === "html,title" && !isData(schema);
+
+describe("engine task-brief moneyline reports use generic HTML", () => {
   it("does not treat native American-odds venues as fraction-priced report mode", async () => {
     for (const venue of ["novig", "prophetx"]) {
       const { model, chat } = scripted([[artifactCall(LEGACY)], [say(FINAL)]], { brief: { ...BRIEF, venues: [venue] } });
       await runReport(briefEngine(model));
-      assert.ok(offeredSchema(chat[0])?.properties?.html, venue);
+      assert.ok(isGeneric(offeredSchema(chat[0])), venue);
     }
   });
 
   it("an opted-in first-turn generic report still uses the generic HTML contract", async () => {
     const { model, chat } = scripted([[artifactCall(LEGACY)], [say(FINAL)]], { brief: { ...BRIEF, market: "unspecified", venues: [] } });
     await runReport(briefEngine(model), { history: [] });
-    assert.ok(offeredSchema(chat[0])?.properties?.html);
-    assert.equal(isData(offeredSchema(chat[0])), false);
+    assert.ok(isGeneric(offeredSchema(chat[0])));
   });
-  it("a first-turn explicit moneyline report cannot bypass the code-owned format", async () => {
-    const { model, chat, all } = scripted([[marketsCall()], [artifactCall(DATA)], [say(FINAL)]]);
-    const engine = briefEngine(model);
+
+  it("a first-turn explicit moneyline report authors generic HTML, checked as submitted", async () => {
+    const { model, chat, all } = scripted([[marketsCall()], [artifactCall(MONEY)], [say(FINAL)]]);
     const results = [];
-    const text = await engine.run("Create a Polymarket NBA moneyline report with team records", {
+    await briefEngine(model).run("Create a Polymarket NBA moneyline report with team records", {
       historyMode: "caller", history: [], artifact: clone(TURN), onArtifactResult: (r) => results.push(clone(r)),
     });
     assert.ok(all.some(isBriefCall));
-    assert.ok(isData(offeredSchema(chat[0])));
-    assert.equal(text, PREPARED);
-    assert.equal(results[0].reasonCode, null);
-  });
-  it("a resolved single-venue moneyline report brief selects the data schema before primary generation", async () => {
-    const { model, chat, all } = scripted([[marketsCall()], [artifactCall(DATA)], [say(FINAL)]]);
-    const engine = briefEngine(model);
-    const { results } = await runReport(engine);
-    const briefAt = all.findIndex(isBriefCall);
-    assert.ok(briefAt >= 0 && briefAt < all.indexOf(chat[0]), "brief resolved before the first main call");
-    assert.ok(isData(offeredSchema(chat[0])), "data schema on the first main call");
-    assert.doesNotMatch(JSON.stringify(chat[0].prompt), /build one self-contained HTML document/, "no HTML authoring instruction");
-    const [result] = results;
-    assert.equal(results.length, 1);
-    assert.equal(result.reasonCode, null);
-    assert.deepEqual(wire.parseArtifactTurnResult(clone(result), TURN), result, "canonical, nonce-bound");
-    assert.match(result.artifact.title, /Moneyline report/);
-    assert.match(result.artifact.title, /Polymarket/);
-    assert.ok(result.artifact.html.includes("81.5c") && result.artifact.html.includes("80.6%"));
+    assert.ok(chat.every((call) => isGeneric(offeredSchema(call))), "generic HTML on every main call");
+    assert.match(JSON.stringify(chat[0].prompt), /build one self-contained HTML document/, "generic HTML authoring instruction");
+    assert.deepEqual(results, [accepted(MONEY)]);
     const checks = checkerCalls(all);
-    assert.equal(checks.length, 1, "the rendered document is still fact-checked");
-    assert.ok(promptText(checks[0]).includes(result.artifact.html), "the check judged this exact document");
+    assert.equal(checks.length, 1, "the document is still fact-checked");
+    assert.ok(promptText(checks[0]).includes(MONEY_HTML), "the check judged this exact document");
   });
 
-  it("raw HTML in moneyline mode is invalid, never legacy compatibility", async () => {
-    for (const input of [LEGACY, { ...clone(DATA), rationale: "Celtics control the paint" }]) {
+  it("a resolved single-venue moneyline follow-up keeps generic HTML and the brief's venue scope", async () => {
+    const { model, chat, all } = scripted([[marketsCall()], [artifactCall(MONEY)], [say(FINAL)]]);
+    const engine = briefEngine(model);
+    const { text, results } = await runReport(engine);
+    const briefAt = all.findIndex(isBriefCall);
+    assert.ok(briefAt >= 0 && briefAt < all.indexOf(chat[0]), "brief resolved before the first main call");
+    assert.ok(chat.every((call) => isGeneric(offeredSchema(call))), "generic HTML on every main call");
+    assert.ok(promptText(chat[0]).includes(BRIEF.resolvedRequest), "the resolved venue/market scope reaches the author");
+    assert.equal(engine.fixtureSourceReads(), 1, "fresh venue data was actually read, not inferred from history");
+    assert.deepEqual(results, [accepted(MONEY)]);
+    assert.deepEqual(wire.parseArtifactTurnResult(clone(results[0]), TURN), results[0], "canonical, nonce-bound");
+    assert.doesNotMatch(text, /<!doctype|<html\b|<body\b/i, "no raw HTML in chat");
+  });
+
+  it("an unknown data-only payload is refused, never rendered by code", async () => {
+    for (const input of [DATA, { ...clone(DATA), title: "Moneylines" }]) {
       const { model } = scripted([[marketsCall()], [artifactCall(input)], [say(FINAL)]]);
       const { results } = await runReport(briefEngine(model));
       assert.deepEqual(results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "invalid_artifact" }]);
     }
   });
 
-  it("identical resubmission in one run is stable; a different one conflicts", async () => {
-    const same = scripted([[marketsCall()], [artifactCall(DATA)], [artifactCall(REORDERED)], [say(FINAL)]]);
-    assert.equal((await runReport(briefEngine(same.model))).results[0].reasonCode, null);
-    const diff = scripted([[marketsCall()], [artifactCall(DATA)], [artifactCall(OTHER_DATA)], [say(FINAL)]]);
+  it("identical HTML resubmission in one run is stable; a different one conflicts", async () => {
+    const same = scripted([[marketsCall()], [artifactCall(MONEY)], [artifactCall(MONEY)], [say(FINAL)]]);
+    assert.deepEqual((await runReport(briefEngine(same.model))).results, [accepted(MONEY)]);
+    const diff = scripted([[marketsCall()], [artifactCall(MONEY)], [artifactCall(LEGACY)], [say(FINAL)]]);
     assert.deepEqual((await runReport(briefEngine(diff.model))).results,
       [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "conflicting_artifact" }]);
-  });
-
-  it("an accepted structured report gets neutral prepared-output text, not model edge prose", async () => {
-    const { model } = scripted([[marketsCall()], [artifactCall(DATA)], [say("Celtics are a +EV edge at 81.5c.")]]);
-    const { text, results } = await runReport(briefEngine(model));
-    assert.equal(results[0].reasonCode, null);
-    assert.equal(text, PREPARED);
   });
 
   for (const [label, options] of [
@@ -422,32 +425,40 @@ describe("engine task-brief moneyline mode", () => {
     });
   }
 
-  it("a client cannot select the mode", async () => {
+  it("a moneyline report brief cannot widen a caller allowlist that omits the artifact tool", async () => {
+    const { model, chat, all } = scripted([[marketsCall()], [say(FINAL)]]);
+    const { results } = await runReport(briefEngine(model, { toolAllowlist: [SOURCE_TOOL] }));
+    assert.ok(all.some(isBriefCall), "the brief still resolved");
+    assert.ok(all.every((call) => !offeredSchema(call)), "submit_artifact never offered, including tool-free calls");
+    assert.deepEqual(results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: null, reasonCode: "denied" }]);
+  });
+
+  it("a client cannot select a data mode", async () => {
     const { model } = scripted([]);
     const engine = briefEngine(model, { taskBrief: false });
     await assert.rejects(runReport(engine, { artifact: { ...TURN, moneylineScope: clone(SCOPE) } }), /invalid artifact turn input/);
     const { model: m, chat } = scripted([[artifactCall(LEGACY)], [say(FINAL)]]);
-    await runReport(briefEngine(m, { taskBrief: false }), { moneylineScope: clone(SCOPE) });
-    assert.ok(!isData(offeredSchema(chat[0])), "a run option does not switch the schema");
+    await runReport(briefEngine(m), { moneylineScope: clone(SCOPE) });
+    assert.ok(isGeneric(offeredSchema(chat[0])), "a run option does not switch the schema");
   });
 });
 
-describe("structured reports still need real source verification", () => {
+describe("generic moneyline reports still need real source verification", () => {
   const MARKER = "81.5c";
   const flag = JSON.stringify({ isValid: false, discrepancies: [{ claim: MARKER, evidence: "source price differs", severity: "high", kind: "contradicted" }] });
 
-  it("a schema-valid report contradicted by the source is withheld", async () => {
-    const { model, all } = scripted([[marketsCall()], [artifactCall(DATA)], [say(FINAL)]], {
+  it("an HTML report contradicted by the source is withheld", async () => {
+    const { model, all } = scripted([[marketsCall()], [artifactCall(MONEY)], [say(FINAL)]], {
       verdict: (o) => (promptText(o).includes(MARKER) ? flag : VERDICT_OK),
     });
     const { results } = await runReport(briefEngine(model, { checker: { provider: "generative", generativeAction: "retain" } }));
-    assert.ok(promptText(checkerCalls(all)[0]).includes(MARKER), "the check saw the rendered price");
+    assert.ok(promptText(checkerCalls(all)[0]).includes(MONEY_HTML), "the check saw the submitted document");
     assert.deepEqual(results, [WITHHELD]);
   });
 
-  it("a private value in a label refuses before any credential read or request", async () => {
+  it("a private value in the HTML refuses before any credential read or request", async () => {
     const jev = jevRecorder();
-    const leaking = { games: [{ ...clone(DATA.games[1]), event: `Knicks at Heat ${NONCE}` }] };
+    const leaking = { title: MONEY.title, html: MONEY_HTML.replace("Knicks 65.5c", `Knicks 65.5c ${NONCE}`) };
     const { model } = scripted([[marketsCall()], [artifactCall(leaking)], [say(FINAL)]]);
     const engine = briefEngine(model, { checker: jev.config });
     const { results } = await runReport(engine);
@@ -457,48 +468,40 @@ describe("structured reports still need real source verification", () => {
     assert.equal(engine.evidenceReceipts[0]?.reasonCode, "private_content");
   });
 
-  describe("structured correction", () => {
-    const CORRECTED = { games: [{ ...clone(DATA.games[0]), outcomes: [{ ...DATA.games[0].outcomes[0], price: 0.8 }, DATA.games[0].outcomes[1]] }] };
-    const FIXED_HTML = "<!doctype html><html><head><title>Fixed</title></head><body><p>Celtics 80.0c, strong edge.</p></body></html>";
+  describe("HTML correction", () => {
+    const FIXED_HTML = "<!doctype html><html><head><title>Fixed</title></head><body><p>Celtics 80.0c, Knicks 65.5c.</p></body></html>";
     const correcting = { provider: "generative", generativeAction: "correct" };
-    /** First check flags MARKER; the editor answers `editor`; any recheck passes. */
+    /** Any check flags MARKER; the editor answers `editor`. */
     const judge = (editor) => (o) => {
       if (phaseOf(o) === "editor") return editor;
       return promptText(o).includes(MARKER) ? flag : VERDICT_OK;
     };
 
-    it("returns the same closed data, re-rendered by code and bound by the one recheck", async () => {
-      const { model, all } = scripted([[marketsCall()], [artifactCall(DATA)], [say(FINAL)]], { verdict: judge(JSON.stringify(CORRECTED)) });
+    it("publishes only the exact corrected document bound by the one recheck", async () => {
+      const { model, all } = scripted([[marketsCall()], [artifactCall(MONEY)], [say(FINAL)]], { verdict: judge(FIXED_HTML) });
       const { text, results } = await runReport(briefEngine(model, { checker: correcting }));
       assert.equal(editorCalls(all).length, 1, "one correction");
-      assert.doesNotMatch(promptText(editorCalls(all)[0]), /\b(complete|full)\b[^\n]*\bHTML\b[^\n]*\bdocument\b/i, "no HTML repair directive");
       const checks = checkerCalls(all);
       assert.equal(checks.length, 2, "one recheck");
-      const [result] = results;
-      assert.equal(result.reasonCode, null);
-      assert.ok(result.artifact.html.includes("80.0c") && !result.artifact.html.includes(MARKER), "the corrected data, rendered by code");
-      assert.match(result.artifact.title, /Moneyline report/);
-      assert.ok(promptText(checks[1]).includes(result.artifact.html), "the recheck bound this exact new document");
-      assert.equal(text, PREPARED);
+      const expectedArtifact = wire.renderRepairedReport(FIXED_HTML);
+      assert.deepEqual(results, [{ contract: "artifact-turn-v1", nonce: NONCE, artifact: expectedArtifact, reasonCode: null }]);
+      assert.ok(!results[0].artifact.html.includes(MARKER), "the contradicted claim is gone");
+      assert.ok(promptText(checks[1]).includes(results[0].artifact.html), "the recheck bound this exact new document");
+      assert.doesNotMatch(text, /<!doctype|<html\b|<body\b/i, "no raw HTML in chat");
     });
 
     for (const [label, editor] of [
-      ["a complete HTML document", FIXED_HTML],
-      ["a fenced HTML document", "```html\n" + FIXED_HTML + "\n```"],
-      ["markdown prose", "## Report\n\nCeltics 80.0c, strong edge."],
-      ["data with extra narration", JSON.stringify({ ...CORRECTED, rationale: "Celtics dominate the interior" })],
-      ["data with html", JSON.stringify({ ...CORRECTED, html: FIXED_HTML })],
-      ["malformed data", '{"games":[{"event":"Lakers at'],
+      ["a correction that keeps the contradicted claim", MONEY_HTML.replace("Knicks 65.5c", "Knicks 66.0c")],
       ["an empty correction", ""],
     ]) {
       it(`never publishes or leaks ${label}`, async () => {
-        const { model, all } = scripted([[marketsCall()], [artifactCall(DATA)], [say(FINAL)]], { verdict: judge(editor) });
+        const { model, all } = scripted([[marketsCall()], [artifactCall(MONEY)], [say(FINAL)]], { verdict: judge(editor) });
         const { text, results } = await runReport(briefEngine(model, { checker: correcting }));
         assert.equal(editorCalls(all).length, 1, "still one correction");
         assert.ok(checkerCalls(all).length <= 2, "at most one recheck");
         assert.deepEqual(results, [WITHHELD]);
-        assert.doesNotMatch(text, /<!doctype|<html\b|<body\b|"games"\s*:/i, "no raw HTML or data in chat");
-        assert.ok(!text.includes("strong edge") && !text.includes("interior"));
+        assert.doesNotMatch(text, /<!doctype|<html\b|<body\b/i, "no raw HTML in chat");
+        assert.ok(!text.includes(MARKER) && !text.includes("66.0c"));
       });
     }
   });
