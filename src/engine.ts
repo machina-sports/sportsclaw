@@ -137,18 +137,21 @@ import {
   type SlipTurnResult,
 } from "./slip-output.js";
 import { extractSlipProposal } from "./slip-extraction.js";
+import { TASK_BRIEF_VENUES, resolveTaskBrief, type TaskBrief } from "./task-brief.js";
 import {
   ARTIFACT_OUTPUT_TOOL_NAME,
   ARTIFACT_TURN_CONTRACT,
   artifactPromptSection,
   createArtifactOutputCollector,
   parseArtifactTurnInput,
+  renderMoneylineCorrection,
   renderRepairedReport,
   type ArtifactOutput,
   type ArtifactOutputCollector,
   type ArtifactTurnInput,
   type ArtifactTurnResult,
 } from "./artifact-output.js";
+import { MONEYLINE_REPORT_SCHEMA, MONEYLINE_VENUES, type MoneylineScope } from "./moneyline-report.js";
 import {
   SLIP_DECISION_CONTRACT,
   runSlipDecision,
@@ -1227,6 +1230,10 @@ export class sportsclawEngine {
     }
 
     merged.sampling = validateSampling(merged.sampling);
+    // Opt-in task brief: an explicit boolean wins; otherwise only the exact operator env value enables it.
+    merged.taskBrief = typeof config?.taskBrief === "boolean"
+      ? config.taskBrief
+      : process.env.SPORTSCLAW_TASK_BRIEF_ENABLED === "true";
     this.config = merged;
     this.mainModel = resolveModel(
       this.config.provider,
@@ -1681,15 +1688,24 @@ export class sportsclawEngine {
     const html = artifact && !artifact.denied ? artifact.collector.finish()?.html : undefined;
     let out: string;
     try {
+      const moneylineScope = artifact?.collector.moneylineScope ?? undefined;
       out = await this.validateResponseEvidence(
-        artifact ? { ...params, artifactHtml: html, privateValues: [artifact.input.nonce] } : params
+        artifact
+          ? { ...params, artifactHtml: html, privateValues: [artifact.input.nonce], ...(moneylineScope ? { moneylineScope } : {}) }
+          : params
       );
     } finally {
       this._verifyNotes = undefined;
     }
+    // A report repair is not a chat fallback when its exact document failed the recheck.
+    if (artifact && notes.repair && notes.artifactSha256 !== sha256(notes.repair.html)) {
+      out = VERIFY_UNAVAILABLE;
+    }
+    // A structured repair keeps the neutral text, so a passed exact-document recheck is the correction.
+    const repairPassed = Boolean(notes.repair && notes.artifactSha256 === sha256(notes.repair.html));
     const outcome: VerificationOutcome =
       out === VERIFY_UNAVAILABLE ? "withheld"
-      : out !== params.draft ? "corrected"
+      : out !== params.draft || repairPassed ? "corrected"
       : notes.flagged ? "flagged"
       : notes.unverified ? "unverified"
       : "kept";
@@ -1705,6 +1721,8 @@ export class sportsclawEngine {
     if (artifact && outcome === "corrected" && notes.repair && notes.artifactSha256 === sha256(notes.repair.html)) {
       artifact.repaired = notes.repair;
       artifact.checkedSha256 = notes.artifactSha256;
+      // A complete corrected document rides beside the text, never inside it.
+      if (/^(?:```html|<!doctype\s+html|<html\b)/i.test(out.trim())) return ARTIFACT_PREPARED_TEXT;
     }
     return out;
   }
@@ -1737,6 +1755,14 @@ export class sportsclawEngine {
     conversationContext?: string;
     /** Public-data mode: bounded reads for the one correction; its recheck gets the refreshed evidence. */
     correctionReads?: CorrectionReads;
+    /**
+     * A real contextual follow-up or a report: the primary checker also judges
+     * task fidelity against the current request and the user context, including
+     * after a Jev "supported" verdict (Jev judges facts and never gets that context).
+     */
+    taskFidelity?: boolean;
+    /** Engine scope of a code-owned moneyline report: its correction is closed data, never HTML. */
+    moneylineScope?: MoneylineScope;
   }): Promise<string> {
     const { userPrompt, draft, toolOutputs } = params;
     const settings = resolveEvidenceVerifierSettings(this.config.evidenceVerifier);
@@ -1772,13 +1798,35 @@ export class sportsclawEngine {
 
     // Only the wrapper label and tool names are private. Genuine publishers,
     // article URLs and observation times inside the evidence remain citable.
-    const MAX_SOURCES = 10;
-    const shown = toolOutputs.slice(0, MAX_SOURCES);
+    // Newest first, so a late query or a correction's refresh is never starved by
+    // earlier large outputs; within the old ceiling of 10 sources × the per-source
+    // budget. Whole outputs when they fit, else focused on the draft's claims.
+    // Admission below still inspects every original source.
+    const MAX_SOURCES = 64;
+    let remaining = 10 * (this.publicDataMode() ? DECISION_LIMITS.maxStateChars : VERIFICATION_EVIDENCE_CHARS);
+    const claimTerms = draftClaimTerms(draft);
+    const picked: Array<{ at: number; output: string; truncated: boolean }> = [];
+    for (let at = toolOutputs.length - 1; at >= 0 && picked.length < MAX_SOURCES && remaining > 0; at--) {
+      const item = toolOutputs[at];
+      if (item.output.length <= remaining) {
+        picked.push({ at, output: item.output, truncated: item.truncated ?? isTruncatedEvidence(item.output) });
+        remaining -= item.output.length;
+        continue;
+      }
+      // Cut markers count against the budget: fall back to the bounded head + tail
+      // summary, and omit a source whose cut still does not fit.
+      let cut = focusEvidenceOnClaims(item.output, claimTerms, remaining);
+      if (cut.length > remaining) cut = summarizeToolOutputForEvidence(item.output, remaining);
+      if (cut.length > remaining) continue;
+      picked.push({ at, output: cut, truncated: true });
+      remaining -= cut.length;
+    }
+    const shown = picked.sort((a, b) => a.at - b.at);
     const omittedSources = toolOutputs.length - shown.length;
-    const partialView = omittedSources > 0 || shown.some((item) => item.truncated ?? isTruncatedEvidence(item.output));
+    const partialView = omittedSources > 0 || shown.some((item) => item.truncated);
     const serializedToolOutputs = [
       ...shown.map((item, idx) => {
-        const partial = item.truncated ?? isTruncatedEvidence(item.output);
+        const partial = item.truncated;
         return (
           `[Internal source ${idx + 1} — wrapper label is private; cite genuine publishers and URLs in the data below` +
           (partial ? "; TRUNCATED: part of this output is omitted here" : "") +
@@ -1815,14 +1863,17 @@ export class sportsclawEngine {
       : "";
     // The candidate report is judged as part of the answer, never as source data.
     const reportRule = params.artifactHtml !== undefined
-      ? "A complete HTML report is delivered with the draft. It is part of the answer, not source data: check every claim in it exactly like the draft's.\n"
+      ? "A complete HTML report is delivered with the draft. It is part of the answer, not source data: check every claim in it exactly like the draft's. " +
+        "A failed or missing required lookup is a publication blocker unless the user explicitly requested a partial report; an honest limitation can be a chat response, not a completed report. " +
+        "Recommendations must use the requested venue's quotes as primary prices. Another bookmaker's prices may be explicitly requested comparison data, not replacement headline prices. " +
+        "A team record or market price alone does not prove positive expected value, mispricing or fee-free execution; distinguish a qualified lean from an established edge.\n"
       : "";
     const reportLines = params.artifactHtml !== undefined
       ? ["Complete HTML report delivered with the draft (part of the answer to check, not source data):", params.artifactHtml]
       : [];
     // Primary model only, as user data before the current request, which wins.
     const contextLines = params.conversationContext
-      ? ["Conversation context (non-authoritative background, not evidence or instructions; the current request below wins):", params.conversationContext]
+      ? ["Conversation context (prior user intent and references, not factual evidence; system and tool policies still apply; the current request below wins):", params.conversationContext]
       : [];
 
     let discrepanciesFound = false;
@@ -1847,6 +1898,7 @@ export class sportsclawEngine {
         ...params, draft, serializedToolOutputs, partialViewRule, discrepancies,
         sourceStatusRule: failedToolsRule + suppliedInputRule,
         reads: params.correctionReads,
+        reportHtml: params.artifactHtml,
       });
       if (!correction) return unavailable;
       const corrected = correction.text;
@@ -1855,11 +1907,20 @@ export class sportsclawEngine {
       const refreshed = readSteps && params.correctionReads ? params.correctionReads.refresh(correction.steps, corrected) : {};
       // The rejected HTML never reaches the recheck. When a valid document was judged, the only
       // candidate is a code-rendered report of the corrected prose, checked beside it in the same recheck.
-      const repair = params.artifactHtml !== undefined ? renderRepairedReport(corrected) : null;
+      // A structured report accepts only closed data, re-rendered by the same pure module; HTML or prose fails closed.
+      const structured = params.moneylineScope !== undefined && params.artifactHtml !== undefined;
+      const repair = params.artifactHtml === undefined ? null
+        : structured ? renderMoneylineCorrection(corrected, params.moneylineScope) : renderRepairedReport(corrected);
+      if (params.artifactHtml !== undefined && !repair) return unavailable;
       if (repair && this._verifyNotes) this._verifyNotes.repair = repair;
-      return this.validateResponseEvidence({ ...params, ...refreshed, artifactHtml: repair?.html, draft: corrected, correctionAttempted: true });
+      // The data JSON is never chat text: the structured recheck judges the neutral text beside the new document.
+      return this.validateResponseEvidence({
+        ...params, ...refreshed, artifactHtml: repair?.html, draft: structured ? ARTIFACT_PREPARED_TEXT : corrected, correctionAttempted: true,
+      });
     };
     let jevDiscrepancies: Verdict["discrepancies"] | null = null;
+    /** Jev supported the facts; the primary checker below judges only whether the task was fulfilled. */
+    let fidelityOnly = false;
     /** Set when admitted Jev mode routes a source-free report to the primary checker below. */
     let sourceFreeReceipt: EvidenceVerificationReceipt | undefined;
     const startedAt = Date.now();
@@ -1932,12 +1993,15 @@ export class sportsclawEngine {
           const mayFallback = settings.fallbackToGenerative && !NO_FALLBACK_REASONS.has(decision.reasonCode);
           const decisive = decision.status === "supported" || decision.status === "contradicted";
           this.recordEvidenceReceipt({ ...decision.receipt, fallbackUsed: !decisive && mayFallback });
-          if (decision.status === "supported") {
+          if (decision.status === "supported" && !params.taskFidelity) {
             // Bind the pass to the exact document it judged.
             if (params.artifactHtml !== undefined && this._verifyNotes) this._verifyNotes.artifactSha256 = sha256(params.artifactHtml);
             return draft;
           }
-          if (decision.status === "contradicted") jevDiscrepancies = correctionDiscrepancies(decision.contradicted);
+          // True facts are not fulfilment: the existing primary checker, with the
+          // context already approved for the main model, judges the task next.
+          if (decision.status === "supported") fidelityOnly = true;
+          else if (decision.status === "contradicted") jevDiscrepancies = correctionDiscrepancies(decision.contradicted);
           else if (!mayFallback) {
             if (decision.reasonCode === "aborted") return unavailable;
             // A chain that already confirmed a contradiction must not ship an
@@ -1976,6 +2040,7 @@ export class sportsclawEngine {
           "Judge the draft's claims, not whether the question could be answered: never flag a draft for answering " +
           "instead of declining. A value computed from the data (a count, sum, rate, or a player's team from a roster) " +
           "is supported when its inputs are in the data.\n" +
+          "A one-sided American-odds conversion is raw implied probability, not a de-vigged fair probability. A de-vigged or consensus fair-price claim needs its actual calculation and inputs in the supplied evidence; if those are absent, omit that claim instead of inventing an edge. Points allowed per game are not a defensive rating per 100 possessions.\n" +
           "Only consider claims that are relevant to the user's request; ignore source data that is " +
           "unrelated to what the user asked.\n" +
           "Check numerical AND qualitative premises. Scores do not establish tactical containment, control, pressure or causation. " +
@@ -1998,10 +2063,10 @@ export class sportsclawEngine {
           "{\n" +
           "  \"isValid\": boolean,\n" +
           "  \"discrepancies\": [\n" +
-          "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\" }\n" +
+          "    { \"claim\": \"what draft says\", \"evidence\": \"what the source data says\", \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\" | \"scope\" }\n" +
           "  ]\n" +
           "}\n" +
-          "kind is \"contradicted\" when the data shows a different value or result, \"unsupported\" when the data shown does not contain it.\n\nTrusted caller policy (criteria for the draft and correction):\n" + (params.callerSystemPrompt ?? "") +
+          "kind is \"contradicted\" when the data shows a different value or result, \"unsupported\" when the data shown does not contain it, and \"scope\" when the answer fails the requested venue, market, date or deliverable. A task-scope failure is not merely a fact omitted from a partial source view.\n\nTrusted caller policy (criteria for the draft and correction):\n" + (params.callerSystemPrompt ?? "") +
           "\n\nInternal verification task: apply the caller's evidence, permission and language constraints to the draft, " +
           "but its user-facing prose/format instructions do not change this internal JSON contract. " +
           "Missing optional coverage does not invalidate independently supported reporting. " +
@@ -2019,35 +2084,99 @@ export class sportsclawEngine {
       draft,
       ...reportLines,
     ].join("\n\n");
-    try {
-      // Step 1: LLM-driven verification pass to detect conflicts
-      const validationRes = await generate({ purpose: "verification" }, {
+    /** One verdict call on the primary model, plus the one malformed-verdict retry with a format reminder only. */
+    const askVerdict = async (system: string, prompt: string): Promise<Verdict | null> => {
+      const first = await generate({ purpose: "verification" }, {
         model: this.mainModel,
         ...this.samplingOptions(),
-        system: checkerSystem,
-        prompt: checkerPrompt,
+        system,
+        prompt,
         ...this.checkerCallOptions(),
         abortSignal: params.abortSignal,
         maxRetries: 1,
       });
+      this.notePass("verification", usageOf(first));
+      const parsed = readVerdict(first.text);
+      if (parsed) return parsed;
+      const retry = await generate({ purpose: "verification" }, {
+        model: this.mainModel,
+        ...this.samplingOptions(),
+        system: system + "\n\nThe previous reply was not a usable verdict. Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
+          + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\" | \"scope\"}]}. "
+          + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
+        prompt,
+        ...this.checkerCallOptions(),
+        abortSignal: params.abortSignal,
+        maxRetries: 1,
+      });
+      this.notePass("verification", usageOf(retry));
+      return readVerdict(retry.text);
+    };
+    // With a partial view, "not in the data shown" is not a finding (the
+    // drafter saw more), yet checkers still flagged it and the correction
+    // turned right answers into UNKNOWN (bench v1-fix2). Contradictions and
+    // task-scope failures still act; a merely unsupported fact does not,
+    // unless a tool failed: a value only it could have supplied
+    // must still be caught (#194). A flag without a kind counts as a
+    // contradiction.
+    const actionableOf = (verdict: Verdict): Verdict["discrepancies"] =>
+      !strict && partialView && failedTools.length === 0
+        ? verdict.discrepancies.filter((d) => d.kind !== "unsupported")
+        : verdict.discrepancies;
 
-      this.notePass("verification", usageOf(validationRes));
-      let parsed = readVerdict(validationRes.text);
-      if (!parsed) {
-        const retryRes = await generate({ purpose: "verification" }, {
-          model: this.mainModel,
-          ...this.samplingOptions(),
-          system: checkerSystem + "\n\nThe previous reply was not a usable verdict. Return only the JSON verdict: {\"isValid\": boolean, \"discrepancies\": "
-            + "[{\"claim\": string, \"evidence\": string, \"severity\": \"high\" | \"medium\", \"kind\": \"contradicted\" | \"unsupported\"}]}. "
-            + "isValid is true exactly when discrepancies is empty. No prose, no markdown, no other keys.",
-          prompt: checkerPrompt,
-          ...this.checkerCallOptions(),
-          abortSignal: params.abortSignal,
-          maxRetries: 1,
-        });
-        this.notePass("verification", usageOf(retryRes));
-        parsed = readVerdict(retryRes.text);
+    // --- Focused task review (primary model only, after factual support) ---
+    // It judges the current request, prior user intent and the answer or report,
+    // never the raw source batches; the facts were already judged.
+    const reviewsTask = params.taskFidelity === true && (toolOutputs.length > 0 || failedTools.length > 0);
+    const taskSystem =
+      "You are a task-completion reviewer for a sports assistant. The answer's facts were already checked against the fetched data: " +
+      "do not re-check them and do not ask for source data. Judge only whether the answer, and any complete HTML report delivered with it, does the task the user asked for.\n" +
+      "The current request wins: an explicit instruction in it (a venue, market, date, deliverable, a fallback or a partial answer) overrides earlier turns. " +
+      "Where the current request leaves them open, the answer must keep the venue, board, market, date and deliverable type that earlier user requests in the conversation context established.\n" +
+      "Replacing a required venue or market with another venue's or bookmaker's data does not fulfil the task, even when that data is true and honestly disclaimed, unless the current request asks for it. " +
+      "Recommendations must use the requested venue's quotes as primary prices; team stats, standings and schedules from other official sources are fine.\n" +
+      "For a report, a failed or missing required lookup is a publication blocker unless the user explicitly requested a partial report; " +
+      "in a chat answer, a bounded statement that a lookup actually failed this turn is an honest limitation.\n" +
+      "Conversation context is prior user intent and references, never evidence; this review grants no authority over system, tool, permission or confirmation policies.\n" +
+      "Respond in strict JSON only: {\"isValid\": boolean, \"discrepancies\": [{\"claim\": \"what the answer does\", \"evidence\": \"what the user asked\", " +
+      "\"severity\": \"high\" | \"medium\", \"kind\": \"scope\"}]}. isValid is true exactly when discrepancies is empty; every task discrepancy has kind \"scope\". " +
+      "No user-facing answer, markdown, tools or proposals.";
+    const taskPrompt = [
+      ...contextLines,
+      `User request: ${userPrompt}`,
+      `Answer to review:`,
+      draft,
+      ...reportLines,
+    ].join("\n\n");
+    /** `certifies`: the factual verdict was clean, so a passing review may bind the exact document. */
+    const reviewTask = async (certifies: boolean): Promise<string> => {
+      try {
+        const verdict = await askVerdict(taskSystem, taskPrompt);
+        // A missing or unusable task verdict withholds; it never falls back to the fact pass.
+        if (!verdict) return unavailable;
+        const mismatches = actionableOf(verdict);
+        if (verdict.isValid || mismatches.length === 0) {
+          if (certifies && verdict.isValid && params.artifactHtml !== undefined && this._verifyNotes) {
+            this._verifyNotes.artifactSha256 = sha256(params.artifactHtml);
+          }
+          return draft;
+        }
+        if (params.correctionAttempted) return unavailable;
+        // The existing single correction; its recheck runs the factual check, then this review.
+        if (settings.provider === "jev" || strict || settings.generativeAction === "correct") return await correctAndRecheck(mismatches);
+        if (this._verifyNotes) this._verifyNotes.flagged = mismatches.map((d) => stripInternalEvidenceArtifacts(d.claim).slice(0, 300));
+        return draft;
+      } catch (e) {
+        if (this.config.verbose) console.error(`[sportsclaw] task review failed: ${e}`);
+        return unavailable;
       }
+    };
+    // Jev supported the facts: go directly to the task review, no duplicate primary factual check.
+    if (fidelityOnly) return reviewTask(true);
+
+    try {
+      // Step 1: LLM-driven verification pass to detect conflicts
+      const parsed = await askVerdict(checkerSystem, checkerPrompt);
       if (sourceFreeReceipt) {
         // The primary model answered the check; its verdict, never a Jev decision.
         sourceFreeReceipt.model = this.mainModelId;
@@ -2056,16 +2185,11 @@ export class sportsclawEngine {
       }
       if (!parsed) return unverified("the checker did not return a usable verdict twice");
 
-      // With a partial view, "not in the data shown" is not a finding (the
-      // drafter saw more), yet checkers still flagged it and the correction
-      // turned right answers into UNKNOWN (bench v1-fix2). Only contradictions
-      // act then, unless a tool failed: a value only it could have supplied
-      // must still be caught (#194). A flag without a kind counts as a
-      // contradiction.
-      const actionable = !strict && partialView && failedTools.length === 0
-        ? parsed.discrepancies.filter((d) => d.kind !== "unsupported")
-        : parsed.discrepancies;
+      const actionable = actionableOf(parsed);
       if (parsed.isValid || actionable.length === 0) {
+        // Factual support first, then the focused task review; a non-clean partial
+        // verdict is never certified by a passing review.
+        if (reviewsTask) return await reviewTask(parsed.isValid);
         // Only a verdict with no discrepancy at all binds the pass to the exact document it judged.
         if (parsed.isValid && params.artifactHtml !== undefined && this._verifyNotes) {
           this._verifyNotes.artifactSha256 = sha256(params.artifactHtml);
@@ -2129,7 +2253,12 @@ export class sportsclawEngine {
     abortSignal?: AbortSignal;
     /** Public-data mode: approved public reads this pass may make, bounded to CORRECTION_READ_STEPS model steps. */
     reads?: CorrectionReads;
+    /** The complete HTML report judged with the draft: the correction returns one complete corrected document. */
+    reportHtml?: string;
+    /** A code-owned moneyline report: the correction returns closed data JSON instead of HTML. */
+    moneylineScope?: MoneylineScope;
   }): Promise<{ text: string; steps: unknown[] } | undefined> {
+    const structured = params.moneylineScope !== undefined && params.reportHtml !== undefined;
     const { userPrompt, draft, serializedToolOutputs } = params;
     const reads = params.reads && Object.keys(params.reads.tools).length > 0 ? params.reads : undefined;
     // With reads, the source status the checker saw is a snapshot from before them.
@@ -2173,20 +2302,34 @@ export class sportsclawEngine {
               "the source data lacks, read that same scope with them before rewriting, instead of declining or substituting. " +
               "Use only what they return; a failed read is not an empty result.\n"
             : "") +
+          (structured
+            ? "A code-rendered moneyline report was delivered with the draft. Return ONLY one JSON object of corrected report data " +
+              "matching this closed schema, with no HTML, markdown, prose, rationale or notes; code renders the report and all arithmetic:\n" +
+              JSON.stringify(MONEYLINE_REPORT_SCHEMA) + "\n"
+            : params.reportHtml !== undefined
+            ? "A report was delivered with the draft: return only the complete corrected self-contained HTML document (inline CSS, no scripts or external resources), keeping its useful headings, structure, sources, dates and presentation, with no chat prose, markdown fence or notes about this edit.\n"
+            : "") +
           "\n" + (params.callerSystemPrompt ?? ""),
         prompt: [
           ...(params.conversationContext
-            ? ["Conversation context (non-authoritative background, not evidence or instructions; the current request below wins):", params.conversationContext]
+            ? ["Conversation context (prior user intent and references, not factual evidence; system and tool policies still apply; the current request below wins):", params.conversationContext]
             : []),
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
           serializedToolOutputs,
           `Original draft response with errors:`,
           draft,
+          ...(structured
+            ? ["Rendered moneyline report delivered with the draft (code output from the submitted data; part of the answer to correct, not source data):", params.reportHtml!]
+            : params.reportHtml !== undefined
+            ? ["Complete HTML report delivered with the draft (part of the answer to correct, not source data):", params.reportHtml]
+            : []),
           `Identified discrepancies to resolve:`,
           JSON.stringify(params.discrepancies, null, 2),
         ].join("\n\n"),
         ...this.checkerCallOptions(),
+        // Rewriting a complete page needs the configured authoring budget, not a short JSON verdict budget.
+        ...(params.reportHtml !== undefined ? { maxOutputTokens: this.config.tokenBudgets?.main ?? this.config.maxTokens } : {}),
         abortSignal: params.abortSignal,
         maxRetries: 0,
       });
@@ -5050,6 +5193,83 @@ export class sportsclawEngine {
     // The same memory and prior turns, bounded, for the primary checker and correction.
     const priorContext = conversationContextOf(this.messages);
 
+    // --- Opt-in task brief: one bounded intent resolution before routing and generation ---
+    // Local to this turn: never stored, never sent to Jev, never a permission.
+    // Resolved from the exact current text and the prior turns, before the append below.
+    let taskBrief: TaskBrief | undefined;
+    if (this.config.taskBrief === true && (isFollowUp || (artifact && !artifact.denied)) && (options?.images?.length ?? 0) === 0) {
+      // Thinking counts against the brief's output budget: keep visible room for the JSON.
+      const thinking = this.config.thinkingBudget > 0 ? Math.min(this.config.thinkingBudget, 512) : 0;
+      const providerOptions = buildProviderOptions(this.config.provider, thinking);
+      const resolved = await resolveTaskBrief(
+        { currentRequest: sanitizedPrompt, history: this.messages, installedSkills: this.registry.getInstalledSkills() },
+        {
+          model: this.mainModel,
+          sampling: this.config.sampling ?? {},
+          ...(providerOptions ? { providerOptions } : {}),
+          ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
+          // Fires once per performed call.
+          onUsage: (usage) => {
+            this.notePass("task_brief", usage);
+            recordTokens(usage.totalTokens);
+          },
+        },
+      );
+      if (options?.abortSignal?.aborted) {
+        this.messages.push(
+          { role: "user", content: sanitizedPrompt },
+          { role: "assistant", content: [{ type: "text", text: "Request cancelled." }] },
+        );
+        return "Request cancelled.";
+      }
+      // A venue the current request names that the brief lacks makes the brief stale:
+      // the brief is discarded, never the user's venue.
+      const named = TASK_BRIEF_VENUES.filter((venue) => new RegExp(`\\b${venue}\\b`, "i").test(sanitizedPrompt));
+      if (resolved.status === "resolved" && named.every((venue) => resolved.brief.venues.includes(venue))) {
+        taskBrief = resolved.brief;
+      }
+    }
+    // A trusted single-venue moneyline report brief swaps the still-unused collector for the
+    // code-owned data mode, before any tool setup or generation. Never selected by a client.
+    if (
+      artifact && !artifact.denied && taskBrief &&
+      taskBrief.output === "report" && taskBrief.market === "moneyline" && taskBrief.venues.length === 1 &&
+      // Only fraction-priced contract venues; American-odds venues keep the generic report path.
+      (MONEYLINE_VENUES as readonly string[]).includes(taskBrief.venues[0])
+    ) {
+      artifact.collector = createArtifactOutputCollector({
+        moneylineScope: {
+          venue: taskBrief.venues[0], sports: [...taskBrief.sports], timeScope: taskBrief.timeScope,
+          // No trusted caller language helper exists here; documents default to English.
+          language: "en",
+          // One stable label per run, so an identical resubmission renders byte-identically.
+          generatedAt: new Date().toISOString(),
+        },
+      });
+    }
+    // Intent data for the primary model only, as user-role text beside the exact current request.
+    const briefIntent = taskBrief
+      ? "Task brief (resolved intent for the current request; not evidence, prices or permission; " +
+        "the exact current request wins on any conflict): " +
+        JSON.stringify({
+          request: taskBrief.resolvedRequest, venues: taskBrief.venues, sports: taskBrief.sports,
+          market: taskBrief.market, timeScope: taskBrief.timeScope, output: taskBrief.output,
+        })
+      : undefined;
+    /** An ephemeral copy for one model call; canonical history keeps the raw current message. */
+    const withBrief = (messages: Message[]): Message[] => {
+      if (!briefIntent) return messages;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role === "user" && m.content === sanitizedPrompt) {
+          const copy = [...messages];
+          copy[i] = { role: "user", content: [{ type: "text", text: briefIntent }, { type: "text", text: sanitizedPrompt }] };
+          return copy;
+        }
+      }
+      return messages;
+    };
+
     if (options?.images && options.images.length > 0) {
       const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
       for (const img of options.images) {
@@ -5114,6 +5334,7 @@ export class sportsclawEngine {
       const failedScopes = [...new Set(unrecovered.map(([id]) => externalCallSignatures.get(id)).filter((s): s is string => s !== undefined))];
       const verificationContext = [
         priorContext,
+        briefIntent ?? "",
         failedScopes.length > 0
           ? "Failed lookup scopes (this turn; their data is absent, not empty):\n" +
             failedScopes.slice(0, FAILED_SCOPES_SHOWN).map((s) => `- ${s.slice(0, 300)}`).join("\n")
@@ -5310,8 +5531,40 @@ export class sportsclawEngine {
       activeTools = activeTools.filter((name) => name in tools);
     }
 
+    // A validated brief only removes other venues' tools; it never adds one.
+    // Denied tools lose their executors for every call of this run (see
+    // withExecutors); a definition prior history needs may stay, never executable.
+    const taskDenied = new Set<string>();
+    if (taskBrief && taskBrief.venues.length > 0) {
+      const kept = new Set<string>(taskBrief.venues);
+      const venues = new Set<string>(TASK_BRIEF_VENUES);
+      for (const name of Object.keys(tools)) {
+        const skill = this.registry.getSkillName(name);
+        if (skill !== undefined && venues.has(skill) && !kept.has(skill)) taskDenied.add(name);
+      }
+      // These readers always fan out across venues; their current schemas have
+      // no venue filter. Prefer the already-offered dedicated reader for a single venue.
+      const dedicatedOffered = activeTools?.some((name) => kept.has(this.registry.getSkillName(name) ?? "")) ?? false;
+      if (kept.size === 1 && dedicatedOffered) {
+        for (const name of ["markets_get_todays_markets", "markets_get_sport_markets", "markets_compare_odds", "markets_compare_market_url"]) {
+          taskDenied.add(name);
+        }
+      }
+      if (activeTools) activeTools = activeTools.filter((name) => !taskDenied.has(name) || historyToolNames.has(name));
+      if (routedTools) routedTools = routedTools.filter((name) => !taskDenied.has(name));
+    }
+
     const slipSection = slip && !slip.denied ? slipPromptSection(slip.input.context) : "";
-    const artifactSection = artifact && !artifact.denied ? artifactPromptSection() : "";
+    const artifactSection = !artifact || artifact.denied
+      ? ""
+      : artifact.collector.moneylineScope
+        ? "\n\n## Moneyline report output\n\n" +
+          `This turn offers \`${ARTIFACT_OUTPUT_TOOL_NAME}\` for one moneyline report as DATA ONLY: games, outcomes, ` +
+          "venue prices, optional bookmaker American odds, records and per-game points exactly as obtained in this " +
+          "conversation. Send no HTML, title, prose, rationale, tactics, probabilities, edges or other derived numbers; code " +
+          "renders the document and all arithmetic. Submit once. The tool returns no link and publishes nothing: never " +
+          "write a URL or say it was saved or published. Keep the chat reply to one short neutral sentence."
+        : artifactPromptSection();
 
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;
@@ -5361,10 +5614,11 @@ export class sportsclawEngine {
     // an executor a call the model attempts anyway (toolChoice is not a security
     // boundary) never runs SDK, MCP, agent or business code. Per-run only.
     const withExecutors = (set: ToolSet, permitted = executable): ToolSet => {
-      const out: ToolSet = permitted
+      // The task restriction intersects the existing authority; it never permits.
+      const out: ToolSet = permitted || taskDenied.size > 0
         ? (Object.fromEntries(
             Object.entries(set).map(([name, def]) => {
-              if (permitted.has(name)) return [name, def];
+              if ((!permitted || permitted.has(name)) && !taskDenied.has(name)) return [name, def];
               const { execute: _execute, ...definition } = def as ToolSet[string] & { execute?: unknown };
               return [name, definition];
             })
@@ -5373,7 +5627,7 @@ export class sportsclawEngine {
       // The reader gets this call's executable set out of band; the model never sees or sets it.
       const execute = (out[QUERY_TOOL_RESULT_TOOL] as { execute?: ToolExecute } | undefined)?.execute;
       if (readerOffered && execute) {
-        const authority = new Set(permitted ?? Object.keys(set));
+        const authority = new Set([...(permitted ?? Object.keys(set))].filter((name) => !taskDenied.has(name)));
         out[QUERY_TOOL_RESULT_TOOL] = {
           ...out[QUERY_TOOL_RESULT_TOOL],
           execute: ((input, toolOptions) =>
@@ -5473,7 +5727,7 @@ export class sportsclawEngine {
             callerSystemPrompt: options?.systemPrompt,
             ...(agentActiveTools !== undefined ? { activeToolNames: agentActiveTools } : {}),
           }) + slipSection,
-          messages: this.messages,
+          messages: withBrief(this.messages),
           tools: withExecutors(laneTools, executable ? new Set(laneRoutedTools ?? []) : undefined),
           ...(agentActiveTools !== undefined ? { activeTools: agentActiveTools } : {}),
           abortSignal: options?.abortSignal,
@@ -5573,7 +5827,7 @@ export class sportsclawEngine {
 
       // Parallel synthesis must satisfy the same caller policy and evidence gate.
       const parallelToolOutputs = laneResults.flatMap((lane) =>
-        this.collectToolOutputSnippets(lane.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
+        this.collectToolOutputSnippets(lane.steps as Parameters<sportsclawEngine["collectToolOutputSnippets"]>[0],
           new Set(succeededExternalTools.keys()), this.publicDataMode() ? DECISION_LIMITS.maxStateChars : VERIFICATION_EVIDENCE_CHARS, draftClaimTerms(responseText),
           queryProvenanceThisTurn, true));
       // A failed lane read is a failure the check must know about, never "no source data".
@@ -5584,6 +5838,8 @@ export class sportsclawEngine {
           failedTools: laneFailures.map((f) => f.toolName),
           callerSystemPrompt: options?.systemPrompt, abortSignal: options?.abortSignal,
           conversationContext: laneContext,
+          // Read-only judgement; lanes get no correction reads.
+          taskFidelity: isFollowUp,
         });
       }
 
@@ -5711,7 +5967,7 @@ export class sportsclawEngine {
           callerSystemPrompt: options?.systemPrompt,
           ...(activeTools ? { activeToolNames: activeTools } : {}),
         }) + slipSection + artifactSection),
-        messages: messagesOverride ?? this.messages,
+        messages: withBrief(messagesOverride ?? this.messages),
         tools: callTools,
         ...(activeTools ? { activeTools } : {}),
         ...(toolChoice ? { toolChoice } : {}),
@@ -5903,6 +6159,8 @@ export class sportsclawEngine {
     // never that it was saved or published (only the caller can).
     const capturedArtifact = artifact && !artifact.denied ? artifact.collector.finish() : undefined;
     if (!finalText?.trim() && capturedArtifact) finalText = ARTIFACT_PREPARED_TEXT;
+    // A code-owned report speaks for itself: model prose could reintroduce edge or tactical claims outside it.
+    if (capturedArtifact && artifact?.collector.moneylineScope) finalText = ARTIFACT_PREPARED_TEXT;
 
     let responseText =
       stepCount >= this.config.maxTurns && !finalText
@@ -5976,7 +6234,7 @@ export class sportsclawEngine {
         failedTools: netFailures.map((f) => f.toolName),
         succeededTools: successes.map((s) => s.toolName),
         toolOutputs: this.collectToolOutputSnippets(
-          result.steps as Parameters<typeof this.collectToolOutputSnippets>[0],
+          result.steps as Parameters<sportsclawEngine["collectToolOutputSnippets"]>[0],
           new Set(succeededExternalTools.keys())
         ),
         maxOutputTokens: budgets.evidenceGate,
@@ -6029,7 +6287,7 @@ export class sportsclawEngine {
               const { netFailures: failures, verificationContext: context } = failureEvidence();
               return {
                 toolOutputs: this.collectToolOutputSnippets(
-                  [...mainSteps, ...steps] as Parameters<typeof this.collectToolOutputSnippets>[0],
+                  [...mainSteps, ...steps] as Parameters<sportsclawEngine["collectToolOutputSnippets"]>[0],
                   new Set(succeededExternalTools.keys()),
                   DECISION_LIMITS.maxStateChars,
                   draftClaimTerms(draft),
@@ -6049,6 +6307,8 @@ export class sportsclawEngine {
         callerSystemPrompt: options?.systemPrompt,
         abortSignal: options?.abortSignal,
         conversationContext: verificationContext,
+        // Real prior turns (not saved memory alone) or a report: judge task fidelity too.
+        taskFidelity: isFollowUp || Boolean(capturedArtifact),
         ...(correctionReads ? { correctionReads } : {}),
       }, artifact);
     }

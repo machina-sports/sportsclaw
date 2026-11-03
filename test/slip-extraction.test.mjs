@@ -122,6 +122,22 @@ async function extract({ context = null, input, answerText = ANSWER, images, res
   return { result, calls: model.doGenerateCalls, receipts };
 }
 
+it("keeps recommendation intent separate from authority to create a draft", async () => {
+  const { result, calls } = await extract({
+    input: {
+      turn: turn("Which of those would you choose?", null),
+      answerText: "My tentative lean is the away moneyline, subject to a fresh quote. This is a recommendation.",
+    },
+  });
+  assert.equal(result.status, "none");
+  assert.equal(calls.length, 1);
+  const policy = calls[0].prompt.filter((message) => message.role === "system")
+    .map((message) => String(message.content)).join("\n");
+  assert.match(policy, /recommendations.*ordinary/i);
+  assert.match(policy, /assistant.*(?:cannot|never).*authoriz/i);
+  assert.match(policy, /user.*(?:create|change|review).*draft/i);
+});
+
 const filesOf = (call) => call.prompt.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((p) => p.type === "file");
 
 function assertUsage(usage, label) {
