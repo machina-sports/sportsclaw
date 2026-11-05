@@ -55,7 +55,10 @@ function runIsolated(allowlist) {
     const offeredPerCall = model.doGenerateCalls
       .map((c) => (c.tools ?? []).map((t) => t.name).sort())
       .filter((names) => names.length > 0);
-    console.log(JSON.stringify({ listed, offeredPerCall, trace: engine.lastRunTrace, allowlist: engine.manifestConfig.toolAllowlist }));
+    const systemText = (c) => c.prompt.filter((m) => m.role === "system")
+      .map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join("\\n"))).join("\\n");
+    const routerCalls = model.doGenerateCalls.filter((c) => systemText(c).startsWith("You route sports queries")).length;
+    console.log(JSON.stringify({ listed, offeredPerCall, routerCalls, trace: engine.lastRunTrace, allowlist: engine.manifestConfig.toolAllowlist }));
   `;
   try {
     const output = execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", timeout: 30000 });
@@ -83,4 +86,16 @@ test("without an allowlist, built-in tools remain available (default behavior un
   const out = runIsolated(null);
   assert.equal(out.allowlist, null);
   assert.ok(out.trace.offeredTools.includes("nba_get_scores"));
+});
+
+test("one allowlisted sport skips the router's model call and keeps its tools", () => {
+  const out = runIsolated(["nba_get_scores"]);
+  assert.equal(out.routerCalls, 0);
+  assert.deepEqual(out.trace.routedSkills, ["nba"]);
+  assert.deepEqual(out.trace.offeredTools, ["nba_get_scores"]);
+});
+
+test("two allowlisted sports still go through the router", () => {
+  const out = runIsolated(["nba_get_scores", "nfl_get_scores"]);
+  assert.ok(out.routerCalls >= 1, "the router ran");
 });

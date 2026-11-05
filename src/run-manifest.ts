@@ -150,6 +150,8 @@ export interface RunTrace {
   passTokens?: Record<string, number>;
   /** What the evidence check did to the answer. Absent when it did not run. */
   verification?: { outcome: VerificationOutcome; draftBeforeCorrection?: string; flaggedClaims?: string[] };
+  /** Deterministic number grounding (sportsclawConfig.groundingCheck). Absent when it is off. */
+  numberGrounding?: { action: "flag" | "withhold"; unsupported: string[]; draft?: string };
 }
 
 /**

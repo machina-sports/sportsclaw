@@ -36,6 +36,7 @@ import {
 } from "./anthropic-oauth.js";
 import { resolveAnthropicAuth } from "./credentials.js";
 import { resolveOpenAICompatibleSettings } from "./openai-compatible.js";
+import { mediaFetch } from "./media-input.js";
 import {
   azureFoundryApiStyle,
   azureFoundryOpenAISubmode,
@@ -501,6 +502,8 @@ export function resolveModel(
         baseURL: settings.baseURL,
         apiKey: settings.apiKey,
         name: "openai-compatible",
+        // RunOptions.media: marker text parts become vLLM video_url / audio_url parts.
+        fetch: mediaFetch(),
       }).chat(settings.modelId);
     }
     default:

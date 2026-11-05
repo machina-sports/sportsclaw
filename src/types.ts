@@ -7,6 +7,7 @@
 import type { ModelMessage } from "ai";
 import type { SlipTurnInput, SlipTurnResult } from "./slip-output.js";
 import type { ArtifactTurnInput, ArtifactTurnResult } from "./artifact-output.js";
+import type { RunTrace } from "./run-manifest.js";
 
 // ---------------------------------------------------------------------------
 // Supported LLM providers
@@ -319,6 +320,12 @@ export interface sportsclawConfig {
   maxTokens?: number;
   /** System prompt prepended to every conversation */
   systemPrompt?: string;
+  /**
+   * IANA time zone for the local date and time the model is told
+   * (default: America/Los_Angeles). Use the league's zone, e.g. America/New_York
+   * for NBA schedules, so "today" matches the slate. RunOptions.timeZone overrides it.
+   */
+  timeZone?: string;
   /** Path to the Python interpreter (default: python3) */
   pythonPath?: string;
   /** Timeout in ms for Python subprocess calls (default: 60000) */
@@ -397,6 +404,20 @@ export interface sportsclawConfig {
    * `engine.listToolNames()` first (the bench runner does).
    */
   toolAllowlist?: string[] | null;
+  /**
+   * Tools defined in the host application's own code, keyed by tool name
+   * (lowercase letters, digits and underscores). A name may not reuse a
+   * built-in or sport tool. They are offered every turn and follow toolAllowlist.
+   */
+  hostTools?: Record<string, HostToolDef>;
+  /**
+   * Deterministic number grounding after the evidence checks (no model call):
+   * every number of two or more digits in the answer must appear in this turn's
+   * tool results, host context, question, caller history or local date.
+   * "flag" records misses in lastRunTrace.numberGrounding; "withhold" also replaces
+   * the answer with the "could not verify" reply. Default "off".
+   */
+  groundingCheck?: "off" | "flag" | "withhold";
   /**
    * Opt-in task brief: resolve one bounded intent brief before primary
    * generation (see `task-brief.ts`). It may only narrow already-offered
@@ -605,6 +626,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   maxTurns: 25,
   maxTokens: 16_384,
   systemPrompt: "",
+  timeZone: "America/Los_Angeles",
   pythonPath: "python3",
   timeout: 60_000,
   env: {},
@@ -628,6 +650,8 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   routing: {},
   sampling: {},
   toolAllowlist: null,
+  hostTools: {},
+  groundingCheck: "off",
   taskBrief: false,
 };
 
@@ -743,6 +767,15 @@ export interface SportToolDef {
 // ---------------------------------------------------------------------------
 
 /** An image attached to a user message (inbound vision). */
+/** A video or audio clip for one run (RunOptions.media). */
+export interface MediaAttachment {
+  kind: "video" | "audio";
+  /** Base64-encoded data (without data URI prefix). */
+  data: string;
+  /** e.g. "video/mp4", "audio/wav"; must match kind. */
+  mimeType: string;
+}
+
 export interface ImageAttachment {
   /** Base64-encoded image data (without data URI prefix) */
   data: string;
@@ -799,6 +832,54 @@ export type ToolProgressEvent =
     }
   | { type: "synthesizing" };
 
+/**
+ * A tool defined in the embedding application's own code (sportsclawConfig.hostTools).
+ * No MCP server needed. Offered like any other tool and subject to toolAllowlist.
+ */
+export interface HostToolDef {
+  description: string;
+  /** JSON Schema for the tool's input object. */
+  inputSchema: Record<string, unknown>;
+  /** Returns text, or a value that is sent to the model as JSON. Throwing reports a tool error. */
+  execute: (input: unknown, context: { abortSignal?: AbortSignal }) => unknown | Promise<unknown>;
+}
+
+/** A data block the host application supplies for one run (RunOptions.context). */
+export interface HostContextBlock {
+  /** Short name shown with the block, e.g. "official play-by-play". */
+  label: string;
+  content: string;
+}
+
+/** One tool result from a run, as the model received it. */
+export interface RunToolResult {
+  toolName: string;
+  toolCallId: string;
+  /** The arguments the model called the tool with. */
+  input: unknown;
+  /** The tool output the model saw (JSON-encoded when it was not text). */
+  output: string;
+  isError: boolean;
+}
+
+/**
+ * How a run ended:
+ * - "answer": the model's answer (possibly corrected by the evidence checker);
+ * - "refusal": the model gave the engine's injection refusal (INJECTION_REFUSAL_TEXT);
+ * - "withheld": the evidence checks replaced the answer with a "could not verify" reply;
+ * - "engine_reply": the engine answered without the model (guide, routing refusal,
+ *   cancellation, or no final response).
+ */
+export type RunOutcome = "answer" | "refusal" | "withheld" | "engine_reply";
+
+/** Structured result of `runDetailed()`, captured before the next queued run starts. */
+export interface RunResult {
+  text: string;
+  outcome: RunOutcome;
+  toolResults: RunToolResult[];
+  trace: RunTrace | null;
+}
+
 /** One prior turn of a caller-owned transcript. No system/developer/tool roles. */
 export interface CallerHistoryEntry {
   role: "user" | "assistant";
@@ -832,8 +913,22 @@ export interface RunOptions {
   abortSignal?: AbortSignal;
   /** Image attachments from the user (vision input). */
   images?: ImageAttachment[];
+  /**
+   * Video and audio clips for this run. Provider "openai-compatible" sends them
+   * as vLLM `video_url` / `audio_url` parts; "google" as file parts. Other
+   * providers reject them before any model call.
+   */
+  media?: MediaAttachment[];
   /** Additional system prompt injected by the caller (e.g. relay user context). */
   systemPrompt?: string;
+  /** IANA time zone for this run's local date and time (overrides sportsclawConfig.timeZone). */
+  timeZone?: string;
+  /**
+   * Data the host supplies for this run: a labelled system-prompt section that is
+   * not user input (not sanitized, never treated as an injection attempt) and a
+   * source the generative evidence checker accepts. Never sent to the Jev verifier.
+   */
+  context?: HostContextBlock[];
   /** Platform the request arrived on (used by alert-subscription tools). */
   platform?: "telegram" | "discord" | "cli";
   /** Delivery target id for proactive alerts (e.g. Telegram chat_id). */

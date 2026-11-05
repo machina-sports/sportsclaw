@@ -18,13 +18,14 @@
  * boundary (the static sections naturally land at the front for cache hits).
  */
 
-import type { ToolSpec, SkillGuide } from "../types.js";
+import type { ToolSpec, SkillGuide, HostContextBlock } from "../types.js";
 import type { LLMProvider } from "../types.js";
 import type { AgentDef } from "../agents.js";
 import type { McpManager } from "../mcp.js";
 import type { QueryIntent } from "../response-templates.js";
 import { buildTemplatePrompt } from "../response-templates.js";
 import { getSecurityDirectives } from "../security.js";
+import { hostContextSection } from "../host-context.js";
 import { getBuiltInSkillGuides } from "./built-in-guides.js";
 import { SKILL_READ_TOOL, SKILL_RUN_TOOL } from "../skill-runtime.js";
 import { CORE_BEHAVIOR_SECTIONS, EXAMPLES, SECURITY_FLOOR } from "./sections.js";
@@ -44,6 +45,15 @@ export interface SystemPromptContext {
   /** Routing config — surfaced so the model can reason about its own constraints. */
   routingMaxSkills: number;
   routingAllowSpillover: number;
+
+  /** IANA zone for the local date and time the model is told. */
+  timeZone: string;
+
+  /** Host-supplied data blocks for this run (RunOptions.context). */
+  hostContext?: readonly HostContextBlock[];
+
+  /** The run carries video or audio (RunOptions.media). */
+  hasMedia?: boolean;
 
   /** Trading + fan-profile gates. */
   allowTrading: boolean;
@@ -164,6 +174,11 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
     sections.push(ctx.userSystemPrompt.trim());
   }
 
+  // ---- Host-supplied data (per run; trusted data, never instructions) ----
+  if (ctx.hostContext && ctx.hostContext.length > 0) {
+    sections.push(hostContextSection(ctx.hostContext));
+  }
+
   // ---- Per-turn context (dynamic, MUST be last for attention weight) ----
   sections.push(currentTurnSection(ctx));
 
@@ -249,8 +264,8 @@ function selfAwarenessSection(ctx: SystemPromptContext): string {
     `You are sportsclaw v${ctx.packageVersion}.`,
     `Provider: ${ctx.provider} · Model: ${ctx.modelId}`,
     `Routing: maxSkills=${ctx.routingMaxSkills}, spillover=${ctx.routingAllowSpillover}`,
-    `Local time: ${now.toLocaleString("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "short" })}`,
-    `Local date: ${now.toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", weekday: "long", year: "numeric", month: "long", day: "numeric" })}`,
+    `Local time: ${now.toLocaleString("en-US", { timeZone: ctx.timeZone, timeZoneName: "short" })}`,
+    `Local date: ${now.toLocaleDateString("en-US", { timeZone: ctx.timeZone, weekday: "long", year: "numeric", month: "long", day: "numeric" })}`,
     "",
     `Installed sports (${ctx.installedSports.length}): ${ctx.installedSports.length > 0 ? ctx.installedSports.join(", ") : "(none)"}`,
     `Available (not installed): ${ctx.availableSports.length > 0 ? ctx.availableSports.join(", ") : "(all installed)"}`,
@@ -460,7 +475,11 @@ function currentTurnSection(ctx: SystemPromptContext): string {
   // The model still sees it in the user message, but echoing it here in the
   // system context gives it a strong attention prior — same trick Claude Code
   // and other agentic systems use for "the question is X, the tools are Y".
-  lines.push("", "User request:", `> ${ctx.userPrompt.replace(/\n/g, "\n> ")}`);
+  // With media attached, drop tag-like tokens (e.g. "<video>", "<so_embedding>")
+  // from the echo: multimodal chat templates count them as media placeholders,
+  // and a second copy here leaves vLLM unable to pair the media with its slot.
+  const echoed = ctx.hasMedia ? ctx.userPrompt.replace(/<\/?[A-Za-z_][\w-]*>/g, "").trim() : ctx.userPrompt;
+  lines.push("", "User request:", `> ${echoed.replace(/\n/g, "\n> ")}`);
 
   // Append the response-shape template last so it's the freshest signal.
   if (ctx.queryIntent) {
