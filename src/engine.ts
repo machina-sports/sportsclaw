@@ -32,6 +32,11 @@ import {
   type RouteMeta,
   type sportsclawConfig,
   type RunOptions,
+  type RunOutcome,
+  type RunResult,
+  type RunToolResult,
+  type HostContextBlock,
+  type MediaAttachment,
   type Message,
   type GeneratedImage,
   type GeneratedVideo,
@@ -93,7 +98,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { sanitizeInput, logSecurityEvent } from "./security.js";
+import { sanitizeInput, logSecurityEvent, INJECTION_REFUSAL_TEXT } from "./security.js";
+import { validateHostContext, formatHostContext } from "./host-context.js";
+import { unsupportedNumbers, dateSources } from "./number-grounding.js";
+import { validateMedia, registerMedia, releaseMedia } from "./media-input.js";
 import {
   logQuery,
   buildQueryEvent,
@@ -399,6 +407,23 @@ const CHECKER_THINKING_BUDGET = 2_048;
 
 /** What the fact-checker returns when it withholds an answer. */
 const VERIFY_UNAVAILABLE = "I could not verify a reliable answer from the available evidence.";
+const DEFAULT_TIME_ZONE = "America/Los_Angeles";
+const HOST_TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+/** Providers that can take RunOptions.media. */
+const MEDIA_PROVIDERS = new Set<string>(["openai-compatible", "google"]);
+
+/** The zone itself, or an error before any model work: a typo must not silently become UTC. */
+function validTimeZone(zone: string): string {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+  } catch {
+    throw new Error(`invalid timeZone: ${zone}`);
+  }
+  return zone;
+}
+
+/** The evidence gate's deterministic reply when it cannot rewrite a draft that leaned on failed tools. */
+const EVIDENCE_GATE_FALLBACK = "I can’t verify that cleanly right now. Ask me again in a minute and I’ll rerun it.";
 
 /**
  * Near the turn limit, tell the model to finish; on the last step, take the
@@ -1100,6 +1125,20 @@ export class sportsclawEngine {
   /** Set while verifyWithTrace runs: whether the check could not run, the draft before any correction, the HTML a pass judged. */
   private _verifyNotes?: { unverified?: boolean; firstDraft?: string; flagged?: string[]; artifactSha256?: string; repair?: ArtifactOutput };
   private _lastRunTrace: RunTrace | null = null;
+  /** Tail of the run queue: one run at a time per instance (see serialized). */
+  private _runQueue?: Promise<unknown>;
+  /** Set when the current run's reply came from the engine, not the model. */
+  private _engineReply?: boolean;
+  /** Index into this.messages where the current run's model messages begin. */
+  private _turnMessagesStart?: number | null;
+  /** IANA zone for this run (RunOptions.timeZone, else the configured one). */
+  private _runTimeZone?: string;
+  /** RunOptions.context for this run, validated. */
+  private _hostContext?: HostContextBlock[];
+  /** RunOptions.media for this run, validated. */
+  private _media?: MediaAttachment[];
+  /** Markers registered for this run's media (openai-compatible), released when it ends. */
+  private _mediaMarkers?: Array<{ marker: string; kind: MediaAttachment["kind"] }>;
 
   /** Sanitized evidence-verification receipts from the last run(). */
   get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
@@ -1329,6 +1368,9 @@ export class sportsclawEngine {
       modelId: this.mainModelId,
       routingMaxSkills: this.config.routingMaxSkills,
       routingAllowSpillover: this.config.routingAllowSpillover,
+      timeZone: this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE,
+      hostContext: this._hostContext,
+      hasMedia: Boolean(this._media?.length),
       allowTrading: this.config.allowTrading,
       skipFanProfile: this.config.skipFanProfile,
       installedSports: installed,
@@ -1363,7 +1405,32 @@ export class sportsclawEngine {
     memoryBlock?: string,
     abortSignal?: AbortSignal
   ): Promise<{ activeTools?: string[]; decision?: RouteDecision; routeMeta?: RouteMeta }> {
-    const installedSkills = this.registry.getInstalledSkills();
+    let installedSkills = this.registry.getInstalledSkills();
+    // A tool allowlist narrows what the router may pick: a skill none of whose
+    // tools survived the allowlist cannot serve this turn, and routing to it
+    // would leave the model with no tools at all.
+    if (this.config.toolAllowlist) {
+      const reachable = new Set(
+        toolNames.map((name) => this.registry.getSkillName(name)).filter((s): s is string => s !== undefined)
+      );
+      const allowedSkills = installedSkills.filter((skill) => reachable.has(skill));
+      const generative = (this.config.routing?.provider ?? "generative") === "generative";
+      if (allowedSkills.length === 1 && generative) {
+        // One sport is pinned: there is nothing to route, so skip the router's
+        // model call (and its retry) and keep every allowlisted tool active.
+        return {
+          activeTools: toolNames,
+          decision: {
+            selectedSkills: allowedSkills,
+            mode: "focused",
+            confidence: 1,
+            reason: "Only one sport skill is allowlisted",
+          },
+          routeMeta: { modelUsed: null, llmAttempted: false, llmSucceeded: false, llmDurationMs: 0 },
+        };
+      }
+      if (allowedSkills.length > 0) installedSkills = allowedSkills;
+    }
     if (installedSkills.length === 0) {
       // With no sport schemas there is nothing to skill-filter. Every tool is
       // engine-owned or MCP-provided, so keep the complete registry active.
@@ -1479,7 +1546,7 @@ export class sportsclawEngine {
       // fall through to deterministic fallback
     }
 
-    return "I can’t verify that cleanly right now. Ask me again in a minute and I’ll rerun it.";
+    return EVIDENCE_GATE_FALLBACK;
   }
 
   private filterToolsForAgent(agent: AgentDef, allToolNames: string[]): string[] | undefined {
@@ -2069,6 +2136,7 @@ export class sportsclawEngine {
       `User request: ${userPrompt}`,
       `Raw source data (Source of Truth):`,
       serializedToolOutputs || "(none)",
+      ...this.hostContextEvidence(),
       `Draft response to check:`,
       draft,
       ...reportLines,
@@ -2299,6 +2367,7 @@ export class sportsclawEngine {
           `User request: ${userPrompt}`,
           `Raw source data (Source of Truth):`,
           serializedToolOutputs,
+          ...this.hostContextEvidence(),
           `Original draft response with errors:`,
           draft,
           ...(params.reportHtml !== undefined
@@ -4569,7 +4638,30 @@ export class sportsclawEngine {
       },
     });
 
+    this.addHostTools(toolMap);
     return toolMap;
+  }
+
+  /** sportsclawConfig.hostTools, wrapped as model tools with the same output cap as data tools. */
+  private addHostTools(toolMap: ToolSet): void {
+    for (const [name, def] of Object.entries(this.config.hostTools ?? {})) {
+      if (!HOST_TOOL_NAME.test(name)) throw new Error(`invalid host tool name: ${name}`);
+      if (toolMap[name]) throw new Error(`host tool name collides with an engine tool: ${name}`);
+      if (!def || typeof def.execute !== "function" || typeof def.description !== "string") {
+        throw new Error(`host tool ${name} needs a description and an execute function`);
+      }
+      toolMap[name] = defineTool({
+        description: def.description,
+        inputSchema: jsonSchema(def.inputSchema as Parameters<typeof jsonSchema>[0]),
+        execute: async (input: unknown, { abortSignal }: { abortSignal?: AbortSignal }) => {
+          const value = await def.execute(input, { abortSignal });
+          const text = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+          return text.length > TOOL_OUTPUT_CHAR_CAP
+            ? `${text.slice(0, TOOL_OUTPUT_CHAR_CAP)}\n${TOOL_OUTPUT_TRUNCATED_MARKER}: ${text.length.toLocaleString()} chars, first ${TOOL_OUTPUT_CHAR_CAP.toLocaleString()} shown]`
+            : text;
+        },
+      });
+    }
   }
 
   /** Reset conversation history */
@@ -4843,7 +4935,99 @@ export class sportsclawEngine {
     return { text, tokens: usage?.totalTokens ?? 0, unsuccessful };
   }
 
+  /**
+   * Run one turn. Calls on the same instance are queued and run one at a time:
+   * a run owns this.messages, the run trace and the usage counters until it ends.
+   */
   async run(userPrompt: string, options?: RunOptions): Promise<string> {
+    return this.serialized(() => this.runExclusive(userPrompt, options));
+  }
+
+  /**
+   * Like run(), but also reports how the run ended, the tool results the model
+   * saw, and the run trace, all captured before the next queued run starts.
+   */
+  async runDetailed(userPrompt: string, options?: RunOptions): Promise<RunResult> {
+    return this.serialized(async () => {
+      const text = await this.runExclusive(userPrompt, options);
+      const trace = this.lastRunTrace;
+      return { text, outcome: this.runOutcome(text, trace), toolResults: this.turnToolResults(), trace };
+    });
+  }
+
+  /** Host-supplied data as checker evidence: same standing as tool data, local checker only. */
+  private hostContextEvidence(): string[] {
+    const blocks = this._hostContext;
+    if (!blocks || blocks.length === 0) return [];
+    return ["Host-supplied data (from the application, not the user; same standing as the raw source data):", formatHostContext(blocks)];
+  }
+
+  private serialized<T>(fn: () => Promise<T>): Promise<T> {
+    // `??`: engines built without the constructor (tests, embedders) have no queue yet.
+    const turn = (this._runQueue ?? Promise.resolve()).then(fn);
+    this._runQueue = turn.catch(() => undefined);
+    return turn;
+  }
+
+  private runOutcome(text: string, trace: RunTrace | null): RunOutcome {
+    if (this._engineReply) return "engine_reply";
+    const reply = text.trim().replace(/^["“]|["”]$/g, "");
+    if (reply === INJECTION_REFUSAL_TEXT) return "refusal";
+    if (trace?.verification?.outcome === "withheld" || reply === VERIFY_UNAVAILABLE || reply === EVIDENCE_GATE_FALLBACK) {
+      return "withheld";
+    }
+    return "answer";
+  }
+
+  /** Tool results from the current run's model messages, paired with the call that produced each. */
+  private turnToolResults(): RunToolResult[] {
+    const start = this._turnMessagesStart;
+    if (start === undefined || start === null) return [];
+    const inputs = new Map<string, unknown>();
+    const out: RunToolResult[] = [];
+    for (const msg of this.messages.slice(start)) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const part of msg.content as Array<Record<string, unknown>>) {
+        if (part.type === "tool-call") inputs.set(String(part.toolCallId), part.input);
+        if (part.type !== "tool-result") continue;
+        const result = (part.output ?? {}) as { type?: string; value?: unknown };
+        const value = "value" in result ? result.value : part.output;
+        out.push({
+          toolName: String(part.toolName),
+          toolCallId: String(part.toolCallId),
+          input: inputs.get(String(part.toolCallId)),
+          output: typeof value === "string" ? value : JSON.stringify(value),
+          isError: typeof result.type === "string" && result.type.startsWith("error"),
+        });
+      }
+    }
+    return out;
+  }
+
+  private async runExclusive(userPrompt: string, options?: RunOptions): Promise<string> {
+    try {
+      return await this.runExclusiveTurn(userPrompt, options);
+    } finally {
+      this.releaseRunMedia();
+    }
+  }
+
+  /** Forget this run's media markers and leave a short note where each stood in the transcript. */
+  private releaseRunMedia(): void {
+    const markers = this._mediaMarkers ?? [];
+    this._mediaMarkers = [];
+    if (markers.length === 0) return;
+    releaseMedia(markers.map((m) => m.marker));
+    const note = new Map(markers.map((m) => [m.marker, `[${m.kind} attached]`]));
+    for (const msg of this.messages) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const part of msg.content as Array<{ type?: string; text?: string }>) {
+        if (part.type === "text" && part.text && note.has(part.text)) part.text = note.get(part.text);
+      }
+    }
+  }
+
+  private async runExclusiveTurn(userPrompt: string, options?: RunOptions): Promise<string> {
     if (!options || (options.slip === undefined && options.artifact === undefined)) return this.runTurn(userPrompt, options);
 
     // Explicit artifact mode: validate before any model, tool or credential work.
@@ -4943,6 +5127,14 @@ export class sportsclawEngine {
     const callerHistory = options?.history !== undefined ? validateCallerHistory(options.history) : undefined;
     const callerMode = options?.historyMode === "caller";
 
+    this._runTimeZone = validTimeZone(options?.timeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE);
+    this._hostContext = options?.context !== undefined ? validateHostContext(options.context) : undefined;
+    this._media = options?.media !== undefined ? validateMedia(options.media) : undefined;
+    if (this._media?.length && !MEDIA_PROVIDERS.has(this.config.provider)) {
+      throw new Error(`media input needs provider "openai-compatible" or "google", not "${this.config.provider}"`);
+    }
+    this._engineReply = false;
+    this._turnMessagesStart = null;
     this._generatedImages = [];
     this._generatedVideos = [];
     this._lastUsage = null;
@@ -5006,12 +5198,13 @@ export class sportsclawEngine {
     // In YOLO mode, skip the guide intercept — the LLM handles everything.
     if (!this.config.yoloMode && isGuideIntent(sanitizedPrompt, {
       historyMode: options?.historyMode,
-      hasSystemPrompt: Boolean(options?.systemPrompt || this.config.systemPrompt),
+      hasSystemPrompt: Boolean(options?.systemPrompt || this.config.systemPrompt || this._hostContext?.length),
       hasMcpServers: this.mcpManager.serverCount > 0,
     })) {
       if (this.config.verbose) {
         console.error("[sportsclaw] guide intercept: handling meta-query");
       }
+      this._engineReply = true;
       return generateGuideResponse(sanitizedPrompt);
     }
 
@@ -5200,6 +5393,7 @@ export class sportsclawEngine {
           { role: "user", content: sanitizedPrompt },
           { role: "assistant", content: [{ type: "text", text: "Request cancelled." }] },
         );
+        this._engineReply = true;
         return "Request cancelled.";
       }
       // A venue the current request names that the brief lacks makes the brief stale:
@@ -5232,14 +5426,23 @@ export class sportsclawEngine {
       return messages;
     };
 
-    if (options?.images && options.images.length > 0) {
+    if ((options?.images && options.images.length > 0) || this._media?.length) {
       const parts: any[] = [{ type: "text", text: sanitizedPrompt }];
-      for (const img of options.images) {
+      for (const img of options?.images ?? []) {
         parts.push({
           type: "image",
           image: img.data,
           mimeType: img.mimeType,
         });
+      }
+      for (const media of this._media ?? []) {
+        if (this.config.provider === "google") {
+          parts.push({ type: "file", data: media.data, mediaType: media.mimeType });
+        } else {
+          const marker = registerMedia(media);
+          (this._mediaMarkers ??= []).push({ marker, kind: media.kind });
+          parts.push({ type: "text", text: marker });
+        }
       }
       this.messages.push({ role: "user", content: parts });
     } else {
@@ -5386,6 +5589,7 @@ export class sportsclawEngine {
       // Keep local history coherent: an orphaned user message corrupts the
       // next turn's LLM call.
       this.messages.push({ role: "assistant", content: [{ type: "text", text: refusal }] });
+      this._engineReply = true;
       return refusal;
     }
 
@@ -5754,6 +5958,7 @@ export class sportsclawEngine {
       let responseText: string;
       if (agentTexts.length === 0) {
         responseText = "[sportsclaw] No response generated from parallel agents.";
+        this._engineReply = true;
       } else if (agentTexts.length === 1) {
         responseText = agentTexts[0].replace(/^\[.*?\]\n/, "");
       } else {
@@ -6065,6 +6270,7 @@ export class sportsclawEngine {
 
     // Append the full response messages to our history for multi-turn support
     const turnMessagesStart = this.messages.length;
+    this._turnMessagesStart = turnMessagesStart;
     for (const msg of result.response.messages) {
       this.messages.push(msg as Message);
     }
@@ -6117,6 +6323,7 @@ export class sportsclawEngine {
       stepCount >= this.config.maxTurns && !finalText
         ? "[sportsclaw] Max turns reached without a final response."
         : finalText || "[sportsclaw] No response generated.";
+    if (!finalText) this._engineReply = true;
 
     const successes = Array.from(succeededExternalTools.values());
     const succeededToolNames = new Set(successes.map((s) => s.toolName));
@@ -6366,6 +6573,19 @@ export class sportsclawEngine {
   }): Promise<string> {
     const { memory, options, sanitizedPrompt, sessionId, analyticsSessionId, analyticsStartTime } = params;
     let { responseText } = params;
+    // --- Number grounding (opt-in): before memory and session keep the answer ---
+    const grounded = this.applyNumberGrounding(responseText, sanitizedPrompt, options?.history);
+    if (grounded !== responseText) {
+      // The withheld draft must not survive in the transcript the next turn sees.
+      for (const msg of [...this.messages].reverse()) {
+        if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+        for (const part of msg.content as Array<{ type?: string; text?: string }>) {
+          if (part.type === "text" && part.text === responseText) part.text = grounded;
+        }
+        break;
+      }
+      responseText = grounded;
+    }
     // --- Memory: write after LLM reply (async, non-blocking) ---
     if (memory) {
       try {
@@ -6423,6 +6643,27 @@ export class sportsclawEngine {
     responseText = stripInternalEvidenceArtifacts(responseText);
 
     return responseText;
+  }
+
+  /** sportsclawConfig.groundingCheck: numbers in the answer must come from this turn's evidence. */
+  private applyNumberGrounding(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
+    const action = this.config.groundingCheck ?? "off";
+    if (action === "off" || this._engineReply || text === VERIFY_UNAVAILABLE) return text;
+    const sources = [
+      userPrompt,
+      ...(callerHistory ?? []).map((h) => h.content),
+      ...(this._hostContext ?? []).map((b) => b.content),
+      ...this.turnToolResults().map((r) => r.output),
+      ...dateSources(this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE),
+    ];
+    const unsupported = unsupportedNumbers(text, sources);
+    if (unsupported.length === 0) return text;
+    const withhold = action === "withhold";
+    if (this._lastRunTrace) {
+      this._lastRunTrace.numberGrounding = { action, unsupported, ...(withhold ? { draft: text } : {}) };
+    }
+    if (this.config.verbose) console.error(`[sportsclaw] number grounding: unsupported ${unsupported.join(", ")}`);
+    return withhold ? VERIFY_UNAVAILABLE : text;
   }
 
   /**

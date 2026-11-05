@@ -254,6 +254,12 @@ export type {
   LLMProvider,
   sportsclawConfig,
   RunOptions,
+  RunOutcome,
+  RunResult,
+  RunToolResult,
+  HostContextBlock,
+  HostToolDef,
+  MediaAttachment,
   ToolProgressEvent,
   ToolSpec,
   PythonBridgeResult,
@@ -281,6 +287,7 @@ export {
   clearSuspendedState,
 } from "./ask.js";
 export { isGuideIntent, generateGuideResponse } from "./guide.js";
+export { INJECTION_REFUSAL_TEXT } from "./security.js";
 export {
   BUILD_BRIEF_MAX_BYTES,
   BUILD_BRIEF_SCHEMA_VERSION,
