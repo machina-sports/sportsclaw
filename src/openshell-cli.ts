@@ -397,20 +397,56 @@ interface ScaffoldOpts {
   credentialless?: boolean;
 }
 
+/** Native OpenShell inference target. `credentialless` wins over `credentialEnv`. */
+export interface OpenShellJobTarget {
+  baseUrl: string;
+  credentialEnv?: string;
+  credentialless?: boolean;
+}
+
+/** Core operator job fields: a direct OpenAI-compatible job, or an OpenShell-native one. */
+export type JobObjectOpts = {
+  jobId: string;
+  label: string;
+  intervalMs: number;
+  personaText: string;
+  model: string;
+} & (
+  | { provider: "anthropic" | "openai"; openshell: OpenShellJobTarget }
+  | { provider: "openai-compatible"; openshell?: never }
+);
+
+/** Shared core of `openshell setup` scaffolds and `quickstart` jobs. */
+export function buildJobObject(o: JobObjectOpts): Record<string, unknown> {
+  return {
+    jobId: o.jobId,
+    label: o.label,
+    intervalMs: o.intervalMs,
+    personaText: o.personaText,
+    provider: o.provider,
+    model: o.model,
+    ...(o.openshell
+      ? {
+          openshell: {
+            baseUrl: o.openshell.baseUrl,
+            ...(o.openshell.credentialless ? { credentialless: true } : { credentialEnv: o.openshell.credentialEnv }),
+          },
+        }
+      : {}),
+  };
+}
+
 /** Build the JSON content for an openshell-enabled job config. */
 export function buildScaffoldConfig(opts: ScaffoldOpts): string {
-  const cfg = {
+  const cfg = buildJobObject({
     jobId: opts.jobId,
     label: `${opts.jobId} (OpenShell)`,
     intervalMs: opts.intervalMs,
     personaText: opts.personaText,
     provider: opts.provider,
     model: opts.model,
-    openshell: {
-      baseUrl: opts.baseUrl,
-      ...(opts.credentialless ? { credentialless: true } : { credentialEnv: opts.credentialEnv }),
-    },
-  };
+    openshell: { baseUrl: opts.baseUrl, credentialEnv: opts.credentialEnv, credentialless: opts.credentialless },
+  });
   return JSON.stringify(cfg, null, 2) + "\n";
 }
 
@@ -432,6 +468,47 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+export interface OpenShellCommandOpts extends SetupRecipeOpts {
+  /** Local job file to upload, used exactly as given; defaults to `./<jobId>.json`. */
+  jobFile?: string;
+  /** One tick in a `--no-keep` sandbox instead of the detached on-failure daemon. */
+  once?: boolean;
+}
+
+/**
+ * Shared 0.1.x profile/provider/sandbox commands for `openshell setup` and
+ * `quickstart`. Every value is POSIX-quoted so the text runs as printed; the
+ * job id is validated and always names the in-sandbox upload target.
+ */
+export function buildOpenShellCommands(o: OpenShellCommandOpts): {
+  jobFile: string;
+  profileLint: string;
+  profileImport: string;
+  providerCreate: string;
+  sandboxCreate: string;
+} {
+  const jobId = o.jobId ?? "openshell-op";
+  if (!JOB_ID_PATTERN.test(jobId)) {
+    throw new Error(`Invalid job id ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
+  }
+  const jobFile = o.jobFile ?? `./${jobId}.json`;
+  const operate = `-- node /app/dist/index.js operate --job ${shq(jobId)}`;
+  return {
+    jobFile,
+    profileLint: `openshell profile lint -f ${shq(o.profileFile)}`,
+    profileImport: `openshell profile import -f ${shq(o.profileFile)}`,
+    providerCreate:
+      `openshell provider create --name ${shq(o.providerName)} --type ${shq(o.profileId)}` +
+      (o.credentialless ? "" : " --from-existing"),
+    sandboxCreate: [
+      `openshell sandbox create --name ${shq(o.sandboxName)} --from ${shq(o.image)}`,
+      `--provider ${shq(o.providerName)} --policy ${shq(o.policyFile)}`,
+      `--upload ${shq(`${jobFile}:/sandbox/.sportsclaw/operator/${jobId}.json`)}`,
+      o.once ? `--no-keep ${operate} --once` : `--detach --restart-policy on-failure ${operate}`,
+    ].join(" \\\n  "),
+  };
+}
+
 /**
  * The ordered 0.1.x commands to bring up a SportsClaw operator sandbox. Every
  * user/config/path value is POSIX-quoted so the text runs as printed. The
@@ -439,29 +516,20 @@ function shq(s: string): string {
  * restart policy — not via `sportsclaw start operator` (a host service manager).
  */
 export function buildSetupRecipe(o: SetupRecipeOpts): string {
-  const jobId = o.jobId ?? "openshell-op";
-  if (!JOB_ID_PATTERN.test(jobId)) {
-    throw new Error(`Invalid job id ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
-  }
-  const jobFile = `./${jobId}.json`;
-  const sandboxCreate = [
-    `openshell sandbox create --name ${shq(o.sandboxName)} --from ${shq(o.image)}`,
-    `--provider ${shq(o.providerName)} --policy ${shq(o.policyFile)}`,
-    `--upload ${shq(`${jobFile}:/sandbox/.sportsclaw/operator/${jobId}.json`)}`,
-    `--detach --restart-policy on-failure -- node /app/dist/index.js operate --job ${shq(jobId)}`,
-  ].join(" \\\n  ");
+  // Setup always prints the default job file and the detached restart launch.
+  const { jobFile, profileLint, profileImport, providerCreate, sandboxCreate } =
+    buildOpenShellCommands({ ...o, jobFile: undefined, once: false });
   return [
     "# 0. Gateway: start/provision it per the OpenShell docs. `openshell gateway add` only registers an existing one.",
     "",
     "# 1. Validate and import the provider profile (both need the active gateway; lint does not register).",
-    `openshell profile lint -f ${shq(o.profileFile)}`,
-    `openshell profile import -f ${shq(o.profileFile)}`,
+    profileLint,
+    profileImport,
     "",
     o.credentialless
       ? "# 2. Create the provider instance (credentialless profile)."
       : "# 2. Create the provider instance. --from-existing reads the profile's credential env var from THIS shell.",
-    `openshell provider create --name ${shq(o.providerName)} --type ${shq(o.profileId)}` +
-      (o.credentialless ? "" : " --from-existing"),
+    providerCreate,
     "",
     "# 3. Build an OCI image and push it where the gateway's engine can pull it (source checkout).",
     "#    docker build -t sportsclaw:latest . && docker build -t <image> -f openshell/Dockerfile . && docker push <image>",

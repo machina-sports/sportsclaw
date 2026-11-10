@@ -19,7 +19,9 @@ import { fileURLToPath } from "node:url";
 
 import { parse as parseYaml } from "yaml";
 
+import { buildJobObject, buildOpenShellCommands } from "../dist/openshell-cli.js";
 import { validateOperatorJobConfig } from "../dist/operator-config.js";
+import { buildQuickstartBundle, buildQuickstartJob, parseQuickstartArgs } from "../dist/quickstart.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "dist", "index.js");
@@ -630,6 +632,63 @@ describe("nim OpenShell bundle", () => {
     ]);
     const profile = parseYaml(fs.readFileSync(path.join(out, "provider.yaml"), "utf8"));
     assert.deepEqual(profile.endpoints.map((e) => [e.host, e.port, e.path]), [["host.openshell.internal", 8000, "/v1/**"]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared builders: quickstart renders the same core as `openshell setup`
+// ---------------------------------------------------------------------------
+
+describe("quickstart uses the shared OpenShell builders", () => {
+  const guide = fs.readFileSync(GUIDE, "utf8");
+  const opts = (...extra) => {
+    const o = parseQuickstartArgs(["--host", "brev", "--model", "org/m", "--out", "unused", ...extra]);
+    assert.notEqual(o, "help");
+    return o;
+  };
+
+  it("launch-openshell.sh renders the shared one-shot commands verbatim", () => {
+    const o = opts("--openshell", "--endpoint", "https://gpu.example.com/v1", "--image", "r.example/i:t");
+    const launch = buildQuickstartBundle(o, guide).find((f) => f.path === "launch-openshell.sh").content;
+    const cmds = buildOpenShellCommands({
+      profileFile: "./provider.yaml",
+      profileId: "sportsclaw-quickstart",
+      providerName: "sportsclaw-quickstart",
+      image: "r.example/i:t",
+      sandboxName: "sportsclaw-quickstart",
+      policyFile: "./policy.yaml",
+      jobId: "quickstart",
+      jobFile: "./.sportsclaw/operator/quickstart.json",
+      once: true,
+    });
+    assert.ok(
+      launch.includes([cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate].join("\n")),
+      launch,
+    );
+    // One-shot only: no daemon restart, no verification against an auto-removed sandbox.
+    assert.doesNotMatch(launch, /--detach|--restart-policy|sandbox provider list|policy get/);
+  });
+
+  it("job core fields equal the shared job object (OpenShell and direct)", () => {
+    const cases = [
+      [opts("--openshell", "--endpoint", "https://gpu.example.com/v1", "--image", "r.example/i:t"),
+        { provider: "openai", openshell: { baseUrl: "https://gpu.example.com/v1", credentialEnv: "VLLM_API_KEY" } }],
+      [opts(), { provider: "openai-compatible" }],
+    ];
+    for (const [o, route] of cases) {
+      const job = buildQuickstartJob(o, guide);
+      const core = buildJobObject({
+        jobId: "quickstart",
+        label: `Hosted-model quickstart (brev${o.openshell ? ", OpenShell" : ""})`,
+        intervalMs: 300_000,
+        personaText: job.personaText,
+        model: "org/m",
+        ...route,
+      });
+      for (const [key, value] of Object.entries(core)) assert.deepEqual(job[key], value, key);
+      assert.equal("openshell" in job, o.openshell);
+      assert.ok(job.personaText.includes(guideBody()));
+    }
   });
 });
 
