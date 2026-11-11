@@ -102,4 +102,14 @@ test("the manifest reports verification in run and keeps it out of config_sha256
   assert.deepEqual(withV.run.verification, { outcome: "flagged", draft_before_correction: null, flagged_claims: ["c"] });
   assert.equal(buildRunManifest({ ...base, trace }).run.verification, null);
   assert.equal(withV.config_sha256, buildRunManifest({ ...base, trace }).config_sha256);
+  // What the engine's own code checked or wrote is evidence a grader needs per case.
+  const plain = buildRunManifest({ ...base, trace }).run;
+  assert.deepEqual([plain.number_grounding, plain.data_answer], [null, null]);
+  const checked = buildRunManifest({ ...base, trace: { ...trace,
+    numberGrounding: { action: "flag", unsupported: ["150", "90"] },
+    dataAnswer: { tools: ["nba_get_scoreboard"], facts: "NBA:\n- A 1, B 2 (final)", draft: "A won 150-90.", unsupported: ["150", "90"] } } }).run;
+  assert.deepEqual(checked.number_grounding, { action: "flag", unsupported: ["150", "90"], draft: null });
+  assert.deepEqual(checked.data_answer, { tools: ["nba_get_scoreboard"], facts: "NBA:\n- A 1, B 2 (final)", draft: "A won 150-90.", unsupported: ["150", "90"] });
+  const kept = buildRunManifest({ ...base, trace: { ...trace, dataAnswer: { tools: ["nba_get_standings"], facts: "x" } } }).run.data_answer;
+  assert.deepEqual(kept, { tools: ["nba_get_standings"], facts: "x", draft: null, unsupported: null });
 });

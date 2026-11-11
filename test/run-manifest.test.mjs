@@ -144,6 +144,8 @@ test("run trace is reported but excluded from config_sha256", () => {
     route_llm_ok: null,
     pass_tokens: null,
     verification: null,
+    number_grounding: null,
+    data_answer: null,
   });
 });
 

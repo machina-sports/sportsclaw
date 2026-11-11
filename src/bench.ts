@@ -200,6 +200,11 @@ export function withoutExcludedSkills(toolNames: readonly string[]): string[] {
   return toolNames.filter((name) => !BENCH_EXCLUDED_SKILLS.some((skill) => name.startsWith(`${skill}_`)));
 }
 
+export const BENCH_ANSWER_FROM = ["model", "model+data", "data"] as const;
+export type BenchAnswerFrom = (typeof BENCH_ANSWER_FROM)[number];
+export const BENCH_GROUNDING_CHECK = ["off", "flag", "withhold"] as const;
+export type BenchGroundingCheck = (typeof BENCH_GROUNDING_CHECK)[number];
+
 export interface ToolCallRecord {
   name: string;
   success: boolean | null;
@@ -245,6 +250,9 @@ export interface BenchRunOptions {
   arm?: BenchArm;
   /** Per-case wall-clock limit; the case is aborted and recorded as `timeout`. */
   caseTimeoutS?: number;
+  /** The engine's answerFrom and groundingCheck for this run, recorded in the start line (routed arms). */
+  answerFrom?: BenchAnswerFrom;
+  groundingCheck?: BenchGroundingCheck;
   /** How long a timed-out run gets to unwind before the next case (default 5 s). */
   abortGraceMs?: number;
   /** Receives each output line as an object; the caller serializes it. */
@@ -340,6 +348,8 @@ export async function runBench(opts: BenchRunOptions): Promise<BenchSummary> {
     },
     limit: opts.limit ?? null,
     arm,
+    answer_from: opts.answerFrom ?? null,
+    grounding_check: opts.groundingCheck ?? null,
     case_timeout_s: caseTimeoutS,
     manifest_version: base.manifest_version,
     config_sha256: base.config_sha256,
@@ -540,12 +550,17 @@ export interface BenchArgs {
   sampling: SamplingConfig;
   arm: BenchArm;
   caseTimeoutS: number;
+  /** --answer-from: who writes the answer when the engine can render the tool data. */
+  answerFrom?: BenchAnswerFrom;
+  /** --grounding-check: the engine's deterministic number check. */
+  groundingCheck?: BenchGroundingCheck;
 }
 
 export const BENCH_USAGE =
   "Usage: sportsclaw bench <dataset.jsonl> [--out <results.jsonl>] [--limit <n>] " +
   "[--arm routed|raw-tools|direct|routed-oracle] [--case-timeout <seconds>] " +
-  "[--tools <a,b,...> | --all-tools] [--system-prompt <text>] [--temperature <n>] [--seed <n>] [--verbose]";
+  "[--tools <a,b,...> | --all-tools] [--system-prompt <text>] [--answer-from model|model+data|data] " +
+  "[--grounding-check off|flag|withhold] [--temperature <n>] [--seed <n>] [--verbose]";
 
 function takeValue(args: string[], flag: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
@@ -587,6 +602,8 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
   const systemPrompt = takeValue(args, "--system-prompt");
   const armRaw = takeValue(args, "--arm");
   const timeoutRaw = takeValue(args, "--case-timeout");
+  const answerFromRaw = takeValue(args, "--answer-from");
+  const groundingRaw = takeValue(args, "--grounding-check");
   const allTools = takeSwitch(args, "--all-tools");
   const verbose = takeSwitch(args, "--verbose", "-v");
 
@@ -614,6 +631,17 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
     throw new Error("--tools/--all-tools apply to the routed arm only; baseline arms use each case's \"skills\"");
   }
 
+  if (answerFromRaw !== undefined && !(BENCH_ANSWER_FROM as readonly string[]).includes(answerFromRaw)) {
+    throw new Error(`--answer-from must be one of ${BENCH_ANSWER_FROM.join(", ")} (got ${JSON.stringify(answerFromRaw)})`);
+  }
+  if (groundingRaw !== undefined && !(BENCH_GROUNDING_CHECK as readonly string[]).includes(groundingRaw)) {
+    throw new Error(`--grounding-check must be one of ${BENCH_GROUNDING_CHECK.join(", ")} (got ${JSON.stringify(groundingRaw)})`);
+  }
+  // The baseline arms run the minimal loop, which never reaches the engine's answer step.
+  if ((arm === "raw_tools" || arm === "direct") && (answerFromRaw !== undefined || groundingRaw !== undefined)) {
+    throw new Error("--answer-from/--grounding-check apply to the routed arms only");
+  }
+
   const unknownFlag = args.find((a) => a.startsWith("-"));
   if (unknownFlag) throw new Error(`unknown option ${unknownFlag}`);
   if (args.length === 0) throw new Error("missing dataset path");
@@ -630,5 +658,7 @@ export function parseBenchArgs(argv: readonly string[], takeSampling: (args: str
     sampling,
     arm,
     caseTimeoutS,
+    ...(answerFromRaw !== undefined ? { answerFrom: answerFromRaw as BenchAnswerFrom } : {}),
+    ...(groundingRaw !== undefined ? { groundingCheck: groundingRaw as BenchGroundingCheck } : {}),
   };
 }
