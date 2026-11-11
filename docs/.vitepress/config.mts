@@ -152,6 +152,7 @@ export default defineConfig({
           { text: 'Capability Routing', link: '/guide/capability-routing' },
           { text: 'Jev Decision Client', link: '/guide/decision-client' },
           { text: 'Decision Providers', link: '/guide/decision-providers' },
+          { text: 'Speech', link: '/guide/speech' },
           { text: 'Decision Relay', link: '/guide/decision-relay' },
           { text: 'Jev Evidence Verification', link: '/guide/jev-evidence-verifier' },
         ],

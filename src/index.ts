@@ -520,6 +520,24 @@ export {
 } from "./gemini-decision-client.js";
 export type { GeminiDecisionClientConfig } from "./gemini-decision-client.js";
 export { createDecisionProvider, JUDGE_PROVIDERS } from "./inference/judge.js";
+// Speech — text in, WAV out, on a route chosen in config (a server you run or a hosted service).
+export {
+  synthesizeSpeech,
+  speechText,
+  speechConfigIssue,
+  SpeechRouteError,
+  SPEECH_FORMATS,
+  SPEECH_LIMITS,
+  SPEECH_ROUTES,
+} from "./inference/speech.js";
+export type {
+  SpeechFormat,
+  SpeechResult,
+  SpeechRoute,
+  SpeechRouteConfig,
+  SpeechTrace,
+  SynthesizeSpeechArgs,
+} from "./inference/speech.js";
 export type { JudgeConfig, JudgeSeams } from "./inference/judge.js";
 export type {
   ChoiceAnswer,
