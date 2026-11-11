@@ -2572,6 +2572,8 @@ async function cmdBench(argv: string[]): Promise<void> {
       allowTrading: false,
       yoloMode: false,
       sampling: opts.sampling,
+      ...(opts.answerFrom !== undefined ? { answerFrom: opts.answerFrom } : {}),
+      ...(opts.groundingCheck !== undefined ? { groundingCheck: opts.groundingCheck } : {}),
     });
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
@@ -2625,6 +2627,8 @@ async function cmdBench(argv: string[]): Promise<void> {
     ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
     arm: opts.arm,
     caseTimeoutS: opts.caseTimeoutS,
+    ...(opts.answerFrom !== undefined ? { answerFrom: opts.answerFrom } : {}),
+    ...(opts.groundingCheck !== undefined ? { groundingCheck: opts.groundingCheck } : {}),
     emit: write,
   });
   if (out) await new Promise<void>((resolve) => out.end(resolve));

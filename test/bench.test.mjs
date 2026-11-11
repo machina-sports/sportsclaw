@@ -69,6 +69,32 @@ test("parseBenchArgs reads every option", () => {
   assert.deepEqual(parseBenchArgs(["d.jsonl", "--all-tools"], takeSamplingArgs).allTools, true);
 });
 
+test("parseBenchArgs reads the answer-from and grounding-check modes", () => {
+  const args = parseBenchArgs(["d.jsonl", "--answer-from", "model+data", "--grounding-check=flag"], takeSamplingArgs);
+  assert.equal(args.answerFrom, "model+data");
+  assert.equal(args.groundingCheck, "flag");
+  const plain = parseBenchArgs(["d.jsonl"], takeSamplingArgs);
+  assert.equal("answerFrom" in plain || "groundingCheck" in plain, false, "unset means the engine's defaults");
+  const bad = [
+    [["d.jsonl", "--answer-from", "code"], /--answer-from must be one of model, model\+data, data/],
+    [["d.jsonl", "--grounding-check", "on"], /--grounding-check must be one of off, flag, withhold/],
+    [["d.jsonl", "--arm", "direct", "--answer-from", "data"], /apply to the routed arms only/],
+    [["d.jsonl", "--arm", "raw-tools", "--grounding-check", "flag"], /apply to the routed arms only/],
+  ];
+  for (const [argv, pattern] of bad) assert.throws(() => parseBenchArgs(argv, takeSamplingArgs), pattern, JSON.stringify(argv));
+  assert.equal(parseBenchArgs(["d.jsonl", "--arm", "routed-oracle", "--answer-from", "data"], takeSamplingArgs).answerFrom, "data");
+});
+
+test("the start line records the answer-from and grounding-check modes of the run", async () => {
+  const dataset = parseDataset(JSON.stringify({ id: "ok-1", prompt: "p-ok" }));
+  const engine = fakeEngine({ "p-ok": { answer: "Knicks 110-104", tools: [] } });
+  const run = { engine, dataset, datasetPath: "d.jsonl", sportsSkillsVersion: "0.33.0" };
+  const [plain] = (await collect(run)).lines;
+  assert.deepEqual([plain.answer_from, plain.grounding_check], [null, null]);
+  const [start] = (await collect({ ...run, answerFrom: "model+data", groundingCheck: "flag" })).lines;
+  assert.deepEqual([start.answer_from, start.grounding_check], ["model+data", "flag"]);
+});
+
 test("parseBenchArgs rejects bad input with clear messages", () => {
   const cases = [
     [[], /missing dataset path/],

@@ -212,6 +212,10 @@ export interface RunManifest {
     route_llm_ok: boolean | null;
     pass_tokens: Record<string, number> | null;
     verification: { outcome: VerificationOutcome; draft_before_correction: string | null; flagged_claims: string[] | null } | null;
+    /** The deterministic number check's result, when it found numbers no source contains. */
+    number_grounding: { action: "flag" | "withhold"; unsupported: string[]; draft: string | null } | null;
+    /** What code wrote into the answer from the tool data, and the model's draft when the data replaced it. */
+    data_answer: { tools: string[]; facts: string; draft: string | null; unsupported: string[] | null } | null;
   } | null;
 }
 
@@ -287,6 +291,17 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
                 outcome: trace.verification.outcome,
                 draft_before_correction: trace.verification.draftBeforeCorrection ?? null,
                 flagged_claims: trace.verification.flaggedClaims ? [...trace.verification.flaggedClaims] : null,
+              }
+            : null,
+          number_grounding: trace.numberGrounding
+            ? { action: trace.numberGrounding.action, unsupported: [...trace.numberGrounding.unsupported], draft: trace.numberGrounding.draft ?? null }
+            : null,
+          data_answer: trace.dataAnswer
+            ? {
+                tools: [...trace.dataAnswer.tools],
+                facts: trace.dataAnswer.facts,
+                draft: trace.dataAnswer.draft ?? null,
+                unsupported: trace.dataAnswer.unsupported ? [...trace.dataAnswer.unsupported] : null,
               }
             : null,
         }
