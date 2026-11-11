@@ -1,7 +1,7 @@
 /**
  * sportsclaw — Model Role Router
  *
- * Routes `eyes/brain/hands/voice` invocations to a configured route
+ * Routes `eyes/brain/hands/writer` invocations to a configured route
  * (`openshell`, `nim`, or `mock`) and returns typed `InferenceResult`s
  * with timing traces. This is the single stable call surface for TV/pod
  * workflows and operators — callers request a role, never a GPU, an
@@ -110,7 +110,7 @@ export interface ModelRoleRouterConfig {
   roles: Partial<Record<ModelRole, ModelRoleRouteConfig>>;
   /** The decision provider for typed questions. Not a role: see `judge.ts`. */
   judge?: JudgeConfig;
-  /** Where text is spoken. Not a role: the `voice` role writes, this speaks. See `speech.ts`. */
+  /** Where text is spoken. Not a role: the `writer` role writes, this speaks. See `speech.ts`. */
   speech?: SpeechRouteConfig;
 }
 

@@ -6,7 +6,8 @@
  *   - `eyes`  — visual perception (e.g. Cosmos 3 Nano Reasoner)
  *   - `brain` — editorial/programming reasoning (e.g. Nemotron 3 Super 120B A12B)
  *   - `hands` — generated video/image asset production (e.g. Cosmos 3 Super I2V)
- *   - `voice` — narration/chyrons/copy (e.g. Nemotron 49B)
+ *   - `writer` — narration/chyrons/copy (e.g. Nemotron 49B). Speaking the text is not a
+ *     role: that is `inference.speech`.
  *
  * The abstraction is inference roles, not hardware. Hardware (H200 etc.)
  * lives only in route metadata and benchmark output — never in contract
@@ -14,7 +15,7 @@
  * NIM endpoints, or future cloud inference.
  */
 
-export const MODEL_ROLES = ["eyes", "brain", "hands", "voice"] as const;
+export const MODEL_ROLES = ["eyes", "brain", "hands", "writer"] as const;
 
 export type ModelRole = (typeof MODEL_ROLES)[number];
 

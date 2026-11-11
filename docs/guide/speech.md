@@ -1,6 +1,6 @@
 # Speech
 
-`synthesizeSpeech` turns text into a WAV file on a route you choose in config. The `voice` model role writes narration; this speaks it. Changing where speech runs — a server you run, or a hosted service — is a config edit, the same way it is for a model role.
+`synthesizeSpeech` turns text into a WAV file on a route you choose in config. The `writer` model role writes narration; this speaks it. Changing where speech runs — a server you run, or a hosted service — is a config edit, the same way it is for a model role.
 
 ```ts
 import { speechText, synthesizeSpeech } from "sportsclaw-engine-core";
@@ -22,7 +22,7 @@ Speech sits beside the model roles as `inference.speech`:
 ```json
 {
   "inference": {
-    "roles": { "voice": { "route": "nim", "model": "..." } },
+    "roles": { "writer": { "route": "nim", "model": "..." } },
     "speech": { "route": "api", "format": "openai", "model": "gpt-4o-mini-tts", "voice": "alloy",
                 "baseUrl": "https://api.openai.com/v1", "credentialEnv": "OPENAI_API_KEY" }
   }

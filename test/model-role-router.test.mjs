@@ -28,7 +28,7 @@ function mockRouterConfig() {
       eyes: { route: "mock", model: "nvidia/cosmos3-nano-reasoner" },
       brain: { route: "mock", model: "nvidia/nemotron-3-super-120b-a12b" },
       hands: { route: "mock", model: "nvidia/cosmos3-super-i2v" },
-      voice: { route: "mock", model: "nvidia/llama-3.3-nemotron-super-49b" },
+      writer: { route: "mock", model: "nvidia/llama-3.3-nemotron-super-49b" },
     },
   };
 }
@@ -55,7 +55,7 @@ function nimRouterConfig() {
         accelerator: "h200",
         model: "nvidia/cosmos3-super-i2v",
       },
-      voice: {
+      writer: {
         route: "nim",
         locality: "h200",
         accelerator: "h200",
@@ -134,10 +134,10 @@ describe("validateModelRoleRouterConfig", () => {
 
   it("rejects an unknown accelerator", () => {
     const config = mockRouterConfig();
-    config.roles.voice.accelerator = "tpu9000";
+    config.roles.writer.accelerator = "tpu9000";
     const result = validateModelRoleRouterConfig(config);
     assert.strictEqual(result.ok, false);
-    assert.ok(result.error.includes("voice"));
+    assert.ok(result.error.includes("writer"));
     assert.ok(result.error.includes("accelerator"));
   });
 });
@@ -171,7 +171,7 @@ describe("invokeModelRole (mock route)", () => {
   it("echoes the input in the mock output", async () => {
     const input = { headline: "Brazil pressure is structural" };
     const result = await invokeModelRole({
-      role: "voice",
+      role: "writer",
       input,
       source: "sportsclaw-operator",
       config: mockRouterConfig(),
@@ -218,12 +218,12 @@ describe("invokeModelRole (error paths)", () => {
     await assert.rejects(
       () =>
         invokeModelRole({
-          role: "voice",
+          role: "writer",
           input: {},
           source: "machina-pod",
           config,
         }),
-      (err) => err.message.includes("voice"),
+      (err) => err.message.includes("writer"),
     );
   });
 

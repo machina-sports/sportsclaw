@@ -682,7 +682,7 @@ describe("validateOperatorJobConfig — inference block", () => {
             accelerator: "h200",
             model: "nvidia/cosmos3-super-i2v",
           },
-          voice: {
+          writer: {
             route: "nim",
             locality: "h200",
             accelerator: "h200",
@@ -693,7 +693,7 @@ describe("validateOperatorJobConfig — inference block", () => {
     });
     assert.strictEqual(r.valid, true, JSON.stringify(r.issues));
     assert.strictEqual(r.config.inference.roles.eyes.model, "nvidia/cosmos3-nano-reasoner");
-    assert.strictEqual(r.config.inference.roles.voice.route, "nim");
+    assert.strictEqual(r.config.inference.roles.writer.route, "nim");
   });
 
   it("rejects a non-object inference block", () => {

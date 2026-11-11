@@ -87,7 +87,7 @@ export function validateInferenceTaskEnvelope(envelope: unknown): ValidationResu
   }
 
   if (!isModelRole(e.role)) {
-    return { ok: false, error: "Envelope role must be one of eyes, brain, hands, voice." };
+    return { ok: false, error: "Envelope role must be one of eyes, brain, hands, writer." };
   }
 
   if (typeof e.model !== "string" || e.model === "") {
@@ -120,7 +120,7 @@ export function validateInferenceTrace(trace: unknown): ValidationResult {
   }
 
   if (!isModelRole(t.role)) {
-    return { ok: false, error: "Trace role must be one of eyes, brain, hands, voice." };
+    return { ok: false, error: "Trace role must be one of eyes, brain, hands, writer." };
   }
 
   if (typeof t.model !== "string" || t.model === "") {

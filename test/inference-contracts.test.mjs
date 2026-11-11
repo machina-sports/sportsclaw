@@ -62,7 +62,7 @@ describe("MODEL_ROLES", () => {
   it("exports exactly the four expected roles", () => {
     assert.deepStrictEqual(
       [...MODEL_ROLES].sort(),
-      ["brain", "eyes", "hands", "voice"].sort(),
+      ["brain", "eyes", "hands", "writer"].sort(),
     );
   });
 });

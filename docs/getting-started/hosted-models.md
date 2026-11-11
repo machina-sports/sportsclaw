@@ -45,7 +45,7 @@ describes, then point sportsclaw at the same OpenAI-compatible endpoint.
 
 ## Pointing a model role at either kind of endpoint
 
-An operator job can give each model role (`eyes`, `brain`, `hands`, `voice`) its own endpoint under
+An operator job can give each model role (`eyes`, `brain`, `hands`, `writer`) its own endpoint under
 `inference.roles`. Switching a role between a model you run and a hosted service is an edit to that
 one block.
 

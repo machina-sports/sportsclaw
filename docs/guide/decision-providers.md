@@ -20,7 +20,7 @@ Code written against `DecisionProvider` does not change when the provider does.
 
 ## Not a model role
 
-The model roles (`eyes`, `brain`, `hands`, `voice`) write: they go through `invokeModelRole` and return text or media. A judge returns checked probabilities over options the caller supplied, so it is not a fifth role and never goes through a chat route. It is configured in the same block:
+The model roles (`eyes`, `brain`, `hands`, `writer`) write: they go through `invokeModelRole` and return text or media. A judge returns checked probabilities over options the caller supplied, so it is not a fifth role and never goes through a chat route. It is configured in the same block:
 
 ```json
 {
