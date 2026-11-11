@@ -15,7 +15,12 @@
  *   - `nim` — OpenAI-compatible native client pointed at a NIM endpoint
  *     (`baseUrl` in role config, else NIM_BASE_URL / OPENAI_BASE_URL env).
  *     No OpenShell requirement. Nemotron thinking-suppression kwargs are
- *     injected by `resolveModel`'s fetch wrapper.
+ *     injected by `resolveModel`'s fetch wrapper. Keyless: for a model server
+ *     you run yourself.
+ *   - `api` — the same client pointed at a hosted OpenAI-compatible service
+ *     that needs a key. The config names the environment variable holding the
+ *     key (`credentialEnv`); the key is never in config. HTTPS is required
+ *     unless the endpoint is on loopback.
  *   - `mock` — deterministic in-process echo, no network. Used by unit
  *     tests and the moment-to-air benchmark in CI.
  *
@@ -78,16 +83,20 @@ export interface ModelRoleRouteConfig {
    * Never put credentials here.
    */
   baseUrl?: string;
-  /** openshell only: credential env var injected by the attached provider profile. */
+  /**
+   * The NAME of the environment variable that holds the credential, never the credential.
+   * openshell: the variable the attached provider profile injects. api: required; the
+   * service's key is read from it at call time.
+   */
   credentialEnv?: string;
   /** openshell only: explicit unauthenticated local endpoint. */
   credentialless?: boolean;
-  /** Request shape for openshell/nim routes. Default `"chat"`. */
+  /** Request shape for openshell/nim/api routes. Default `"chat"`. */
   apiMode?: NativeApiMode;
-  /** Per-request timeout for openshell/nim routes. */
+  /** Per-request timeout for openshell/nim/api routes. */
   timeoutMs?: number;
   /**
-   * nim only: extra fields added to each chat request body, for server options the
+   * nim and api only: extra fields added to each chat request body, for server options the
    * model needs (vLLM: `top_k`, `chat_template_kwargs`, `mm_processor_kwargs`).
    * It may not set the request itself (model, messages, stream, tools).
    */
@@ -101,6 +110,12 @@ export interface ModelRoleRouterConfig {
 // ---------------------------------------------------------------------------
 // validateModelRoleRouterConfig — runtime validation for the config block
 // ---------------------------------------------------------------------------
+
+/** An environment variable name, as opposed to a key pasted where a name belongs. */
+const ENV_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
+/** A bearer key: printable characters with no whitespace. */
+const USABLE_KEY = /^[!-~]+$/;
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 /** Request fields a role's `requestBody` may not set: they are the call, not options for the server. */
 const REQUEST_BODY_RESERVED: ReadonlySet<string> = new Set(["model", "messages", "stream", "tools", "tool_choice"]);
@@ -141,8 +156,8 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
       if (!r.requestBody || typeof r.requestBody !== "object" || Array.isArray(r.requestBody)) {
         return { ok: false, error: `Role "${key}" requestBody must be an object of extra request fields.` };
       }
-      if (r.route !== "nim") {
-        return { ok: false, error: `Role "${key}" requestBody is sent on nim routes only.` };
+      if (r.route !== "nim" && r.route !== "api") {
+        return { ok: false, error: `Role "${key}" requestBody is sent on nim and api routes only.` };
       }
       const reserved = Object.keys(r.requestBody).filter((field) => REQUEST_BODY_RESERVED.has(field));
       if (reserved.length > 0) {
@@ -180,10 +195,21 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
       continue;
     }
 
-    for (const field of ["credentialEnv", "credentialless"] as const) {
-      if (r[field] !== undefined) {
-        return { ok: false, error: `Role "${key}" ${field} applies only to route "openshell".` };
+    if (r.credentialless !== undefined) {
+      return { ok: false, error: `Role "${key}" credentialless applies only to route "openshell".` };
+    }
+    if (r.route === "api") {
+      if (typeof r.credentialEnv !== "string" || !ENV_NAME.test(r.credentialEnv)) {
+        return {
+          ok: false,
+          error: `Role "${key}" credentialEnv must be the name of an environment variable that holds the key (for example NVIDIA_API_KEY), never the key itself.`,
+        };
       }
+      if (typeof r.baseUrl !== "string" || r.baseUrl === "") {
+        return { ok: false, error: `Role "${key}" route "api" needs a baseUrl.` };
+      }
+    } else if (r.credentialEnv !== undefined) {
+      return { ok: false, error: `Role "${key}" credentialEnv applies only to routes "openshell" and "api".` };
     }
     if (r.apiMode !== undefined && r.apiMode !== "chat" && r.apiMode !== "responses") {
       return { ok: false, error: `Role "${key}" apiMode must be one of chat, responses.` };
@@ -203,6 +229,10 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
         const url = new URL(r.baseUrl);
         if (url.protocol !== "http:" && url.protocol !== "https:") {
           return { ok: false, error: `Role "${key}" baseUrl must be http(s).` };
+        }
+        // A key travels with every request on this route: plain HTTP only to this machine.
+        if (r.route === "api" && url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
+          return { ok: false, error: `Role "${key}" route "api" baseUrl must be https, except on loopback.` };
         }
       } catch {
         return { ok: false, error: `Role "${key}" baseUrl is not a valid URL.` };
@@ -294,6 +324,17 @@ export function resolveNativeRoleEndpoint(
     // NIM endpoints are keyless here; the client just needs a non-empty key.
     return {
       baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs,
+      ...(routeConfig.requestBody ? { requestBody: routeConfig.requestBody } : {}),
+    };
+  }
+  if (routeConfig.route === "api") {
+    // The key is read here, at call time, from the variable the config names. No fallback to any other key.
+    const name = routeConfig.credentialEnv as string;
+    const key = env[name];
+    if (!key) throw new Error(`${name} is not set — export the key for this route's service; there is no fallback.`);
+    if (!USABLE_KEY.test(key)) throw new Error(`${name} does not hold a usable key (printable characters, no spaces).`);
+    return {
+      baseUrl: routeConfig.baseUrl as string, apiKey: key, apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs,
       ...(routeConfig.requestBody ? { requestBody: routeConfig.requestBody } : {}),
     };
   }
@@ -447,7 +488,8 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
         output = { mock: true, role, model: routeConfig.model, echo: input };
         break;
       case "openshell":
-      case "nim": {
+      case "nim":
+      case "api": {
         // Guard + credential lookup happen here, before any request.
         const endpoint = resolveNativeRoleEndpoint(routeConfig);
         const media = args.media !== undefined ? validateMedia(args.media) : undefined;

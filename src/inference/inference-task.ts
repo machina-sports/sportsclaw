@@ -13,7 +13,7 @@ import { isModelRole, type ModelRole } from "./model-roles.js";
 // InferenceRoute — how a role is reached (never named after hardware)
 // ---------------------------------------------------------------------------
 
-export const INFERENCE_ROUTES = ["openshell", "nim", "mock"] as const;
+export const INFERENCE_ROUTES = ["openshell", "nim", "api", "mock"] as const;
 
 export type InferenceRoute = (typeof INFERENCE_ROUTES)[number];
 

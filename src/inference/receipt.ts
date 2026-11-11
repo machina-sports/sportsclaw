@@ -29,7 +29,7 @@ export type InferenceErrorCode = (typeof INFERENCE_ERROR_CODES)[number];
 export type InferenceKind = "generate" | "stream" | "image" | "decision";
 export type InferenceStatus = "completed" | "failed" | "aborted";
 /** Route label only — never an endpoint. */
-export type InferenceRouteLabel = "direct" | "nim" | "openshell" | "mock";
+export type InferenceRouteLabel = "direct" | "nim" | "api" | "openshell" | "mock";
 
 export interface InferenceReceipt {
   kind: InferenceKind;
@@ -66,7 +66,7 @@ export function safeModelId(value: unknown): string | undefined {
   return value;
 }
 
-const ROUTES: ReadonlySet<string> = new Set(["direct", "nim", "openshell", "mock"]);
+const ROUTES: ReadonlySet<string> = new Set(["direct", "nim", "api", "openshell", "mock"]);
 
 export function routeOf(ctx: InferenceContext): InferenceRouteLabel {
   return ctx.route && ROUTES.has(ctx.route) ? ctx.route : "direct";
