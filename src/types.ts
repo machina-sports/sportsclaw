@@ -419,6 +419,17 @@ export interface sportsclawConfig {
    */
   groundingCheck?: "off" | "flag" | "withhold";
   /**
+   * Who writes the answer when every tool result of the turn is one a fixed
+   * renderer fully validates (so far `<league>_get_scoreboard` and
+   * `<league>_get_standings`). "model+data": the model's answer, with the data
+   * written by code under it; if the answer has a number of two or more digits
+   * that none of the turn's sources contains, the data alone is the answer.
+   * "data": the data alone, always. What code wrote, and any draft it replaced,
+   * are in lastRunTrace.dataAnswer. Otherwise, and with "model" (the default),
+   * the model's answer stands.
+   */
+  answerFrom?: "model" | "model+data" | "data";
+  /**
    * Opt-in task brief: resolve one bounded intent brief before primary
    * generation (see `task-brief.ts`). It may only narrow already-offered
    * tools and never authorizes a write. Default: false.
@@ -652,6 +663,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   toolAllowlist: null,
   hostTools: {},
   groundingCheck: "off",
+  answerFrom: "model",
   taskBrief: false,
 };
 

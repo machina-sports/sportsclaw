@@ -152,6 +152,12 @@ export interface RunTrace {
   verification?: { outcome: VerificationOutcome; draftBeforeCorrection?: string; flaggedClaims?: string[] };
   /** Deterministic number grounding (sportsclawConfig.groundingCheck). Absent when it is off. */
   numberGrounding?: { action: "flag" | "withhold"; unsupported: string[]; draft?: string };
+  /**
+   * Set when code wrote data from the turn's tool results into the answer (sportsclawConfig.answerFrom).
+   * `facts` is what code wrote; `draft` is the model's answer when the data replaced it, and `unsupported`
+   * the numbers in that draft no source contains.
+   */
+  dataAnswer?: { tools: string[]; facts: string; draft?: string; unsupported?: string[] };
 }
 
 /**
