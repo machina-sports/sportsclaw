@@ -89,6 +89,7 @@ export default defineConfig({
           { text: 'Introduction', link: '/getting-started/introduction' },
           { text: 'Quickstart', link: '/getting-started/quickstart' },
           { text: 'Configuration', link: '/getting-started/configuration' },
+          { text: 'Your Own Hosted Model', link: '/getting-started/hosted-models' },
         ],
       },
       {

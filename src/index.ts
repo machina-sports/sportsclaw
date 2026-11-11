@@ -152,6 +152,7 @@ import {
 } from "./daemon.js";
 import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
+import { cmdQuickstart } from "./quickstart.js";
 import { cmdMachina } from "./machina.js";
 import { cmdGames } from "./games.js";
 import { cmdPremierLeagueRecap } from "./premier-league-recap.js";
@@ -3369,6 +3370,7 @@ function printHelp(): void {
   console.log("  sportsclaw operate --list          List configured operator jobs");
   console.log("  sportsclaw openshell doctor        Diagnose OpenShell prereqs (optional integration)");
   console.log("  sportsclaw openshell setup         Print a non-mutating OpenShell 0.1.x setup recipe");
+  console.log("  sportsclaw quickstart --host brev|nim --model <id> --out <dir>  Write an offline hosted-model launch bundle");
   console.log("  sportsclaw start <platform>        Start a listener as a background daemon");
   console.log("  sportsclaw start operator <jobId>  Start a supervised operator daemon");
   console.log("  sportsclaw stop <platform>         Stop a running daemon");
@@ -3592,6 +3594,11 @@ async function main(): Promise<void> {
   // Game brief validation must not load user profile or credential files.
   if (args[0] === "games") {
     return cmdGames(args.slice(1));
+  }
+  // Offline bundle generator: must not read saved config or credentials, and
+  // owns its own --help.
+  if (args[0] === "quickstart") {
+    return cmdQuickstart(args.slice(1));
   }
 
   // Load ~/.sportsclaw/.env and persisted config into process.env before any

@@ -69,5 +69,6 @@ sportsclaw chat
 ## What's next
 
 - **[Configuration](./configuration)** — choose your model, manage providers, set up bots
+- **[Your own hosted model](./hosted-models)** — serve a model you choose on Brev/vLLM or the NVIDIA API
 - **[How It Works](../core-concepts/how-it-works)** — what the engine is doing under the hood
 - **[Building a Discord bot](../building-bots/discord)** — put it in front of your community
