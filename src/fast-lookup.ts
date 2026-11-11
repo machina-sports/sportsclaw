@@ -19,7 +19,7 @@ const FINAL = new Set(["final", "post", "closed", "complete", "completed"]);
 const LIVE = new Set(["in_progress", "live", "halftime"]);
 const UPCOMING = new Set(["not_started", "scheduled", "pre"]);
 /** Plain names and details only: no URL, query string or markup reaches unchecked text. */
-const SAFE_NAME = /^[\p{L}\p{N} .'&()-]{1,60}$/u;
+export const SAFE_NAME = /^[\p{L}\p{N} .'&()-]{1,60}$/u;
 const SAFE_DETAIL = /^[\p{L}\p{N} .:'-]{1,40}$/u;
 const SCORE = /^\d{1,3}$/;
 const MAX_EVENTS = 50;
@@ -41,7 +41,13 @@ function side(competitors: unknown[], homeAway: string): { name: string; score?:
   return { name, ...(typeof raw === "string" && SCORE.test(raw) ? { score: raw } : {}) };
 }
 
-function renderEvent(event: unknown, date: string): string | undefined {
+/** One validated game: its line and the two team names it states. */
+export interface ScoreboardGame {
+  line: string;
+  teams: string[];
+}
+
+function renderEvent(event: unknown, date: string): ScoreboardGame | undefined {
   if (!isRow(event) || typeof event.status !== "string" || typeof event.start_time !== "string") return undefined;
   const start = new Date(event.start_time);
   if (Number.isNaN(start.getTime()) || dayFormat.format(start) !== date) return undefined;
@@ -49,18 +55,25 @@ function renderEvent(event: unknown, date: string): string | undefined {
   const home = side(event.competitors, "home");
   const away = side(event.competitors, "away");
   if (!home || !away) return undefined;
-  if (UPCOMING.has(event.status)) return `${away.name} at ${home.name}, ${timeFormat.format(start)}`;
+  const teams = [away.name, home.name];
+  if (UPCOMING.has(event.status)) return { line: `${away.name} at ${home.name}, ${timeFormat.format(start)}`, teams };
   if (home.score === undefined || away.score === undefined) return undefined;
   const result = `${away.name} ${away.score}, ${home.name} ${home.score}`;
-  if (FINAL.has(event.status)) return `${result} (final)`;
+  if (FINAL.has(event.status)) return { line: `${result} (final)`, teams };
   if (LIVE.has(event.status) && typeof event.status_detail === "string" && SAFE_DETAIL.test(event.status_detail)) {
-    return `${result} (${event.status_detail})`;
+    return { line: `${result} (${event.status_detail})`, teams };
   }
   return undefined;
 }
 
 /** The whole slate for `date`, or undefined when any part cannot be validated. */
 export function renderScoreboard(league: string, date: string, content: string): string | undefined {
+  const slate = scoreboardGames(league, date, content);
+  return slate && [slate.header, ...slate.games.map((g) => `- ${g.line}`)].join("\n");
+}
+
+/** The slate's header and validated games for `date`, or undefined when any part cannot be validated. */
+export function scoreboardGames(league: string, date: string, content: string): { header: string; games: ScoreboardGame[] } | undefined {
   let payload: unknown;
   try {
     payload = JSON.parse(content);
@@ -70,12 +83,12 @@ export function renderScoreboard(league: string, date: string, content: string):
   if (!isRow(payload) || payload.status !== true || !isRow(payload.data)) return undefined;
   const events = payload.data.events;
   if (!Array.isArray(events) || events.length === 0 || events.length > MAX_EVENTS) return undefined;
-  const lines: string[] = [];
+  const games: ScoreboardGame[] = [];
   for (const event of events) {
-    const line = renderEvent(event, date);
-    if (line === undefined) return undefined;
-    lines.push(`- ${line}`);
+    const game = renderEvent(event, date);
+    if (game === undefined) return undefined;
+    games.push(game);
   }
   // Noon UTC is the same calendar day in the league zone.
-  return [`${league.toUpperCase()}, ${headerFormat.format(new Date(`${date}T12:00:00Z`))}:`, ...lines].join("\n");
+  return { header: `${league.toUpperCase()}, ${headerFormat.format(new Date(`${date}T12:00:00Z`))}:`, games };
 }

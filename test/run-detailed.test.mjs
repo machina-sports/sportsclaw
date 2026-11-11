@@ -29,6 +29,7 @@ const { tool, jsonSchema } = await import("ai");
 const { sportsclawEngine } = await import("../dist/engine.js");
 const { INJECTION_REFUSAL_TEXT } = await import("../dist/index.js");
 const { unsupportedNumbers, dateSources, timeSources } = await import("../dist/number-grounding.js");
+const { dataAnswer } = await import("../dist/data-answer.js");
 const { mediaPartFor } = await import("../dist/media-input.js");
 
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -52,7 +53,7 @@ const SCORES = JSON.stringify({ games: [{ home: "LAL", away: "MIA", score: "138-
  * One NBA tool, allowlisted, so routing needs no model call. `answer(call)` is
  * the model's final text; when `callTool` is set the model first calls the tool.
  */
-function makeEngine({ answer, callTool = true, delayMs = () => 0 }) {
+function makeEngine({ answer, callTool = true, delayMs = () => 0, scores = SCORES }) {
   let seq = 0;
   const model = new MockLanguageModelV3({
     doGenerate: async (call) => {
@@ -75,7 +76,7 @@ function makeEngine({ answer, callTool = true, delayMs = () => 0 }) {
     nba_get_scoreboard: tool({
       description: "NBA scores",
       inputSchema: jsonSchema({ type: "object", properties: { date: { type: "string" } } }),
-      execute: async () => SCORES,
+      execute: async () => scores,
     }),
   });
   engine.setToolAllowlist(["nba_get_scoreboard"]);
@@ -398,6 +399,150 @@ describe("number grounding (opt-in, no model call)", () => {
     );
     assert.equal(r.outcome, "answer", r.text);
     assert.equal(r.trace.numberGrounding, undefined);
+  });
+});
+
+describe("answers written from data (opt-in)", () => {
+  // Synthetic teams and scores in the native scoreboard shape. 03:00 UTC on November 3 is the evening of November 2 in the league zone.
+  const side = (name, home_away, score) => ({ team: { name }, home_away, score });
+  const game = (home, homeScore, away, awayScore, extra = {}) => ({
+    status: "closed", status_detail: "Final", start_time: "2026-11-03T03:00:00Z",
+    competitors: [side(home, "home", homeScore), side(away, "away", awayScore)], ...extra,
+  });
+  const BOARD = JSON.stringify({ status: true, data: { events: [
+    game("Los Angeles Lakers", "138", "Miami Heat", "117"),
+    game("Boston Celtics", "101", "Denver Nuggets", "99"),
+  ] } });
+  const SLATE = "NBA, Mon, Nov 2:\n- Miami Heat 117, Los Angeles Lakers 138 (final)\n- Denver Nuggets 99, Boston Celtics 101 (final)";
+  const read = (output = BOARD, extra = {}) => ({ toolName: "nba_get_scoreboard", input: { date: "2026-11-02" }, output, isError: false, ...extra });
+
+  it("writes the whole slate when the question names no team", () => {
+    assert.equal(dataAnswer("What were the scores?", [read()]), SLATE);
+  });
+
+  it("writes only the games of a team the question names", () => {
+    assert.equal(dataAnswer("Did the Lakers win?", [read()]), "NBA, Mon, Nov 2:\n- Miami Heat 117, Los Angeles Lakers 138 (final)");
+    assert.equal(dataAnswer("how did the boston celtics do", [read()]), "NBA, Mon, Nov 2:\n- Denver Nuggets 99, Boston Celtics 101 (final)");
+    assert.equal(dataAnswer("Is Lakersville a place?", [read()]), SLATE, "whole words only");
+  });
+
+  it("leaves the answer to the model unless it can render every tool result", () => {
+    assert.equal(dataAnswer("Scores?", []), undefined, "no tool was read");
+    assert.equal(dataAnswer("Scores?", [read(SCORES)]), undefined, "a payload it cannot validate");
+    assert.equal(dataAnswer("Scores?", [read(BOARD, { isError: true })]), undefined);
+    assert.equal(dataAnswer("Scores?", [read(BOARD, { input: { date: "2026-11-05" } })]), undefined, "games on another day");
+    assert.equal(dataAnswer("Scores?", [read(BOARD, { input: { date: "yesterday" } })]), undefined, "a date it cannot read");
+    assert.equal(dataAnswer("Scores?", [read(), read("{}", { toolName: "nba_get_news" })]), undefined, "a tool with no renderer");
+  });
+
+  // Synthetic records in the native standings shape. Entries arrive in no useful order: the rank is playoff_seed.
+  const row = (name, seed, wins, losses, extra = {}) => ({ team: { name }, playoff_seed: seed, wins, losses, ...extra });
+  const table = (groups, extra = {}) => JSON.stringify({ status: true, data: { groups, season: 2027, season_type: "regular", ...extra } });
+  const NBA_TABLE = table([
+    { conference: "Eastern Conference", division: "", entries: [row("Milwaukee Bucks", "3", "1", "10"), row("Boston Celtics", "1", "9", "2"), row("New York Knicks", "2", "8", "3")] },
+    { conference: "Western Conference", division: "", entries: [row("Los Angeles Lakers", "2", "7", "4"), row("Denver Nuggets", "1", "9", "1")] },
+  ]);
+  const EAST = "NBA standings, Eastern Conference:\n1. Boston Celtics 9-2\n2. New York Knicks 8-3\n3. Milwaukee Bucks 1-10";
+  const WEST = "NBA standings, Western Conference:\n1. Denver Nuggets 9-1\n2. Los Angeles Lakers 7-4";
+  const standings = (output = NBA_TABLE, extra = {}) => ({ toolName: "nba_get_standings", input: {}, output, isError: false, ...extra });
+
+  it("writes the standings in the order the data ranks them, not the order it lists them", () => {
+    assert.equal(dataAnswer("What are the standings?", [standings()]), `${EAST}\n\n${WEST}`);
+  });
+
+  it("writes only the teams or the group the question names", () => {
+    assert.equal(dataAnswer("Where are the Knicks and the Lakers?", [standings()]),
+      "NBA standings, Eastern Conference:\n2. New York Knicks 8-3\n\nNBA standings, Western Conference:\n2. Los Angeles Lakers 7-4");
+    assert.equal(dataAnswer("Who leads the East?", [standings()]), EAST);
+    assert.equal(dataAnswer("western conference table", [standings()]), WEST);
+    const mlb = table([
+      { league: "American League", division: "", entries: [row("New York Yankees", "1", "93", "68")] },
+      { league: "National League", division: "", entries: [row("Los Angeles Dodgers", "1", "98", "64")] },
+    ]);
+    assert.equal(dataAnswer("AL standings", [standings(mlb, { toolName: "mlb_get_standings" })]), "MLB standings, American League:\n1. New York Yankees 93-68");
+  });
+
+  it("writes ties, overtime losses and points when the data has them", () => {
+    const nfl = table([{ conference: "American Football Conference", division: "", entries: [row("Buffalo Bills", "1", "7", "1", { ties: "0" }), row("Denver Broncos", "2", "6", "2", { ties: "1" })] }]);
+    assert.equal(dataAnswer("AFC?", [standings(nfl, { toolName: "nfl_get_standings" })]),
+      "NFL standings, American Football Conference:\n1. Buffalo Bills 7-1\n2. Denver Broncos 6-2-1");
+    const nhl = table([{ conference: "Eastern Conference", division: "", entries: [row("Carolina Hurricanes", "1", "14", "3", { overtime_losses: "2", points: "30" })] }]);
+    assert.equal(dataAnswer("standings", [standings(nhl, { toolName: "nhl_get_standings" })]),
+      "NHL standings, Eastern Conference:\n1. Carolina Hurricanes 14-3-2, 30 pts");
+  });
+
+  it("says which season when the read asked for one", () => {
+    const old = table([{ conference: "Eastern Conference", division: "", entries: [row("Boston Celtics", "1", "64", "18")] }], { season: 2024 });
+    assert.equal(dataAnswer("2024 standings", [standings(old, { input: { season: 2024 } })]), "NBA standings, season 2024, Eastern Conference:\n1. Boston Celtics 64-18");
+    assert.equal(dataAnswer("2024 standings", [standings(NBA_TABLE, { input: { season: 2024 } })]), undefined, "the data is for another season");
+  });
+
+  it("leaves standings it cannot validate to the model", () => {
+    const one = (entries, group = {}, extra = {}) => table([{ conference: "Eastern Conference", division: "", entries, ...group }], extra);
+    assert.equal(dataAnswer("standings", [standings(one([row("Boston Celtics", "1", "9", "2"), row("New York Knicks", "1", "8", "3")]))]), undefined, "two teams with one rank");
+    assert.equal(dataAnswer("standings", [standings(one([row("Boston Celtics", "", "9", "2")]))]), undefined, "no rank");
+    assert.equal(dataAnswer("standings", [standings(one([row("Boston Celtics", "1", "nine", "2")]))]), undefined, "a record that is not a number");
+    assert.equal(dataAnswer("standings", [standings(one([row("Boston Celtics", "1", "9", "2")], { division: "Atlantic" }))]), undefined, "a grouping not seen yet");
+    assert.equal(dataAnswer("standings", [standings(one([row("Boston Celtics", "1", "9", "2")], {}, { season_type: "post" }))]), undefined, "not the regular season");
+    assert.equal(dataAnswer("standings", [standings(one([]))]), undefined, "an empty group");
+  });
+
+  it("answers from several reads of the turn together", () => {
+    assert.equal(dataAnswer("Did the Lakers win, and where are they?", [read(), standings()]),
+      "NBA, Mon, Nov 2:\n- Miami Heat 117, Los Angeles Lakers 138 (final)\n\nNBA standings, Western Conference:\n2. Los Angeles Lakers 7-4");
+  });
+
+  const LAKERS = "NBA, Mon, Nov 2:\n- Miami Heat 117, Los Angeles Lakers 138 (final)";
+  const asked = (answerFrom, extra = {}) => {
+    const { engine } = makeEngine({ answer: () => "Lakers won 150-90.", scores: BOARD, ...extra });
+    if (answerFrom) engine.config.answerFrom = answerFrom;
+    return engine.runDetailed("Did the Lakers win?", caller);
+  };
+
+  it("off by default: the model's answer is the answer", async () => {
+    const r = await asked();
+    assert.equal(r.text, "Lakers won 150-90.");
+    assert.equal(r.trace.dataAnswer, undefined);
+  });
+
+  it("model+data: the model's answer stays and the data it read is written under it", async () => {
+    for (const answer of ["Yes, they won.", "Yes, the Lakers won 138-117."]) {
+      const r = await asked("model+data", { answer: () => answer });
+      assert.equal(r.text, `${answer}\n\n${LAKERS}`);
+      assert.equal(r.outcome, "answer");
+      assert.deepEqual(r.trace.dataAnswer, { tools: ["nba_get_scoreboard"], facts: LAKERS });
+    }
+  });
+
+  it("model+data: an answer with a number the data does not have gives way to the data", async () => {
+    const r = await asked("model+data");
+    assert.equal(r.text, LAKERS);
+    assert.equal(r.outcome, "answer");
+    assert.deepEqual(r.trace.dataAnswer, { tools: ["nba_get_scoreboard"], facts: LAKERS, draft: "Lakers won 150-90.", unsupported: ["150", "90"] });
+  });
+
+  it("data: only the data is the answer, whatever the model wrote", async () => {
+    const r = await asked("data", { answer: () => "Yes, the Lakers won 138-117." });
+    assert.equal(r.text, LAKERS);
+    assert.equal(r.outcome, "answer");
+    assert.deepEqual(r.trace.dataAnswer, { tools: ["nba_get_scoreboard"], facts: LAKERS, draft: "Yes, the Lakers won 138-117." });
+  });
+
+  it("the model's answer stands alone when the read cannot be rendered or no tool was read", async () => {
+    for (const mode of ["model+data", "data"]) {
+      const unrendered = await asked(mode, { scores: SCORES });
+      assert.equal(unrendered.text, "Lakers won 150-90.", mode);
+      assert.equal(unrendered.trace.dataAnswer, undefined);
+      const noTool = await asked(mode, { callTool: false });
+      assert.equal(noTool.text, "Lakers won 150-90.", mode);
+    }
+  });
+
+  it("host-supplied data keeps the answer with the model", async () => {
+    const { engine } = makeEngine({ answer: () => "Per the play-by-play, 17-18.", scores: BOARD });
+    engine.config.answerFrom = "model+data";
+    const r = await engine.runDetailed("What is the score in the clip?", { ...caller, context: [{ label: "official play", content: "score MIA 17 - LAL 18" }] });
+    assert.equal(r.text, "Per the play-by-play, 17-18.");
   });
 });
 

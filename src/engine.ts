@@ -101,6 +101,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent, INJECTION_REFUSAL_TEXT } from "./security.js";
 import { validateHostContext, formatHostContext } from "./host-context.js";
 import { unsupportedNumbers, dateSources, timeSources } from "./number-grounding.js";
+import { dataAnswer } from "./data-answer.js";
 import { validateMedia, registerMedia, releaseMedia } from "./media-input.js";
 import {
   logQuery,
@@ -6573,10 +6574,10 @@ export class sportsclawEngine {
   }): Promise<string> {
     const { memory, options, sanitizedPrompt, sessionId, analyticsSessionId, analyticsStartTime } = params;
     let { responseText } = params;
-    // --- Number grounding (opt-in): before memory and session keep the answer ---
-    const grounded = this.applyNumberGrounding(responseText, sanitizedPrompt, options?.history);
+    // --- Answer from data, then number grounding (both opt-in): before memory and session keep the answer ---
+    const grounded = this.applyNumberGrounding(this.applyDataAnswer(responseText, sanitizedPrompt, options?.history), sanitizedPrompt, options?.history);
     if (grounded !== responseText) {
-      // The withheld draft must not survive in the transcript the next turn sees.
+      // The replaced draft must not survive in the transcript the next turn sees.
       for (const msg of [...this.messages].reverse()) {
         if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
         for (const part of msg.content as Array<{ type?: string; text?: string }>) {
@@ -6645,19 +6646,55 @@ export class sportsclawEngine {
     return responseText;
   }
 
-  /** sportsclawConfig.groundingCheck: numbers in the answer must come from this turn's evidence. */
-  private applyNumberGrounding(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
-    const action = this.config.groundingCheck ?? "off";
-    if (action === "off" || this._engineReply || text === VERIFY_UNAVAILABLE) return text;
-    const timeZone = this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE;
-    const sources = [
+  /**
+   * sportsclawConfig.answerFrom: when code can render every tool result of the turn, "model+data" writes
+   * that data under the model's answer, and "data" makes it the answer. A "model+data" answer with a
+   * number none of the turn's sources contains gives way to the data alone.
+   */
+  private applyDataAnswer(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
+    const mode = this.config.answerFrom ?? "model";
+    if (mode === "model" || this._hostContext?.length) return text;
+    if (this.runOutcome(text, this._lastRunTrace ?? null) !== "answer") return text;
+    const results = this.turnToolResults().map((r) => ({ ...r, output: r.output.replace(RESULT_ID_FOOTER, "") }));
+    const facts = dataAnswer(userPrompt, results);
+    if (facts === undefined) return text;
+    const unsupported = mode === "model+data"
+      ? unsupportedNumbers(text, this.groundingSources(userPrompt, callerHistory), timeSources(this.runTimeZone()))
+      : [];
+    const keep = mode === "model+data" && unsupported.length === 0;
+    if (this._lastRunTrace) {
+      this._lastRunTrace.dataAnswer = {
+        tools: results.map((r) => r.toolName), facts,
+        ...(keep ? {} : { draft: text }), ...(unsupported.length > 0 ? { unsupported } : {}),
+      };
+    }
+    return keep ? `${text}\n\n${facts}` : facts;
+  }
+
+  /** The time zone of this run: RunOptions.timeZone, else the configured one. */
+  private runTimeZone(): string {
+    return this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE;
+  }
+
+  /**
+   * What a number in the answer may come from: the question, caller history, host data, this turn's
+   * tool results, the date. The time of day is not here: it supports only a clock time (timeSources).
+   */
+  private groundingSources(userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string[] {
+    return [
       userPrompt,
       ...(callerHistory ?? []).map((h) => h.content),
       ...(this._hostContext ?? []).map((b) => b.content),
       ...this.turnToolResults().map((r) => r.output),
-      ...dateSources(timeZone),
+      ...dateSources(this.runTimeZone()),
     ];
-    const unsupported = unsupportedNumbers(text, sources, timeSources(timeZone));
+  }
+
+  /** sportsclawConfig.groundingCheck: numbers in the answer must come from this turn's evidence. */
+  private applyNumberGrounding(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
+    const action = this.config.groundingCheck ?? "off";
+    if (action === "off" || this._engineReply || text === VERIFY_UNAVAILABLE) return text;
+    const unsupported = unsupportedNumbers(text, this.groundingSources(userPrompt, callerHistory), timeSources(this.runTimeZone()));
     if (unsupported.length === 0) return text;
     const withhold = action === "withhold";
     if (this._lastRunTrace) {
