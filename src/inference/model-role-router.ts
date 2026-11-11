@@ -40,6 +40,8 @@ import type { MediaAttachment, NativeApiMode, NativeEndpoint } from "../types.js
 import type { ValidationResult } from "../schema/tv.js";
 import { isModelRole, MODEL_ROLES, type ModelRole } from "./model-roles.js";
 import { judgeConfigIssue, type JudgeConfig } from "./judge.js";
+import { speechConfigIssue, type SpeechRouteConfig } from "./speech.js";
+import { ENV_NAME, LOOPBACK_HOSTS, USABLE_KEY } from "./endpoint-rules.js";
 import {
   INFERENCE_ROUTES,
   type InferenceResult,
@@ -108,17 +110,13 @@ export interface ModelRoleRouterConfig {
   roles: Partial<Record<ModelRole, ModelRoleRouteConfig>>;
   /** The decision provider for typed questions. Not a role: see `judge.ts`. */
   judge?: JudgeConfig;
+  /** Where text is spoken. Not a role: the `voice` role writes, this speaks. See `speech.ts`. */
+  speech?: SpeechRouteConfig;
 }
 
 // ---------------------------------------------------------------------------
 // validateModelRoleRouterConfig — runtime validation for the config block
 // ---------------------------------------------------------------------------
-
-/** An environment variable name, as opposed to a key pasted where a name belongs. */
-const ENV_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
-/** A bearer key: printable characters with no whitespace. */
-const USABLE_KEY = /^[!-~]+$/;
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 /** Request fields a role's `requestBody` may not set: they are the call, not options for the server. */
 const REQUEST_BODY_RESERVED: ReadonlySet<string> = new Set(["model", "messages", "stream", "tools", "tool_choice"]);
@@ -136,6 +134,11 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
 
   if (c.judge !== undefined) {
     const issue = judgeConfigIssue(c.judge);
+    if (issue) return { ok: false, error: issue };
+  }
+
+  if (c.speech !== undefined) {
+    const issue = speechConfigIssue(c.speech);
     if (issue) return { ok: false, error: issue };
   }
 

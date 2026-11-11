@@ -26,7 +26,7 @@ export const INFERENCE_ERROR_CODES = [
 
 export type InferenceErrorCode = (typeof INFERENCE_ERROR_CODES)[number];
 
-export type InferenceKind = "generate" | "stream" | "image" | "decision";
+export type InferenceKind = "generate" | "stream" | "image" | "decision" | "speech";
 export type InferenceStatus = "completed" | "failed" | "aborted";
 /** Route label only — never an endpoint. */
 export type InferenceRouteLabel = "direct" | "nim" | "api" | "openshell" | "mock";
@@ -77,7 +77,7 @@ export const INFERENCE_PURPOSES = [
   "chat", "chat_lane", "routing", "verification", "correction", "compaction", "synthesis",
   "tool_repair", "subagent", "heartbeat_condition", "setup", "operator_tick", "momentum_explain",
   "momentum_evaluate", "model_role", "image", "watch_intent", "evidence_decision",
-  "capability_routing", "decision_relay", "slip_decision", "slip_extraction", "other",
+  "capability_routing", "decision_relay", "slip_decision", "slip_extraction", "speech", "other",
 ] as const;
 const PURPOSES: ReadonlySet<string> = new Set(INFERENCE_PURPOSES);
 
