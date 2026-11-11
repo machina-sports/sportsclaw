@@ -184,6 +184,21 @@ function withTimeout(timeoutMs: number, base?: typeof fetch): typeof fetch {
  * isolated pool; bare endpoints (NIM roles) keep the ambient fetch and only
  * add a timeout when one is configured.
  */
+/** Adds a native endpoint's extra request fields (NativeEndpoint.requestBody) to each JSON request body. */
+function withRequestBody(extra: Record<string, unknown> | undefined, base: typeof fetch): typeof fetch {
+  if (!extra || Object.keys(extra).length === 0) return base;
+  return async (input, init) => {
+    if (init?.body && typeof init.body === "string") {
+      try {
+        init = { ...init, body: JSON.stringify({ ...(JSON.parse(init.body) as Record<string, unknown>), ...extra }) };
+      } catch {
+        // Not JSON: leave the request alone.
+      }
+    }
+    return base(input, init);
+  };
+}
+
 function nativeTransport(native: NativeEndpoint): typeof fetch | undefined {
   const base = native.isolated ? isolatedFetch : undefined;
   if (native.timeoutMs !== undefined) return withTimeout(native.timeoutMs, base);
@@ -449,7 +464,8 @@ export function resolveModel(
         const p = createOpenAI({
           baseURL: native.baseUrl,
           apiKey: native.apiKey,
-          fetch: nimNemotronFetch(fetchImpl),
+          // Outermost first: media markers become vLLM media parts, then the endpoint's own request fields are added.
+          fetch: mediaFetch(withRequestBody(native.requestBody, nimNemotronFetch(fetchImpl))),
         });
         return native.apiMode === "responses" ? p.responses(modelId) : p.chat(modelId);
       }
