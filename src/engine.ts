@@ -100,7 +100,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent, INJECTION_REFUSAL_TEXT } from "./security.js";
 import { validateHostContext, formatHostContext } from "./host-context.js";
-import { unsupportedNumbers, dateSources } from "./number-grounding.js";
+import { unsupportedNumbers, dateSources, timeSources } from "./number-grounding.js";
 import { validateMedia, registerMedia, releaseMedia } from "./media-input.js";
 import {
   logQuery,
@@ -6649,14 +6649,15 @@ export class sportsclawEngine {
   private applyNumberGrounding(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
     const action = this.config.groundingCheck ?? "off";
     if (action === "off" || this._engineReply || text === VERIFY_UNAVAILABLE) return text;
+    const timeZone = this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE;
     const sources = [
       userPrompt,
       ...(callerHistory ?? []).map((h) => h.content),
       ...(this._hostContext ?? []).map((b) => b.content),
       ...this.turnToolResults().map((r) => r.output),
-      ...dateSources(this._runTimeZone ?? this.config.timeZone ?? DEFAULT_TIME_ZONE),
+      ...dateSources(timeZone),
     ];
-    const unsupported = unsupportedNumbers(text, sources);
+    const unsupported = unsupportedNumbers(text, sources, timeSources(timeZone));
     if (unsupported.length === 0) return text;
     const withhold = action === "withhold";
     if (this._lastRunTrace) {

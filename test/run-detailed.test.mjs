@@ -28,7 +28,7 @@ const { MockLanguageModelV3 } = await import("ai/test");
 const { tool, jsonSchema } = await import("ai");
 const { sportsclawEngine } = await import("../dist/engine.js");
 const { INJECTION_REFUSAL_TEXT } = await import("../dist/index.js");
-const { unsupportedNumbers } = await import("../dist/number-grounding.js");
+const { unsupportedNumbers, dateSources, timeSources } = await import("../dist/number-grounding.js");
 const { mediaPartFor } = await import("../dist/media-input.js");
 
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -319,6 +319,35 @@ describe("number grounding (opt-in, no model call)", () => {
     assert.deepEqual(unsupportedNumbers("In the 4th, Q4 on an H100: 3 threes.\n12. next item", []), []);
   });
 
+  it("checks numbers written as words like digits", () => {
+    // A small model often spells its numbers: "behind by twelve" passed for a ten-point gap.
+    assert.deepEqual(unsupportedNumbers("They fall behind by twelve.", ["LAL 104 GS 94, margin 10"]), ["12"]);
+    assert.deepEqual(unsupportedNumbers("He finishes with thirty eight points.", ["Stephen Curry: 38 points"]), []);
+    assert.deepEqual(unsupportedNumbers("Forty-five for him, from twenty six feet.", ["26-foot three"]), ["45"]);
+    assert.deepEqual(unsupportedNumbers("A 12-point lead.", ["They led by twelve."]), [], "a source may spell its numbers too");
+  });
+
+  it("leaves one to nine, ordinals and longer words alone", () => {
+    const answer = "Down three with nine seconds left, in the twenty-first minute of his thirteenth game, attention often turns to a tenth of a second.";
+    assert.deepEqual(unsupportedNumbers(answer, []), []);
+  });
+
+  it("does not read the idioms fifty-fifty and starting eleven as numbers", () => {
+    assert.deepEqual(unsupportedNumbers("A fifty-fifty ball falls to the starting eleven. Fifty fifty, really.", []), []);
+    assert.deepEqual(unsupportedNumbers("Fifty passes from the starting eleven, eleven shots.", []), ["50", "11"], "only the idioms");
+  });
+
+  it("counts the time of day only for a clock time the answer writes", () => {
+    // The model is told the local time. As a plain source it made "won by 31" pass whenever the clock read :31.
+    const at = new Date("2026-11-11T19:31:07Z"), zone = "America/New_York"; // 2:31:07 PM on November 11
+    const check = (answer) => unsupportedNumbers(answer, dateSources(zone, at), timeSources(zone, at));
+    assert.deepEqual(check("Lakers won by 31."), ["31"], "the minute is not evidence for a score");
+    assert.deepEqual(check("It is 2:31 PM on November 11, 2026."), []);
+    assert.deepEqual(check("It is 14:31 now, 14:31:07 to be exact."), [], "24-hour form");
+    assert.deepEqual(check("It is 2:45 PM."), ["45"], "another time of day");
+    assert.deepEqual(check("He scored with 12:31 left."), ["12", "31"], "a game clock is not the time of day");
+  });
+
   /** The tool returns 138-117; the model's answer is given per test. */
   const grounded = (answer, groundingCheck, extra = {}) => {
     const { engine } = makeEngine({ answer: () => answer });
@@ -344,6 +373,20 @@ describe("number grounding (opt-in, no model call)", () => {
     assert.equal(r.outcome, "withheld");
     assert.match(r.text, /could not verify/);
     assert.equal(r.trace.numberGrounding.draft, "Lakers won 112-108.");
+  });
+
+  it("withhold catches an invented margin written as words", async () => {
+    // Ninety one: no clock time or date can contain it (the local time is one of the sources).
+    const r = await grounded("Lakers won by ninety one.", "withhold");
+    assert.equal(r.outcome, "withheld");
+    assert.deepEqual(r.trace.numberGrounding.unsupported, ["91"]);
+  });
+
+  it("withhold keeps an answer that states the local time the model was told", async () => {
+    const clock = () => new Date().toLocaleTimeString("en-GB", { timeZone: "America/Los_Angeles" }).slice(0, 5);
+    const told = clock();
+    const r = await grounded(`It is ${told} right now.`, "withhold");
+    if (clock() === told) assert.equal(r.outcome, "answer", r.text); // unless the minute turned during the run
   });
 
   it("withhold keeps answers whose numbers come from tools, host context, the question or today's date", async () => {
