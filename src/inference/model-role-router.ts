@@ -30,7 +30,8 @@ import { randomUUID } from "node:crypto";
 
 import { resolveModel } from "../llm-providers.js";
 import { openShellEndpointIssues, resolveOpenShellEndpoint } from "../openshell-native.js";
-import type { NativeApiMode, NativeEndpoint } from "../types.js";
+import { registerMedia, releaseMedia, validateMedia } from "../media-input.js";
+import type { MediaAttachment, NativeApiMode, NativeEndpoint } from "../types.js";
 import type { ValidationResult } from "../schema/tv.js";
 import { isModelRole, MODEL_ROLES, type ModelRole } from "./model-roles.js";
 import {
@@ -85,6 +86,12 @@ export interface ModelRoleRouteConfig {
   apiMode?: NativeApiMode;
   /** Per-request timeout for openshell/nim routes. */
   timeoutMs?: number;
+  /**
+   * nim only: extra fields added to each chat request body, for server options the
+   * model needs (vLLM: `top_k`, `chat_template_kwargs`, `mm_processor_kwargs`).
+   * It may not set the request itself (model, messages, stream, tools).
+   */
+  requestBody?: Record<string, unknown>;
 }
 
 export interface ModelRoleRouterConfig {
@@ -94,6 +101,9 @@ export interface ModelRoleRouterConfig {
 // ---------------------------------------------------------------------------
 // validateModelRoleRouterConfig — runtime validation for the config block
 // ---------------------------------------------------------------------------
+
+/** Request fields a role's `requestBody` may not set: they are the call, not options for the server. */
+const REQUEST_BODY_RESERVED: ReadonlySet<string> = new Set(["model", "messages", "stream", "tools", "tool_choice"]);
 
 export function validateModelRoleRouterConfig(config: unknown): ValidationResult {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
@@ -125,6 +135,19 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
         ok: false,
         error: `Role "${key}" route must be one of ${INFERENCE_ROUTES.join(", ")}.`,
       };
+    }
+
+    if (r.requestBody !== undefined) {
+      if (!r.requestBody || typeof r.requestBody !== "object" || Array.isArray(r.requestBody)) {
+        return { ok: false, error: `Role "${key}" requestBody must be an object of extra request fields.` };
+      }
+      if (r.route !== "nim") {
+        return { ok: false, error: `Role "${key}" requestBody is sent on nim routes only.` };
+      }
+      const reserved = Object.keys(r.requestBody).filter((field) => REQUEST_BODY_RESERVED.has(field));
+      if (reserved.length > 0) {
+        return { ok: false, error: `Role "${key}" requestBody may not set ${reserved.join(", ")}: those are the request itself.` };
+      }
     }
 
     if (typeof r.model !== "string" || r.model === "") {
@@ -225,6 +248,14 @@ export interface InvokeModelRoleArgs<TInput = unknown> {
   abortSignal?: AbortSignal;
   /** Per-call sanitized receipt observer (no endpoint, prompt or output). */
   onReceipt?: (receipt: InferenceReceipt) => void;
+  /**
+   * Video and audio for a chat-shaped openshell/nim route (same rules as RunOptions.media).
+   * They are sent as one user message: the media parts in the order given, then the
+   * input as text. The mock route ignores them.
+   */
+  media?: MediaAttachment[];
+  /** Output limit and sampling for this call. Unset fields are left to the server's defaults. */
+  sampling?: { maxOutputTokens?: number; temperature?: number; topP?: number };
 }
 
 /**
@@ -261,13 +292,17 @@ export function resolveNativeRoleEndpoint(
       );
     }
     // NIM endpoints are keyless here; the client just needs a non-empty key.
-    return { baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs };
+    return {
+      baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs,
+      ...(routeConfig.requestBody ? { requestBody: routeConfig.requestBody } : {}),
+    };
   }
   throw new Error(`route "${routeConfig.route}" has no native endpoint`);
 }
 
 const NATIVE_ROUTE_KEYS: ReadonlySet<string> = new Set([
   "route", "model", "locality", "accelerator", "baseUrl", "credentialEnv", "credentialless", "apiMode", "timeoutMs",
+  "requestBody",
 ]);
 
 /**
@@ -312,10 +347,36 @@ async function runChatRoute(
   endpoint: NativeEndpoint,
   ctx: InferenceContext,
   abortSignal?: AbortSignal,
+  media?: MediaAttachment[],
+  sampling?: InvokeModelRoleArgs["sampling"],
 ): Promise<string> {
   const model = resolveModel("openai", envelope.model, endpoint);
-  const res = await generate(ctx, { model, prompt: toPrompt(envelope.input), abortSignal });
-  return res.text;
+  const limits = {
+    ...(sampling?.maxOutputTokens !== undefined ? { maxOutputTokens: sampling.maxOutputTokens } : {}),
+    ...(sampling?.temperature !== undefined ? { temperature: sampling.temperature } : {}),
+    ...(sampling?.topP !== undefined ? { topP: sampling.topP } : {}),
+  };
+  if (!media || media.length === 0) {
+    const res = await generate(ctx, { model, prompt: toPrompt(envelope.input), ...limits, abortSignal });
+    return res.text;
+  }
+  if (endpoint.apiMode === "responses") throw new Error("media needs a chat-shaped route (apiMode chat)");
+  // Each attachment travels as a marker text part; the endpoint's fetch swaps it for the real media part.
+  const markers = media.map(registerMedia);
+  try {
+    const res = await generate(ctx, {
+      model,
+      messages: [{
+        role: "user",
+        content: [...markers.map((text) => ({ type: "text" as const, text })), { type: "text" as const, text: toPrompt(envelope.input) }],
+      }],
+      ...limits,
+      abortSignal,
+    });
+    return res.text;
+  } finally {
+    releaseMedia(markers);
+  }
 }
 
 export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
@@ -389,11 +450,14 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
       case "nim": {
         // Guard + credential lookup happen here, before any request.
         const endpoint = resolveNativeRoleEndpoint(routeConfig);
+        const media = args.media !== undefined ? validateMedia(args.media) : undefined;
         output = await runChatRoute(
           envelope,
           endpoint,
           { purpose: "model_role", route: routeConfig.route, onReceipt: args.onReceipt },
           args.abortSignal,
+          media,
+          args.sampling,
         );
         break;
       }

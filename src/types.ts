@@ -104,6 +104,8 @@ export interface NativeEndpoint {
   apiMode?: NativeApiMode;
   /** Per-request timeout. Unset = the ambient fetch has no extra timeout. */
   timeoutMs?: number;
+  /** Extra fields added to each chat request body: server options such as vLLM's `top_k` or `chat_template_kwargs`. */
+  requestBody?: Record<string, unknown>;
   /**
    * Use SportsClaw's private HTTP pool instead of the ambient global fetch
    * dispatcher. Set by `resolveOpenShellEndpoint`; bare endpoints (NIM roles)
