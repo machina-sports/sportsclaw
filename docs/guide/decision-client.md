@@ -4,6 +4,8 @@
 
 Nothing in SportsClaw calls this client automatically. The only consumer in the repository is the opt-in [Jev evidence verifier](./jev-evidence-verifier.md), which is itself opt-in.
 
+The request, the answers and the checks described here are shared with the Gemini provider: see [Decision providers](./decision-providers.md) for switching between them and comparing them.
+
 ```ts
 import { JevDecisionClient } from "sportsclaw-engine-core";
 
@@ -119,7 +121,7 @@ Credentials, transport, model and deadline are **client configuration**, never r
 
 `decide()` never throws. Success means the answers are **schema-valid for the exact snapshot that was sent** — the request is deep-copied before egress, so mutating your objects during the `await` cannot change what is validated. It is not a statement about business correctness or permission.
 
-Every other outcome is a typed non-success result with **no answers**, a sanitized `reasonCode` and a receipt: `local_only`, `aborted`, `invalid_request`, `invalid_state`, `invalid_questions`, `request_too_large`, `missing_credential`, `redirect_refused`, `auth_denied`, `rate_limited`, `upstream_error`, `timeout`, `network_error`, `response_too_large`, `malformed_response`, `model_mismatch`, `question_set_mismatch`, `answer_type_mismatch`, `option_set_mismatch`, `probability_invalid`, `probability_sum_invalid`, `argmax_mismatch`, `confidence_invalid`, `score_invalid`, `score_inconsistent`, `legend_invalid`, `noul_invalid`.
+Every other outcome is a typed non-success result with **no answers**, a sanitized `reasonCode` and a receipt: `local_only`, `aborted`, `invalid_request`, `invalid_state`, `invalid_questions`, `request_too_large`, `missing_credential`, `redirect_refused`, `auth_denied`, `rate_limited`, `upstream_error`, `content_blocked` (Gemini only), `timeout`, `network_error`, `response_too_large`, `malformed_response`, `model_mismatch`, `question_set_mismatch`, `answer_type_mismatch`, `option_set_mismatch`, `probability_invalid`, `probability_sum_invalid`, `argmax_mismatch`, `confidence_invalid`, `score_invalid`, `score_inconsistent`, `legend_invalid`, `noul_invalid`.
 
 Receipts carry only closed enums and numbers: provider, status (`answered` / `blocked` / `failed`), reason code, requested and validated model, question and per-kind counts, provider-reported usage and latency. They never contain the state, instructions, question IDs, option labels, rubric text, answers, raw provider errors or credentials. Answers legitimately contain your own labels; receipts do not. A value the provider did not supply — an actual model, token usage — stays missing rather than becoming zero.
 

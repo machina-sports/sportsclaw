@@ -63,7 +63,7 @@ export { INFERENCE_PURPOSES } from "./inference/receipt.js";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
@@ -81,6 +81,15 @@ import {
   takeSamplingArgs,
 } from "./run-manifest.js";
 import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools, withoutExcludedSkills } from "./bench.js";
+import {
+  JUDGE_COMPARE_USAGE,
+  parseJudgeCases,
+  parseJudgeCompareArgs,
+  runJudgeCompare,
+  type JudgeCompareArgs,
+  type JudgeCompareReport,
+} from "./judge-compare.js";
+import { createDecisionProvider } from "./inference/judge.js";
 import { MemoryManager, createMemoryStorage } from "./memory.js";
 import {
   fetchSportSchema,
@@ -496,14 +505,22 @@ export type {
   GuardrailDetail,
 } from "./guardrails.js";
 
-// Generic Jev decision client — typed Choice/Score/Noul questions over one
-// shared state. Standalone: no engine, no generative key, no network on import.
+// Decision providers — typed Choice/Score/Noul questions over one shared state,
+// answered by Jev or Gemini. Standalone: no engine, no generative key, no network on import.
 export {
   JevDecisionClient,
   DECISION_LIMITS,
   DEFAULT_JEV_MODEL,
   JEV_ENDPOINT,
 } from "./decision-client.js";
+export {
+  GeminiDecisionClient,
+  DEFAULT_GEMINI_DECISION_MODEL,
+  GEMINI_DECISIONS_ENDPOINT,
+} from "./gemini-decision-client.js";
+export type { GeminiDecisionClientConfig } from "./gemini-decision-client.js";
+export { createDecisionProvider, JUDGE_PROVIDERS } from "./inference/judge.js";
+export type { JudgeConfig, JudgeSeams } from "./inference/judge.js";
 export type {
   ChoiceAnswer,
   ChoiceQuestion,
@@ -513,6 +530,8 @@ export type {
   DecisionFailure,
   DecisionJsonValue,
   DecisionKindCounts,
+  DecisionProvider,
+  DecisionProviderName,
   DecisionQuestion,
   DecisionReasonCode,
   DecisionReceipt,
@@ -2642,6 +2661,58 @@ async function cmdBench(argv: string[]): Promise<void> {
   process.exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// judge-compare — one question set through several decision providers
+// ---------------------------------------------------------------------------
+
+async function cmdJudgeCompare(argv: string[]): Promise<void> {
+  const fail = (msg: string): never => {
+    console.error(`[sportsclaw judge-compare] ${msg}`);
+    process.exit(1);
+  };
+  const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+  let report: JudgeCompareReport;
+  let opts: JudgeCompareArgs;
+  try {
+    const parsed = (opts = parseJudgeCompareArgs(argv));
+    if (!opts.cloudAllowed) {
+      throw new Error("this sends each case's state to the judges' hosted services; pass --cloud-allowed to allow it");
+    }
+    const cases = parseJudgeCases(readFileSync(opts.casesPath, "utf-8"));
+    if (cases.length === 0) throw new Error(`${opts.casesPath} has no cases`);
+    const judges = opts.judges.map((judge) =>
+      createDecisionProvider({
+        ...judge,
+        dataPolicy: "cloud_allowed",
+        ...(parsed.timeoutMs !== undefined ? { timeoutMs: parsed.timeoutMs } : {}),
+      })
+    );
+    report = await runJudgeCompare(cases, judges, (done, total) => {
+      console.error(`[sportsclaw judge-compare] ${done}/${total}`);
+    });
+  } catch (err) {
+    return fail(`${message(err)}\n${JUDGE_COMPARE_USAGE}`);
+  }
+
+  const text = `${JSON.stringify(report, null, 2)}\n`;
+  if (opts.out) writeFileSync(opts.out, text);
+  else process.stdout.write(text);
+
+  for (const [model, tally] of Object.entries(report.summary.judges)) {
+    const failed = Object.entries(tally.failed).map(([reason, n]) => `${reason} ×${n}`).join(", ");
+    console.error(
+      `[sportsclaw judge-compare] ${model}: ${tally.answered}/${tally.cases} cases answered` +
+        (tally.expected > 0 ? `, ${tally.correct}/${tally.expected} correct` : "") +
+        (tally.meanLatencyMs !== undefined ? `, ${tally.meanLatencyMs} ms mean` : "") +
+        (failed ? ` · failed: ${failed}` : ""),
+    );
+  }
+  const { questions, agreed } = report.summary.agreement;
+  if (questions > 0) console.error(`[sportsclaw judge-compare] judges agree on ${agreed}/${questions} questions`);
+  process.exit(0);
+}
+
 async function cmdQuery(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const forcePipe = args.includes("--pipe");
@@ -3369,6 +3440,7 @@ function printHelp(): void {
   console.log("  sportsclaw remove <sport>          Remove a sport schema");
   console.log("  sportsclaw list [--json]           List all installed schemas and support modules");
   console.log("  sportsclaw bench <dataset.jsonl> [--out f] [--limit n] [--arm routed|raw-tools|direct] [--case-timeout s] [--tools a,b|--all-tools]  Run a dataset, one JSON line per case");
+  console.log("  sportsclaw judge-compare <cases.jsonl> --cloud-allowed [--judges jev,gemini] [--out f] [--timeout ms]  Run one question set through several decision providers");
   console.log("  sportsclaw init                    Interactive sport selection & install");
   console.log("  sportsclaw init --all              Bootstrap all 14 default sport schemas");
   console.log("  sportsclaw listen <platform>       Start a chat listener (discord, telegram)");
@@ -3652,6 +3724,8 @@ async function main(): Promise<void> {
       return cmdSelftest(subArgs);
     case "bench":
       return cmdBench(subArgs);
+    case "judge-compare":
+      return cmdJudgeCompare(subArgs);
     case "add":
       return cmdAdd(subArgs);
     case "remove":

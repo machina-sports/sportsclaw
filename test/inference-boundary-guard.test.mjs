@@ -39,7 +39,8 @@ const IMAGE_DISPATCH = "generateImageForProvider";
 const IMAGE_BACKENDS = new Set(["generateImageGoogle", "generateImageOpenAI", "generateImageAzureFoundry"]);
 
 const isAi = (spec) => spec === "ai" || spec.startsWith("ai/");
-const isDecisionClient = (spec) => /(^|\/)decision-client(\.js)?$/.test(spec);
+// Every module that hands out a decision provider: the clients and the judge factory.
+const isDecisionClient = (spec) => /(^|\/)((gemini-)?decision-client|judge)(\.js)?$/.test(spec);
 const isImageGen = (spec) => /(^|\/)image-gen(\.js)?$/.test(spec);
 const literal = (node) => (node && ts.isStringLiteralLike(node) ? node.text : undefined);
 
@@ -305,6 +306,8 @@ describe("inference guard scanner (synthetic cases)", () => {
     "destructured doGenerate": ['x.ts', 'const { doGenerate } = model;'],
     "jev decide": ['evidence-verifier.ts', 'import { JevDecisionClient } from "./decision-client.js";\nawait new JevDecisionClient().decide(req);'],
     "jev decide via type-only import": ['routing/capability-router.ts', 'import type { JevDecisionClient } from "../decision-client.js";\ndeclare const c: JevDecisionClient;\nawait c.decide(req);'],
+    "gemini decide": ['x.ts', 'import { GeminiDecisionClient } from "./gemini-decision-client.js";\nawait new GeminiDecisionClient().decide(req);'],
+    "judge decide": ['x.ts', 'import { createDecisionProvider } from "./inference/judge.js";\nawait createDecisionProvider({ provider: "gemini" }).decide(req);'],
     "aliased image dispatcher": ['engine.ts', 'import { generateImageForProvider as gen } from "./image-gen.js";\nawait gen("openai", "p");'],
     "namespaced image backend": ['operate.ts', 'import * as img from "./image-gen.js";\nawait img.generateImageOpenAI("p");'],
     "dispatcher call inside image-gen tool": ['image-gen.ts', 'export function createGenerateImageTool() {\n  return generateImageForProvider("openai", "p");\n}'],

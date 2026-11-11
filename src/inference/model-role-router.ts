@@ -39,6 +39,7 @@ import { registerMedia, releaseMedia, validateMedia } from "../media-input.js";
 import type { MediaAttachment, NativeApiMode, NativeEndpoint } from "../types.js";
 import type { ValidationResult } from "../schema/tv.js";
 import { isModelRole, MODEL_ROLES, type ModelRole } from "./model-roles.js";
+import { judgeConfigIssue, type JudgeConfig } from "./judge.js";
 import {
   INFERENCE_ROUTES,
   type InferenceResult,
@@ -105,6 +106,8 @@ export interface ModelRoleRouteConfig {
 
 export interface ModelRoleRouterConfig {
   roles: Partial<Record<ModelRole, ModelRoleRouteConfig>>;
+  /** The decision provider for typed questions. Not a role: see `judge.ts`. */
+  judge?: JudgeConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +132,11 @@ export function validateModelRoleRouterConfig(config: unknown): ValidationResult
 
   if (!c.roles || typeof c.roles !== "object" || Array.isArray(c.roles)) {
     return { ok: false, error: "Inference config must have a roles object." };
+  }
+
+  if (c.judge !== undefined) {
+    const issue = judgeConfigIssue(c.judge);
+    if (issue) return { ok: false, error: issue };
   }
 
   for (const [key, value] of Object.entries(c.roles as Record<string, unknown>)) {
