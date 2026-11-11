@@ -1,10 +1,10 @@
 /**
  * Typed-decision entrypoint of the unified inference boundary.
  *
- * Every runtime Jev decision crosses here. The low-level `JevDecisionClient`
- * stays the transport adapter (consent, egress policy, pinned-model response
- * validation); this wrapper adds only a per-call sanitized receipt. The client
- * result object is returned unchanged.
+ * Every runtime decision crosses here, whichever `DecisionProvider` answers it.
+ * The provider's client stays the transport adapter (consent, egress policy,
+ * response validation); this wrapper adds only a per-call sanitized receipt. The
+ * client result object is returned unchanged.
  *
  * Import graph: the decision client's types and `receipt.ts` only — no SDK,
  * engine, MCP, memory or provider modules — so the decision relay stays light.
@@ -12,10 +12,10 @@
 
 import type {
   DecisionCallOptions,
+  DecisionProvider,
   DecisionReasonCode,
   DecisionRequest,
   DecisionResult,
-  JevDecisionClient,
 } from "../decision-client.js";
 import { emitReceipt, type InferenceContext, type InferenceErrorCode } from "./receipt.js";
 
@@ -32,6 +32,7 @@ function errorCodeOf(reason: DecisionReasonCode): InferenceErrorCode {
       return "auth";
     case "local_only":
     case "redirect_refused":
+    case "content_blocked":
       return "refused";
     case "invalid_request":
     case "invalid_state":
@@ -49,7 +50,7 @@ function errorCodeOf(reason: DecisionReasonCode): InferenceErrorCode {
 
 export async function decide(
   ctx: InferenceContext,
-  client: Pick<JevDecisionClient, "decide">,
+  client: Pick<DecisionProvider, "decide">,
   request: DecisionRequest,
   options?: DecisionCallOptions,
 ): Promise<DecisionResult> {

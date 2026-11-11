@@ -13,8 +13,12 @@
  *     against the exact snapshot that was sent;
  *   - sanitized, text-free receipts.
  *
+ * The request, answer and result types and the call itself (consent, bounds,
+ * deadline, answer checks, receipts) are shared by every `DecisionProvider`; a
+ * provider supplies only its wire (`DecisionWire`). Jev is implemented here,
+ * Gemini in `gemini-decision-client.ts`.
+ *
  * What this client is not:
- *   - a provider framework. Jev is the one implemented provider.
  *   - an interpreter. Question IDs, option labels and rubric wording belong to
  *     the caller; this module never adds meaning to them, thresholds them, or
  *     turns an answer into an action.
@@ -179,6 +183,7 @@ export type DecisionReasonCode =
   | "auth_denied"
   | "rate_limited"
   | "upstream_error"
+  | "content_blocked"
   | "timeout"
   | "network_error"
   | "response_too_large"
@@ -196,6 +201,9 @@ export type DecisionReasonCode =
   | "legend_invalid"
   | "noul_invalid";
 
+/** The decision services this package can call. */
+export type DecisionProviderName = "jev" | "gemini";
+
 export interface DecisionKindCounts {
   choice: number;
   score: number;
@@ -209,13 +217,13 @@ export interface DecisionKindCounts {
  * supply stay missing rather than becoming zero.
  */
 export interface DecisionReceipt {
-  provider: "jev";
+  provider: DecisionProviderName;
   /** `answered` once answers validated; `blocked` before egress; `failed` after. */
   status: "answered" | "blocked" | "failed";
   reasonCode: DecisionReasonCode;
   /** The model this client asked for, recorded even when nothing was sent. */
   requestedModel: string;
-  /** Only set from a validated response that matched the request. */
+  /** Only set from a validated response that named its model and matched the request. */
   model?: string;
   latencyMs: number;
   /** Counts describe the validated snapshot; a request refused earlier reports 0. */
@@ -226,7 +234,7 @@ export interface DecisionReceipt {
 
 export interface DecisionSuccess {
   ok: true;
-  /** The model reported by the response, already matched against the request. */
+  /** The model that answered: the one the response reported and matched, else the one asked for. */
   model: string;
   /** Exactly the question IDs that were sent. */
   answers: Record<string, DecisionAnswer>;
@@ -267,155 +275,248 @@ export interface JevDecisionClientConfig {
   env?: Record<string, string | undefined>;
 }
 
-class DecisionError extends Error {
+/** @internal Shared with the other providers in this package. */
+export class DecisionError extends Error {
   constructor(readonly reasonCode: DecisionReasonCode) {
     super(reasonCode);
   }
 }
 
-export class JevDecisionClient {
+/**
+ * One decision service behind the shared request and answer types. Code written
+ * against this runs on any provider. Which provider's answers to trust for a job
+ * is a measurement, not an assumption: see `sportsclaw judge-compare`.
+ */
+export interface DecisionProvider {
+  readonly provider: DecisionProviderName;
+  readonly model: string;
+  readonly dataPolicy: DecisionDataPolicy;
+  /** One bounded attempt. Never retries, never falls back, never throws. */
+  decide(request: DecisionRequest, options?: DecisionCallOptions): Promise<DecisionResult>;
+}
+
+/** @internal A client's checked configuration. */
+export interface DecisionSettings {
+  dataPolicy: DecisionDataPolicy;
+  model: string;
+  timeoutMs: number;
+  transport?: DecisionTransport;
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * @internal The constructor checks every provider shares. Invalid configuration
+ * throws here, where the developer who wrote it can see it, rather than degrading
+ * into a request against an unintended model.
+ */
+export function decisionSettings(
+  config: JevDecisionClientConfig,
+  model: { fallback: string; pattern: RegExp; expected: string }
+): DecisionSettings {
+  const dataPolicy = config.dataPolicy ?? "local_only";
+  if (dataPolicy !== "local_only" && dataPolicy !== "cloud_allowed") {
+    throw new TypeError("Invalid dataPolicy: expected local_only or cloud_allowed");
+  }
+  const name = config.model ?? model.fallback;
+  if (typeof name !== "string" || !model.pattern.test(name)) {
+    throw new TypeError(`Invalid model: expected ${model.expected}`);
+  }
+  const timeoutMs = config.timeoutMs ?? DECISION_LIMITS.defaultTimeoutMs;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < DECISION_LIMITS.minTimeoutMs ||
+    timeoutMs > DECISION_LIMITS.maxTimeoutMs
+  ) {
+    throw new TypeError(
+      `Invalid timeoutMs: expected ${DECISION_LIMITS.minTimeoutMs}–${DECISION_LIMITS.maxTimeoutMs}`
+    );
+  }
+  return { dataPolicy, model: name, timeoutMs, transport: config.transport, env: config.env };
+}
+
+/** @internal What differs between decision services. Everything else about a call is shared. */
+export interface DecisionWire {
+  provider: DecisionProviderName;
+  /** Fixed HTTPS endpoint. */
+  endpoint: string;
+  /** The NAME of the environment variable that holds the key. */
+  credentialEnv: string;
+  headers(apiKey: string): Record<string, string>;
+  /** The request body for a snapshot. Throws a `DecisionError` for a request this service cannot take. */
+  body(model: string, snapshot: RequestSnapshot): unknown;
+  /** The reason for an error status the shared rules do not name, read from its body. */
+  refusal?(status: number, text: string): DecisionReasonCode | undefined;
+  /** The checked answers of a 2xx body. `model` only when the service reports it. */
+  read(text: string, snapshot: RequestSnapshot, requestedModel: string): ValidatedResponse;
+}
+
+const JEV_WIRE: DecisionWire = {
+  provider: "jev",
+  endpoint: JEV_ENDPOINT,
+  credentialEnv: "TYPESAFE_API_KEY",
+  headers: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
+  body: (model, snapshot) => ({ model, state: snapshot.state, questions: snapshot.payload }),
+  read(text, snapshot, requestedModel) {
+    const parsed = parseResponseRecord(text);
+    if (typeof parsed.model !== "string") throw new DecisionError("malformed_response");
+    if (parsed.model !== requestedModel) throw new DecisionError("model_mismatch");
+    return {
+      model: parsed.model,
+      answers: validateAnswers(parsed.answers, snapshot),
+      usage: readUsage(parsed.usage, "input_tokens", "output_tokens"),
+    };
+  },
+};
+
+export class JevDecisionClient implements DecisionProvider {
+  readonly provider = "jev";
   readonly dataPolicy: DecisionDataPolicy;
   readonly model: string;
   readonly timeoutMs: number;
-  private readonly transport?: DecisionTransport;
-  private readonly env?: Record<string, string | undefined>;
+  private readonly settings: DecisionSettings;
 
-  /**
-   * Invalid configuration throws here, where the developer who wrote it can see
-   * it, rather than degrading into a request against an unintended model.
-   */
   constructor(config: JevDecisionClientConfig = {}) {
-    const dataPolicy = config.dataPolicy ?? "local_only";
-    if (dataPolicy !== "local_only" && dataPolicy !== "cloud_allowed") {
-      throw new TypeError("Invalid dataPolicy: expected local_only or cloud_allowed");
-    }
-    const model = config.model ?? DEFAULT_JEV_MODEL;
-    if (typeof model !== "string" || !MODEL_PATTERN.test(model)) {
-      throw new TypeError(`Invalid model: expected a pinned jev-X.Y.Z identifier`);
-    }
-    const timeoutMs = config.timeoutMs ?? DECISION_LIMITS.defaultTimeoutMs;
-    if (
-      typeof timeoutMs !== "number" ||
-      !Number.isFinite(timeoutMs) ||
-      timeoutMs < DECISION_LIMITS.minTimeoutMs ||
-      timeoutMs > DECISION_LIMITS.maxTimeoutMs
-    ) {
-      throw new TypeError(
-        `Invalid timeoutMs: expected ${DECISION_LIMITS.minTimeoutMs}–${DECISION_LIMITS.maxTimeoutMs}`
-      );
-    }
-    this.dataPolicy = dataPolicy;
-    this.model = model;
-    this.timeoutMs = timeoutMs;
-    this.transport = config.transport;
-    this.env = config.env;
+    this.settings = decisionSettings(config, {
+      fallback: DEFAULT_JEV_MODEL,
+      pattern: MODEL_PATTERN,
+      expected: "a pinned jev-X.Y.Z identifier",
+    });
+    this.dataPolicy = this.settings.dataPolicy;
+    this.model = this.settings.model;
+    this.timeoutMs = this.settings.timeoutMs;
   }
 
   /**
    * One bounded attempt. Never retries, never falls back, never throws: every
    * refusal and failure becomes a typed non-success result with no answers.
    */
-  async decide(request: DecisionRequest, options: DecisionCallOptions = {}): Promise<DecisionResult> {
-    const startedAt = Date.now();
-    let questionCount = 0;
-    let kindCounts: DecisionKindCounts = { choice: 0, score: 0, noul: 0 };
+  decide(request: DecisionRequest, options: DecisionCallOptions = {}): Promise<DecisionResult> {
+    return runDecision(JEV_WIRE, this.settings, request, options);
+  }
+}
 
-    const refuse = (status: "blocked" | "failed", reasonCode: DecisionReasonCode): DecisionFailure => ({
-      ok: false,
+/** @internal One decision call over a provider's wire. */
+export async function runDecision(
+  wire: DecisionWire,
+  settings: DecisionSettings,
+  request: DecisionRequest,
+  options: DecisionCallOptions
+): Promise<DecisionResult> {
+  const startedAt = Date.now();
+  let questionCount = 0;
+  let kindCounts: DecisionKindCounts = { choice: 0, score: 0, noul: 0 };
+
+  const refuse = (status: "blocked" | "failed", reasonCode: DecisionReasonCode): DecisionFailure => ({
+    ok: false,
+    reasonCode,
+    receipt: {
+      provider: wire.provider,
+      status,
       reasonCode,
+      requestedModel: settings.model,
+      model: undefined,
+      latencyMs: Date.now() - startedAt,
+      questionCount,
+      kindCounts: { ...kindCounts },
+      usage: undefined,
+    },
+  });
+
+  // Cloud consent is the outermost gate: withheld consent stops before the
+  // request is even read, and cannot be re-granted by the request itself.
+  if (settings.dataPolicy !== "cloud_allowed") return refuse("blocked", "local_only");
+  if (options.abortSignal?.aborted) return refuse("blocked", "aborted");
+
+  // The snapshot is what gets sent *and* what the response is checked
+  // against, so mutating the caller's objects during the await changes
+  // nothing here.
+  let snapshot: RequestSnapshot;
+  try {
+    snapshot = snapshotRequest(request);
+  } catch (err) {
+    return refuse("blocked", err instanceof DecisionError ? err.reasonCode : "invalid_request");
+  }
+  questionCount = snapshot.questions.length;
+  kindCounts = snapshot.kindCounts;
+
+  let body: string;
+  try {
+    body = JSON.stringify(wire.body(settings.model, snapshot));
+  } catch (err) {
+    return refuse("blocked", err instanceof DecisionError ? err.reasonCode : "invalid_request");
+  }
+  if (Buffer.byteLength(body, "utf8") > DECISION_LIMITS.maxRequestBytes) {
+    return refuse("blocked", "request_too_large");
+  }
+
+  // Resolved at call time and never persisted, logged or put in a receipt.
+  const apiKey = (settings.env ?? process.env)[wire.credentialEnv]?.trim();
+  if (!apiKey) return refuse("blocked", "missing_credential");
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, settings.timeoutMs);
+  const onCallerAbort = () => controller.abort();
+  options.abortSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+  let res: Response | undefined;
+  try {
+    const send = settings.transport ?? ((url: string, init: RequestInit) => fetch(url, init));
+    res = await send(wire.endpoint, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json", ...wire.headers(apiKey) },
+      body,
+      signal: controller.signal,
+    });
+
+    if (res.status >= 300 && res.status < 400) throw new DecisionError("redirect_refused");
+    if (res.status === 401 || res.status === 403) throw new DecisionError("auth_denied");
+    if (res.status === 429) throw new DecisionError("rate_limited");
+    if (!res.ok) throw new DecisionError((await refusalOf(wire, res)) ?? "upstream_error");
+
+    const validated = wire.read(await readBounded(res), snapshot, settings.model);
+    return {
+      ok: true,
+      model: validated.model ?? settings.model,
+      answers: validated.answers,
       receipt: {
-        provider: "jev",
-        status,
-        reasonCode,
-        requestedModel: this.model,
-        model: undefined,
+        provider: wire.provider,
+        status: "answered",
+        reasonCode: "answered",
+        requestedModel: settings.model,
+        model: validated.model,
         latencyMs: Date.now() - startedAt,
         questionCount,
         kindCounts: { ...kindCounts },
-        usage: undefined,
+        usage: validated.usage,
       },
-    });
+    };
+  } catch (err) {
+    if (options.abortSignal?.aborted) return refuse("failed", "aborted");
+    if (timedOut) return refuse("failed", "timeout");
+    if (err instanceof DecisionError) return refuse("failed", err.reasonCode);
+    return refuse("failed", "network_error");
+  } finally {
+    clearTimeout(timer);
+    options.abortSignal?.removeEventListener("abort", onCallerAbort);
+    // A status or size exit leaves the body unread; release it rather than
+    // holding a response stream open until collection.
+    if (res?.body && !res.bodyUsed && !res.body.locked) void res.body.cancel().catch(() => {});
+  }
+}
 
-    // Cloud consent is the outermost gate: withheld consent stops before the
-    // request is even read, and cannot be re-granted by the request itself.
-    if (this.dataPolicy !== "cloud_allowed") return refuse("blocked", "local_only");
-    if (options.abortSignal?.aborted) return refuse("blocked", "aborted");
-
-    // The snapshot is what gets sent *and* what the response is checked
-    // against, so mutating the caller's objects during the await changes
-    // nothing here.
-    let snapshot: RequestSnapshot;
-    try {
-      snapshot = snapshotRequest(request);
-    } catch (err) {
-      return refuse("blocked", err instanceof DecisionError ? err.reasonCode : "invalid_request");
-    }
-    questionCount = snapshot.questions.length;
-    kindCounts = snapshot.kindCounts;
-
-    const body = JSON.stringify({ model: this.model, state: snapshot.state, questions: snapshot.payload });
-    if (Buffer.byteLength(body, "utf8") > DECISION_LIMITS.maxRequestBytes) {
-      return refuse("blocked", "request_too_large");
-    }
-
-    // Resolved at call time and never persisted, logged or put in a receipt.
-    const apiKey = (this.env ?? process.env).TYPESAFE_API_KEY?.trim();
-    if (!apiKey) return refuse("blocked", "missing_credential");
-
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.timeoutMs);
-    const onCallerAbort = () => controller.abort();
-    options.abortSignal?.addEventListener("abort", onCallerAbort, { once: true });
-
-    let res: Response | undefined;
-    try {
-      const send = this.transport ?? ((url: string, init: RequestInit) => fetch(url, init));
-      res = await send(JEV_ENDPOINT, {
-        method: "POST",
-        redirect: "manual",
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body,
-        signal: controller.signal,
-      });
-
-      if (res.status >= 300 && res.status < 400) throw new DecisionError("redirect_refused");
-      if (res.status === 401 || res.status === 403) throw new DecisionError("auth_denied");
-      if (res.status === 429) throw new DecisionError("rate_limited");
-      if (!res.ok) throw new DecisionError("upstream_error");
-
-      const validated = validateResponseBody(await readBounded(res), snapshot, this.model);
-      return {
-        ok: true,
-        model: validated.model,
-        answers: validated.answers,
-        receipt: {
-          provider: "jev",
-          status: "answered",
-          reasonCode: "answered",
-          requestedModel: this.model,
-          model: validated.model,
-          latencyMs: Date.now() - startedAt,
-          questionCount,
-          kindCounts: { ...kindCounts },
-          usage: validated.usage,
-        },
-      };
-    } catch (err) {
-      if (options.abortSignal?.aborted) return refuse("failed", "aborted");
-      if (timedOut) return refuse("failed", "timeout");
-      if (err instanceof DecisionError) return refuse("failed", err.reasonCode);
-      return refuse("failed", "network_error");
-    } finally {
-      clearTimeout(timer);
-      options.abortSignal?.removeEventListener("abort", onCallerAbort);
-      // A status or size exit leaves the body unread; release it rather than
-      // holding a response stream open until collection.
-      if (res?.body && !res.bodyUsed && !res.body.locked) void res.body.cancel().catch(() => {});
-    }
+/** What a provider says about an error status, when it says anything this package names. */
+async function refusalOf(wire: DecisionWire, res: Response): Promise<DecisionReasonCode | undefined> {
+  if (!wire.refusal) return undefined;
+  try {
+    return wire.refusal(res.status, await readBounded(res));
+  } catch {
+    return undefined;
   }
 }
 
@@ -423,7 +524,8 @@ export class JevDecisionClient {
 // Request snapshot + validation (no credential, no network)
 // ---------------------------------------------------------------------------
 
-interface QuestionSnapshot {
+/** @internal */
+export interface QuestionSnapshot {
   id: string;
   kind: "choice" | "score" | "noul";
   /** Offered option IDs, in the order supplied. Choice only. */
@@ -434,14 +536,16 @@ interface QuestionSnapshot {
   payload: Record<string, unknown>;
 }
 
-interface RequestSnapshot {
+/** @internal */
+export interface RequestSnapshot {
   state: DecisionState;
   questions: QuestionSnapshot[];
   payload: Record<string, unknown>;
   kindCounts: DecisionKindCounts;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/** @internal */
+export function isRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
@@ -452,7 +556,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * `constructor` key stays an ordinary, exactly-preserved key instead of
  * reaching an inherited setter.
  */
-function emptyRecord<T>(): Record<string, T> {
+export function emptyRecord<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
 }
 
@@ -670,22 +774,15 @@ async function readBounded(res: Response): Promise<string> {
   }
 }
 
-interface ValidatedResponse {
-  model: string;
+/** @internal */
+export interface ValidatedResponse {
+  model?: string;
   answers: Record<string, DecisionAnswer>;
   usage?: { inputTokens: number; outputTokens: number };
 }
 
-/**
- * Structural validation against the snapshot that was actually sent. Anything
- * unexpected raises, which `decide` turns into a non-success result — never
- * into a partially trusted answer set.
- */
-function validateResponseBody(
-  text: string,
-  snapshot: RequestSnapshot,
-  expectedModel: string
-): ValidatedResponse {
+/** @internal A response body as a plain JSON object. */
+export function parseResponseRecord(text: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -693,10 +790,15 @@ function validateResponseBody(
     throw new DecisionError("malformed_response");
   }
   if (!isRecord(parsed)) throw new DecisionError("malformed_response");
-  if (typeof parsed.model !== "string") throw new DecisionError("malformed_response");
-  if (parsed.model !== expectedModel) throw new DecisionError("model_mismatch");
+  return parsed;
+}
 
-  const rawAnswers = parsed.answers;
+/**
+ * @internal Structural validation against the snapshot that was actually sent.
+ * Anything unexpected raises, which the call turns into a non-success result —
+ * never into a partially trusted answer set.
+ */
+export function validateAnswers(rawAnswers: unknown, snapshot: RequestSnapshot): Record<string, DecisionAnswer> {
   if (!isRecord(rawAnswers)) throw new DecisionError("malformed_response");
   const expectedIds = snapshot.questions.map((question) => question.id).sort();
   const actualIds = Object.keys(rawAnswers).sort();
@@ -711,7 +813,7 @@ function validateResponseBody(
   for (const question of snapshot.questions) {
     answers[question.id] = validateAnswer(question, rawAnswers[question.id]);
   }
-  return { model: parsed.model, answers, usage: readUsage(parsed.usage) };
+  return answers;
 }
 
 function validateAnswer(question: QuestionSnapshot, raw: unknown): DecisionAnswer {
@@ -816,13 +918,17 @@ function validateNoulAnswer(raw: Record<string, unknown>): NoulAnswer {
   return { type: "noul", noul };
 }
 
-/** Token counts are only recorded when they are plain nonnegative integers. */
-function readUsage(usage: unknown): { inputTokens: number; outputTokens: number } | undefined {
+/** @internal Token counts are only recorded when they are plain nonnegative integers. */
+export function readUsage(
+  usage: unknown,
+  inputField: string,
+  outputField: string
+): { inputTokens: number; outputTokens: number } | undefined {
   if (!isRecord(usage)) return undefined;
   const count = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-  const inputTokens = count(usage.input_tokens);
-  const outputTokens = count(usage.output_tokens);
+  const inputTokens = count(usage[inputField]);
+  const outputTokens = count(usage[outputField]);
   return inputTokens === undefined || outputTokens === undefined
     ? undefined
     : { inputTokens, outputTokens };
