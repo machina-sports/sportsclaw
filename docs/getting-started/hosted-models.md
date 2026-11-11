@@ -43,6 +43,35 @@ Some NVIDIA sports multimodal models document their own serving wrapper. Deploy 
 [NVIDIA's playbook](https://github.com/NVIDIA/sports-intelligence-playbooks/blob/4bcb551cca93b66b10c1dd14d14ad39056ffe33f/avlm/deployment/vLLM/README.md)
 describes, then point sportsclaw at the same OpenAI-compatible endpoint.
 
+## Pointing a model role at either kind of endpoint
+
+An operator job can give each model role (`eyes`, `brain`, `hands`, `voice`) its own endpoint under
+`inference.roles`. Switching a role between a model you run and a hosted service is an edit to that
+one block.
+
+```json
+{
+  "inference": {
+    "roles": {
+      "eyes":  { "route": "nim", "model": "basketball", "baseUrl": "http://127.0.0.1:8000/v1" },
+      "brain": { "route": "api", "model": "<served-model-id>",
+                 "baseUrl": "https://integrate.api.nvidia.com/v1", "credentialEnv": "NVIDIA_API_KEY" }
+    }
+  }
+}
+```
+
+| Route | For | Key |
+| --- | --- | --- |
+| `nim` | A model server you run yourself (vLLM, a NIM container), usually on loopback | None |
+| `api` | A hosted OpenAI-compatible service | Read at call time from the environment variable named by `credentialEnv` |
+| `openshell` | A model reached from inside an OpenShell sandbox | Injected by the sandbox's provider profile |
+
+`credentialEnv` is the variable's name, never the key. An `api` route requires HTTPS unless the
+endpoint is on loopback, fails before any request when the variable is unset, and never falls back
+to another key. A `nim` or `api` route can also carry `requestBody`: extra request fields for
+server options a model needs, such as vLLM's `top_k` or `chat_template_kwargs`.
+
 ## Optional: OpenShell
 
 Add `--openshell --image <oci-ref>` (and, for brev, an `--endpoint` the sandbox can reach) to also

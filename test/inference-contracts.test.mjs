@@ -157,7 +157,7 @@ describe("INFERENCE_ROUTES", () => {
   it("exports exactly the expected routes", () => {
     assert.deepStrictEqual(
       [...INFERENCE_ROUTES].sort(),
-      ["mock", "nim", "openshell"].sort(),
+      ["api", "mock", "nim", "openshell"].sort(),
     );
   });
 });
