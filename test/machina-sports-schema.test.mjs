@@ -71,7 +71,28 @@ describe("reading a Machina Sports Schema envelope", () => {
     assert.ok(event.actions[0].id);
   });
 
+  it("carries capabilities and provenance exactly as written, never a trimmed copy", () => {
+    // The adoption guide: they travel with every path and must not be stripped.
+    const block = soccer().machina_sports_schema;
+    const event = readMachinaSportsEvent(soccer());
+    assert.deepEqual(event.capabilities, block.capabilities);
+    assert.deepEqual(event.provenance, block.provenance);
+    assert.ok(event.capabilities.present.includes("event.score"));
+    assert.ok(readMachinaSportsEvent(nba()).capabilities.present.includes("event.play_by_play"));
+  });
+
+  it("carries a start stated only to the minute as the envelope's own evidence", () => {
+    const evidence = { kind: "start", source_value: "2026-06-14T00:30Z", precision: "minute", lower_inclusive: "2026-06-14T00:30:00Z", upper_exclusive: "2026-06-14T00:31:00Z" };
+    const event = readMachinaSportsEvent(changed((m) => { delete m.event_view.start_time; m.event_view.temporal_evidence = evidence; }));
+    assert.equal(event.startTime, undefined);
+    assert.deepEqual(event.temporalEvidence, evidence);
+    assert.equal(readMachinaSportsEvent(soccer()).temporalEvidence, undefined);
+  });
+
   it("is undefined for anything that is not a valid envelope", () => {
+    assert.equal(readMachinaSportsEvent(changed((m) => { delete m.capabilities; })), undefined, "no capabilities block");
+    assert.equal(readMachinaSportsEvent(changed((m) => { delete m.provenance; })), undefined, "no provenance block");
+    assert.equal(readMachinaSportsEvent(changed((m) => { m.event_view.temporal_evidence = "minute"; })), undefined, "temporal evidence that is not an object");
     assert.equal(readMachinaSportsEvent(undefined), undefined);
     assert.equal(readMachinaSportsEvent({}), undefined);
     assert.equal(readMachinaSportsEvent({ status: true, data: { events: [] } }), undefined, "a provider-native payload");
