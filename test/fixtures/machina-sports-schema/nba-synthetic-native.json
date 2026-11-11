@@ -1,0 +1,133 @@
+{
+ "generator": "sports_skills.canonical.canonicalize_nba_event",
+ "sports_skills_version": "0.40.4",
+ "observed_at": "2026-03-01T23:05:00Z",
+ "start_time_precision": "second",
+ "event": {
+  "id": "9002",
+  "name": "",
+  "short_name": "",
+  "status": "closed",
+  "status_detail": "Final",
+  "start_time": "2026-03-01T20:00:00Z",
+  "season_type": "postseason",
+  "venue": {
+   "name": "",
+   "city": "",
+   "state": ""
+  },
+  "competitors": [
+   {
+    "team": {
+     "id": "9011",
+     "name": "Synthetic Home Hoopers",
+     "abbreviation": "SHH",
+     "logo": ""
+    },
+    "home_away": "home",
+    "score": "101",
+    "period_scores": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "record": "",
+    "winner": true
+   },
+   {
+    "team": {
+     "id": "9012",
+     "name": "Synthetic Away Ballers",
+     "abbreviation": "SAB",
+     "logo": ""
+    },
+    "home_away": "away",
+    "score": "99",
+    "period_scores": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "record": "",
+    "winner": false
+   }
+  ],
+  "odds": null,
+  "broadcasts": []
+ },
+ "plays": {
+  "plays": [
+   {
+    "id": "90011",
+    "text": "Synthetic Guard makes 26-foot three point jumper",
+    "type": "Jump Shot",
+    "period": 1,
+    "clock": "11:35",
+    "home_score": 3,
+    "away_score": 0,
+    "scoring_play": true,
+    "score_value": 3,
+    "team_id": "9011",
+    "team": "SHH",
+    "shooting_play": true
+   },
+   {
+    "id": "90012",
+    "text": "Synthetic Center misses 4-foot layup",
+    "type": "Layup Shot",
+    "period": 1,
+    "clock": "11:10",
+    "home_score": 3,
+    "away_score": 0,
+    "scoring_play": false,
+    "score_value": 0,
+    "team_id": "9012",
+    "team": "SAB",
+    "shooting_play": true
+   },
+   {
+    "id": "90013",
+    "text": "Synthetic Forward makes driving layup",
+    "type": "Driving Layup Shot",
+    "period": 4,
+    "clock": "7.1",
+    "home_score": 99,
+    "away_score": 99,
+    "scoring_play": true,
+    "score_value": 2,
+    "team_id": "9012",
+    "team": "SAB",
+    "shooting_play": true
+   },
+   {
+    "id": "90014",
+    "text": "Synthetic Guard makes 12-foot floater",
+    "type": "Driving Floating Jump Shot",
+    "period": 4,
+    "clock": "1.1",
+    "home_score": 101,
+    "away_score": 99,
+    "scoring_play": true,
+    "score_value": 2,
+    "team_id": "9011",
+    "team": "SHH",
+    "shooting_play": true
+   }
+  ],
+  "count": 4,
+  "teams": {
+   "home": {
+    "id": "9011",
+    "abbreviation": "SHH",
+    "name": "Synthetic Home Hoopers"
+   },
+   "away": {
+    "id": "9012",
+    "abbreviation": "SAB",
+    "name": "Synthetic Away Ballers"
+   }
+  }
+ }
+}
