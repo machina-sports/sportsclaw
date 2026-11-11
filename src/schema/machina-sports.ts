@@ -11,8 +11,9 @@
  * It never computes a schema id, maps a status or decides who may use the data: those
  * rules live with the schema, and a second copy here would be a second definition of
  * one contract. Values come back exactly as the envelope states them (a score is the
- * text "101", a status is "closed"), and the rights block is passed on for the caller
- * to respect.
+ * text "101", a status is "closed"). The rights, capabilities and provenance blocks
+ * travel with the event, whole and unrewritten: a projection served without them is an
+ * unlicensed, unattributed payload wearing a checked one's shape.
  *
  * `src/schema/iptc.ts` and `src/schema/machina.ts` are older types for the relay's
  * live-game channels. They are not this schema and use different names for things.
@@ -87,9 +88,18 @@ export interface MachinaSportsEvent {
   site?: MachinaRef;
   participants: MachinaParticipant[];
   actions: MachinaAction[];
+  /**
+   * Set when the source stated the start less exactly than the schema needs for `startTime`
+   * (ESPN states an NBA start to the minute): the envelope's own bounds and source value, verbatim.
+   */
+  temporalEvidence?: Readonly<Record<string, unknown>>;
   provider: { namespace: string; family?: string };
   observedAt?: string;
   rights: MachinaRights;
+  /** What the envelope says it does and does not carry, verbatim (`present`, `absent`, `tier`, ...). */
+  capabilities: Readonly<Record<string, unknown>>;
+  /** Who observed this, when and through what, verbatim. */
+  provenance: Readonly<Record<string, unknown>>;
 }
 
 type Row = Record<string, unknown>;
@@ -151,8 +161,13 @@ export function readMachinaSportsEvent(document: unknown): MachinaSportsEvent | 
     return undefined;
   }
 
+  const { capabilities, provenance } = block;
+  if (!isRow(capabilities) || !isRow(provenance)) return undefined;
+
   const view = block.event_view;
   if (machinaIdKind(view.event_id) !== "event") return undefined;
+  const temporalEvidence = view.temporal_evidence;
+  if (temporalEvidence !== undefined && !isRow(temporalEvidence)) return undefined;
   const provider = view.provider;
   if (!isRow(provider) || typeof provider.namespace !== "string" || !provider.namespace) return undefined;
   const family = text(provider.family);
@@ -183,7 +198,7 @@ export function readMachinaSportsEvent(document: unknown): MachinaSportsEvent | 
     actions.push({ ...(id ? { id } : {}), ordinal: item.ordinal, ...rest });
   }
 
-  const observedAt = isRow(block.provenance) ? text(block.provenance.observed_at) : undefined;
+  const observedAt = text(provenance.observed_at);
   if (observedAt === INVALID) return undefined;
 
   return {
@@ -198,8 +213,11 @@ export function readMachinaSportsEvent(document: unknown): MachinaSportsEvent | 
     ...(site ? { site: site as MachinaRef } : {}),
     participants,
     actions,
+    ...(temporalEvidence ? { temporalEvidence } : {}),
     provider: { namespace: provider.namespace, ...(family ? { family: family as string } : {}) },
     ...(observedAt ? { observedAt } : {}),
     rights: { dataClass: rights.data_class, prototypeOnly: rights.prototype_only, commercialUse: rights.commercial_use },
+    capabilities,
+    provenance,
   };
 }
