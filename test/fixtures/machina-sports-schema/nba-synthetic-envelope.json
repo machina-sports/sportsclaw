@@ -1,0 +1,599 @@
+{
+ "machina_sports_schema": {
+  "schema_version": "machina-sports-schema/1",
+  "profile": "machina-iptc-profile/1.2",
+  "sport_schema_graph": {
+   "@context": {
+    "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "owl": "http://www.w3.org/2002/07/owl#",
+    "skos": "http://www.w3.org/2004/02/skos/core#",
+    "sh": "http://www.w3.org/ns/shacl#",
+    "dcterms": "http://purl.org/dc/terms/",
+    "prov": "http://www.w3.org/ns/prov#",
+    "schema": "https://schema.org/",
+    "schemaorg": "https://schema.org/",
+    "sport": "https://sportschema.org/ontologies/main/",
+    "spstat": "https://sportschema.org/ontologies/corestatistics/",
+    "spfacet": "https://sportschema.org/ontologies/sport-facets/",
+    "spamfstat": "https://sportschema.org/ontologies/american-football/",
+    "spbblstat": "https://sportschema.org/ontologies/baseball/",
+    "spbkbstat": "https://sportschema.org/ontologies/basketball/",
+    "spespstat": "https://sportschema.org/ontologies/esports/",
+    "spgolf": "https://sportschema.org/ontologies/golf/",
+    "spgolstat": "https://sportschema.org/ontologies/golf/",
+    "spmcrstat": "https://sportschema.org/ontologies/motor-racing/",
+    "sprgxstat": "https://sportschema.org/ontologies/rugby/",
+    "spsocstat": "https://sportschema.org/ontologies/soccer/",
+    "sptenstat": "https://sportschema.org/ontologies/tennis/",
+    "spvolstat": "https://sportschema.org/ontologies/volleyball/",
+    "medtop": "http://cv.iptc.org/newscodes/mediatopic/",
+    "subj": "http://cv.iptc.org/newscodes/subjectcode/",
+    "ikos": "http://cv.iptc.org/newscodes/ikos/",
+    "aspfacet": "http://cv.iptc.org/newscodes/asportfacet/",
+    "aspfacetvalue": "http://cv.iptc.org/newscodes/asportfacetvalue/",
+    "spactionclass": "http://cv.iptc.org/newscodes/spactionclass/",
+    "spcompetitionscope": "http://cv.iptc.org/newscodes/spcompetitionscope/",
+    "spct": "http://cv.iptc.org/newscodes/spct/",
+    "spesaction": "http://cv.iptc.org/newscodes/spesaction/",
+    "speventoutcome": "http://cv.iptc.org/newscodes/speventoutcome/",
+    "speventoutcometype": "http://cv.iptc.org/newscodes/speventoutcometype/",
+    "speventstatus": "http://cv.iptc.org/newscodes/speventstatus/",
+    "spgolholetype": "http://cv.iptc.org/newscodes/spgolholetype/",
+    "sphorposition": "http://cv.iptc.org/newscodes/sphorposition/",
+    "spichposition": "http://cv.iptc.org/newscodes/spichposition/",
+    "spplayerstatus": "http://cv.iptc.org/newscodes/spplayerstatus/",
+    "spresulteffect": "http://cv.iptc.org/newscodes/spresulteffect/",
+    "spscoreunits": "http://cv.iptc.org/newscodes/spscoreunits/",
+    "spsocactiontype": "http://cv.iptc.org/newscodes/spsocaction/",
+    "spsocposition": "http://cv.iptc.org/newscodes/spsocposition/",
+    "spsocrole": "http://cv.iptc.org/newscodes/spsocrole/",
+    "sptournamentform": "http://cv.iptc.org/newscodes/sptournamentform/",
+    "sptournamentphase": "http://cv.iptc.org/newscodes/sptournamentphase/",
+    "machina": "https://machina.gg/ns/sport/1.0/"
+   },
+   "@graph": [
+    {
+     "@id": "urn:machina:sports:competition:x0a4ce1b9034f898d57e3398c7f0651d3",
+     "@type": "sport:Competition",
+     "rdfs:label": "NBA",
+     "sport:sport": {
+      "@id": "medtop:20000851"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:team:xc5e6eb33acaef3504ff5fd9c9fdf07c5",
+     "@type": "sport:Team",
+     "rdfs:label": "Synthetic Home Hoopers"
+    },
+    {
+     "@id": "urn:machina:sports:team:x6db1801abba4c6eac80b3296bd73dc74",
+     "@type": "sport:Team",
+     "rdfs:label": "Synthetic Away Ballers"
+    },
+    {
+     "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa",
+     "@type": "sport:Event",
+     "sport:sport": {
+      "@id": "medtop:20000851"
+     },
+     "sport:eventInCompetition": {
+      "@id": "urn:machina:sports:competition:x0a4ce1b9034f898d57e3398c7f0651d3"
+     },
+     "sport:startDateTime": {
+      "@value": "2026-03-01T20:00:00Z",
+      "@type": "xsd:dateTime"
+     },
+     "sport:eventStatus": {
+      "@id": "speventstatus:post-event"
+     },
+     "sport:participation": [
+      {
+       "@id": "urn:machina:sports:participation:xf979c0c1074a4d232784c3ab2733d7f2"
+      },
+      {
+       "@id": "urn:machina:sports:participation:xa4e06063ab4eb2a8c0fd31bd1facdacb"
+      }
+     ]
+    },
+    {
+     "@id": "urn:machina:sports:participation:xf979c0c1074a4d232784c3ab2733d7f2",
+     "@type": "sport:TeamParticipation",
+     "rdfs:label": "Synthetic Home Hoopers participation",
+     "sport:participationBy": {
+      "@id": "urn:machina:sports:team:xc5e6eb33acaef3504ff5fd9c9fdf07c5"
+     },
+     "sport:alignment": "home",
+     "sport:score": "101",
+     "sport:eventOutcome": {
+      "@id": "speventoutcome:win"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:participation:xa4e06063ab4eb2a8c0fd31bd1facdacb",
+     "@type": "sport:TeamParticipation",
+     "rdfs:label": "Synthetic Away Ballers participation",
+     "sport:participationBy": {
+      "@id": "urn:machina:sports:team:x6db1801abba4c6eac80b3296bd73dc74"
+     },
+     "sport:alignment": "away",
+     "sport:score": "99",
+     "sport:eventOutcome": {
+      "@id": "speventoutcome:loss"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:action:x36bfe29de77206f951a9d5d2a958caf1",
+     "@type": "sport:Action",
+     "rdfs:label": "Synthetic Guard makes 26-foot three point jumper",
+     "sport:actionInEvent": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "sport:class": {
+      "@id": "spactionclass:play"
+     },
+     "sport:minutesElapsed": "11:35",
+     "sport:periodValue": "1",
+     "sport:sequenceNumber": "90011",
+     "sport:participation": {
+      "@id": "urn:machina:sports:participation:xf979c0c1074a4d232784c3ab2733d7f2"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:action:x69e177e53ceb1542b4f9e60deda2a126",
+     "@type": "sport:Action",
+     "rdfs:label": "Synthetic Center misses 4-foot layup",
+     "sport:actionInEvent": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "sport:class": {
+      "@id": "spactionclass:play"
+     },
+     "sport:minutesElapsed": "11:10",
+     "sport:periodValue": "1",
+     "sport:sequenceNumber": "90012",
+     "sport:participation": {
+      "@id": "urn:machina:sports:participation:xa4e06063ab4eb2a8c0fd31bd1facdacb"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:action:xd51e1f1a8500ed35edc9a1b1a42091ef",
+     "@type": "sport:Action",
+     "rdfs:label": "Synthetic Forward makes driving layup",
+     "sport:actionInEvent": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "sport:class": {
+      "@id": "spactionclass:play"
+     },
+     "sport:minutesElapsed": "7.1",
+     "sport:periodValue": "4",
+     "sport:sequenceNumber": "90013",
+     "sport:participation": {
+      "@id": "urn:machina:sports:participation:xa4e06063ab4eb2a8c0fd31bd1facdacb"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:action:x9191972be6e9db555ae6ff32f1e9419e",
+     "@type": "sport:Action",
+     "rdfs:label": "Synthetic Guard makes 12-foot floater",
+     "sport:actionInEvent": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "sport:class": {
+      "@id": "spactionclass:play"
+     },
+     "sport:minutesElapsed": "1.1",
+     "sport:periodValue": "4",
+     "sport:sequenceNumber": "90014",
+     "sport:participation": {
+      "@id": "urn:machina:sports:participation:xf979c0c1074a4d232784c3ab2733d7f2"
+     }
+    },
+    {
+     "@id": "urn:machina:sports:provider-identifier:xa14f70acc45882929b220a4c1ae59081",
+     "@type": "machina:ProviderIdentifier",
+     "rdfs:label": "sports-skills/espn competition nba",
+     "machina:identifies": {
+      "@id": "urn:machina:sports:competition:x0a4ce1b9034f898d57e3398c7f0651d3"
+     },
+     "machina:providerNamespace": "sports-skills/espn",
+     "machina:providerId": "nba",
+     "machina:resolutionMethod": "declared"
+    },
+    {
+     "@id": "urn:machina:sports:provider-identifier:x0b344741f4f6d4d65573b185617f2e5f",
+     "@type": "machina:ProviderIdentifier",
+     "rdfs:label": "sports-skills/espn event 9002",
+     "machina:identifies": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "machina:providerNamespace": "sports-skills/espn",
+     "machina:providerId": "9002",
+     "machina:resolutionMethod": "provider-native"
+    },
+    {
+     "@id": "urn:machina:sports:provider-identifier:x359539bbce8752145c3c925bffe089d9",
+     "@type": "machina:ProviderIdentifier",
+     "rdfs:label": "sports-skills/espn team 9011",
+     "machina:identifies": {
+      "@id": "urn:machina:sports:team:xc5e6eb33acaef3504ff5fd9c9fdf07c5"
+     },
+     "machina:providerNamespace": "sports-skills/espn",
+     "machina:providerId": "9011",
+     "machina:resolutionMethod": "provider-native"
+    },
+    {
+     "@id": "urn:machina:sports:provider-identifier:x41bcac281bce7158338a86d48f74f527",
+     "@type": "machina:ProviderIdentifier",
+     "rdfs:label": "sports-skills/espn team 9012",
+     "machina:identifies": {
+      "@id": "urn:machina:sports:team:x6db1801abba4c6eac80b3296bd73dc74"
+     },
+     "machina:providerNamespace": "sports-skills/espn",
+     "machina:providerId": "9012",
+     "machina:resolutionMethod": "provider-native"
+    },
+    {
+     "@id": "urn:machina:sports:observation-provenance:x0e779a1ec0407fafa5310a47aff7e1c7",
+     "@type": "machina:ObservationProvenance",
+     "rdfs:label": "sports-skills/espn observation of event x4eb76ed47f659cac14e996ada990a5aa",
+     "machina:describes": {
+      "@id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa"
+     },
+     "machina:providerNamespace": "sports-skills/espn",
+     "machina:observedAt": {
+      "@value": "2026-03-01T23:05:00Z",
+      "@type": "xsd:dateTime"
+     },
+     "machina:adapterVersion": "1",
+     "machina:serializerVersion": "1",
+     "machina:rightsClass": "open-public"
+    }
+   ]
+  },
+  "event_view": {
+   "event_id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa",
+   "sport": "basketball",
+   "start_time": "2026-03-01T20:00:00Z",
+   "status": "closed",
+   "competition": {
+    "id": "urn:machina:sports:competition:x0a4ce1b9034f898d57e3398c7f0651d3",
+    "name": "NBA"
+   },
+   "participants": [
+    {
+     "id": "urn:machina:sports:team:xc5e6eb33acaef3504ff5fd9c9fdf07c5",
+     "role": "home",
+     "name": "Synthetic Home Hoopers",
+     "score": "101",
+     "outcome": "win"
+    },
+    {
+     "id": "urn:machina:sports:team:x6db1801abba4c6eac80b3296bd73dc74",
+     "role": "away",
+     "name": "Synthetic Away Ballers",
+     "score": "99",
+     "outcome": "loss"
+    }
+   ],
+   "actions": [
+    {
+     "ordinal": "90011",
+     "class": "play",
+     "label": "Synthetic Guard makes 26-foot three point jumper",
+     "minute": "11:35",
+     "period": "1"
+    },
+    {
+     "ordinal": "90012",
+     "class": "play",
+     "label": "Synthetic Center misses 4-foot layup",
+     "minute": "11:10",
+     "period": "1"
+    },
+    {
+     "ordinal": "90013",
+     "class": "play",
+     "label": "Synthetic Forward makes driving layup",
+     "minute": "7.1",
+     "period": "4"
+    },
+    {
+     "ordinal": "90014",
+     "class": "play",
+     "label": "Synthetic Guard makes 12-foot floater",
+     "minute": "1.1",
+     "period": "4"
+    }
+   ],
+   "provider": {
+    "namespace": "sports-skills/espn",
+    "family": "open-data",
+    "raw": {
+     "event": {
+      "id": "9002",
+      "name": "",
+      "short_name": "",
+      "status": "closed",
+      "status_detail": "Final",
+      "start_time": "2026-03-01T20:00:00Z",
+      "season_type": "postseason",
+      "venue": {
+       "name": "",
+       "city": "",
+       "state": ""
+      },
+      "competitors": [
+       {
+        "team": {
+         "id": "9011",
+         "name": "Synthetic Home Hoopers",
+         "abbreviation": "SHH",
+         "logo": ""
+        },
+        "home_away": "home",
+        "score": "101",
+        "period_scores": [
+         0,
+         0,
+         0,
+         0
+        ],
+        "record": "",
+        "winner": true
+       },
+       {
+        "team": {
+         "id": "9012",
+         "name": "Synthetic Away Ballers",
+         "abbreviation": "SAB",
+         "logo": ""
+        },
+        "home_away": "away",
+        "score": "99",
+        "period_scores": [
+         0,
+         0,
+         0,
+         0
+        ],
+        "record": "",
+        "winner": false
+       }
+      ],
+      "odds": null,
+      "broadcasts": []
+     },
+     "plays": {
+      "plays": [
+       {
+        "id": "90011",
+        "text": "Synthetic Guard makes 26-foot three point jumper",
+        "type": "Jump Shot",
+        "period": 1,
+        "clock": "11:35",
+        "home_score": 3,
+        "away_score": 0,
+        "scoring_play": true,
+        "score_value": 3,
+        "team_id": "9011",
+        "team": "SHH",
+        "shooting_play": true
+       },
+       {
+        "id": "90012",
+        "text": "Synthetic Center misses 4-foot layup",
+        "type": "Layup Shot",
+        "period": 1,
+        "clock": "11:10",
+        "home_score": 3,
+        "away_score": 0,
+        "scoring_play": false,
+        "score_value": 0,
+        "team_id": "9012",
+        "team": "SAB",
+        "shooting_play": true
+       },
+       {
+        "id": "90013",
+        "text": "Synthetic Forward makes driving layup",
+        "type": "Driving Layup Shot",
+        "period": 4,
+        "clock": "7.1",
+        "home_score": 99,
+        "away_score": 99,
+        "scoring_play": true,
+        "score_value": 2,
+        "team_id": "9012",
+        "team": "SAB",
+        "shooting_play": true
+       },
+       {
+        "id": "90014",
+        "text": "Synthetic Guard makes 12-foot floater",
+        "type": "Driving Floating Jump Shot",
+        "period": 4,
+        "clock": "1.1",
+        "home_score": 101,
+        "away_score": 99,
+        "scoring_play": true,
+        "score_value": 2,
+        "team_id": "9011",
+        "team": "SHH",
+        "shooting_play": true
+       }
+      ],
+      "count": 4,
+      "teams": {
+       "home": {
+        "id": "9011",
+        "abbreviation": "SHH",
+        "name": "Synthetic Home Hoopers"
+       },
+       "away": {
+        "id": "9012",
+        "abbreviation": "SAB",
+        "name": "Synthetic Away Ballers"
+       }
+      }
+     }
+    }
+   }
+  },
+  "provenance": {
+   "provider": {
+    "namespace": "sports-skills/espn",
+    "family": "open-data"
+   },
+   "adapter": {
+    "name": "sports_skills.canonical.adapters.nba",
+    "version": "1"
+   },
+   "serializer": {
+    "name": "machina-iptc-serializer",
+    "version": "1"
+   },
+   "profile": "machina-iptc-profile/1.1",
+   "upstream_pin": {
+    "repository": "https://github.com/iptc/sport-schema",
+    "commit": "0e77bf8678f3702fe81c28673bede35efe47d633",
+    "target_version": "1.1"
+   },
+   "observed_at": "2026-03-01T23:05:00Z",
+   "source_refs": [
+    {
+     "kind": "endpoint-class",
+     "value": "espn/summary",
+     "note": "endpoint class only; no URL, query or credential is recorded"
+    }
+   ],
+   "rights": {
+    "data_class": "open-public",
+    "prototype_only": true,
+    "commercial_use": false
+   },
+   "determinism": {
+    "id_strategy": "provider-scoped-surrogate",
+    "digest": "blake2b-128",
+    "canonical_id_service": "not-available-in-this-phase"
+   }
+  },
+  "provider_ids": [
+   {
+    "machina_id": "urn:machina:sports:competition:x0a4ce1b9034f898d57e3398c7f0651d3",
+    "entity_type": "competition",
+    "provider_namespace": "sports-skills/espn",
+    "provider_id": "nba",
+    "resolution_method": "declared",
+    "confidence": 1.0,
+    "evidence": "observation.competition.provider_id"
+   },
+   {
+    "machina_id": "urn:machina:sports:event:x4eb76ed47f659cac14e996ada990a5aa",
+    "entity_type": "event",
+    "provider_namespace": "sports-skills/espn",
+    "provider_id": "9002",
+    "resolution_method": "provider-native",
+    "confidence": 1.0,
+    "evidence": "observation.event.provider_id"
+   },
+   {
+    "machina_id": "urn:machina:sports:team:xc5e6eb33acaef3504ff5fd9c9fdf07c5",
+    "entity_type": "team",
+    "provider_namespace": "sports-skills/espn",
+    "provider_id": "9011",
+    "resolution_method": "provider-native",
+    "confidence": 1.0,
+    "evidence": "observation.participants[0].provider_id"
+   },
+   {
+    "machina_id": "urn:machina:sports:team:x6db1801abba4c6eac80b3296bd73dc74",
+    "entity_type": "team",
+    "provider_namespace": "sports-skills/espn",
+    "provider_id": "9012",
+    "resolution_method": "provider-native",
+    "confidence": 1.0,
+    "evidence": "observation.participants[1].provider_id"
+   }
+  ],
+  "capabilities": {
+   "tier": "core",
+   "tiers_satisfied": [
+    "core"
+   ],
+   "present": [
+    "event.actions",
+    "event.competition",
+    "event.identity",
+    "event.participants",
+    "event.play_by_play",
+    "event.result",
+    "event.score",
+    "event.start_time",
+    "event.status",
+    "provenance"
+   ],
+   "absent": [
+    "event.clock",
+    "event.coordinates",
+    "event.expected_metrics",
+    "event.formations",
+    "event.lineups",
+    "event.live_statistics",
+    "event.period",
+    "event.start_time.bounded",
+    "event.tracking",
+    "participant.player_statistics"
+   ],
+   "not_expressible": [
+    "event.coordinates",
+    "event.expected_metrics",
+    "event.formations",
+    "event.tracking"
+   ],
+   "by_tier": {
+    "core": {
+     "required_present": [
+      "event.competition",
+      "event.identity",
+      "event.participants",
+      "event.start_time",
+      "event.status",
+      "provenance"
+     ],
+     "required_absent": [],
+     "optional_present": [
+      "event.result",
+      "event.score"
+     ],
+     "optional_absent": [
+      "event.start_time.bounded"
+     ]
+    },
+    "live": {
+     "required_present": [
+      "event.actions"
+     ],
+     "required_absent": [
+      "event.clock",
+      "event.period"
+     ],
+     "optional_present": [
+      "event.play_by_play"
+     ],
+     "optional_absent": [
+      "event.live_statistics"
+     ]
+    }
+   },
+   "violations": []
+  },
+  "rights": {
+   "data_class": "open-public",
+   "prototype_only": true,
+   "commercial_use": false
+  }
+ }
+}

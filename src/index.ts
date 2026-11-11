@@ -390,6 +390,8 @@ export {
   validateManifestCoverage,
   validateMatchMoment,
 } from "./schema/tv.js";
+export { MACHINA_SPORTS_SCHEMA_KEY, MACHINA_SPORTS_SCHEMA_VERSIONS, machinaIdKind, readMachinaSportsEvent } from "./schema/machina-sports.js";
+export type { MachinaAction, MachinaParticipant, MachinaRef, MachinaRights, MachinaSportsEvent } from "./schema/machina-sports.js";
 export type {
   FreshnessClass,
   ReviewState,
