@@ -432,6 +432,13 @@ export interface sportsclawConfig {
    */
   answerFrom?: "model" | "model+data" | "data";
   /**
+   * Model roles for this engine. When `inference.roles.brain` is set, it is the
+   * chat model: its route (a server you run, or a hosted service with a key)
+   * replaces `provider` and `model` for every model call the engine makes.
+   * Other roles are for `invokeModelRole` and are not used by a chat run.
+   */
+  inference?: import("./inference/model-role-router.js").ModelRoleRouterConfig;
+  /**
    * Opt-in task brief: resolve one bounded intent brief before primary
    * generation (see `task-brief.ts`). It may only narrow already-offered
    * tools and never authorizes a write. Default: false.
@@ -666,6 +673,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   hostTools: {},
   groundingCheck: "off",
   answerFrom: "model",
+  inference: { roles: {} },
   taskBrief: false,
 };
 
