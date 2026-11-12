@@ -166,7 +166,7 @@ export interface OperatorJobConfig {
    */
   openshell?: OpenShellConfig;
   /**
-   * Model-role inference routing — maps `eyes/brain/hands/voice` roles to
+   * Model-role inference routing — maps `eyes/brain/hands/writer` roles to
    * OpenShell, NIM (keyless, self-run), `api` (hosted, keyed) or mock routes.
    * Consumed by `invokeModelRole` in `inference/model-role-router.ts`.
    * Hardware (locality/accelerator) is runtime metadata only — callers

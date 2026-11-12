@@ -1,7 +1,7 @@
 /**
  * sportsclaw — the judge: which decision provider answers typed questions.
  *
- * The model roles (`eyes`, `brain`, `hands`, `voice`) write: they are reached through
+ * The model roles (`eyes`, `brain`, `hands`, `writer`) write: they are reached through
  * `invokeModelRole` and return text or media. A judge answers bounded questions (pick one,
  * rate, true/false) and returns probabilities, so it is not a fifth role and never goes
  * through a chat route. It is configured in the same block, as `inference.judge`, and built
