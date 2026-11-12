@@ -100,7 +100,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent, INJECTION_REFUSAL_TEXT } from "./security.js";
 import { validateHostContext, formatHostContext } from "./host-context.js";
-import { unsupportedNumbers, dateSources, timeSources } from "./number-grounding.js";
+import { unsupportedNumbers, numbersOfUnnamedPeople, dateSources, timeSources } from "./number-grounding.js";
 import { dataAnswer } from "./data-answer.js";
 import { validateMedia, registerMedia, releaseMedia } from "./media-input.js";
 import {
@@ -6659,7 +6659,7 @@ export class sportsclawEngine {
     const facts = dataAnswer(userPrompt, results);
     if (facts === undefined) return text;
     const unsupported = mode === "model+data"
-      ? unsupportedNumbers(text, this.groundingSources(userPrompt, callerHistory), timeSources(this.runTimeZone()))
+      ? this.unsupportedInAnswer(text, userPrompt, callerHistory)
       : [];
     const keep = mode === "model+data" && unsupported.length === 0;
     if (this._lastRunTrace) {
@@ -6690,11 +6690,18 @@ export class sportsclawEngine {
     ];
   }
 
+  /** Numbers no evidence contains, then numbers said of someone the looked-up data never names. */
+  private unsupportedInAnswer(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string[] {
+    const absent = unsupportedNumbers(text, this.groundingSources(userPrompt, callerHistory), timeSources(this.runTimeZone()));
+    const data = [...(this._hostContext ?? []).map((b) => b.content), ...this.turnToolResults().map((r) => r.output)];
+    return [...absent, ...numbersOfUnnamedPeople(text, data).filter((n) => !absent.includes(n))];
+  }
+
   /** sportsclawConfig.groundingCheck: numbers in the answer must come from this turn's evidence. */
   private applyNumberGrounding(text: string, userPrompt: string, callerHistory?: ReadonlyArray<{ content: string }>): string {
     const action = this.config.groundingCheck ?? "off";
     if (action === "off" || this._engineReply || text === VERIFY_UNAVAILABLE) return text;
-    const unsupported = unsupportedNumbers(text, this.groundingSources(userPrompt, callerHistory), timeSources(this.runTimeZone()));
+    const unsupported = this.unsupportedInAnswer(text, userPrompt, callerHistory);
     if (unsupported.length === 0) return text;
     const withhold = action === "withhold";
     if (this._lastRunTrace) {

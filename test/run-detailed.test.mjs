@@ -28,7 +28,7 @@ const { MockLanguageModelV3 } = await import("ai/test");
 const { tool, jsonSchema } = await import("ai");
 const { sportsclawEngine } = await import("../dist/engine.js");
 const { INJECTION_REFUSAL_TEXT } = await import("../dist/index.js");
-const { unsupportedNumbers, dateSources, timeSources } = await import("../dist/number-grounding.js");
+const { unsupportedNumbers, numbersOfUnnamedPeople, dateSources, timeSources } = await import("../dist/number-grounding.js");
 const { dataAnswer } = await import("../dist/data-answer.js");
 const { mediaPartFor } = await import("../dist/media-input.js");
 
@@ -349,6 +349,20 @@ describe("number grounding (opt-in, no model call)", () => {
     assert.deepEqual(check("He scored with 12:31 left."), ["12", "31"], "a game clock is not the time of day");
   });
 
+  it("numbersOfUnnamedPeople: a stat needs its person in the data", () => {
+    const data = ['{"home":"Los Angeles Lakers","home_score":138,"away":"Miami Heat","away_score":117,"periods":[30,32,29,32]}', "Leaders: L. Doncic 41 pts"];
+    const check = (answer) => numbersOfUnnamedPeople(answer, data);
+    assert.deepEqual(check("Jalen Brunson scored 32 points."), ["32"], "the number is in the data, the player is not");
+    assert.deepEqual(check("Luka Doncic scored 41 points."), [], "a surname in the data is enough");
+    assert.deepEqual(check("The Los Angeles Lakers won 138-117."), [], "a team the data names");
+    assert.deepEqual(check("The Lakers beat the Heat by 21."), [], "one-word names are not judged");
+    assert.deepEqual(check("On November 10 the Lakers scored 138."), [], "a date is not a person");
+    assert.deepEqual(check("Jalen Brunson played well. The Lakers scored 138."), [], "only numbers in the same sentence");
+    assert.deepEqual(check("Jalen Brunson had 32 and Josh Hart had 30."), ["32", "30"]);
+    assert.deepEqual(check("Jalen Brunson scored 5 in the 4th."), [], "the numbers the number check skips are skipped here");
+    assert.deepEqual(numbersOfUnnamedPeople("Jalen Brunson scored 32 points.", []), [], "no data, nothing to compare with");
+  });
+
   /** The tool returns 138-117; the model's answer is given per test. */
   const grounded = (answer, groundingCheck, extra = {}) => {
     const { engine } = makeEngine({ answer: () => answer });
@@ -374,6 +388,14 @@ describe("number grounding (opt-in, no model call)", () => {
     assert.equal(r.outcome, "withheld");
     assert.match(r.text, /could not verify/);
     assert.equal(r.trace.numberGrounding.draft, "Lakers won 112-108.");
+  });
+
+  it("a number that is in the data is still unsupported when it is said of a person the data never names", async () => {
+    // 117 is the Heat's score. The data names no player, and the question naming one is not evidence about him.
+    const { engine } = makeEngine({ answer: () => "Austin Reaves scored 117 points." });
+    engine.config.groundingCheck = "flag";
+    const r = await engine.runDetailed("How many points did Austin Reaves score?", caller);
+    assert.deepEqual(r.trace.numberGrounding, { action: "flag", unsupported: ["117"] });
   });
 
   it("withhold catches an invented margin written as words", async () => {
