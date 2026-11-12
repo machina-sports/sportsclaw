@@ -297,6 +297,8 @@ export interface InvokeModelRoleArgs<TInput = unknown> {
   media?: MediaAttachment[];
   /** Output limit and sampling for this call. Unset fields are left to the server's defaults. */
   sampling?: { maxOutputTokens?: number; temperature?: number; topP?: number };
+  /** A system prompt for a chat-shaped route, sent before the input. The mock route ignores it. */
+  system?: string;
 }
 
 /**
@@ -401,12 +403,14 @@ async function runChatRoute(
   abortSignal?: AbortSignal,
   media?: MediaAttachment[],
   sampling?: InvokeModelRoleArgs["sampling"],
+  system?: string,
 ): Promise<string> {
   const model = resolveModel("openai", envelope.model, endpoint);
   const limits = {
     ...(sampling?.maxOutputTokens !== undefined ? { maxOutputTokens: sampling.maxOutputTokens } : {}),
     ...(sampling?.temperature !== undefined ? { temperature: sampling.temperature } : {}),
     ...(sampling?.topP !== undefined ? { topP: sampling.topP } : {}),
+    ...(system !== undefined ? { system } : {}),
   };
   if (!media || media.length === 0) {
     const res = await generate(ctx, { model, prompt: toPrompt(envelope.input), ...limits, abortSignal });
@@ -436,6 +440,9 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
 ): Promise<InferenceResult<TOutput>> {
   const { role, input, source, config } = args;
 
+  if (args.system !== undefined && (typeof args.system !== "string" || args.system === "")) {
+    throw new Error("A role call's system prompt must be non-empty text.");
+  }
   if (!isModelRole(role)) {
     throw new Error(
       `Unknown model role ${JSON.stringify(role)} — must be one of ${MODEL_ROLES.join(", ")}.`,
@@ -511,6 +518,7 @@ export async function invokeModelRole<TInput = unknown, TOutput = unknown>(
           args.abortSignal,
           media,
           args.sampling,
+          args.system,
         );
         break;
       }
