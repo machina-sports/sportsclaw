@@ -72,6 +72,19 @@ endpoint is on loopback, fails before any request when the variable is unset, an
 to another key. A `nim` or `api` route can also carry `requestBody`: extra request fields for
 server options a model needs, such as vLLM's `top_k` or `chat_template_kwargs`.
 
+## The chat model as the `brain` role
+
+An embedded engine can take its chat model from the same block. When `inference.roles.brain` is set in the engine config, that route replaces `provider` and `model` for every model call the engine makes:
+
+```ts
+new sportsclawEngine({
+  inference: { roles: { brain: { route: "api", model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    baseUrl: "https://integrate.api.nvidia.com/v1", credentialEnv: "NVIDIA_API_KEY" } } },
+});
+```
+
+Changing the chat model between a server you run (`nim`) and a hosted service (`api`) is then an edit to that entry. The `mock` route cannot chat and is refused. Other roles in the block are for `invokeModelRole` and are not used by a chat run.
+
 ## Optional: OpenShell
 
 Add `--openshell --image <oci-ref>` (and, for brev, an `--endpoint` the sandbox can reach) to also

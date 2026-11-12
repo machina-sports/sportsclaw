@@ -101,6 +101,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeInput, logSecurityEvent, INJECTION_REFUSAL_TEXT } from "./security.js";
 import { validateHostContext, formatHostContext } from "./host-context.js";
 import { unsupportedNumbers, dateSources, timeSources } from "./number-grounding.js";
+import { resolveNativeRoleEndpoint, validateModelRoleRouterConfig } from "./inference/model-role-router.js";
 import { dataAnswer } from "./data-answer.js";
 import { validateMedia, registerMedia, releaseMedia } from "./media-input.js";
 import {
@@ -1273,12 +1274,22 @@ export class sportsclawEngine {
       ? config.taskBrief
       : process.env.SPORTSCLAW_TASK_BRIEF_ENABLED === "true";
     this.config = merged;
-    this.mainModel = resolveModel(
-      this.config.provider,
-      this.config.model,
-      undefined,
-      resolveAuthForModel(),
-    );
+    const brain = this.config.inference?.roles?.brain;
+    if (brain) {
+      // The brain role is the chat model: its route replaces provider and model.
+      const check = validateModelRoleRouterConfig({ roles: { brain } });
+      if (!check.ok) throw new Error(`Invalid inference.roles.brain: ${check.error}`);
+      if (brain.route === "mock") throw new Error('inference.roles.brain cannot chat on route "mock": use nim, api or openshell.');
+      this.config.model = brain.model;
+      this.mainModel = resolveModel("openai", brain.model, resolveNativeRoleEndpoint(brain));
+    } else {
+      this.mainModel = resolveModel(
+        this.config.provider,
+        this.config.model,
+        undefined,
+        resolveAuthForModel(),
+      );
+    }
     this.mainModelId = readModelId(this.mainModel);
     this.registry = new ToolRegistry();
     this.registry.configureCaching({
