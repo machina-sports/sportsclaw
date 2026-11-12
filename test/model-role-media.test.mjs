@@ -91,3 +91,37 @@ describe("a model role that carries video and audio", () => {
     assert.equal(validateModelRoleRouterConfig(eyes("http://127.0.0.1:1/v1", { requestBody: SERVER_OPTIONS })).ok, true);
   });
 });
+
+describe("a model role call with a system prompt", () => {
+  const writer = (baseUrl) => ({ roles: { writer: { route: "nim", model: "basketball", baseUrl } } });
+
+  it("sends it as the system message before the prompt", async () => {
+    await withModel(async (baseUrl, bodies) => {
+      await invokeModelRole({ role: "writer", source: "benchmark", config: writer(baseUrl), system: "Write one line per beat.", input: "Beat 1: Curry ties it." });
+      assert.deepEqual(bodies[0].messages, [
+        { role: "system", content: "Write one line per beat." },
+        { role: "user", content: "Beat 1: Curry ties it." },
+      ]);
+    });
+  });
+
+  it("sends it before the media message too", async () => {
+    await withModel(async (baseUrl, bodies) => {
+      await invokeModelRole({ role: "eyes", source: "benchmark", config: eyes(baseUrl), system: "Answer in one sentence.", input: "What happened?", media: [VIDEO] });
+      assert.equal(bodies[0].messages.length, 2);
+      assert.deepEqual(bodies[0].messages[0], { role: "system", content: "Answer in one sentence." });
+      assert.equal(bodies[0].messages[1].role, "user");
+    });
+  });
+
+  it("sends no system message when none is given", async () => {
+    await withModel(async (baseUrl, bodies) => {
+      await invokeModelRole({ role: "writer", source: "benchmark", config: writer(baseUrl), input: "x" });
+      assert.deepEqual(bodies[0].messages.map((m) => m.role), ["user"]);
+    });
+  });
+
+  it("refuses a system prompt that is not text", async () => {
+    await assert.rejects(invokeModelRole({ role: "writer", source: "benchmark", config: { roles: { writer: { route: "mock", model: "m" } } }, system: 5, input: "x" }), /system/);
+  });
+});
