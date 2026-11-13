@@ -789,12 +789,12 @@ export interface SportToolDef {
 // ---------------------------------------------------------------------------
 
 /** An image attached to a user message (inbound vision). */
-/** A video or audio clip for one run (RunOptions.media). */
+/** A video clip, an audio clip or a still image for one run (RunOptions.media). */
 export interface MediaAttachment {
-  kind: "video" | "audio";
+  kind: "video" | "audio" | "image";
   /** Base64-encoded data (without data URI prefix). */
   data: string;
-  /** e.g. "video/mp4", "audio/wav"; must match kind. */
+  /** e.g. "video/mp4", "audio/wav", "image/jpeg"; must match kind. */
   mimeType: string;
 }
 
