@@ -15,8 +15,8 @@
  * `DECISION_LIMITS` applies unchanged, although this service accepts more (1,000
  * questions, 255 score levels): a request that is valid for one provider is valid for both.
  *
- * Images (`request.media`) are sent as image blocks after the state. Audio, video and PDF
- * input are part of that API and not of this client. The wire was first run against the
+ * Images and one video (`request.media`) are sent as blocks after the state, in the order
+ * given. Audio and PDF input are part of that API and not of this client. The wire was first run against the
  * live service on 12 Nov 2026 (text and one image).
  */
 
@@ -91,7 +91,7 @@ const GEMINI_WIRE: DecisionWire = {
     if (snapshot.media.length === 0) return { model, input, questions };
     const blocks = [
       { type: "text", text: input },
-      ...snapshot.media.map((image) => ({ type: "image", data: image.data, mime_type: image.mimeType })),
+      ...snapshot.media.map((item) => ({ type: item.kind, data: item.data, mime_type: item.mimeType })),
     ];
     return { model, input: blocks, questions };
   },
