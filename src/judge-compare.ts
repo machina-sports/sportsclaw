@@ -11,12 +11,15 @@
  *   {"id": "...", "state": <string or JSON>, "questions": {<id>: <question>},
  *    "expected": {<id>: <option id | level number | true/false>}}
  *
- * `expected` is optional, per question. The report carries ids, picks and numbers only:
- * never a case's state or a question's wording.
+ * `expected` is optional, per question. `"images": ["frame.png"]` attaches image files
+ * (paths relative to the case file); a judge that cannot read images refuses that case.
+ * The report carries ids, picks and numbers only: never a case's state, images or a
+ * question's wording.
  */
 
 import type {
   DecisionAnswer,
+  DecisionImage,
   DecisionProvider,
   DecisionProviderName,
   DecisionQuestion,
@@ -36,6 +39,10 @@ export interface JudgeCase {
   state: DecisionState;
   questions: Record<string, DecisionQuestion>;
   expected?: Record<string, JudgeExpected>;
+  /** Image files the questions are about (png, jpg, jpeg, webp), relative to the case file. */
+  images?: string[];
+  /** Those images, loaded. Set by the command; a judge that cannot read images refuses the case. */
+  media?: DecisionImage[];
 }
 
 /** What one judge answered: the pick, and the numbers behind it. */
@@ -48,6 +55,8 @@ export interface JudgeCompareReport {
   judges: { provider: DecisionProviderName; model: string }[];
   cases: {
     id: string;
+    /** Images sent with the case, when it has any. */
+    images?: number;
     /** Per judge, keyed by model. */
     calls: Record<string, { ok: boolean; reasonCode: string; latencyMs: number }>;
     questions: Record<
@@ -84,6 +93,14 @@ export interface JudgeCompareReport {
 const isRow = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const IMAGE_FILE = /\.(png|jpe?g|webp)$/i;
+
+/** The image type a case's file path names. */
+export function judgeImageType(path: string): DecisionImage["mimeType"] {
+  const ext = path.toLowerCase().split(".").pop();
+  return ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+}
+
 /** Whether `expected` is an answer the question could give. The providers check the question itself. */
 function expectedFits(question: unknown, expected: unknown): boolean {
   if (!isRow(question)) return false;
@@ -113,7 +130,7 @@ export function parseJudgeCases(text: string): JudgeCase[] {
       fail("not valid JSON");
     }
     if (!isRow(row)) return fail("a case must be a JSON object");
-    const { id, state, questions, expected } = row;
+    const { id, state, questions, expected, images } = row;
     if (typeof id !== "string" || id === "") return fail('a case needs an "id"');
     if (seen.has(id)) return fail(`case id "${id}" is already used`);
     if (state === undefined) return fail('a case needs a "state"');
@@ -126,8 +143,11 @@ export function parseJudgeCases(text: string): JudgeCase[] {
         }
       }
     }
+    if (images !== undefined && !(Array.isArray(images) && images.every((path) => typeof path === "string" && IMAGE_FILE.test(path)))) {
+      return fail('"images" must be a list of png, jpg, jpeg or webp file paths');
+    }
     seen.add(id);
-    cases.push({ id, state, questions, ...(expected ? { expected } : {}) } as JudgeCase);
+    cases.push({ id, state, questions, ...(expected ? { expected } : {}), ...(images ? { images } : {}) } as JudgeCase);
   });
   return cases;
 }
@@ -219,9 +239,13 @@ export async function runJudgeCompare(
 
   for (const item of cases) {
     const results = await Promise.all(
-      judges.map((judge) => decide({ purpose: "other" }, judge, { state: item.state, questions: item.questions }))
+      judges.map((judge) => decide({ purpose: "other" }, judge, {
+        state: item.state, questions: item.questions, ...(item.media?.length ? { media: item.media } : {}),
+      }))
     );
-    const entry: JudgeCompareReport["cases"][number] = { id: item.id, calls: {}, questions: {} };
+    const entry: JudgeCompareReport["cases"][number] = {
+      id: item.id, ...(item.media?.length ? { images: item.media.length } : {}), calls: {}, questions: {},
+    };
 
     results.forEach((result, index) => {
       const model = models[index];

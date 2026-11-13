@@ -68,8 +68,11 @@ export const DECISION_LIMITS = {
   /** Score levels per question. */
   minScoreLevels: 2,
   maxScoreLevels: 10,
-  /** UTF-8 bytes of the serialized request body. */
+  /** UTF-8 bytes of the serialized request body, not counting images. */
   maxRequestBytes: 128 * 1024,
+  /** Images per request, and their total size once decoded. */
+  maxImages: 4,
+  maxMediaBytes: 5 * 1024 * 1024,
   /** Bytes read from a response before it is refused. */
   maxResponseBytes: 256 * 1024,
   /** A probability distribution may miss 1 by this much. */
@@ -121,10 +124,23 @@ export interface NoulQuestion {
 
 export type DecisionQuestion = ChoiceQuestion | ScoreQuestion | NoulQuestion;
 
-/** One request: one state, one caller-keyed map of mixed questions. */
+/** An image the questions are about, beside the state. Base64, no data: prefix. */
+export interface DecisionImage {
+  kind: "image";
+  data: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+}
+
+/** One request: one state, one caller-keyed map of mixed questions, and optionally images. */
 export interface DecisionRequest {
   state: DecisionState;
   questions: Record<string, DecisionQuestion>;
+  /**
+   * Images every question may refer to. Only a provider that reads images accepts them
+   * (Gemini); another refuses the request as `media_unsupported` rather than answering
+   * without having seen them.
+   */
+  media?: readonly DecisionImage[];
 }
 
 /** Per-call options. Credentials, model and deadline are client config. */
@@ -177,6 +193,8 @@ export type DecisionReasonCode =
   | "invalid_request"
   | "invalid_state"
   | "invalid_questions"
+  | "invalid_media"
+  | "media_unsupported"
   | "request_too_large"
   | "missing_credential"
   | "redirect_refused"
@@ -229,6 +247,8 @@ export interface DecisionReceipt {
   /** Counts describe the validated snapshot; a request refused earlier reports 0. */
   questionCount: number;
   kindCounts: DecisionKindCounts;
+  /** Images sent with the request, when there were any. */
+  images?: number;
   usage?: { inputTokens: number; outputTokens: number };
 }
 
@@ -340,8 +360,8 @@ export interface DecisionWire {
   provider: DecisionProviderName;
   /** Fixed HTTPS endpoint. */
   endpoint: string;
-  /** The NAME of the environment variable that holds the key. */
-  credentialEnv: string;
+  /** The NAMES of the environment variables that may hold the key; the first one set is used. */
+  credentialEnv: readonly string[];
   headers(apiKey: string): Record<string, string>;
   /** The request body for a snapshot. Throws a `DecisionError` for a request this service cannot take. */
   body(model: string, snapshot: RequestSnapshot): unknown;
@@ -354,9 +374,13 @@ export interface DecisionWire {
 const JEV_WIRE: DecisionWire = {
   provider: "jev",
   endpoint: JEV_ENDPOINT,
-  credentialEnv: "TYPESAFE_API_KEY",
+  credentialEnv: ["TYPESAFE_API_KEY"],
   headers: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
-  body: (model, snapshot) => ({ model, state: snapshot.state, questions: snapshot.payload }),
+  body(model, snapshot) {
+    // Jev reads text. Answering without the image would be answering a different question.
+    if (snapshot.media.length > 0) throw new DecisionError("media_unsupported");
+    return { model, state: snapshot.state, questions: snapshot.payload };
+  },
   read(text, snapshot, requestedModel) {
     const parsed = parseResponseRecord(text);
     if (typeof parsed.model !== "string") throw new DecisionError("malformed_response");
@@ -406,6 +430,7 @@ export async function runDecision(
   const startedAt = Date.now();
   let questionCount = 0;
   let kindCounts: DecisionKindCounts = { choice: 0, score: 0, noul: 0 };
+  let images = 0;
 
   const refuse = (status: "blocked" | "failed", reasonCode: DecisionReasonCode): DecisionFailure => ({
     ok: false,
@@ -419,6 +444,7 @@ export async function runDecision(
       latencyMs: Date.now() - startedAt,
       questionCount,
       kindCounts: { ...kindCounts },
+      ...(images > 0 ? { images } : {}),
       usage: undefined,
     },
   });
@@ -439,6 +465,7 @@ export async function runDecision(
   }
   questionCount = snapshot.questions.length;
   kindCounts = snapshot.kindCounts;
+  images = snapshot.media.length;
 
   let body: string;
   try {
@@ -446,12 +473,15 @@ export async function runDecision(
   } catch (err) {
     return refuse("blocked", err instanceof DecisionError ? err.reasonCode : "invalid_request");
   }
-  if (Buffer.byteLength(body, "utf8") > DECISION_LIMITS.maxRequestBytes) {
+  // Images have their own limit (checked in the snapshot); the text of the request keeps this one.
+  const mediaChars = snapshot.media.reduce((sum, image) => sum + image.data.length, 0);
+  if (Buffer.byteLength(body, "utf8") - mediaChars > DECISION_LIMITS.maxRequestBytes) {
     return refuse("blocked", "request_too_large");
   }
 
   // Resolved at call time and never persisted, logged or put in a receipt.
-  const apiKey = (settings.env ?? process.env)[wire.credentialEnv]?.trim();
+  const env = settings.env ?? process.env;
+  const apiKey = wire.credentialEnv.map((name) => env[name]?.trim()).find((key) => key);
   if (!apiKey) return refuse("blocked", "missing_credential");
 
   const controller = new AbortController();
@@ -493,6 +523,7 @@ export async function runDecision(
         latencyMs: Date.now() - startedAt,
         questionCount,
         kindCounts: { ...kindCounts },
+        ...(images > 0 ? { images } : {}),
         usage: validated.usage,
       },
     };
@@ -542,6 +573,7 @@ export interface RequestSnapshot {
   questions: QuestionSnapshot[];
   payload: Record<string, unknown>;
   kindCounts: DecisionKindCounts;
+  media: { data: string; mimeType: string }[];
 }
 
 /** @internal */
@@ -566,11 +598,31 @@ function snapshotRequest(request: DecisionRequest): RequestSnapshot {
   // endpoint, credentials and deadlines are client config and cannot be
   // smuggled in beside them.
   for (const key of Object.keys(request)) {
-    if (key !== "state" && key !== "questions") throw new DecisionError("invalid_request");
+    if (key !== "state" && key !== "questions" && key !== "media") throw new DecisionError("invalid_request");
   }
   const state = snapshotState((request as Record<string, unknown>).state);
   const questions = snapshotQuestions((request as Record<string, unknown>).questions);
-  return { state, ...questions };
+  const media = snapshotMedia((request as Record<string, unknown>).media);
+  return { state, ...questions, media };
+}
+
+const IMAGE_TYPES: ReadonlySet<unknown> = new Set(["image/png", "image/jpeg", "image/webp"]);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function snapshotMedia(raw: unknown): RequestSnapshot["media"] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > DECISION_LIMITS.maxImages) throw new DecisionError("invalid_media");
+  let bytes = 0;
+  return raw.map((item: unknown) => {
+    if (!isRecord(item) || item.kind !== "image" || !IMAGE_TYPES.has(item.mimeType)) throw new DecisionError("invalid_media");
+    const { data } = item;
+    if (typeof data !== "string" || data.length === 0 || data.length % 4 !== 0 || !BASE64.test(data)) {
+      throw new DecisionError("invalid_media");
+    }
+    bytes += (data.length / 4) * 3;
+    if (bytes > DECISION_LIMITS.maxMediaBytes) throw new DecisionError("request_too_large");
+    return { data, mimeType: item.mimeType as string };
+  });
 }
 
 function snapshotState(raw: unknown): DecisionState {
@@ -641,7 +693,7 @@ function cloneJson(
   }
 }
 
-function snapshotQuestions(raw: unknown): Omit<RequestSnapshot, "state"> {
+function snapshotQuestions(raw: unknown): Omit<RequestSnapshot, "state" | "media"> {
   if (!isRecord(raw)) throw new DecisionError("invalid_questions");
   const ids = Object.keys(raw);
   if (ids.length < DECISION_LIMITS.minQuestions || ids.length > DECISION_LIMITS.maxQuestions) {

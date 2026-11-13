@@ -9,6 +9,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { DECISION_LIMITS } from "../dist/decision-client.js";
 import {
   DEFAULT_GEMINI_DECISION_MODEL,
   GEMINI_DECISIONS_ENDPOINT,
@@ -267,4 +268,69 @@ describe("gemini decision refusals", () => {
       assert.equal(result.reasonCode, reasonCode);
     });
   }
+});
+
+describe("gemini decision with images", () => {
+  const PNG = Buffer.from("89504e470d0a1a0a-synthetic", "utf8").toString("base64");
+  const image = (extra = {}) => ({ kind: "image", data: PNG, mimeType: "image/png", ...extra });
+
+  it("sends the state as a text block followed by the images", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [image(), image({ mimeType: "image/jpeg" })] });
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls[0].body.input, [
+      { type: "text", text: STATE },
+      { type: "image", data: PNG, mime_type: "image/png" },
+      { type: "image", data: PNG, mime_type: "image/jpeg" },
+    ]);
+    assert.equal(result.receipt.images, 2);
+  });
+
+  it("keeps the plain string input when there are no images", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [] });
+    assert.equal(calls[0].body.input, STATE);
+    assert.equal(result.receipt.images, undefined);
+  });
+
+  it("accepts an image far larger than the text request limit", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const big = Buffer.alloc(600 * 1024, 7).toString("base64");
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [image({ data: big })] });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+  });
+
+  it("refuses bad media before reading the key", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const tooBig = Buffer.alloc(DECISION_LIMITS.maxMediaBytes + 1, 7).toString("base64");
+    for (const [media, reason] of [
+      [[image({ kind: "video" })], "invalid_media"],
+      [[image({ mimeType: "image/gif" })], "invalid_media"],
+      [[image({ data: "not base64!" })], "invalid_media"],
+      [[image({ data: "" })], "invalid_media"],
+      ["x", "invalid_media"],
+      [Array.from({ length: DECISION_LIMITS.maxImages + 1 }, () => image()), "invalid_media"],
+      [[image({ data: tooBig })], "request_too_large"],
+    ]) {
+      const result = await client(transport, { env: trapEnv() }).decide({ state: STATE, questions: mixedQuestions(), media });
+      assert.equal(result.reasonCode, reason);
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe("gemini decision key", () => {
+  it("falls back to the name sportsclaw saves a Google key under", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const result = await client(transport, { env: { GOOGLE_GENERATIVE_AI_API_KEY: "saved-key" } }).decide({ state: STATE, questions: mixedQuestions() });
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].init.headers["x-goog-api-key"], "saved-key");
+  });
+
+  it("prefers GEMINI_API_KEY when both are set", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    await client(transport, { env: { GEMINI_API_KEY: "first", GOOGLE_GENERATIVE_AI_API_KEY: "second" } }).decide({ state: STATE, questions: mixedQuestions() });
+    assert.equal(calls[0].init.headers["x-goog-api-key"], "first");
+  });
 });

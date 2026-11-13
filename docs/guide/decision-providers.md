@@ -5,7 +5,7 @@ A decision provider answers bounded questions about a supplied state — pick on
 | Provider | Client | Default model | Key read from |
 | --- | --- | --- | --- |
 | TypeSafe Jev | `JevDecisionClient` | `jev-1.13.0` | `TYPESAFE_API_KEY` |
-| Google Gemini | `GeminiDecisionClient` | `gemini-decision-1` | `GEMINI_API_KEY` |
+| Google Gemini | `GeminiDecisionClient` | `gemini-decision-1` | `GEMINI_API_KEY`, else `GOOGLE_GENERATIVE_AI_API_KEY` (where SportsClaw saves a Google key) |
 
 Both implement `DecisionProvider`, take the request described in [Jev decision client](./decision-client.md) and return the same `DecisionResult`. Consent, limits, the deadline, the answer checks and the receipts are one shared implementation; a provider supplies only its wire format.
 
@@ -50,9 +50,9 @@ The built-in Jev consumers — the [evidence verifier](./jev-evidence-verifier.m
 - **True/false answers.** The service returns a confidence with the probability; the shared answer carries the probability only, as for Jev.
 - **Model.** The service does not report which model answered: `result.model` is the model asked for and the receipt's `model` stays unset.
 - **Blocked input.** Input the service's safety filters block is the reason code `content_blocked`, with no answers and none of the provider's message.
-- **Media.** The service also accepts images, audio, video and PDFs. This client sends text only.
+- **Images.** `request.media` takes up to 4 images (PNG, JPEG, WebP; 5 MB in total, base64), sent after the state so every question can refer to them. Jev reads text only and refuses such a request as `media_unsupported` rather than answering without the image. The service also accepts audio, video and PDFs; this client does not send them.
 
-The Gemini wire format follows Google's published guide and is covered by tests against responses of that shape. It has not been run against the live service from this repository.
+The Gemini wire format follows Google's published guide and was run against the live service on 12 November 2026: ten text cases and three image cases, all answered.
 
 ## Comparing providers
 
@@ -65,7 +65,7 @@ sportsclaw judge-compare cases.jsonl --cloud-allowed --judges jev:jev-1.14.0,jev
 
 `--cloud-allowed` is required: the command sends each case's state to the judges' hosted services. A judge whose key is not set is reported as `missing_credential` and nothing is sent to it.
 
-A case file is JSONL, one case per line. `expected` is optional and per question: an option id, a level number, or `true`/`false`.
+A case file is JSONL, one case per line. `expected` is optional and per question: an option id, a level number, or `true`/`false`. `"images": ["frame.png"]` attaches image files, with paths relative to the case file; a judge that cannot read images reports `media_unsupported` for that case.
 
 ```json
 {"id": "final-score", "state": "Falcons 2-1 Rovers, full time.", "questions": {"next": {"type": "choice", "instructions": "Pick the next action", "criteria": {"summarize": "Summarize the result", "clarify": "Ask which game is meant"}}}, "expected": {"next": "summarize"}}
