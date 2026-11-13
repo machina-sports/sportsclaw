@@ -73,6 +73,9 @@ export const DECISION_LIMITS = {
   /** Images per request, and their total size once decoded. */
   maxImages: 4,
   maxMediaBytes: 5 * 1024 * 1024,
+  /** Videos per request, and the size of one once decoded. */
+  maxVideos: 1,
+  maxVideoBytes: 48 * 1024 * 1024,
   /** Bytes read from a response before it is refused. */
   maxResponseBytes: 256 * 1024,
   /** A probability distribution may miss 1 by this much. */
@@ -131,16 +134,25 @@ export interface DecisionImage {
   mimeType: "image/png" | "image/jpeg" | "image/webp";
 }
 
-/** One request: one state, one caller-keyed map of mixed questions, and optionally images. */
+/** A video clip the questions are about. Base64, no data: prefix. */
+export interface DecisionVideo {
+  kind: "video";
+  data: string;
+  mimeType: "video/mp4" | "video/webm" | "video/quicktime";
+}
+
+export type DecisionMedia = DecisionImage | DecisionVideo;
+
+/** One request: one state, one caller-keyed map of mixed questions, and optionally media. */
 export interface DecisionRequest {
   state: DecisionState;
   questions: Record<string, DecisionQuestion>;
   /**
-   * Images every question may refer to. Only a provider that reads images accepts them
-   * (Gemini); another refuses the request as `media_unsupported` rather than answering
-   * without having seen them.
+   * Images and a video every question may refer to. Only a provider that reads them
+   * accepts them (Gemini); another refuses the request as `media_unsupported` rather
+   * than answering without having seen them.
    */
-  media?: readonly DecisionImage[];
+  media?: readonly DecisionMedia[];
 }
 
 /** Per-call options. Credentials, model and deadline are client config. */
@@ -247,8 +259,9 @@ export interface DecisionReceipt {
   /** Counts describe the validated snapshot; a request refused earlier reports 0. */
   questionCount: number;
   kindCounts: DecisionKindCounts;
-  /** Images sent with the request, when there were any. */
+  /** Images and videos sent with the request, when there were any. */
   images?: number;
+  videos?: number;
   usage?: { inputTokens: number; outputTokens: number };
 }
 
@@ -431,6 +444,7 @@ export async function runDecision(
   let questionCount = 0;
   let kindCounts: DecisionKindCounts = { choice: 0, score: 0, noul: 0 };
   let images = 0;
+  let videos = 0;
 
   const refuse = (status: "blocked" | "failed", reasonCode: DecisionReasonCode): DecisionFailure => ({
     ok: false,
@@ -445,6 +459,7 @@ export async function runDecision(
       questionCount,
       kindCounts: { ...kindCounts },
       ...(images > 0 ? { images } : {}),
+      ...(videos > 0 ? { videos } : {}),
       usage: undefined,
     },
   });
@@ -465,7 +480,8 @@ export async function runDecision(
   }
   questionCount = snapshot.questions.length;
   kindCounts = snapshot.kindCounts;
-  images = snapshot.media.length;
+  images = snapshot.media.filter((m) => m.kind === "image").length;
+  videos = snapshot.media.length - images;
 
   let body: string;
   try {
@@ -524,6 +540,7 @@ export async function runDecision(
         questionCount,
         kindCounts: { ...kindCounts },
         ...(images > 0 ? { images } : {}),
+      ...(videos > 0 ? { videos } : {}),
         usage: validated.usage,
       },
     };
@@ -573,7 +590,7 @@ export interface RequestSnapshot {
   questions: QuestionSnapshot[];
   payload: Record<string, unknown>;
   kindCounts: DecisionKindCounts;
-  media: { data: string; mimeType: string }[];
+  media: { kind: "image" | "video"; data: string; mimeType: string }[];
 }
 
 /** @internal */
@@ -607,21 +624,30 @@ function snapshotRequest(request: DecisionRequest): RequestSnapshot {
 }
 
 const IMAGE_TYPES: ReadonlySet<unknown> = new Set(["image/png", "image/jpeg", "image/webp"]);
+const VIDEO_TYPES: ReadonlySet<unknown> = new Set(["video/mp4", "video/webm", "video/quicktime"]);
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function snapshotMedia(raw: unknown): RequestSnapshot["media"] {
   if (raw === undefined) return [];
-  if (!Array.isArray(raw) || raw.length > DECISION_LIMITS.maxImages) throw new DecisionError("invalid_media");
-  let bytes = 0;
+  if (!Array.isArray(raw) || raw.length > DECISION_LIMITS.maxImages + DECISION_LIMITS.maxVideos) throw new DecisionError("invalid_media");
+  let imageBytes = 0;
+  let images = 0;
+  let videos = 0;
   return raw.map((item: unknown) => {
-    if (!isRecord(item) || item.kind !== "image" || !IMAGE_TYPES.has(item.mimeType)) throw new DecisionError("invalid_media");
-    const { data } = item;
-    if (typeof data !== "string" || data.length === 0 || data.length % 4 !== 0 || !BASE64.test(data)) {
+    if (!isRecord(item)) throw new DecisionError("invalid_media");
+    const video = item.kind === "video";
+    if (video ? !VIDEO_TYPES.has(item.mimeType) : item.kind !== "image" || !IMAGE_TYPES.has(item.mimeType)) {
       throw new DecisionError("invalid_media");
     }
-    bytes += (data.length / 4) * 3;
-    if (bytes > DECISION_LIMITS.maxMediaBytes) throw new DecisionError("request_too_large");
-    return { data, mimeType: item.mimeType as string };
+    if (video ? ++videos > DECISION_LIMITS.maxVideos : ++images > DECISION_LIMITS.maxImages) throw new DecisionError("invalid_media");
+    const { data } = item;
+    if (typeof data !== "string" || data.length === 0 || data.length % 4 !== 0) throw new DecisionError("invalid_media");
+    const bytes = (data.length / 4) * 3;
+    if (video ? bytes > DECISION_LIMITS.maxVideoBytes : (imageBytes += bytes) > DECISION_LIMITS.maxMediaBytes) {
+      throw new DecisionError("request_too_large");
+    }
+    if (!BASE64.test(data)) throw new DecisionError("invalid_media");
+    return { kind: video ? "video" as const : "image" as const, data, mimeType: item.mimeType as string };
   });
 }
 

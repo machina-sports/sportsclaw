@@ -334,3 +334,46 @@ describe("gemini decision key", () => {
     assert.equal(calls[0].init.headers["x-goog-api-key"], "first");
   });
 });
+
+describe("gemini decision with video", () => {
+  const MP4 = Buffer.from("synthetic-mp4-bytes!").toString("base64");
+  const PNG = Buffer.from("synthetic-png").toString("base64").padEnd(20, "=").slice(0, 20);
+  const video = (extra = {}) => ({ kind: "video", data: MP4, mimeType: "video/mp4", ...extra });
+
+  it("sends a video block after the state, in the order given with images", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const image = { kind: "image", data: Buffer.from("png!").toString("base64"), mimeType: "image/png" };
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [video(), image] });
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls[0].body.input, [
+      { type: "text", text: STATE },
+      { type: "video", data: MP4, mime_type: "video/mp4" },
+      { type: "image", data: image.data, mime_type: "image/png" },
+    ]);
+    assert.equal(result.receipt.videos, 1);
+    assert.equal(result.receipt.images, 1);
+  });
+
+  it("accepts a clip of several megabytes", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const clip = Buffer.alloc(20 * 1024 * 1024, 7).toString("base64");
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [video({ data: clip })] });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+  });
+
+  it("refuses a second video, another container, or a clip over the limit, before reading the key", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(geminiBody()));
+    const tooBig = Buffer.alloc(DECISION_LIMITS.maxVideoBytes + 3, 7).toString("base64");
+    for (const [media, reason] of [
+      [[video(), video()], "invalid_media"],
+      [[video({ mimeType: "video/x-msvideo" })], "invalid_media"],
+      [[video({ mimeType: "image/png" })], "invalid_media"],
+      [[video({ data: tooBig })], "request_too_large"],
+    ]) {
+      const result = await client(transport, { env: trapEnv() }).decide({ state: STATE, questions: mixedQuestions(), media });
+      assert.equal(result.reasonCode, reason);
+    }
+    assert.equal(calls.length, 0);
+  });
+});

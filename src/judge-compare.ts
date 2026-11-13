@@ -11,15 +11,15 @@
  *   {"id": "...", "state": <string or JSON>, "questions": {<id>: <question>},
  *    "expected": {<id>: <option id | level number | true/false>}}
  *
- * `expected` is optional, per question. `"images": ["frame.png"]` attaches image files
- * (paths relative to the case file); a judge that cannot read images refuses that case.
+ * `expected` is optional, per question. `"images": ["frame.png"]` and `"videos": ["clip.mp4"]`
+ * attach files (paths relative to the case file); a judge that cannot read them refuses that case.
  * The report carries ids, picks and numbers only: never a case's state, images or a
  * question's wording.
  */
 
 import type {
   DecisionAnswer,
-  DecisionImage,
+  DecisionMedia,
   DecisionProvider,
   DecisionProviderName,
   DecisionQuestion,
@@ -41,8 +41,10 @@ export interface JudgeCase {
   expected?: Record<string, JudgeExpected>;
   /** Image files the questions are about (png, jpg, jpeg, webp), relative to the case file. */
   images?: string[];
-  /** Those images, loaded. Set by the command; a judge that cannot read images refuses the case. */
-  media?: DecisionImage[];
+  /** Video files the questions are about (mp4, webm, mov), relative to the case file. */
+  videos?: string[];
+  /** Those files, loaded. Set by the command; a judge that cannot read media refuses the case. */
+  media?: DecisionMedia[];
 }
 
 /** What one judge answered: the pick, and the numbers behind it. */
@@ -55,8 +57,9 @@ export interface JudgeCompareReport {
   judges: { provider: DecisionProviderName; model: string }[];
   cases: {
     id: string;
-    /** Images sent with the case, when it has any. */
+    /** Images and videos sent with the case, when it has any. */
     images?: number;
+    videos?: number;
     /** Per judge, keyed by model. */
     calls: Record<string, { ok: boolean; reasonCode: string; latencyMs: number }>;
     questions: Record<
@@ -94,11 +97,15 @@ const isRow = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const IMAGE_FILE = /\.(png|jpe?g|webp)$/i;
+const VIDEO_FILE = /\.(mp4|webm|mov)$/i;
 
-/** The image type a case's file path names. */
-export function judgeImageType(path: string): DecisionImage["mimeType"] {
+/** A case's image or video file as media for a request: `read` returns the file's bytes as base64. */
+export function judgeMedia(path: string, read: (path: string) => string): DecisionMedia {
   const ext = path.toLowerCase().split(".").pop();
-  return ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+  if (VIDEO_FILE.test(path)) {
+    return { kind: "video", data: read(path), mimeType: ext === "webm" ? "video/webm" : ext === "mov" ? "video/quicktime" : "video/mp4" };
+  }
+  return { kind: "image", data: read(path), mimeType: ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg" };
 }
 
 /** Whether `expected` is an answer the question could give. The providers check the question itself. */
@@ -130,7 +137,7 @@ export function parseJudgeCases(text: string): JudgeCase[] {
       fail("not valid JSON");
     }
     if (!isRow(row)) return fail("a case must be a JSON object");
-    const { id, state, questions, expected, images } = row;
+    const { id, state, questions, expected, images, videos } = row;
     if (typeof id !== "string" || id === "") return fail('a case needs an "id"');
     if (seen.has(id)) return fail(`case id "${id}" is already used`);
     if (state === undefined) return fail('a case needs a "state"');
@@ -146,8 +153,11 @@ export function parseJudgeCases(text: string): JudgeCase[] {
     if (images !== undefined && !(Array.isArray(images) && images.every((path) => typeof path === "string" && IMAGE_FILE.test(path)))) {
       return fail('"images" must be a list of png, jpg, jpeg or webp file paths');
     }
+    if (videos !== undefined && !(Array.isArray(videos) && videos.every((path) => typeof path === "string" && VIDEO_FILE.test(path)))) {
+      return fail('"videos" must be a list of mp4, webm or mov file paths');
+    }
     seen.add(id);
-    cases.push({ id, state, questions, ...(expected ? { expected } : {}), ...(images ? { images } : {}) } as JudgeCase);
+    cases.push({ id, state, questions, ...(expected ? { expected } : {}), ...(images ? { images } : {}), ...(videos ? { videos } : {}) } as JudgeCase);
   });
   return cases;
 }
@@ -243,8 +253,10 @@ export async function runJudgeCompare(
         state: item.state, questions: item.questions, ...(item.media?.length ? { media: item.media } : {}),
       }))
     );
+    const videoCount = (item.media ?? []).filter((m) => m.kind === "video").length;
+    const imageCount = (item.media?.length ?? 0) - videoCount;
     const entry: JudgeCompareReport["cases"][number] = {
-      id: item.id, ...(item.media?.length ? { images: item.media.length } : {}), calls: {}, questions: {},
+      id: item.id, ...(imageCount ? { images: imageCount } : {}), ...(videoCount ? { videos: videoCount } : {}), calls: {}, questions: {},
     };
 
     results.forEach((result, index) => {

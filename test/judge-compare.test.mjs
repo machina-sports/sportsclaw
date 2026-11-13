@@ -107,6 +107,23 @@ describe("cases with images", () => {
   });
 });
 
+describe("cases with a video", () => {
+  it("keeps the video path a case names, and refuses anything else", () => {
+    assert.deepEqual(parseJudgeCases(JSON.stringify({ ...CASE, videos: ["clips/a.mp4"] }))[0].videos, ["clips/a.mp4"]);
+    assert.throws(() => parseJudgeCases(JSON.stringify({ ...CASE, videos: ["a.avi"] })), /line 1.*videos/);
+    assert.throws(() => parseJudgeCases(JSON.stringify({ ...CASE, videos: "a.mp4" })), /line 1.*videos/);
+  });
+
+  it("counts images and videos apart in the report", async () => {
+    const spy = { provider: "gemini", model: "gemini-decision-1", dataPolicy: "cloud_allowed",
+      decide: async () => ({ ok: true, model: "gemini-decision-1", answers: GEMINI_ANSWERS, receipt: receipt() }) };
+    const media = [{ kind: "video", data: "AAAA", mimeType: "video/mp4" }, { kind: "image", data: "AAAA", mimeType: "image/png" }];
+    const report = await runJudgeCompare([{ ...CASE, media }], [spy]);
+    assert.equal(report.cases[0].videos, 1);
+    assert.equal(report.cases[0].images, 1);
+  });
+});
+
 describe("parseJudgeCompareArgs", () => {
   it("defaults to both providers on their default models", () => {
     const args = parseJudgeCompareArgs(["cases.jsonl", "--cloud-allowed"]);

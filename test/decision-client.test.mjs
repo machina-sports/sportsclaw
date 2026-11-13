@@ -956,3 +956,13 @@ describe("images on a provider that cannot read them", () => {
     assert.deepEqual(Object.keys(calls[0].body).sort(), ["model", "questions", "state"]);
   });
 });
+
+describe("video on a provider that cannot watch it", () => {
+  it("refuses the request", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(nativeBody()));
+    const media = [{ kind: "video", data: Buffer.from("mp4!").toString("base64"), mimeType: "video/mp4" }];
+    const result = await client(transport, { env: trapEnv() }).decide({ state: STATE, questions: mixedQuestions(), media });
+    assert.equal(result.reasonCode, "media_unsupported");
+    assert.equal(calls.length, 0);
+  });
+});

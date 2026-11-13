@@ -84,7 +84,7 @@ import {
 import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools, withoutExcludedSkills } from "./bench.js";
 import {
   JUDGE_COMPARE_USAGE,
-  judgeImageType,
+  judgeMedia,
   parseJudgeCases,
   parseJudgeCompareArgs,
   runJudgeCompare,
@@ -549,6 +549,8 @@ export type {
   DecisionDataPolicy,
   DecisionFailure,
   DecisionImage,
+  DecisionMedia,
+  DecisionVideo,
   DecisionJsonValue,
   DecisionKindCounts,
   DecisionProvider,
@@ -2703,10 +2705,8 @@ async function cmdJudgeCompare(argv: string[]): Promise<void> {
     const cases = parseJudgeCases(readFileSync(opts.casesPath, "utf-8"));
     if (cases.length === 0) throw new Error(`${opts.casesPath} has no cases`);
     for (const item of cases) {
-      item.media = (item.images ?? []).map((path) => ({
-        kind: "image", mimeType: judgeImageType(path),
-        data: readFileSync(resolve(dirname(opts.casesPath), path)).toString("base64"),
-      }));
+      item.media = [...(item.videos ?? []), ...(item.images ?? [])].map((path) =>
+        judgeMedia(path, (file) => readFileSync(resolve(dirname(opts.casesPath), file)).toString("base64")));
     }
     const judges = opts.judges.map((judge) =>
       createDecisionProvider({
