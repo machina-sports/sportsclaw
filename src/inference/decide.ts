@@ -37,6 +37,8 @@ function errorCodeOf(reason: DecisionReasonCode): InferenceErrorCode {
     case "invalid_request":
     case "invalid_state":
     case "invalid_questions":
+    case "invalid_media":
+    case "media_unsupported":
     case "request_too_large":
       return "invalid_request";
     case "network_error":

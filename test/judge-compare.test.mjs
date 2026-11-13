@@ -85,6 +85,28 @@ describe("parseJudgeCases", () => {
   });
 });
 
+describe("cases with images", () => {
+  it("keeps the image paths a case names, and refuses anything that is not a list of paths", () => {
+    const parsed = parseJudgeCases(JSON.stringify({ ...CASE, images: ["frames/a.png", "b.jpg"] }));
+    assert.deepEqual(parsed[0].images, ["frames/a.png", "b.jpg"]);
+    assert.throws(() => parseJudgeCases(JSON.stringify({ ...CASE, images: "a.png" })), /line 1.*images/);
+    assert.throws(() => parseJudgeCases(JSON.stringify({ ...CASE, images: ["a.gif"] })), /line 1.*images/);
+  });
+
+  it("sends a case's loaded images with its request and counts them", async () => {
+    const seen = [];
+    const spy = { provider: "gemini", model: "gemini-decision-1", dataPolicy: "cloud_allowed",
+      decide: async (request) => { seen.push(request); return { ok: true, model: "gemini-decision-1", answers: GEMINI_ANSWERS, receipt: receipt() }; } };
+    const media = [{ kind: "image", data: "AAAA", mimeType: "image/png" }];
+    const report = await runJudgeCompare([{ ...CASE, media }], [spy]);
+    assert.deepEqual(seen[0].media, media);
+    assert.equal(report.cases[0].images, 1);
+    const plain = await runJudgeCompare([CASE], [spy]);
+    assert.equal("media" in seen[1], false);
+    assert.equal("images" in plain.cases[0], false);
+  });
+});
+
 describe("parseJudgeCompareArgs", () => {
   it("defaults to both providers on their default models", () => {
     const args = parseJudgeCompareArgs(["cases.jsonl", "--cloud-allowed"]);

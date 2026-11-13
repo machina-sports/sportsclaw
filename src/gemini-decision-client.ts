@@ -15,8 +15,9 @@
  * `DECISION_LIMITS` applies unchanged, although this service accepts more (1,000
  * questions, 255 score levels): a request that is valid for one provider is valid for both.
  *
- * Wire shapes follow Google's published guide. Media input (image, audio, video, PDF) is
- * part of that API and not of this client.
+ * Images (`request.media`) are sent as image blocks after the state. Audio, video and PDF
+ * input are part of that API and not of this client. The wire was first run against the
+ * live service on 12 Nov 2026 (text and one image).
  */
 
 import {
@@ -57,7 +58,7 @@ const BLOCK_CODES: ReadonlySet<unknown> = new Set([
   "content_blocked",
 ]);
 
-/** Trusted, caller-authored configuration. The key is read from `GEMINI_API_KEY` at call time. */
+/** Trusted, caller-authored configuration. The key is read at call time from `GEMINI_API_KEY`, else `GOOGLE_GENERATIVE_AI_API_KEY`. */
 export interface GeminiDecisionClientConfig extends Omit<JevDecisionClientConfig, "model"> {
   /** A `gemini-decision-*` model. Default: `gemini-decision-1`. */
   model?: string;
@@ -66,7 +67,8 @@ export interface GeminiDecisionClientConfig extends Omit<JevDecisionClientConfig
 const GEMINI_WIRE: DecisionWire = {
   provider: "gemini",
   endpoint: GEMINI_DECISIONS_ENDPOINT,
-  credentialEnv: "GEMINI_API_KEY",
+  // GEMINI_API_KEY is Google's own name; the second is where sportsclaw saves a Google key.
+  credentialEnv: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
   headers: (apiKey) => ({ "x-goog-api-key": apiKey }),
   body(model, snapshot) {
     const input = typeof snapshot.state === "string" ? snapshot.state : JSON.stringify(snapshot.state);
@@ -86,7 +88,12 @@ const GEMINI_WIRE: DecisionWire = {
             }
           : question.payload;
     }
-    return { model, input, questions };
+    if (snapshot.media.length === 0) return { model, input, questions };
+    const blocks = [
+      { type: "text", text: input },
+      ...snapshot.media.map((image) => ({ type: "image", data: image.data, mime_type: image.mimeType })),
+    ];
+    return { model, input: blocks, questions };
   },
   refusal(status, text) {
     if (status !== 400) return undefined;

@@ -65,6 +65,7 @@ import { createRequire } from "node:module";
 import { execFile, execFileSync } from "node:child_process";
 import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Transform, type TransformCallback } from "node:stream";
 import { text } from "node:stream/consumers";
@@ -83,6 +84,7 @@ import {
 import { BENCH_USAGE, parseBenchArgs, parseDataset, runBench, unknownTools, withoutExcludedSkills } from "./bench.js";
 import {
   JUDGE_COMPARE_USAGE,
+  judgeImageType,
   parseJudgeCases,
   parseJudgeCompareArgs,
   runJudgeCompare,
@@ -546,6 +548,7 @@ export type {
   DecisionCallOptions,
   DecisionDataPolicy,
   DecisionFailure,
+  DecisionImage,
   DecisionJsonValue,
   DecisionKindCounts,
   DecisionProvider,
@@ -2699,6 +2702,12 @@ async function cmdJudgeCompare(argv: string[]): Promise<void> {
     }
     const cases = parseJudgeCases(readFileSync(opts.casesPath, "utf-8"));
     if (cases.length === 0) throw new Error(`${opts.casesPath} has no cases`);
+    for (const item of cases) {
+      item.media = (item.images ?? []).map((path) => ({
+        kind: "image", mimeType: judgeImageType(path),
+        data: readFileSync(resolve(dirname(opts.casesPath), path)).toString("base64"),
+      }));
+    }
     const judges = opts.judges.map((judge) =>
       createDecisionProvider({
         ...judge,

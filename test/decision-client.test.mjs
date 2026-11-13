@@ -937,3 +937,22 @@ describe("package-root export", () => {
     }
   });
 });
+
+describe("images on a provider that cannot read them", () => {
+  it("refuses the request instead of dropping the image", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(nativeBody()));
+    const media = [{ kind: "image", data: Buffer.from("png").toString("base64"), mimeType: "image/png" }];
+    const result = await client(transport, { env: trapEnv() }).decide({ state: STATE, questions: mixedQuestions(), media });
+    assert.equal(result.ok, false);
+    assert.equal(result.reasonCode, "media_unsupported");
+    assert.equal(result.receipt.status, "blocked");
+    assert.equal(calls.length, 0);
+  });
+
+  it("answers as before when media is an empty list", async () => {
+    const { transport, calls } = recorder(() => jsonResponse(nativeBody()));
+    const result = await client(transport).decide({ state: STATE, questions: mixedQuestions(), media: [] });
+    assert.equal(result.ok, true);
+    assert.deepEqual(Object.keys(calls[0].body).sort(), ["model", "questions", "state"]);
+  });
+});
