@@ -78,3 +78,31 @@ test("media is validated: kind matches mime type, base64 data, size and count li
     "nope",
   ]) assert.throws(() => validateMedia(bad), /media|video|audio|base64/, JSON.stringify(bad).slice(0, 60));
 });
+
+// ---------------------------------------------------------------------------
+// Still images (a crop of one player, a frame of a broadcast)
+// ---------------------------------------------------------------------------
+const IMAGE = { kind: "image", data: Buffer.from("fake jpeg bytes").toString("base64"), mimeType: "image/jpeg" };
+
+test("an image attachment is valid and reaches the server as an image_url part", async () => {
+  assert.deepEqual(validateMedia([IMAGE]), [IMAGE]);
+  await withServer(async (bodies) => {
+    const marker = registerMedia(IMAGE);
+    try {
+      await generateText({
+        model: resolveModel("openai-compatible", "basketball"),
+        messages: [{ role: "user", content: [{ type: "text", text: marker }, { type: "text", text: "What number is on the jersey?" }] }],
+      });
+    } finally {
+      releaseMedia([marker]);
+    }
+    const parts = bodies[0].messages.at(-1).content;
+    assert.deepEqual(parts[0], { type: "image_url", image_url: { url: `data:image/jpeg;base64,${IMAGE.data}` } });
+    assert.equal(parts[1].text, "What number is on the jersey?");
+  });
+});
+
+test("an image must carry an image type", () => {
+  assert.throws(() => validateMedia([{ ...IMAGE, mimeType: "video/mp4" }]), /invalid image mimeType/);
+  assert.throws(() => validateMedia([{ ...IMAGE, kind: "picture" }]), /invalid media kind/);
+});
