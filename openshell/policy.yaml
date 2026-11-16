@@ -5,6 +5,7 @@ filesystem_policy:
     - /opt/venv
     - /app/dist
     - /app/node_modules
+    - /app/package.json
     - /app/skills-lock.json
   read_write:
     - /sandbox

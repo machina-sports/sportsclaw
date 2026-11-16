@@ -69,12 +69,16 @@ openshell sandbox create --name sportsclaw-tv \
   --provider nvidia-native-prod \
   --policy openshell/policy.vault.yaml \
   --upload ./tv-operator.json:/sandbox/.sportsclaw/operator/tv-operator.json \
-  -- node /app/dist/index.js operate --job tv-operator --once
+  --detach
+
+# 4. Run one operator tick inside the sandbox
+openshell sandbox exec sportsclaw-tv -- node /app/dist/index.js operate --job tv-operator --once
 ```
 
 `--from` takes an image reference the gateway's engine can pull (or a rootfs tar), not a
-Dockerfile. For a long-running job, add `--detach --restart-policy on-failure` and drop `--once`
-so the daemon runs as the sandbox's foreground main process under OpenShell. Don't use
+Dockerfile. OpenShell 0.1.5 refuses `--upload` together with a command after `--`, so the
+sandbox is created detached and the job runs with `sandbox exec`. For a long-running job, drop
+`--once`; the daemon stays in the foreground of that `sandbox exec`. Don't use
 `sportsclaw start operator` for OpenShell jobs — it installs a host service outside any sandbox,
 where the job refuses to start.
 

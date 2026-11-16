@@ -335,28 +335,38 @@ describe("shared OpenShell launch builder", () => {
     sandboxName: "sc-op", policyFile: "policy.vault.yaml",
   };
 
-  it("setup keeps the default detached on-failure launch, job file and verification steps", () => {
+  it("setup creates the sandbox detached with the job uploaded, then runs the operator with exec", () => {
     const recipe = buildSetupRecipe(base);
     assert.ok(
       recipe.includes([
         "openshell sandbox create --name 'sc-op' --from 'img:1' \\",
         "  --provider 'nv' --policy 'policy.vault.yaml' \\",
         "  --upload './openshell-op.json:/sandbox/.sportsclaw/operator/openshell-op.json' \\",
-        "  --detach --restart-policy on-failure -- node /app/dist/index.js operate --job 'openshell-op'",
+        "  --detach",
       ].join("\n")),
       recipe,
     );
-    assert.ok(recipe.includes("# 4. Save the job config (see below) as ./openshell-op.json, then launch"));
+    assert.ok(recipe.includes("\nopenshell sandbox exec --name 'sc-op' -- node /app/dist/index.js operate --job 'openshell-op'\n"));
+    assert.ok(recipe.indexOf("policy get") < recipe.indexOf("sandbox exec"), "verify before the foreground operator");
+    assert.ok(recipe.includes("# 4. Save the job config (see below) as ./openshell-op.json, then create the sandbox"));
     assert.ok(recipe.includes("openshell sandbox provider list 'sc-op'\nopenshell policy get 'sc-op' --full"));
     assert.ok(recipe.includes("#   openshell sandbox provider attach 'sc-op' 'nv' --wait"));
-    assert.doesNotMatch(recipe, /--no-keep|--once/);
+    assert.doesNotMatch(recipe, /--no-keep|--once|--restart-policy/);
+  });
+
+  it("never combines --upload with a command after -- (OpenShell 0.1.5 rejects it)", () => {
+    for (const once of [false, true]) {
+      const { sandboxCreate } = buildOpenShellCommands({ ...base, once });
+      assert.match(sandboxCreate, /--upload/);
+      assert.doesNotMatch(sandboxCreate, / -- /, sandboxCreate);
+    }
   });
 
   it("setup renders exactly the shared builder's commands", () => {
     for (const o of [base, { ...base, credentialless: true, jobId: "tv-op" }]) {
       const recipe = buildSetupRecipe(o);
       const cmds = buildOpenShellCommands(o);
-      for (const line of [cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate]) {
+      for (const line of [cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate, cmds.operatorRun]) {
         assert.ok(recipe.includes(line), line);
       }
       assert.strictEqual(cmds.jobFile, `./${o.jobId ?? "openshell-op"}.json`);
@@ -369,8 +379,10 @@ describe("shared OpenShell launch builder", () => {
     const o = { ...base, sandboxName: "sb 'x'", image: "r.example/i:t", jobId: "quickstart", jobFile, once: true };
     const cmds = buildOpenShellCommands(o);
     assert.strictEqual(cmds.jobFile, jobFile);
-    assert.doesNotMatch(cmds.sandboxCreate, /--detach|--restart-policy/);
-    const argvs = runRecorded([cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate].join("\n"));
+    assert.doesNotMatch(cmds.sandboxCreate, /--restart-policy|--no-keep/);
+    const argvs = runRecorded(
+      [cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate, cmds.operatorRun].join("\n"),
+    );
     assert.deepStrictEqual(argvs, [
       ["profile", "lint", "-f", "p.yaml"],
       ["profile", "import", "-f", "p.yaml"],
@@ -378,18 +390,19 @@ describe("shared OpenShell launch builder", () => {
       [
         "sandbox", "create", "--name", "sb 'x'", "--from", "r.example/i:t",
         "--provider", "nv", "--policy", "policy.vault.yaml",
-        "--upload", `${jobFile}:/sandbox/.sportsclaw/operator/quickstart.json`,
-        "--no-keep", "--", "node", "/app/dist/index.js", "operate", "--job", "quickstart", "--once",
+        "--upload", `${jobFile}:/sandbox/.sportsclaw/operator/quickstart.json`, "--detach",
       ],
+      ["sandbox", "exec", "--name", "sb 'x'", "--", "node", "/app/dist/index.js", "operate", "--job", "quickstart", "--once"],
     ]);
   });
 
-  it("default (non-once) launch keeps the detached daemon argv", () => {
-    const [argv] = runRecorded(buildOpenShellCommands({ ...base, jobId: "tv-op" }).sandboxCreate);
-    assert.deepStrictEqual(argv.slice(argv.indexOf("--upload")), [
-      "--upload", "./tv-op.json:/sandbox/.sportsclaw/operator/tv-op.json",
-      "--detach", "--restart-policy", "on-failure", "--", "node", "/app/dist/index.js", "operate", "--job", "tv-op",
+  it("default (non-once) launch creates detached, then execs the operator daemon", () => {
+    const cmds = buildOpenShellCommands({ ...base, jobId: "tv-op" });
+    const [create, run] = runRecorded([cmds.sandboxCreate, cmds.operatorRun].join("\n"));
+    assert.deepStrictEqual(create.slice(create.indexOf("--upload")), [
+      "--upload", "./tv-op.json:/sandbox/.sportsclaw/operator/tv-op.json", "--detach",
     ]);
+    assert.deepStrictEqual(run, ["sandbox", "exec", "--name", "sc-op", "--", "node", "/app/dist/index.js", "operate", "--job", "tv-op"]);
   });
 
   it("rejects invalid job ids even with a custom source path or once", () => {

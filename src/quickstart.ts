@@ -341,7 +341,8 @@ function renderLaunch(o: QuickstartOptions): string {
     `# ${OPENSHELL_NAME} provider profile, creates the provider from ${cred} in THIS shell`,
     "# (never on a command line), and runs one operator tick in a new sandbox.",
     "# Needs a registered gateway and an image you built and pushed. Stops at the first failing",
-    "# openshell command (set -e) and never deletes or reuses anything.",
+    "# openshell command (set -e) and never deletes or reuses anything; the sandbox stays",
+    `# after the tick (remove it with \`openshell sandbox delete ${OPENSHELL_NAME}\`).`,
     "set -euo pipefail",
     'cd -- "$(dirname -- "${BASH_SOURCE[0]}")"',
     "",
@@ -367,6 +368,7 @@ function renderLaunch(o: QuickstartOptions): string {
     cmds.profileImport,
     cmds.providerCreate,
     cmds.sandboxCreate,
+    cmds.operatorRun,
     "",
   ].join("\n");
 }

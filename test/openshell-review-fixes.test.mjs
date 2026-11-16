@@ -412,8 +412,11 @@ describe("setup recipe shell safety", () => {
     assert.strictEqual(valueOf("--provider"), o.providerName);
     assert.strictEqual(valueOf("--policy"), o.policyFile);
     assert.strictEqual(valueOf("--upload"),`./${o.jobId}.json:/sandbox/.sportsclaw/operator/${o.jobId}.json`);
-    assert.deepStrictEqual(create.slice(create.indexOf("--")), ["--", "node", "/app/dist/index.js", "operate", "--job", o.jobId]);
+    assert.ok(!create.includes("--"), "no command after -- alongside --upload");
     assert.ok(create.includes("--detach"), "line continuation kept the command whole");
+    assert.deepStrictEqual(find("openshell", "sandbox", "exec"), [
+      "openshell", "sandbox", "exec", "--name", o.sandboxName, "--", "node", "/app/dist/index.js", "operate", "--job", o.jobId,
+    ]);
     assert.ok(!calls.some((c) => c[0] !== "openshell"), "no stray commands from broken continuations");
   });
 

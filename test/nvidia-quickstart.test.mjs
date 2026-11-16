@@ -557,8 +557,9 @@ describe("brev OpenShell bundle", () => {
         "sandbox", "create", "--name", "sportsclaw-quickstart", "--from", image,
         "--provider", "sportsclaw-quickstart", "--policy", "./policy.yaml",
         "--upload", "./.sportsclaw/operator/quickstart.json:/sandbox/.sportsclaw/operator/quickstart.json",
-        "--no-keep", "--", "node", "/app/dist/index.js", "operate", "--job", "quickstart", "--once",
+        "--detach",
       ],
+      ["sandbox", "exec", "--name", "sportsclaw-quickstart", "--", "node", "/app/dist/index.js", "operate", "--job", "quickstart", "--once"],
     ]);
     assert.ok(!JSON.stringify(argvs).includes(SECRET), "credential on openshell argv");
     assert.doesNotMatch(JSON.stringify(argvs), /delete|restart/);
@@ -662,11 +663,13 @@ describe("quickstart uses the shared OpenShell builders", () => {
       once: true,
     });
     assert.ok(
-      launch.includes([cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate].join("\n")),
+      launch.includes(
+        [cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate, cmds.operatorRun].join("\n"),
+      ),
       launch,
     );
-    // One-shot only: no daemon restart, no verification against an auto-removed sandbox.
-    assert.doesNotMatch(launch, /--detach|--restart-policy|sandbox provider list|policy get/);
+    // One-shot only: one tick, no daemon restart.
+    assert.doesNotMatch(launch, /--restart-policy|--no-keep/);
   });
 
   it("job core fields equal the shared job object (OpenShell and direct)", () => {
