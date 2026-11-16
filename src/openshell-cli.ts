@@ -461,6 +461,16 @@ export interface SetupRecipeOpts {
   credentialless?: boolean;
   /** Operator job id; defaults to "openshell-op". */
   jobId?: string;
+  /** More providers to create and attach at sandbox creation (for example hosted NIMs next to a local model). */
+  extraProviders?: ProviderSpec[];
+}
+
+/** One provider profile to import, create and attach. */
+export interface ProviderSpec {
+  profileFile: string;
+  profileId: string;
+  providerName: string;
+  credentialless?: boolean;
 }
 
 /** POSIX single-quote one shell word. */
@@ -497,16 +507,21 @@ export function buildOpenShellCommands(o: OpenShellCommandOpts): {
     throw new Error(`Invalid job id ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
   }
   const jobFile = o.jobFile ?? `./${jobId}.json`;
+  const providers: ProviderSpec[] = [o, ...(o.extraProviders ?? [])];
   return {
     jobFile,
-    profileLint: `openshell profile lint -f ${shq(o.profileFile)}`,
-    profileImport: `openshell profile import -f ${shq(o.profileFile)}`,
-    providerCreate:
-      `openshell provider create --name ${shq(o.providerName)} --type ${shq(o.profileId)}` +
-      (o.credentialless ? "" : " --from-existing"),
+    profileLint: providers.map((p) => `openshell profile lint -f ${shq(p.profileFile)}`).join("\n"),
+    profileImport: providers.map((p) => `openshell profile import -f ${shq(p.profileFile)}`).join("\n"),
+    providerCreate: providers
+      .map(
+        (p) =>
+          `openshell provider create --name ${shq(p.providerName)} --type ${shq(p.profileId)}` +
+          (p.credentialless ? "" : " --from-existing"),
+      )
+      .join("\n"),
     sandboxCreate: [
       `openshell sandbox create --name ${shq(o.sandboxName)} --from ${shq(o.image)}`,
-      `--provider ${shq(o.providerName)} --policy ${shq(o.policyFile)}`,
+      `${providers.map((p) => `--provider ${shq(p.providerName)}`).join(" ")} --policy ${shq(o.policyFile)}`,
       `--upload ${shq(`${jobFile}:/sandbox/.sportsclaw/operator/${jobId}.json`)}`,
       "--detach",
     ].join(" \\\n  "),
@@ -529,19 +544,19 @@ export function buildSetupRecipe(o: SetupRecipeOpts): string {
   return [
     "# 0. Gateway: start/provision it per the OpenShell docs. `openshell gateway add` only registers an existing one.",
     "",
-    "# 1. Validate and import the provider profile (both need the active gateway; lint does not register).",
+    "# 1. Validate and import the provider profiles (both need the active gateway; lint does not register).",
     profileLint,
     profileImport,
     "",
-    o.credentialless
-      ? "# 2. Create the provider instance (credentialless profile)."
-      : "# 2. Create the provider instance. --from-existing reads the profile's credential env var from THIS shell.",
+    [o, ...(o.extraProviders ?? [])].every((p) => p.credentialless)
+      ? "# 2. Create the provider instances (credentialless profiles)."
+      : "# 2. Create the provider instances. --from-existing reads each profile's credential env var from THIS shell.",
     providerCreate,
     "",
     "# 3. Build an OCI image and push it where the gateway's engine can pull it (source checkout).",
     "#    docker build -t sportsclaw:latest . && docker build -t <image> -f openshell/Dockerfile . && docker push <image>",
     "",
-    `# 4. Save the job config (see below) as ${jobFile}, then create the sandbox with the provider attached.`,
+    `# 4. Save the job config (see below) as ${jobFile}, then create the sandbox with its providers attached.`,
     sandboxCreate,
     "",
     "# 5. Verify attachment and the effective policy (provider-derived endpoints included).",
@@ -616,16 +631,24 @@ function usageError(message: string): never {
 /** Print-only: renders the recipe; runs no openshell/docker probes (use `doctor`). */
 async function runSetup(args: string[]): Promise<void> {
   const opts: Record<string, string> = {};
+  const profileKeys: string[] = [];
   for (let i = 0; i < args.length; i += 2) {
     const name = args[i];
     if (!(SETUP_FLAGS as readonly string[]).includes(name)) usageError(`Unknown setup option: ${name}`);
     const value = args[i + 1];
     if (value === undefined || value.startsWith("--")) usageError(`Missing value for ${name}`);
-    opts[name] = value;
+    // --profile repeats: the first is the agent's model, the rest are attached alongside it.
+    if (name === "--profile") profileKeys.push(value);
+    else opts[name] = value;
   }
-  const profileKey = opts["--profile"] ?? "nvidia-native";
+  if (profileKeys.length === 0) profileKeys.push("nvidia-native");
+  for (const key of profileKeys) {
+    if (!PROFILES[key]) usageError(`Unknown --profile ${JSON.stringify(key)}. Use one of: ${Object.keys(PROFILES).join(", ")}.`);
+  }
+  if (new Set(profileKeys).size !== profileKeys.length) usageError("Each --profile may be given once.");
+  if (profileKeys.length > 1 && opts["--provider-name"]) usageError("--provider-name works with a single --profile only.");
+  const [profileKey, ...extraKeys] = profileKeys;
   const profile = PROFILES[profileKey];
-  if (!profile) usageError(`Unknown --profile ${JSON.stringify(profileKey)}. Use one of: ${Object.keys(PROFILES).join(", ")}.`);
   const policyKey = opts["--policy"] ?? "vault";
   const policy = POLICIES[policyKey];
   if (!policy) usageError(`Unknown --policy ${JSON.stringify(policyKey)}. Use one of: ${Object.keys(POLICIES).join(", ")}.`);
@@ -637,7 +660,7 @@ async function runSetup(args: string[]): Promise<void> {
   // Recipes ship in the npm package next to dist/.
   const recipesDir = fileURLToPath(new URL("../openshell/", import.meta.url));
 
-  console.log(pc.bold(`OpenShell setup recipe (${profileKey}, policy ${policyKey}) — review, then run yourself:`));
+  console.log(pc.bold(`OpenShell setup recipe (${profileKeys.join(" + ")}, policy ${policyKey}) — review, then run yourself:`));
   console.log(pc.dim(`Tested with OpenShell ${TESTED_OPENSHELL_VERSION} only. Run \`sportsclaw openshell doctor\` to check prerequisites.`));
   console.log("");
   console.log(
@@ -650,10 +673,16 @@ async function runSetup(args: string[]): Promise<void> {
       policyFile: `${recipesDir}${policy.file}`,
       credentialless: profile.credentialless,
       jobId,
+      extraProviders: extraKeys.map((key) => ({
+        profileFile: `${recipesDir}providers/${PROFILES[key].file}`,
+        profileId: PROFILES[key].id,
+        providerName: `${key}-prod`,
+        credentialless: PROFILES[key].credentialless,
+      })),
     }),
   );
   console.log("");
-  console.log(profile.boundary);
+  for (const key of profileKeys) console.log(PROFILES[key].boundary);
   if (policy.note) console.log(policy.note);
   console.log("");
   console.log(pc.bold(`# ${jobId}.json`));
@@ -692,7 +721,8 @@ function printOpenshellHelp(): void {
     "      [--image <oci-ref>]  Image to inspect locally, probe, and name in hints (default sportsclaw-openshell:latest)",
     "      [--remote]           Skip local docker/podman + image checks (reported as not checked, not verified)",
     "  sportsclaw openshell setup            Print a setup recipe (print-only; runs nothing)",
-    "      [--profile nvidia-native|nim-local] [--policy vault|vault-espn|connected]",
+    "      [--profile nvidia-native|nim-local]... [--policy vault|vault-espn|connected]",
+    "      Repeat --profile to attach several providers; the first is the agent's model.",
     "      [--provider-name <name>] [--image <oci-ref>] [--sandbox <name>] [--job <jobId>]",
     "      Default policy: vault (local-only). connected adds write-capable MCP + public egress.",
     "",

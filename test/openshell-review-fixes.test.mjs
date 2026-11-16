@@ -365,6 +365,28 @@ describe("setup: print-only with a strict default policy", () => {
     assert.ok(policyArg(espn.out).endsWith("/policy.vault-espn.yaml"), policyArg(espn.out));
   });
 
+  it("--profile repeats: every provider is created and attached; the first is the agent's model", async () => {
+    const r = await setup(["--profile", "nim-local", "--profile", "nvidia-native", "--policy", "vault-espn"]);
+    assert.strictEqual(r.code, 0, r.out);
+    assert.deepStrictEqual(r.invocations, []);
+    assert.match(r.out, /openshell provider create --name 'nim-local-prod' --type 'sportsclaw-nim-local'\n/);
+    assert.match(r.out, /openshell provider create --name 'nvidia-native-prod' --type 'nvidia-native' --from-existing/);
+    assert.match(r.out, /--provider 'nim-local-prod' --provider 'nvidia-native-prod' --policy /);
+    assert.match(r.out, /host\.openshell\.internal:8000/);
+    assert.match(r.out, /external/i, "the hosted provider's boundary is still named");
+    assert.match(r.out, /"baseUrl": "http:\/\/host\.openshell\.internal:8000\/v1"/, "job uses the first profile");
+  });
+
+  it("rejects a repeated profile and --provider-name with several profiles", async () => {
+    for (const args of [
+      ["--profile", "nim-local", "--profile", "nim-local"],
+      ["--profile", "nim-local", "--profile", "nvidia-native", "--provider-name", "x"],
+    ]) {
+      const r = await setup(args);
+      assert.strictEqual(r.code, 2, `${args}: ${r.out}`);
+    }
+  });
+
   it("rejects unknown policies and unsupported flags without probing", async () => {
     for (const args of [["--policy", "wide-open"], ["--json"]]) {
       const r = await setup(args);
