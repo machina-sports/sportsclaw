@@ -101,3 +101,11 @@ test("Vault MCP permits only the FastMCP SSE transport routes", () => {
     assert.equal(messages.access, undefined);
   }
 });
+
+test("every shipped policy lets the agent read /app/package.json", () => {
+  // The CLI reads its own package.json at startup; without this path Landlock
+  // refuses it (EACCES) and SportsClaw cannot start inside the sandbox.
+  for (const name of ["policy.yaml", "policy.vault.yaml", "policy.vault-espn.yaml"]) {
+    assert.ok(loadPolicy(name).filesystem_policy.read_only.includes("/app/package.json"), name);
+  }
+});

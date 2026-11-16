@@ -58,7 +58,7 @@ sportsclaw openshell setup      # prints the exact recipe below + a job config; 
 
 `setup` is print-only: it runs no `openshell`/`docker` probes (that is `doctor`'s job, including `doctor --json`) and exits 0 once the recipe renders. Every value in the printed commands is shell-quoted. Options: `--profile nvidia-native|nim-local`, `--policy vault|vault-espn|connected` (default `vault`, local-only; `connected` prints a warning because it grants write-capable Machina MCP and public market/news egress), `--provider-name`, `--image`, `--sandbox`, `--job`.
 
-Run the daemon as the sandbox's foreground main process (`sandbox create ... --detach --restart-policy on-failure -- node /app/dist/index.js operate --job <jobId>`), so OpenShell owns its lifecycle. Do **not** use `sportsclaw start operator` for OpenShell jobs: that installs a host service (launchd/systemd/Task Scheduler) outside any sandbox, and the job will refuse to start there.
+Create the sandbox detached with the job uploaded (`sandbox create ... --upload <job>.json:/sandbox/.sportsclaw/operator/<jobId>.json --detach`), then run the daemon inside it with `sandbox exec <sandbox> -- node /app/dist/index.js operate --job <jobId>`. OpenShell 0.1.5 refuses `--upload` together with a command after `--` (`the argument '--upload <UPLOAD>' cannot be used with '[COMMAND]...'`), so the job can't be the sandbox's main process. Do **not** use `sportsclaw start operator` for OpenShell jobs: that installs a host service (launchd/systemd/Task Scheduler) outside any sandbox, and the job will refuse to start there.
 
 Manual equivalent (hosted NVIDIA API Catalog):
 
@@ -101,10 +101,10 @@ Manual equivalent (hosted NVIDIA API Catalog):
      --provider nvidia-native-prod \
      --policy openshell/policy.vault.yaml \
      --upload ./tv-operator.json:/sandbox/.sportsclaw/operator/tv-operator.json \
-     --detach --restart-policy on-failure \
-     -- node /app/dist/index.js operate --job tv-operator
+     --detach
+   openshell sandbox exec sportsclaw-op -- node /app/dist/index.js operate --job tv-operator
    ```
-   `policy.vault.yaml` is the strict, local-only base; the attached provider adds only its own inference endpoint. Swap in `openshell/policy.yaml` only for the connected Sports TV workload (write-capable Machina MCP + public market/news egress). For a one-off check, create without `--detach` and run `-- node /app/dist/index.js operate --job tv-operator --once`. The image sets `HOME=/sandbox`, which is why the job config is uploaded under `/sandbox/.sportsclaw/operator/`.
+   `policy.vault.yaml` is the strict, local-only base; the attached provider adds only its own inference endpoint. Swap in `openshell/policy.yaml` only for the connected Sports TV workload (write-capable Machina MCP + public market/news egress). For a one-off check, add `--once` to the `sandbox exec` command. `--provider` is repeatable, so a job that also calls a hosted NIM (TTS, vision) can attach each provider at creation. The image sets `HOME=/sandbox`, which is why the job config is uploaded under `/sandbox/.sportsclaw/operator/`.
 
 To attach a provider to a running sandbox: `openshell sandbox provider attach <sandbox> <provider> --wait`, then start a **new** process (running processes don't gain env vars). Detach with `... detach ... --wait` to revoke.
 

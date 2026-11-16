@@ -471,7 +471,7 @@ function shq(s: string): string {
 export interface OpenShellCommandOpts extends SetupRecipeOpts {
   /** Local job file to upload, used exactly as given; defaults to `./<jobId>.json`. */
   jobFile?: string;
-  /** One tick in a `--no-keep` sandbox instead of the detached on-failure daemon. */
+  /** Run one operator tick (`--once`) instead of the long-running daemon. */
   once?: boolean;
 }
 
@@ -479,6 +479,10 @@ export interface OpenShellCommandOpts extends SetupRecipeOpts {
  * Shared 0.1.x profile/provider/sandbox commands for `openshell setup` and
  * `quickstart`. Every value is POSIX-quoted so the text runs as printed; the
  * job id is validated and always names the in-sandbox upload target.
+ *
+ * OpenShell 0.1.5 rejects `--upload` together with a command after `--`, so
+ * the sandbox is created detached with the job uploaded, and the operator is
+ * started with `sandbox exec`.
  */
 export function buildOpenShellCommands(o: OpenShellCommandOpts): {
   jobFile: string;
@@ -486,13 +490,13 @@ export function buildOpenShellCommands(o: OpenShellCommandOpts): {
   profileImport: string;
   providerCreate: string;
   sandboxCreate: string;
+  operatorRun: string;
 } {
   const jobId = o.jobId ?? "openshell-op";
   if (!JOB_ID_PATTERN.test(jobId)) {
     throw new Error(`Invalid job id ${JSON.stringify(jobId)}: must match ${JOB_ID_PATTERN.source}.`);
   }
   const jobFile = o.jobFile ?? `./${jobId}.json`;
-  const operate = `-- node /app/dist/index.js operate --job ${shq(jobId)}`;
   return {
     jobFile,
     profileLint: `openshell profile lint -f ${shq(o.profileFile)}`,
@@ -504,20 +508,23 @@ export function buildOpenShellCommands(o: OpenShellCommandOpts): {
       `openshell sandbox create --name ${shq(o.sandboxName)} --from ${shq(o.image)}`,
       `--provider ${shq(o.providerName)} --policy ${shq(o.policyFile)}`,
       `--upload ${shq(`${jobFile}:/sandbox/.sportsclaw/operator/${jobId}.json`)}`,
-      o.once ? `--no-keep ${operate} --once` : `--detach --restart-policy on-failure ${operate}`,
+      "--detach",
     ].join(" \\\n  "),
+    operatorRun:
+      `openshell sandbox exec --name ${shq(o.sandboxName)} -- node /app/dist/index.js operate --job ${shq(jobId)}` +
+      (o.once ? " --once" : ""),
   };
 }
 
 /**
  * The ordered 0.1.x commands to bring up a SportsClaw operator sandbox. Every
  * user/config/path value is POSIX-quoted so the text runs as printed. The
- * daemon runs as the sandbox's foreground main process under OpenShell's
- * restart policy — not via `sportsclaw start operator` (a host service manager).
+ * daemon runs inside the sandbox via `sandbox exec` — not via
+ * `sportsclaw start operator` (a host service manager).
  */
 export function buildSetupRecipe(o: SetupRecipeOpts): string {
-  // Setup always prints the default job file and the detached restart launch.
-  const { jobFile, profileLint, profileImport, providerCreate, sandboxCreate } =
+  // Setup always prints the default job file and the long-running daemon.
+  const { jobFile, profileLint, profileImport, providerCreate, sandboxCreate, operatorRun } =
     buildOpenShellCommands({ ...o, jobFile: undefined, once: false });
   return [
     "# 0. Gateway: start/provision it per the OpenShell docs. `openshell gateway add` only registers an existing one.",
@@ -534,12 +541,15 @@ export function buildSetupRecipe(o: SetupRecipeOpts): string {
     "# 3. Build an OCI image and push it where the gateway's engine can pull it (source checkout).",
     "#    docker build -t sportsclaw:latest . && docker build -t <image> -f openshell/Dockerfile . && docker push <image>",
     "",
-    `# 4. Save the job config (see below) as ${jobFile}, then launch with the provider attached.`,
+    `# 4. Save the job config (see below) as ${jobFile}, then create the sandbox with the provider attached.`,
     sandboxCreate,
     "",
     "# 5. Verify attachment and the effective policy (provider-derived endpoints included).",
     `openshell sandbox provider list ${shq(o.sandboxName)}`,
     `openshell policy get ${shq(o.sandboxName)} --full`,
+    "",
+    "# 6. Start the operator inside the sandbox. It stays in the foreground until stopped.",
+    operatorRun,
     "",
     "# Attach to an already-running sandbox instead (new processes pick it up):",
     `#   openshell sandbox provider attach ${shq(o.sandboxName)} ${shq(o.providerName)} --wait`,

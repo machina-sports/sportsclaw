@@ -76,7 +76,7 @@ The gateway's own OCSF file is configured separately in TOML. Its writer is asyn
 
 ## Workload launch and acceptance
 
-Use the existing [OpenShell deployment recipe](openshell.md), with the selected gateway and explicit image/provider/policy. Keep the operator as the canonical foreground process; use `--detach --restart-policy on-failure`, not a host retry loop around `sandbox exec`.
+Use the existing [OpenShell deployment recipe](openshell.md), with the selected gateway and explicit image/provider/policy. Create the sandbox with `--detach` and the job uploaded, then start the operator with `sandbox exec` (OpenShell 0.1.5 refuses `--upload` together with a command after `--`).
 
 Use `--approval-mode manual` and `--no-auto-providers` during qualification. Review the effective policy after provider attachment. Profiles add endpoints to the authored policy; an apparently private YAML file can gain public egress through a hosted provider.
 
