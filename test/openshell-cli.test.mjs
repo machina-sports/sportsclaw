@@ -405,6 +405,24 @@ describe("shared OpenShell launch builder", () => {
     assert.deepStrictEqual(run, ["sandbox", "exec", "--name", "sc-op", "--", "node", "/app/dist/index.js", "operate", "--job", "tv-op"]);
   });
 
+  it("extra providers are created and attached alongside the first", () => {
+    const extra = [{ profileFile: "q.yaml", profileId: "nim", providerName: "local", credentialless: true }];
+    const cmds = buildOpenShellCommands({ ...base, extraProviders: extra });
+    const argvs = runRecorded([cmds.profileLint, cmds.profileImport, cmds.providerCreate, cmds.sandboxCreate].join("\n"));
+    assert.deepStrictEqual(argvs.slice(0, 6), [
+      ["profile", "lint", "-f", "p.yaml"],
+      ["profile", "lint", "-f", "q.yaml"],
+      ["profile", "import", "-f", "p.yaml"],
+      ["profile", "import", "-f", "q.yaml"],
+      ["provider", "create", "--name", "nv", "--type", "nvidia-native", "--from-existing"],
+      ["provider", "create", "--name", "local", "--type", "nim"],
+    ]);
+    const create = argvs[6];
+    assert.deepStrictEqual(create.slice(create.indexOf("--provider"), create.indexOf("--policy")), [
+      "--provider", "nv", "--provider", "local",
+    ]);
+  });
+
   it("rejects invalid job ids even with a custom source path or once", () => {
     for (const jobId of ["../evil", "a b", "it's", ""]) {
       assert.throws(() => buildOpenShellCommands({ ...base, jobId, jobFile: "./ok.json", once: true }), /Invalid job id/, jobId);
