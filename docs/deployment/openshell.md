@@ -82,6 +82,32 @@ sandbox is created detached and the job runs with `sandbox exec`. For a long-run
 `sportsclaw start operator` for OpenShell jobs — it installs a host service outside any sandbox,
 where the job refuses to start.
 
+## Your own model, plus hosted NIMs
+
+`--profile` repeats. The first profile is the agent's own model; each one after it is created and
+attached next to it when the sandbox is created, so nothing is attached by hand later. For a model
+served on the GPU host (a local NIM on port 8000) that can also call hosted NVIDIA NIMs, with
+read-only ESPN data for the Python skills:
+
+```bash
+sportsclaw openshell setup --profile nim-local --profile nvidia-native --policy vault-espn
+```
+
+The recipe it prints creates both providers and attaches both at creation:
+
+```bash
+openshell sandbox create --name sportsclaw-op --from <registry>/sportsclaw-openshell:<tag> \
+  --provider nim-local-prod --provider nvidia-native-prod \
+  --policy openshell/policy.vault-espn.yaml \
+  --upload ./openshell-op.json:/sandbox/.sportsclaw/operator/openshell-op.json \
+  --detach
+openshell sandbox exec sportsclaw-op -- node /app/dist/index.js operate --job openshell-op
+```
+
+The job config uses the first profile (`nim-local`: `http://host.openshell.internal:8000/v1`,
+credentialless). `setup` prints the privacy boundary of every attached provider: the hosted one
+authorizes inference egress to `integrate.api.nvidia.com`.
+
 ## Operator job config
 
 ```jsonc
