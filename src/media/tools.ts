@@ -22,7 +22,10 @@
  *   - Line checks: the skill's "check-lines" job runs when the skill whose job made the index (in this run)
  *     has that kind approved. For an index from an earlier run, the one approved skill with a "check-lines"
  *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
- *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`.
+ *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`. The
+ *     result and its step name the checker that ran ("<skill>/check-lines" or "built-in").
+ *   - Renderers: a kind whose produces includes "video" runs only through story_render; media_job_start
+ *     refuses it (`renderer_only`), so a renderer never gets a timeline the engine did not resolve.
  *   - Rights: under rightsCheck "require", reading the source (a source-reading job, a skill renderer, the
  *     plain renderer) needs a clearance whose sourceSha256 is the source's sha256, from operator config
  *     (media.clearances) or the app starting the run (ctx.clearances). No tool takes a rights input, so
@@ -75,6 +78,8 @@ export interface MediaStep {
   tool: string;
   artifactIds: string[];
   jobId?: string;
+  /** story_check_lines: the checker that ran, "<skill>/check-lines" or "built-in". */
+  checker?: string;
   /** The call's input, every string capped at STEP_INPUT_STRING_CHARS. */
   input: unknown;
 }
@@ -370,7 +375,7 @@ interface Approved {
   decl: JobKindDecl;
 }
 
-type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string };
+type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string; checker?: string };
 
 export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   tools: Record<MediaToolName, HostToolDef>;
@@ -556,7 +561,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     return rec;
   }
 
-  function checkerFor(index: Artifact): LineChecker | undefined {
+  /** The line checker for an index and its name ("<skill>/check-lines", or "built-in" when there is none). */
+  function checkerFor(index: Artifact): { checker?: LineChecker; name: string } {
     const withChecker = bundles.filter((b) => b.decls.some((d) => d.kind === CHECK_KIND));
     let skill = producers.get(index.id);
     if (skill === undefined) {
@@ -564,7 +570,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       skill = withChecker[0]?.skill;
     }
     const b = withChecker.find((x) => x.skill === skill);
-    return b ? jobLineChecker({ runner, skill: { skillDir: b.skillDir, bundleSha256: b.bundleSha256, decls: b.decls } }) : undefined;
+    if (!b) return { name: "built-in" };
+    return {
+      checker: jobLineChecker({ runner, skill: { skillDir: b.skillDir, bundleSha256: b.bundleSha256, decls: b.decls } }),
+      name: `${b.skill}/${CHECK_KIND}`,
+    };
   }
 
   /** A timeline only ever comes out of resolveTimeline, with lines from the exact artifact it names. */
@@ -642,6 +652,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (!approved) refuse("unknown_kind", `No approved job kind ${skill}/${kind}.`);
       if (!isPlainObject(a.input)) refuse("invalid_input", "input must be an object.");
       const { bundle, decl } = approved;
+      // A renderer draws captions: it runs only through story_render, on a timeline the engine resolved.
+      if (decl.produces.includes("video")) refuse("renderer_only", `${skill}/${kind} is a renderer; run it with story_render.`);
       const source = a.sourceArtifactId === undefined ? undefined : await needSource(a.sourceArtifactId);
       const artifacts = await artifactInputs(decl, a.input, source?.artifact.sha256);
       if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
@@ -724,7 +736,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (checkRounds >= MAX_CHECK_ROUNDS) {
         refuse("rewrite_limit", `This run has used its ${MAX_CHECK_ROUNDS} checks (two rewrite rounds); drop the lines that failed.`);
       }
-      const checker = checkerFor(indexArtifact);
+      const { checker, name: checkerName } = checkerFor(indexArtifact);
       checkRounds++;
       const { verdicts, passed } = await checkLines({ lines, events: index.events, facts, checker });
       const file = await storyFile("lines");
@@ -736,8 +748,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
           linesArtifactId: artifact.id,
           passed: passed.map((l) => ({ lineId: l.lineId, text: l.text })),
           rewritesLeft: MAX_CHECK_ROUNDS - checkRounds,
+          checker: checkerName,
         },
         artifactIds: [artifact.id],
+        checker: checkerName,
       };
     },
 
@@ -846,7 +860,13 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       async execute(input, { abortSignal }) {
         try {
           const out = await handlers[name](args(input ?? {}), abortSignal);
-          steps.push({ tool: name, artifactIds: out.artifactIds, ...(out.jobId ? { jobId: out.jobId } : {}), input: capStrings(input ?? {}) });
+          steps.push({
+            tool: name,
+            artifactIds: out.artifactIds,
+            ...(out.jobId ? { jobId: out.jobId } : {}),
+            ...(out.checker ? { checker: out.checker } : {}),
+            input: capStrings(input ?? {}),
+          });
           return out.result;
         } catch (err) {
           if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {

@@ -119,6 +119,11 @@ describe("findEvents", () => {
     assert.deepEqual(ids({ period: 1, type: "shot", text: "curry" }), ["a1", "a3"]);
   });
 
+  it("matches type ignoring case and surrounding spaces", () => {
+    assert.deepEqual(ids({ type: " FOUL " }), ["a2"]);
+    assert.deepEqual(ids({ type: "Shot" }), ids({ type: "shot" }));
+  });
+
   it("clamps limit to 1..50 and defaults to 12", () => {
     const many = build(Array.from({ length: 60 }, (_, i) => act(`m${i}`, 1, 719 - i, "shot")));
     assert.equal(findEvents(many, { limit: 500 }).length, 50);

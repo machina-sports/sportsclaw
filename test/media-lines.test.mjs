@@ -89,6 +89,16 @@ describe("checkLines (built-in checks)", () => {
     assert.deepEqual(good.verdicts, [{ text: "Jokic scores 38.", ok: true, reasons: [] }]);
   });
 
+  it("the clock the writer is shown (period N m:ss) is evidence: 'with 15 seconds left' passes, 16 does not", async () => {
+    const good = await checkLines({ lines: [{ text: "Murray scores with 15 seconds left.", cites: ["ev_2"] }], events: EVENTS, facts: FACTS });
+    assert.deepEqual(good.verdicts, [{ text: "Murray scores with 15 seconds left.", ok: true, reasons: [] }]);
+    const bad = await checkLines({ lines: [{ text: "Murray scores with 16 seconds left.", cites: ["ev_2"] }], events: EVENTS, facts: FACTS });
+    assert.deepEqual(bad.verdicts[0].reasons, ["unsupported_number"]);
+    // ev_1's clock is 312 s, shown as 5:12.
+    const shown = await checkLines({ lines: [{ text: "Jokic hits at 5:12 of the first.", cites: ["ev_1"] }], events: EVENTS, facts: FACTS });
+    assert.equal(shown.verdicts[0].ok, true, JSON.stringify(shown.verdicts));
+  });
+
   it("collects every reason of a line", async () => {
     const { verdicts } = await checkLines({ lines: [{ text: "Jokic scores 38.", cites: ["ev_x", "ev_1"] }], events: EVENTS, facts: FACTS });
     assert.deepEqual(verdicts[0].reasons, ["unknown_cite", "unsupported_number"]);
@@ -137,6 +147,12 @@ describe("checkLines (skill checker)", () => {
     const checker = async (lines) => lines.map((l) => ({ text: l.text, ok: false, reasons: ["nope"] }));
     const { verdicts } = await checkLines({ lines: [{ text: "x", cites: [] }], events: EVENTS, facts: FACTS, checker });
     assert.deepEqual(verdicts, [{ text: "x", ok: false, reasons: ["no_cite", "nope"] }]);
+  });
+
+  it("a checker verdict ok:false with no reasons gets the reason checker_refused", async () => {
+    const checker = async (lines) => lines.map((l) => ({ text: l.text, ok: false, reasons: [] }));
+    const { verdicts } = await checkLines({ lines: [LINES[0]], events: EVENTS, facts: FACTS, checker });
+    assert.deepEqual(verdicts, [{ text: LINES[0].text, ok: false, reasons: ["checker_refused"] }]);
   });
 
   it("a checker that throws or answers the wrong length fails every line with checker_failed", async () => {

@@ -175,6 +175,8 @@ export interface MediaStepRecord {
   tool: string;
   artifactIds: string[];
   jobId?: string;
+  /** story_check_lines: the checker that ran ("<skill>/check-lines" or "built-in"). */
+  checker?: string;
   input: unknown;
 }
 
@@ -331,6 +333,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
                 tool: s.tool,
                 artifactIds: [...s.artifactIds],
                 ...(s.jobId !== undefined ? { jobId: s.jobId } : {}),
+                ...(s.checker !== undefined ? { checker: s.checker } : {}),
                 input: structuredClone(s.input),
               }))
             : null,

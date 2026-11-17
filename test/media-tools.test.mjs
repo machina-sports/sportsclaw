@@ -224,7 +224,7 @@ describe("media story tools: the whole chain", () => {
       { tool: "media_find_events", artifactIds: [] },
       { tool: "story_facts_collect", artifactIds: [facts.factsArtifactId] },
       { tool: "story_draft_lines", artifactIds: [] },
-      { tool: "story_check_lines", artifactIds: [checked.linesArtifactId] },
+      { tool: "story_check_lines", artifactIds: [checked.linesArtifactId], checker: `${SKILL}/check-lines` },
       { tool: "speech_synthesize", artifactIds: voices },
       { tool: "story_timeline_build", artifactIds: [built.timelineArtifactId] },
       { tool: "story_render", artifactIds: [video.videoArtifactId] },
@@ -424,6 +424,15 @@ describe("media story tools: renderers", () => {
     assert.deepEqual(Object.keys(st.facts.artifacts).sort(), [p.src.sourceArtifactId, p.checked.linesArtifactId, ...p.voices].sort());
   });
 
+  it("media_job_start refuses a renderer kind (renderer_only): captions nobody checked never reach a renderer", async () => {
+    const { call, workspaceDir } = await make();
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    refused(await call("media_job_start", {
+      skill: SKILL, kind: "render-video", input: { timeline: { captions: ["UNCHECKED"] } }, sourceArtifactId: src.sourceArtifactId,
+    }), "renderer_only");
+    assert.equal(existsSync(join(workspaceDir, "jobs")), false, "no job may start");
+  });
+
   it("a renderer that is not approved, or does not produce video, is refused", { skip: NO_FFMPEG }, async () => {
     const { call } = await make();
     const p = await prepared(call);
@@ -559,6 +568,20 @@ describe("media story tools: facts and checks", () => {
     const { indexId } = await openAndIndex(call);
     const checked = ok(await call("story_check_lines", { indexArtifactId: indexId, lines: [WRITER_LINES[1]] }));
     assert.deepEqual(checked.verdicts, [{ text: WRITER_LINES[1].text, ok: true, reasons: [] }]);
+  });
+
+  it("the check result and its step record which checker ran: the skill's kind or built-in", async () => {
+    const withSkill = await make();
+    const a = await openAndIndex(withSkill.call);
+    const r1 = ok(await withSkill.call("story_check_lines", { indexArtifactId: a.indexId, lines: [WRITER_LINES[0]] }));
+    assert.equal(r1.checker, `${SKILL}/check-lines`);
+    assert.equal(withSkill.media.steps.at(-1).checker, `${SKILL}/check-lines`);
+
+    const builtIn = await make({ kinds: ["make-index"] });
+    const b = await openAndIndex(builtIn.call);
+    const r2 = ok(await builtIn.call("story_check_lines", { indexArtifactId: b.indexId, lines: [WRITER_LINES[0]] }));
+    assert.equal(r2.checker, "built-in");
+    assert.equal(builtIn.media.steps.at(-1).checker, "built-in");
   });
 });
 

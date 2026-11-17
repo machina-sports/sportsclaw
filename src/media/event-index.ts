@@ -86,11 +86,12 @@ export function findEvents(
       : DEFAULT_FIND_LIMIT;
   const queryWords = q.text ? words(q.text) : [];
   const wantPeople = (q.people ?? []).map((p) => p.trim().toLowerCase());
+  const wantType = q.type?.trim().toLowerCase();
 
   const out: IndexedEvent[] = [];
   for (const e of index.events) {
     if (q.period !== undefined && e.period !== q.period) continue;
-    if (q.type !== undefined && e.type !== q.type) continue;
+    if (wantType !== undefined && e.type.trim().toLowerCase() !== wantType) continue;
     if (queryWords.length > 0) {
       const labelWords = new Set(words(e.label));
       if (!queryWords.every((w) => labelWords.has(w))) continue;

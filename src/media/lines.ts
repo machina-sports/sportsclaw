@@ -5,7 +5,9 @@
  * A line passes only if every built-in check passes (each cite names a known event or fact,
  * there is at least one cite, every number is in the cited evidence) AND the skill's checker,
  * if any, says ok. A checker that throws or answers anything but one verdict per line fails
- * every line ("checker_failed"): no line gets through on a broken check.
+ * every line ("checker_failed"): no line gets through on a broken check. A checker's ok:false with no
+ * reasons gets the reason "checker_refused". An event's evidence is its "period N m:ss" (as the writer
+ * is shown it), its label and its people.
  *
  * Facts come from data tools only. A tool result is a fact when it is not an error, its tool is
  * not skill_read_reference or skill_run_script, its name does not start with media_, story_ or
@@ -146,7 +148,8 @@ function builtInReasons(line: DraftLine, events: Map<string, IndexedEvent>, fact
   const sources: string[] = [];
   for (const c of line.cites) {
     const e = events.get(c);
-    if (e) sources.push([e.label, ...e.people].join(" "));
+    // The clock as the writer was shown it (draftPrompt), so "with 15 seconds left" can be backed.
+    if (e) sources.push([`period ${e.period} ${clock(e.clockSec)}`, e.label, ...e.people].join(" "));
     const f = facts.get(c);
     if (f) sources.push(f.output);
   }
@@ -180,7 +183,7 @@ export async function checkLines(args: {
     const reasons = builtInReasons(line, events, facts);
     let ok = reasons.length === 0;
     if (skill) {
-      reasons.push(...skill[i].reasons);
+      reasons.push(...(skill[i].ok || skill[i].reasons.length > 0 ? skill[i].reasons : ["checker_refused"]));
       ok = ok && skill[i].ok;
     }
     verdicts.push({ text: line.text, ok, reasons });
