@@ -51,6 +51,10 @@ WORKDIR /sandbox
 # Explicit: the operator reads ~/.sportsclaw/operator/<jobId>.json, and the
 # runtime is not guaranteed to derive HOME from the image's passwd entry.
 ENV HOME=/sandbox
+# Sports Skills is already installed in the image's /opt/venv. Use it as is:
+# without this, SportsClaw builds ~/.sportsclaw/venv and runs pip, which the
+# sandbox policy correctly blocks, and the data tools come up empty.
+ENV SPORTSCLAW_VENV_DIR=/opt/venv
 
 # Same entrypoint as the root image — `sportsclaw` CLI. OpenShell runs the
 # command given after `--` verbatim as the sandbox main process; upload the

@@ -250,12 +250,22 @@ export function checkPrerequisites(): PrerequisiteStatus {
 
 const VENV_DIR = join(homedir(), ".sportsclaw", "venv");
 
+/**
+ * A Python environment that already has sports-skills, named by
+ * SPORTSCLAW_VENV_DIR (the OpenShell image sets /opt/venv). It is used as is:
+ * SportsClaw never creates it or runs pip in it, since a sandbox policy blocks PyPI.
+ */
+function providedVenvDir(): string | undefined {
+  const dir = process.env.SPORTSCLAW_VENV_DIR?.trim();
+  return dir ? dir : undefined;
+}
+
 export function getVenvDir(): string {
-  return VENV_DIR;
+  return providedVenvDir() ?? VENV_DIR;
 }
 
 export function getVenvPythonPath(): string {
-  return join(VENV_DIR, "bin", "python3");
+  return join(getVenvDir(), "bin", "python3");
 }
 
 export function isVenvSetup(): boolean {
@@ -302,6 +312,16 @@ function writeExtrasMarker(): void {
  * Otherwise creates one using the provided base Python (or auto-detected).
  */
 export function ensureVenv(basePythonPath?: string): EnsureVenvResult {
+  const provided = providedVenvDir();
+  if (provided) {
+    return isVenvSetup()
+      ? { ok: true, pythonPath: getVenvPythonPath() }
+      : {
+          ok: false,
+          pythonPath: basePythonPath ?? "python3",
+          error: `SPORTSCLAW_VENV_DIR=${provided} has no bin/python3.`,
+        };
+  }
   if (isVenvSetup()) {
     // Venv exists — check if extras need upgrading
     if (!hasCorrectExtras()) {
