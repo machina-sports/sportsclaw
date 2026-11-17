@@ -188,7 +188,9 @@ describe("media story tools: the whole chain", () => {
     assert.ok(Math.abs(src.durationSec - 12) < 0.5, `duration ${src.durationSec}`);
 
     const found = ok(await call("media_find_events", { indexArtifactId: indexId, people: ["Ann Smith"] }));
-    assert.deepEqual(found.events, [{ eventId: "ev_1", period: 1, clock: "0:30", label: "Smith 3PT jump shot", people: ["Ann Smith"] }]);
+    assert.deepEqual(found.events, [{
+      eventId: "ev_1", period: 1, clock: "0:30", label: "Smith 3PT jump shot", people: ["Ann Smith"], type: "3pt", videoSec: 3, startSec: 1, endSec: 5,
+    }]);
 
     const facts = ok(await call("story_facts_collect"));
     assert.deepEqual(facts.facts, [{ factId: "fact_1", toolName: "stats_get_player" }]);
@@ -520,6 +522,38 @@ describe("media story tools: footage clearance comes from the operator or the ap
 });
 
 describe("media story tools: timelines", () => {
+  it("media_find_events rows carry the play's type and where it is in the video", async () => {
+    const { call } = await make();
+    const { indexId } = await openAndIndex(call);
+    const found = ok(await call("media_find_events", { indexArtifactId: indexId, type: "2PT" }));
+    assert.deepEqual(found.events, [{
+      eventId: "ev_2", period: 1, clock: "0:50", label: "Jones layup", people: ["Bea Jones"], type: "2pt", videoSec: 8, startSec: 6, endSec: 10,
+    }]);
+  });
+
+  it("a clip may name only its eventId: the window comes from the index its lines were checked against, and the renderer gets it", { skip: NO_FFMPEG }, async () => {
+    const { call, workspaceDir } = await make();
+    const p = await prepared(call);
+    const t = {
+      version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
+      segments: [{ kind: "clip", eventId: "ev_2", lineId: "line_1" }, { kind: "clip", eventId: "ev_1", startSec: 0, endSec: 4 }],
+    };
+    const built = ok(await call("story_timeline_build", { timeline: t }));
+    const doc = JSON.parse(readFileSync(JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${built.timelineArtifactId}.json`), "utf8")).artifact.path, "utf8"));
+    assert.deepEqual(doc.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+    const video = ok(await call("story_render", { timelineArtifactId: built.timelineArtifactId, renderer: `${SKILL}/render-video` }));
+    const st = ok(await call("media_job_status", { jobId: video.jobId }));
+    assert.deepEqual(st.facts.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+  });
+
+  it("a clip window away from its event -> clip_not_event; an event not in the index -> unknown_event", { skip: NO_FFMPEG }, async () => {
+    const { call } = await make();
+    const p = await prepared(call);
+    const t = (seg) => ({ version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId, segments: [seg] });
+    refused(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_1", startSec: 8, endSec: 11 }) }), "clip_not_event");
+    refused(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_404" }) }), "unknown_event");
+  });
+
   it("captions come from the exact lines-checked artifact the timeline names", { skip: NO_FFMPEG }, async () => {
     const { call } = await make();
     const { src, indexId } = await openAndIndex(call);

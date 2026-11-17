@@ -4,5 +4,5 @@ a = sys.argv
 doc = json.load(open(a[a.index("--input") + 1]))
 out = a[a.index("--out") + 1]
 shutil.copyfile(doc["source"]["path"], os.path.join(out, "story.mp4"))
-facts = {"captions": doc["input"]["timeline"]["captions"], "artifacts": doc.get("artifacts")}
+facts = {"captions": doc["input"]["timeline"]["captions"], "segments": doc["input"]["timeline"]["segments"], "artifacts": doc.get("artifacts")}
 json.dump({"artifacts": [{"kind": "video", "file": "story.mp4"}], "facts": facts}, open(os.path.join(out, "manifest.json"), "w"))

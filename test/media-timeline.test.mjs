@@ -119,6 +119,50 @@ describe("resolveTimeline", () => {
     );
   });
 
+  describe("clips named by eventId", () => {
+    // The event index the timeline's lines were checked against.
+    const EVENTS = [{ eventId: "ev_1", startSec: 4, endSec: 10 }, { eventId: "ev_far", startSec: 15, endSec: 25 }];
+    const withEvents = { ...ctx, events: EVENTS };
+    const refusedWith = (t, code, index) =>
+      assert.rejects(resolveTimeline(t, withEvents), (err) => {
+        assert.ok(err instanceof TimelineError, String(err));
+        assert.equal(err.code, code, err.message);
+        assert.equal(err.segmentIndex, index);
+        return true;
+      });
+
+    it("a clip naming only an eventId gets the event's window, and the resolved timeline carries it", async () => {
+      const out = await resolveTimeline(timeline([{ kind: "clip", eventId: "ev_1", lineId: "line_1" }]), withEvents);
+      assert.deepEqual(out.segments, [{ kind: "clip", eventId: "ev_1", startSec: 4, endSec: 10, lineId: "line_1" }]);
+      assert.deepEqual(out.captions, ["Smith scores 30."]);
+    });
+
+    it("an eventId with startSec/endSec inside the event's window +- 5 s keeps the given window", async () => {
+      const out = await resolveTimeline(timeline([clip({ eventId: "ev_1", startSec: 0, endSec: 15 })]), withEvents);
+      assert.deepEqual([out.segments[0].startSec, out.segments[0].endSec], [0, 15]);
+    });
+
+    it("a window outside the event's window +- 5 s -> clip_not_event", async () => {
+      await refusedWith(timeline([clip(), clip({ eventId: "ev_1", startSec: 10, endSec: 15.5 })]), "clip_not_event", 1);
+      await refusedWith(timeline([clip({ eventId: "ev_far", startSec: 2, endSec: 5 })]), "clip_not_event", 0);
+    });
+
+    it("an eventId not in the index -> unknown_event", async () => {
+      await refusedWith(timeline([clip({ eventId: "ev_9" })]), "unknown_event", 0);
+      await refusedWith(timeline([{ kind: "clip", eventId: "ev_9" }]), "unknown_event", 0);
+    });
+
+    it("an eventId with only one of startSec/endSec -> bad_clip; the filled window is checked like any other", async () => {
+      await refusedWith(timeline([{ kind: "clip", eventId: "ev_1", startSec: 4 }]), "bad_clip", 0);
+      await refusedWith(timeline([{ kind: "clip", eventId: "ev_far" }]), "clip_outside_source", 0);
+    });
+
+    it("an eventId when the timeline has no lines (so no event index) -> missing_lines_artifact", async () => {
+      await refused(timeline([{ kind: "clip", eventId: "ev_1" }], { linesArtifactId: undefined }), "missing_lines_artifact", 0);
+      await refused(timeline([{ kind: "clip", eventId: "ev_1" }]), "missing_lines_artifact", 0);
+    });
+  });
+
   it("accepts 40 segments", async () => {
     const out = await resolveTimeline(timeline(Array.from({ length: 40 }, () => clip())), ctx);
     assert.equal(out.captions.length, 40);

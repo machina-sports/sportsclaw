@@ -5,10 +5,17 @@
  * `text` and every other unknown key are refused at both levels. resolveTimeline validates
  * the timeline and returns a fresh plain-JSON copy with `captions[i]` set to the checked line's
  * text for segment i's lineId (null when the segment has none).
+ *
+ * A clip may name its play by eventId instead of startSec/endSec: the window is filled from the event
+ * index the timeline's lines were checked against (ctx.events). A clip that names an eventId and gives
+ * startSec/endSec must lie within the event's [startSec - EVENT_SLACK_SEC, endSec + EVENT_SLACK_SEC]
+ * (`clip_not_event`); an eventId not in that index is `unknown_event`. The resolved timeline always
+ * carries startSec/endSec on every clip.
  */
 
 import type { ArtifactKind } from "./types.js";
 import type { CheckedLine } from "./lines.js";
+import type { IndexedEvent } from "./event-index.js";
 
 export interface TimelineSegment {
   kind: "clip" | "card";
@@ -41,7 +48,9 @@ export type TimelineErrorCode =
   | "too_many_segments"
   | "too_long"
   | "bad_card"
-  | "bad_version";
+  | "bad_version"
+  | "clip_not_event"
+  | "unknown_event";
 
 export class TimelineError extends Error {
   constructor(
@@ -60,6 +69,8 @@ export const MAX_CLIP_SEC = 60;
 export const MIN_CARD_SEC = 1;
 export const MAX_CARD_SEC = 10;
 export const MAX_TOTAL_SEC = 600;
+/** How far a clip that names an eventId may reach past the event's own window, each side. */
+export const EVENT_SLACK_SEC = 5;
 
 const TIMELINE_KEYS = new Set(["version", "sourceArtifactId", "linesArtifactId", "segments"]);
 const SEGMENT_KEYS = new Set([
@@ -105,6 +116,8 @@ export async function resolveTimeline(
     lines: CheckedLine[];
     sourceDurationSec: number;
     hasArtifact: (id: string, kind: ArtifactKind) => Promise<boolean>;
+    /** The event index the timeline's lines were checked against; needed when a clip names an eventId. */
+    events?: ReadonlyArray<Pick<IndexedEvent, "eventId" | "startSec" | "endSec">>;
   },
 ): Promise<ResolvedTimeline> {
   if (!isRecord(t)) throw new TimelineError("bad_version", "Timeline must be an object with version 1");
@@ -128,6 +141,7 @@ export async function resolveTimeline(
   }
 
   const lineText = new Map(ctx.lines.map((l) => [l.lineId, l.text]));
+  const eventsById = new Map((ctx.events ?? []).map((e) => [e.eventId, e]));
   const segments: TimelineSegment[] = [];
   const captions: (string | null)[] = [];
   let total = 0;
@@ -139,8 +153,29 @@ export async function resolveTimeline(
     const seg: TimelineSegment = { kind: raw.kind as "clip" | "card" };
 
     if (raw.kind === "clip") {
-      const { startSec, endSec } = raw;
+      let { startSec, endSec } = raw;
       if (raw.cardSeconds !== undefined) throw new TimelineError("bad_clip", `Segment ${i}: a clip has no cardSeconds`, i);
+      const eventId = optionalString(raw.eventId, "eventId", i, "bad_clip");
+      if (eventId !== undefined) {
+        if (t.linesArtifactId === undefined || ctx.events === undefined) {
+          throw new TimelineError("missing_lines_artifact", `Segment ${i} names event ${eventId}, but the timeline has no linesArtifactId whose event index could place it`, i);
+        }
+        const event = eventsById.get(eventId);
+        if (event === undefined) throw new TimelineError("unknown_event", `Segment ${i}: ${eventId} is not in the event index the lines were checked against`, i);
+        if (startSec === undefined && endSec === undefined) {
+          startSec = event.startSec;
+          endSec = event.endSec;
+        } else if (
+          typeof startSec === "number" && typeof endSec === "number" &&
+          (startSec < event.startSec - EVENT_SLACK_SEC || endSec > event.endSec + EVENT_SLACK_SEC)
+        ) {
+          throw new TimelineError(
+            "clip_not_event",
+            `Segment ${i}: clip ${startSec}-${endSec}s is not within ${EVENT_SLACK_SEC}s of ${eventId} (${event.startSec}-${event.endSec}s)`,
+            i,
+          );
+        }
+      }
       if (typeof startSec !== "number" || typeof endSec !== "number" || !Number.isFinite(startSec) || !Number.isFinite(endSec)) {
         throw new TimelineError("bad_clip", `Segment ${i}: a clip needs finite startSec and endSec`, i);
       }

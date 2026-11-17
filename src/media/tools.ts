@@ -54,7 +54,7 @@ import { LinesError, checkLines, collectFacts, draftLines, jobLineChecker, type 
 import { renderPlain } from "./render-plain.js";
 import { RIGHTS_OFF_NOTE, parseClearances, resolveRightsCheck } from "./rights.js";
 import { startRoleProxy, type RoleProxy } from "./role-proxy.js";
-import { TimelineError, resolveTimeline, type ResolvedTimeline } from "./timeline.js";
+import { EVENT_SLACK_SEC, TimelineError, resolveTimeline, type ResolvedTimeline } from "./timeline.js";
 import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type Artifact, type ArtifactKind, type MediaClearance, type MediaConfig } from "./types.js";
 
 export const MEDIA_TOOL_NAMES = [
@@ -239,14 +239,18 @@ function parseFacts(doc: unknown): Fact[] {
   return doc.facts as Fact[];
 }
 
-function parseLines(doc: unknown): CheckedLine[] {
+/** A lines-checked document: the lines that passed and the event index they were checked against. */
+function parseLines(doc: unknown): { lines: CheckedLine[]; indexArtifactId: string } {
   const ok = (l: unknown): l is CheckedLine =>
     isPlainObject(l) && typeof l.lineId === "string" && typeof l.text === "string" &&
     Array.isArray(l.cites) && l.cites.every((c) => typeof c === "string");
-  if (!isPlainObject(doc) || doc.version !== 1 || !Array.isArray(doc.lines) || !doc.lines.every(ok)) {
+  if (
+    !isPlainObject(doc) || doc.version !== 1 || typeof doc.indexArtifactId !== "string" ||
+    !Array.isArray(doc.lines) || !doc.lines.every(ok)
+  ) {
     refuse("bad_lines", "The lines-checked artifact is not usable.");
   }
-  return doc.lines as CheckedLine[];
+  return { lines: doc.lines as CheckedLine[], indexArtifactId: doc.indexArtifactId };
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +332,10 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
       timeline: {
         type: "object",
         description:
-          "{ version: 1, sourceArtifactId, linesArtifactId?, segments: [{ kind: 'clip', startSec, endSec, eventId?, lineId?, " +
+          "{ version: 1, sourceArtifactId, linesArtifactId?, segments: [{ kind: 'clip', eventId?, startSec?, endSec?, lineId?, " +
           "voiceArtifactId?, subjectTracksArtifactId?, overlay? } | { kind: 'card', cardSeconds, lineId?, voiceArtifactId?, overlay? }] }. " +
+          "A clip names its play by eventId (its window comes from the event index the lines were checked against) or gives " +
+          `startSec and endSec; with both, the window must be within ${EVENT_SLACK_SEC}s of the event's. ` +
           "Captions are named by lineId, never written.",
       },
     },
@@ -351,7 +357,9 @@ function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
     media_job_start: `Start an approved media job. Approved kinds: ${list}.`,
     media_job_status: "A job's state; when it is done, its artifact ids and facts.",
     media_job_cancel: "Cancel a running job.",
-    media_find_events: "Search an event-index artifact for plays. Returns eventId, period, clock, label and people.",
+    media_find_events:
+      "Search an event-index artifact for plays. Returns eventId, period, clock, label, people, type, and where the play is in the " +
+      "video: videoSec and its clip window startSec-endSec.",
     story_facts_collect: "Store this run's data-tool results as a facts artifact. Returns fact ids with their tool names.",
     story_draft_lines: "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked.",
     story_check_lines: `Check lines against the plays and facts they cite. Returns verdicts and a lines-checked artifact of the lines that passed. ${MAX_CHECK_ROUNDS} checks per run.`,
@@ -499,7 +507,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     return parseFacts(await readJsonArtifact(await need(id, "facts"), "bad_facts"));
   }
 
-  async function loadLines(id: unknown): Promise<CheckedLine[]> {
+  async function loadLines(id: unknown): Promise<{ lines: CheckedLine[]; indexArtifactId: string }> {
     return parseLines(await readJsonArtifact(await need(id, "lines-checked"), "bad_lines"));
   }
 
@@ -581,14 +589,22 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   async function resolveForStory(t: unknown): Promise<{ resolved: ResolvedTimeline; source: OpenedSource }> {
     if (!isPlainObject(t)) refuse("invalid_input", "timeline must be an object.");
     const source = await needSource(t.sourceArtifactId);
-    const lines = typeof t.linesArtifactId === "string" ? await loadLines(t.linesArtifactId) : [];
+    const checked = typeof t.linesArtifactId === "string" ? await loadLines(t.linesArtifactId) : undefined;
     const sourceDurationSec = source.durationSec;
     if (sourceDurationSec === null || !Number.isFinite(sourceDurationSec)) {
       refuse("source_duration_unknown", "The source's duration could not be read, so clips cannot be placed on it.");
     }
     const sha = source.artifact.sha256;
+    // A clip may name its play by eventId: place it with the index the lines were checked against.
+    const namesEvent = Array.isArray(t.segments) && t.segments.some((s) => isPlainObject(s) && s.kind === "clip" && s.eventId !== undefined);
+    let events: EventIndex["events"] | undefined;
+    if (checked && namesEvent) {
+      const indexArtifact = await need(checked.indexArtifactId, "event-index", sha);
+      events = parseIndex(await readJsonArtifact(indexArtifact, "bad_index"), [sha]).events;
+    }
     const resolved = await resolveTimeline(t, {
-      lines,
+      lines: checked?.lines ?? [],
+      ...(events ? { events } : {}),
       sourceDurationSec,
       hasArtifact: async (id, kind) => {
         await need(id, kind, sha);
@@ -699,7 +715,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         period: optInt(a, "period", 1, 100),
         type: optStr(a, "type", 100),
         limit: optInt(a, "limit", 1, 1000),
-      }).map((e) => ({ eventId: e.eventId, period: e.period, clock: clock(e.clockSec), label: e.label, people: e.people }));
+      }).map((e) => ({
+        eventId: e.eventId, period: e.period, clock: clock(e.clockSec), label: e.label, people: e.people,
+        type: e.type, videoSec: e.videoSec, startSec: e.startSec, endSec: e.endSec,
+      }));
       return { result: { events: rows }, artifactIds: [] };
     },
 
@@ -758,7 +777,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     async speech_synthesize(a, abortSignal) {
       const lineIds = strList(a, "lineIds", MAX_LINES);
       const voice = optStr(a, "voice", 200);
-      const lines = new Map((await loadLines(a.linesArtifactId)).map((l) => [l.lineId, l]));
+      const lines = new Map((await loadLines(a.linesArtifactId)).lines.map((l) => [l.lineId, l]));
       const chosen = lineIds.map((id) => lines.get(id) ?? refuse("unknown_line", `${id.slice(0, 60)} is not a line that passed the check.`));
       if (!ctx.inference?.speech) refuse("no_speech", "No speech route is configured (inference.speech).");
       const voices: { lineId: string; voiceArtifactId: string; durationMs: number }[] = [];
