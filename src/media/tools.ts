@@ -37,6 +37,8 @@
  *     plain renderer) needs a clearance whose sourceSha256 is the source's sha256, from operator config
  *     (media.clearances) or the app starting the run (ctx.clearances). No tool takes a rights input, so
  *     the model cannot clear a video. Under "off" nothing is needed and "off (operator)" is recorded.
+ *     A video or subject-tracks artifact from an earlier run (shared) needs the same clearance for its
+ *     sourceSha256 before any tool uses it.
  *   - facts, lines-checked, voice and timeline (TOOL_MINTED_KINDS) are made only by these tools: an id of
  *     one is accepted only if these tools registered it in this run (`artifact_not_minted`), so no job,
  *     earlier run or shared registry entry can supply unchecked text, voice or evidence.
@@ -136,6 +138,8 @@ const DEFAULT_MAX_LINES = 8;
 const MAX_LINES = 20;
 const MAX_JSON_ARTIFACT_BYTES = 32 * 1024 * 1024;
 const CHECK_KIND = "check-lines";
+/** Kinds that carry footage: shared from an earlier run, they need a clearance for their source under "require". */
+const SHARED_FOOTAGE_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>(["video", "subject-tracks"]);
 
 class Refusal extends Error {
   /** model_call_failed / speech_failed: the router's error code (a closed enum, never provider text). */
@@ -531,6 +535,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     if (TOOL_MINTED_KINDS.has(kind) && !minted.has(artifact.id)) {
       refuse("artifact_not_minted", `Artifact ${artifact.id} is a ${kind} the story tools did not make in this run.`);
     }
+    // Footage from an earlier run (a video, or subject tracks drawn from it) needs this run's clearance too.
+    if (SHARED_FOOTAGE_KINDS.has(kind) && artifact.runId !== ctx.runId) authorize(artifact.sourceSha256 ?? "");
     return artifact;
   }
 

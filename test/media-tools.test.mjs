@@ -530,6 +530,23 @@ describe("media story tools: footage clearance comes from the operator or the ap
     }
   });
 
+  it("under require, a video or subject-tracks shared from an earlier run needs a clearance for its source (rights_required)", async () => {
+    for (const [kind, key] of [["subject-tracks", "tracks"], ["video", "video"]]) {
+      const workspaceDir = newWorkspace();
+      const file = join(workspaceDir, `earlier-${kind}`);
+      writeFileSync(file, "pixels of the game");
+      const earlier = await new ArtifactStore({ workspaceDir, runId: "an_earlier_run" }).register({ kind, path: file, sourceSha256: SOURCE_SHA, shared: true });
+      const use = async (over) => {
+        const { call } = await make({ workspaceDir, ...over });
+        ok(await call("media_source_open", { path: "media/game.mp4" }));
+        return call("media_job_start", { skill: SKILL, kind: "hand-off", input: { [key]: earlier.id } });
+      };
+      refused(await use({ config: { clearances: [] } }), "rights_required");
+      ok(await use({}));
+      ok(await use({ config: { rightsCheck: "off", clearances: [] } }));
+    }
+  });
+
   it("off: no clearance is needed and the record says off (operator)", async () => {
     const { call } = await make({ config: { rightsCheck: "off", clearances: [] } });
     const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
