@@ -6,6 +6,11 @@
  * there is at least one cite, every number is in the cited evidence) AND the skill's checker,
  * if any, says ok. A checker that throws or answers anything but one verdict per line fails
  * every line ("checker_failed"): no line gets through on a broken check.
+ *
+ * Facts come from data tools only. A tool result is a fact when it is not an error, its tool is
+ * not skill_read_reference or skill_run_script, its name does not start with media_, story_ or
+ * speech_, and, if the caller gives isDataTool, isDataTool(toolName) returns true. A skill doc
+ * full of example stats is not evidence for a line.
  */
 
 import { invokeModelRole, type ModelRoleRouterConfig } from "../inference/model-role-router.js";
@@ -33,11 +38,20 @@ export class LinesError extends Error {
 const DEFAULT_CHECK_KIND = "check-lines";
 const DEFAULT_CHECK_TIMEOUT_SEC = 600;
 
-/** Every tool result that is not an error is a fact, numbered fact_1.. in result order. */
-export function collectFacts(results: RunToolResult[]): Fact[] {
+/** Tools whose output is not game data: skill docs and scripts, and the story pipeline's own tools. */
+function isNonDataTool(toolName: string): boolean {
+  return (
+    toolName === "skill_read_reference" ||
+    toolName === "skill_run_script" ||
+    /^(media_|story_|speech_)/.test(toolName)
+  );
+}
+
+/** Data-tool results that are not errors (see the module doc), numbered fact_1.. over the kept results in order. */
+export function collectFacts(results: RunToolResult[], opts?: { isDataTool?: (toolName: string) => boolean }): Fact[] {
   return results
-    .filter((r) => !r.isError)
-    .map((r, i) => ({ factId: `fact_${i + 1}`, toolName: r.toolName, output: String(r.output) }));
+    .filter((r) => !r.isError && !isNonDataTool(r.toolName) && (opts?.isDataTool?.(r.toolName) ?? true))
+    .map((r, i) => ({ factId: `fact_${i + 1}`, toolName: r.toolName, output: r.output }));
 }
 
 function clock(sec: number): string {

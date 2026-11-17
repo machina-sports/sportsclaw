@@ -41,6 +41,33 @@ describe("collectFacts", () => {
       { factId: "fact_2", toolName: "nba_standings", output: "Nuggets 50-20" },
     ]);
   });
+
+  const r = (toolName, output) => ({ toolName, toolCallId: toolName, input: {}, output, isError: false });
+
+  it("leaves out skill docs, skill scripts and the pipeline's own tools; numbering skips them", () => {
+    const facts = collectFacts([
+      r("skill_read_reference", "Example: Jokic scores 41."),
+      r("skill_run_script", "41"),
+      r("media_job_status", '{"state":"succeeded"}'),
+      r("story_check_lines", "[]"),
+      r("speech_say", "ok"),
+      r("nba_box_score", '{"pts":38}'),
+    ]);
+    assert.deepEqual(facts, [{ factId: "fact_1", toolName: "nba_box_score", output: '{"pts":38}' }]);
+  });
+
+  it("a number only in a skill reference doc does not back a line", async () => {
+    const facts = collectFacts([r("skill_read_reference", "Example: Jokic scores 41.")]);
+    const { verdicts } = await checkLines({ lines: [{ text: "Jokic scores 41.", cites: ["fact_1"] }], events: EVENTS, facts });
+    assert.equal(verdicts[0].ok, false);
+    assert.deepEqual(verdicts[0].reasons, ["unknown_cite", "unsupported_number"]);
+  });
+
+  it("isDataTool returning false drops a result; true keeps it", () => {
+    const results = [r("nba_box_score", "38"), r("weather", "21C")];
+    assert.deepEqual(collectFacts(results, { isDataTool: (t) => t !== "weather" }), [{ factId: "fact_1", toolName: "nba_box_score", output: "38" }]);
+    assert.equal(collectFacts(results, { isDataTool: () => true }).length, 2);
+  });
 });
 
 describe("checkLines (built-in checks)", () => {
