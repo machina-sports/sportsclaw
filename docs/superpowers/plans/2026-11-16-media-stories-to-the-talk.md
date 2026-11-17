@@ -50,7 +50,8 @@ Done when: on one GPU machine, "Curry threes" produces a story whose run manifes
 
 - The media worker: the same job runner behind a small HTTP API on the host. It enforces the same allowlist and the rights switch.
 - An OpenShell provider profile and policy rule so the sandbox reaches `host.openshell.internal:<port>`, like `nim-local`.
-- Speech: confirm whether hosted Magpie has an HTTP form endpoint. If not, add the gRPC wire format.
+- Speech: hosted Magpie is gRPC only (NVCF, function id; see the demo's `tts.py`), so phase 2 adds a `riva-grpc` format and runs speech on the worker, keeping the key and the gRPC call on the host.
+- Plan: `docs/superpowers/plans/2026-11-16-media-stories-phase2-worker.md`.
 - The OpenShell image rebuilt with 0.32.0.
 
 Done when: the B run works with the agent inside OpenShell and the sandbox never sees footage, only manifests.
