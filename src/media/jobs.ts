@@ -55,6 +55,8 @@ export interface JobRecord {
   artifacts: Artifact[];
   facts: Record<string, unknown>;
   rightsCheck?: "off (operator)";
+  /** The authorization the source was read under (rightsCheck "require" and a source-reading kind). */
+  rights?: { rightsHolder: string; licenseRef: string; territories?: string[] };
 }
 
 /** One entry of input.json's `artifacts` map. */
@@ -313,6 +315,7 @@ export class LocalJobRunner implements JobRunner {
     const inputJson: Record<string, unknown> = { input: req.input };
 
     let rightsOff = false;
+    let rightsUsed: JobRecord["rights"];
     let sourcePath: string;
     if (decl.readsSource) {
       const src = req.source;
@@ -323,6 +326,9 @@ export class LocalJobRunner implements JobRunner {
       if (resolveRightsCheck(this.config, this.env) === "off") rightsOff = true;
       else if (!rightsCleared(src.rights)) {
         throw new JobError("rights_required", "This job kind reads the source; a rights block with clearedForClipping: true is required.");
+      } else {
+        const r = src.rights!;
+        rightsUsed = { rightsHolder: r.rightsHolder, licenseRef: r.licenseRef, ...(r.territories ? { territories: [...r.territories] } : {}) };
       }
       inputJson.source = { path: sourcePath, sha256: src.sha256 };
     }
@@ -359,6 +365,7 @@ export class LocalJobRunner implements JobRunner {
       artifacts: [],
       facts: {},
       ...(rightsOff ? { rightsCheck: RIGHTS_OFF_NOTE } : {}),
+      ...(rightsUsed ? { rights: rightsUsed } : {}),
     };
 
     this.started++;
@@ -447,7 +454,7 @@ export class LocalJobRunner implements JobRunner {
   }
 
   private snapshot(record: JobRecord): JobRecord {
-    return { ...record, artifacts: [...record.artifacts], facts: { ...record.facts } };
+    return { ...record, artifacts: [...record.artifacts], facts: { ...record.facts }, ...(record.rights ? { rights: { ...record.rights } } : {}) };
   }
 
   private live(jobId: string): LiveJob {

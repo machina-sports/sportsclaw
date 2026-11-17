@@ -3,8 +3,8 @@
  */
 
 export { ARTIFACT_KINDS, TOOL_MINTED_KINDS } from "./types.js";
-export type { Artifact, ArtifactKind, MediaConfig, RightsCheckMode } from "./types.js";
-export { RIGHTS_CHECK_ENV, RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
+export type { Artifact, ArtifactKind, MediaClearance, MediaConfig, RightsCheckMode } from "./types.js";
+export { RIGHTS_CHECK_ENV, RIGHTS_OFF_NOTE, parseClearances, resolveRightsCheck } from "./rights.js";
 export { ArtifactError, ArtifactStore, hashFile } from "./artifacts.js";
 export type { ArtifactErrorCode } from "./artifacts.js";
 export { BundleError, JOB_ALLOWLIST_ENV, approvedJobBundles, approvedJobKinds, bundleSha256, sealBundle } from "./bundle.js";

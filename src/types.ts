@@ -978,6 +978,11 @@ export interface RunOptions {
   artifact?: ArtifactTurnInput;
   /** Receives exactly one typed artifact result per successful run with `artifact`. */
   onArtifactResult?: (result: ArtifactTurnResult) => void;
+  /**
+   * Footage clearances for this run only (sportsclawConfig.media), added to media.clearances. Each is
+   * tied to one source file's sha256. Set by the app starting the run; the model cannot supply one.
+   */
+  mediaClearances?: import("./media/types.js").MediaClearance[];
 }
 
 // ---------------------------------------------------------------------------

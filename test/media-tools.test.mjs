@@ -9,6 +9,7 @@ import http from "node:http";
 import { after, describe, it } from "node:test";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -66,6 +67,9 @@ if (HAVE_FFMPEG) {
 } else {
   writeFileSync(SOURCE, "not a video");
 }
+const SOURCE_SHA = createHash("sha256").update(readFileSync(SOURCE)).digest("hex");
+/** The operator's clearance for the test source (every workspace holds a copy of the same bytes). */
+const CLEARED = [{ ...RIGHTS, sourceSha256: SOURCE_SHA }];
 
 const EVENTS = [
   { eventId: "ev_1", actionId: "1", period: 1, clockSec: 30, label: "Smith 3PT jump shot", type: "3pt", people: ["Ann Smith"], videoSec: 3, startSec: 1, endSec: 5 },
@@ -119,7 +123,7 @@ async function make(over = {}) {
   const workspaceDir = over.workspaceDir ?? newWorkspace();
   const runId = over.runId ?? `run_${n++}`;
   const media = await createMediaTools({
-    config: { workspaceDir, ...over.config },
+    config: { workspaceDir, clearances: CLEARED, ...over.config },
     guides: GUIDES,
     inference: "inference" in over ? over.inference : INFERENCE,
     runId,
@@ -128,6 +132,7 @@ async function make(over = {}) {
     isDataTool: over.isDataTool ?? ((name) => name === "stats_get_player"),
     ...(over.pythonPath ? { pythonPath: over.pythonPath } : {}),
     ...(over.onReceipt ? { onReceipt: over.onReceipt } : {}),
+    ...(over.clearances ? { clearances: over.clearances } : {}),
   });
   disposers.push(media.dispose);
   const call = (name, input = {}) => media.tools[name].execute(input, {});
@@ -146,7 +151,7 @@ function refused(result, code) {
 
 /** Open the source, run make-index, wait for it. */
 async function openAndIndex(call, mode) {
-  const src = ok(await call("media_source_open", { path: "media/game.mp4", rights: RIGHTS }));
+  const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
   const job = ok(await call("media_job_start", {
     skill: SKILL, kind: "make-index", input: { events: EVENTS, ...(mode ? { mode } : {}) }, sourceArtifactId: src.sourceArtifactId,
   }));
@@ -427,18 +432,63 @@ describe("media story tools: renderers", () => {
     refused(await call("story_render", { timelineArtifactId: built.timelineArtifactId, renderer: `${SKILL}/hand-off` }), "renderer_invalid");
   });
 
-  it("the plain renderer needs cleared rights unless the operator turned the check off", { skip: NO_FFMPEG }, async () => {
-    const { call } = await make({ kinds: [] });
+  it("the plain renderer needs a clearance unless the operator turned the check off", { skip: NO_FFMPEG }, async () => {
+    const { call } = await make({ kinds: [], config: { clearances: [] } });
     const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
     const t = { version: 1, sourceArtifactId: src.sourceArtifactId, segments: [{ kind: "clip", startSec: 1, endSec: 3 }] };
     const built = ok(await call("story_timeline_build", { timeline: t }));
     refused(await call("story_render", { timelineArtifactId: built.timelineArtifactId }), "rights_required");
 
-    const off = await make({ kinds: [], config: { rightsCheck: "off" } });
+    const off = await make({ kinds: [], config: { rightsCheck: "off", clearances: [] } });
     const src2 = ok(await off.call("media_source_open", { path: "media/game.mp4" }));
     const built2 = ok(await off.call("story_timeline_build", { timeline: { ...t, sourceArtifactId: src2.sourceArtifactId } }));
     const video = ok(await off.call("story_render", { timelineArtifactId: built2.timelineArtifactId }));
     assert.equal(video.rightsCheck, "off (operator)");
+  });
+});
+
+describe("media story tools: footage clearance comes from the operator or the app, never the model", () => {
+  const indexJob = (call, sourceArtifactId) => call("media_job_start", { skill: SKILL, kind: "make-index", input: { events: EVENTS }, sourceArtifactId });
+
+  it("rights in media_source_open's input are refused, and its schema has no rights property", async () => {
+    const { media, call } = await make({ config: { clearances: [] } });
+    refused(await call("media_source_open", { path: "media/game.mp4", rights: RIGHTS }), "unknown_field");
+    assert.deepEqual(Object.keys(media.tools.media_source_open.inputSchema.properties), ["path"]);
+    assert.equal(media.tools.media_source_open.inputSchema.additionalProperties, false);
+  });
+
+  it("require + an operator clearance for the source's sha256: the job runs and its record carries the authorization", async () => {
+    const { call } = await make();
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const job = ok(await indexJob(call, src.sourceArtifactId));
+    const st = ok(await call("media_job_status", { jobId: job.jobId, waitSec: 30 }));
+    assert.equal(st.state, "succeeded", st.error);
+    assert.deepEqual(st.rights, { rightsHolder: "League", licenseRef: "L-1" });
+    assert.equal(st.rightsCheck, undefined);
+  });
+
+  it("require + a clearance for another sha256 -> rights_required naming the operator", async () => {
+    const { call } = await make({ config: { clearances: [{ ...RIGHTS, sourceSha256: "a".repeat(64) }, { ...RIGHTS, clearedForClipping: false, sourceSha256: SOURCE_SHA }] } });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const r = await indexJob(call, src.sourceArtifactId);
+    refused(r, "rights_required");
+    assert.match(r.message, /operator config/);
+    assert.match(r.message, /not from the model/);
+  });
+
+  it("off: no clearance is needed and the record says off (operator)", async () => {
+    const { call } = await make({ config: { rightsCheck: "off", clearances: [] } });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const st = ok(await call("media_job_status", { jobId: ok(await indexJob(call, src.sourceArtifactId)).jobId, waitSec: 30 }));
+    assert.equal(st.state, "succeeded", st.error);
+    assert.equal(st.rightsCheck, "off (operator)");
+    assert.equal(st.rights, undefined);
+  });
+
+  it("malformed clearances are a configuration error, not a silent pass", async () => {
+    await assert.rejects(make({ config: { clearances: [{ ...RIGHTS, sourceSha256: "ABC" }] } }), /sourceSha256/);
+    await assert.rejects(make({ clearances: [{ ...RIGHTS, sourceSha256: SOURCE_SHA, extra: 1 }] }), /unknown field/);
+    assert.throws(() => new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace(), clearances: [{ sourceSha256: SOURCE_SHA }] } }), /rightsHolder/);
   });
 });
 
@@ -456,7 +506,7 @@ describe("media story tools: timelines", () => {
   it("a source whose duration cannot be probed cannot be timed (source_duration_unknown)", async () => {
     const { call, workspaceDir } = await make();
     writeFileSync(join(workspaceDir, "media", "notes.mp4"), "plain text");
-    const src = ok(await call("media_source_open", { path: "media/notes.mp4", rights: RIGHTS }));
+    const src = ok(await call("media_source_open", { path: "media/notes.mp4" }));
     assert.equal(src.durationSec, null);
     const t = { version: 1, sourceArtifactId: src.sourceArtifactId, segments: [{ kind: "card", cardSeconds: 2 }] };
     refused(await call("story_timeline_build", { timeline: t }), "source_duration_unknown");
@@ -635,6 +685,35 @@ describe("engine wiring", () => {
     assert.doesNotMatch(systemText(model.doGenerateCalls[0]), /media_source_open|## Media stories/);
     assert.equal(result.trace.mediaSteps, undefined);
     assert.equal(result.trace.mediaReceipts, undefined);
+  });
+
+  it("a clearance passed in run options clears that run only", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        if (isVerdictCall(call)) return generated([{ type: "text", text: JSON.stringify({ isValid: true, discrepancies: [] }) }]);
+        const tools = call.prompt.filter((m) => m.role === "tool");
+        const text = JSON.stringify(tools.slice(-1));
+        const source = /art_[0-9a-f]{16}/.exec(JSON.stringify(tools))?.[0];
+        if (tools.length === 0) return generated([{ type: "tool-call", toolCallId: "o1", toolName: "media_source_open", input: JSON.stringify({ path: "media/game.mp4" }) }]);
+        if (/job_[0-9a-f]{16}|error_code/.test(text)) return generated([{ type: "text", text: "Done." }]);
+        return generated([{ type: "tool-call", toolCallId: "s1", toolName: "media_job_start", input: JSON.stringify({ skill: SKILL, kind: "make-index", input: { events: EVENTS }, sourceArtifactId: source }) }]);
+      },
+    });
+    const engine = new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace() } });
+    engine.mainModel = model;
+    engine.registry = { getInstalledSkills: () => [], getAllToolSpecs: () => [], getSkillName: () => undefined };
+    engine.skillGuides = GUIDES;
+    engine.setToolAllowlist(["media_source_open", "media_job_start"]);
+    process.env[JOB_ALLOWLIST_ENV] = allow(APPROVED)[JOB_ALLOWLIST_ENV];
+    const started = (result) => JSON.parse(result.toolResults.find((r) => r.toolName === "media_job_start").output);
+    try {
+      const first = await engine.runDetailed("Index the game.", { historyMode: "caller", mediaClearances: CLEARED });
+      assert.match(started(first).jobId ?? "", /^job_/, JSON.stringify(started(first)));
+      const second = await engine.runDetailed("Index the game.", { historyMode: "caller" });
+      assert.equal(started(second).error_code, "rights_required");
+    } finally {
+      delete process.env[JOB_ALLOWLIST_ENV];
+    }
   });
 
   it("a job's role-proxy call leaves its receipt on the run trace", async () => {

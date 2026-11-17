@@ -22,7 +22,10 @@
  *     has that kind approved. For an index from an earlier run, the one approved skill with a "check-lines"
  *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
  *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`.
- *   - Rendering reads the source, so the plain renderer applies the same rights rule as a job.
+ *   - Rights: under rightsCheck "require", reading the source (a source-reading job, a skill renderer, the
+ *     plain renderer) needs a clearance whose sourceSha256 is the source's sha256, from operator config
+ *     (media.clearances) or the app starting the run (ctx.clearances). No tool takes a rights input, so
+ *     the model cannot clear a video. Under "off" nothing is needed and "off (operator)" is recorded.
  *   - facts, lines-checked, voice and timeline (TOOL_MINTED_KINDS) are made only by these tools: an id of
  *     one is accepted only if these tools registered it in this run (`artifact_not_minted`), so no job,
  *     earlier run or shared registry entry can supply unchecked text, voice or evidence.
@@ -45,10 +48,10 @@ import { findEvents, type EventIndex, type IndexedEvent } from "./event-index.js
 import { JobError, LocalJobRunner, rightsCleared, type JobArtifactRef, type JobRecord } from "./jobs.js";
 import { LinesError, checkLines, collectFacts, draftLines, jobLineChecker, type CheckedLine, type DraftLine, type Fact, type LineChecker } from "./lines.js";
 import { renderPlain } from "./render-plain.js";
-import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
+import { RIGHTS_OFF_NOTE, parseClearances, resolveRightsCheck } from "./rights.js";
 import { startRoleProxy, type RoleProxy } from "./role-proxy.js";
 import { TimelineError, resolveTimeline, type ResolvedTimeline } from "./timeline.js";
-import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
+import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type Artifact, type ArtifactKind, type MediaClearance, type MediaConfig } from "./types.js";
 
 export const MEDIA_TOOL_NAMES = [
   "media_source_open",
@@ -97,6 +100,8 @@ export interface MediaToolsContext {
   isDataTool?: (toolName: string) => boolean;
   /** The operator's Python (sportsclawConfig.pythonPath): the job interpreter when media.interpreters has no default. */
   pythonPath?: string;
+  /** Clearances the app starting this run supplies (RunOptions.mediaClearances), on top of media.clearances. */
+  clearances?: MediaClearance[];
 }
 
 /** Story checks per run: the first and two rewrite rounds. */
@@ -250,13 +255,9 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
     type: "object",
     properties: {
       path: { type: "string", description: "The video file, relative to the media workspace." },
-      rights: {
-        type: "object",
-        description: "The rights authorization for this footage, when the operator requires one.",
-        properties: { rightsHolder: { type: "string" }, licenseRef: { type: "string" }, clearedForClipping: { type: "boolean" } },
-      },
     },
     required: ["path"],
+    additionalProperties: false,
   },
   media_job_start: {
     type: "object",
@@ -360,7 +361,6 @@ function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
 
 interface OpenedSource {
   artifact: Artifact;
-  rights?: RightsAuthorization;
   durationSec: number | null;
 }
 
@@ -382,6 +382,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   const interpreters = { ...config.interpreters };
   if (!interpreters.default && ctx.pythonPath) interpreters.default = [ctx.pythonPath];
 
+  const clearances = [
+    ...parseClearances(config.clearances, "media.clearances"),
+    ...parseClearances(ctx.clearances, "mediaClearances"),
+  ];
   const bundles = await approvedJobBundles(ctx.guides, env);
   const kinds = new Map<string, Approved>();
   for (const bundle of bundles) for (const decl of bundle.decls) kinds.set(`${bundle.skill}/${decl.kind}`, { bundle, decl });
@@ -416,6 +420,24 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   let checkRounds = 0;
 
   const openedShas = () => [...new Set([...sources.values()].map((s) => s.artifact.sha256))];
+
+  /**
+   * The authorization for reading a source. Under "require": the first clearance for exactly this sha256
+   * that clears clipping, else rights_required. Under "off": none needed.
+   */
+  function authorize(sha: string): { rightsOff: boolean; rights?: RightsAuthorization } {
+    if (resolveRightsCheck(config, env) === "off") return { rightsOff: true };
+    const c = clearances.find((x) => x.sourceSha256 === sha && rightsCleared(x));
+    if (!c) {
+      refuse(
+        "rights_required",
+        "This source has no clearance. A clearance for its exact sha256 must come from the operator config (media.clearances) " +
+          "or the app starting the run (mediaClearances), not from the model.",
+      );
+    }
+    const { sourceSha256: _sha, ...rights } = c;
+    return { rightsOff: false, rights };
+  }
 
   /** Ids of TOOL_MINTED_KINDS artifacts these tools registered in this run. */
   const minted = new Set<string>();
@@ -489,6 +511,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       artifacts: rec.artifacts.map((a) => ({ artifactId: a.id, kind: a.kind, ...(a.facts ? { facts: a.facts } : {}) })),
       facts: rec.facts,
       ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}),
+      ...(rec.rights ? { rights: rec.rights } : {}),
     };
   }
 
@@ -578,8 +601,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
 
   const handlers: Record<MediaToolName, (a: Record<string, unknown>, abortSignal?: AbortSignal) => Promise<StepResult>> = {
     async media_source_open(a) {
+      const extra = Object.keys(a).find((k) => k !== "path");
+      if (extra !== undefined) {
+        refuse("unknown_field", `media_source_open takes only "path" (got "${extra.slice(0, 40)}"); footage is cleared by the operator, not in a tool call.`);
+      }
       const path = str(a, "path", 4096);
-      if (a.rights !== undefined && !isPlainObject(a.rights)) refuse("invalid_input", "rights must be an object.");
       const real = await fs.realpath(resolve(workspace, path)).catch(() => undefined);
       if (real === undefined) refuse("source_not_found", "No file at that path in the media workspace.");
       if (!real.startsWith(workspace + sep)) refuse("source_outside", "The source must be a file inside the media workspace.");
@@ -594,7 +620,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       } catch {
         durationSec = null;
       }
-      sources.set(artifact.id, { artifact, durationSec, ...(a.rights ? { rights: a.rights as unknown as RightsAuthorization } : {}) });
+      sources.set(artifact.id, { artifact, durationSec });
       const shared = (await store.forSource(sha)).map((s) => ({
         artifactId: s.id,
         kind: s.kind,
@@ -614,13 +640,14 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const source = a.sourceArtifactId === undefined ? undefined : await needSource(a.sourceArtifactId);
       if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
       const artifacts = await artifactInputs(decl, a.input, source?.artifact.sha256);
+      const rights = decl.readsSource && source ? authorize(source.artifact.sha256).rights : undefined;
       const rec = await runner.start({
         decl,
         skillDir: bundle.skillDir,
         bundleSha256: bundle.bundleSha256,
         input: a.input,
         ...(decl.readsSource && source
-          ? { source: { path: source.artifact.path, sha256: source.artifact.sha256, ...(source.rights ? { rights: source.rights } : {}) } }
+          ? { source: { path: source.artifact.path, sha256: source.artifact.sha256, ...(rights ? { rights } : {}) } }
           : {}),
         artifacts,
       });
@@ -755,12 +782,13 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         if (!decl.produces.includes("video") || !decl.readsSource) {
           refuse("renderer_invalid", `${renderer} is not a renderer: it must read the source and produce video.`);
         }
+        const { rights } = authorize(sha);
         const started = await runner.start({
           decl,
           skillDir: bundle.skillDir,
           bundleSha256: bundle.bundleSha256,
           input: { timeline: resolved },
-          source: { path: source.artifact.path, sha256: sha, ...(source.rights ? { rights: source.rights } : {}) },
+          source: { path: source.artifact.path, sha256: sha, ...(rights ? { rights } : {}) },
           artifacts: await timelineArtifacts(resolved, source),
         });
         jobs.set(started.jobId, approved);
@@ -771,16 +799,20 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         let durationSec: number | null = Number((await probeVideo(video.path).catch(() => undefined))?.format?.duration);
         if (!Number.isFinite(durationSec)) durationSec = null;
         return {
-          result: { videoArtifactId: video.id, durationSec, renderer, jobId: rec.jobId, ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}) },
+          result: {
+            videoArtifactId: video.id, durationSec, renderer, jobId: rec.jobId,
+            ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}),
+            ...(rec.rights ? { rights: rec.rights } : {}),
+          },
           artifactIds: rec.artifacts.map((x) => x.id),
           jobId: rec.jobId,
         };
       }
 
-      const rightsOff = resolveRightsCheck(config, env) === "off";
-      if (!rightsOff && !rightsCleared(source.rights)) {
-        refuse("rights_required", "Rendering cuts the source: open it with a rights block with clearedForClipping: true.");
-      }
+      const { rightsOff, rights } = authorize(sha);
+      const used = rights
+        ? { rightsHolder: rights.rightsHolder, licenseRef: rights.licenseRef, ...(rights.territories ? { territories: rights.territories } : {}) }
+        : undefined;
       const voicePaths: Record<string, string> = {};
       for (const s of resolved.segments) {
         if (s.voiceArtifactId) voicePaths[s.voiceArtifactId] = (await need(s.voiceArtifactId, "voice", sha)).path;
@@ -791,10 +823,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         kind: "video",
         path: outPath,
         sourceSha256: sha,
-        ...(rightsOff ? { facts: { rightsCheck: RIGHTS_OFF_NOTE } } : {}),
+        facts: rightsOff ? { rightsCheck: RIGHTS_OFF_NOTE } : { rights: used },
       });
       return {
-        result: { videoArtifactId: video.id, durationSec, renderer, ...(rightsOff ? { rightsCheck: RIGHTS_OFF_NOTE } : {}) },
+        result: { videoArtifactId: video.id, durationSec, renderer, ...(rightsOff ? { rightsCheck: RIGHTS_OFF_NOTE } : { rights: used }) },
         artifactIds: [video.id],
       };
     },

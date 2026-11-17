@@ -169,6 +169,7 @@ import {
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import { randomUUID } from "node:crypto";
 import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
+import { parseClearances } from "./media/rights.js";
 import type { InferenceReceipt } from "./inference/receipt.js";
 import {
   buildResultOverview,
@@ -1301,6 +1302,8 @@ export class sportsclawEngine {
       );
     }
     this.mainModelId = readModelId(this.mainModel);
+    // A malformed operator clearance is a configuration error: fail at construction, not mid-run.
+    if (this.config.media) parseClearances(this.config.media.clearances, "media.clearances");
     this.registry = new ToolRegistry();
     this.registry.configureCaching({
       enabled: this.config.cacheEnabled,
@@ -5053,6 +5056,7 @@ export class sportsclawEngine {
           // Sports Skills data tools are the registry's routed tools; MCP and host tools are not.
           isDataTool: (name) => registry.getSkillName(name) !== undefined,
           pythonPath: this.config.pythonPath,
+          ...(options?.mediaClearances !== undefined ? { clearances: options.mediaClearances } : {}),
         });
       }
       return await this.runExclusiveTurn(userPrompt, options);

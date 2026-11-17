@@ -28,6 +28,9 @@ const engine = new sportsclawEngine({
     },
     maxJobsPerRun: 12,
     factTools: ["host_box_score"],         // extra tools whose results count as facts
+    clearances: [                          // footage cleared for clipping, one entry per exact file
+      { sourceSha256: "<sha256 of game.mp4>", rightsHolder: "League", licenseRef: "L-2026-114", clearedForClipping: true },
+    ],
   },
   inference: {
     roles: { writer: { route: "nim", model: "…", baseUrl: "http://127.0.0.1:8000/v1" } },
@@ -47,8 +50,10 @@ const engine = new sportsclawEngine({
   `speech_synthesize`. Every configured role except `brain` is reachable by jobs through the
   role proxy (below).
 
+- `clearances` — see [Rights](#rights).
+
 None of these is a tool input: the model cannot change the workspace, the rights switch, the
-interpreters or the allowlist.
+clearances, the interpreters or the allowlist.
 
 ### Environment variables
 
@@ -63,7 +68,7 @@ Skills are found as for portable skills (`SPORTSCLAW_SKILL_GUIDES_DIR`).
 
 | Tool | Input | Requires | Returns |
 |---|---|---|---|
-| `media_source_open` | `{ path, rights? }` | a file inside `workspaceDir` | `sourceArtifactId`, `sha256`, `durationSec` (null if it cannot be probed), and `shared`: artifacts already prepared for this source |
+| `media_source_open` | `{ path }` (anything else: `unknown_field`) | a file inside `workspaceDir` | `sourceArtifactId`, `sha256`, `durationSec` (null if it cannot be probed), and `shared`: artifacts already prepared for this source |
 | `media_job_start` | `{ skill, kind, input, sourceArtifactId? }` | an approved kind; artifact ids in `input` (see `x-artifact-kind`) | `jobId` |
 | `media_job_status` | `{ jobId, waitSec? }` | a job of this run; `waitSec` is capped at 60 | state, artifact ids and facts when done |
 | `media_job_cancel` | `{ jobId }` | a job of this run | state |
@@ -222,11 +227,33 @@ passed on. The proxy closes when the run ends.
 `media.rightsCheck` (or `SPORTSCLAW_MEDIA_RIGHTS_CHECK`) is an operator switch, never a tool
 input:
 
-- `require` (default): a job that reads the source, and the plain renderer, need the source
-  opened with `rights: { rightsHolder, licenseRef, clearedForClipping: true }`; otherwise
-  they refuse (`rights_required`).
-- `off`: no authorization is needed. Job records and rendered videos say
+- `require` (default): reading the source (a job kind that reads it, a skill renderer, the
+  plain renderer) needs a **clearance** for that source; otherwise the call is refused with
+  `rights_required`. The job record (`media_job_status`) and the rendered video carry the
+  authorization used (`rights: { rightsHolder, licenseRef }`).
+- `off`: no clearance is needed. Job records and rendered videos say
   `rightsCheck: "off (operator)"`.
+
+**The model cannot clear a video.** No tool takes a rights input. A clearance comes from one of
+two places, both outside the model:
+
+- operator config, `media.clearances` (as in the example above), for footage cleared for every
+  run;
+- the app starting a run, `RunOptions.mediaClearances`, for that run only:
+
+  ```ts
+  await engine.runDetailed("Make a story of the fourth quarter.", {
+    mediaClearances: [{ sourceSha256, rightsHolder: "League", licenseRef: "L-2026-114", clearedForClipping: true }],
+  });
+  ```
+
+The two lists are merged. A clearance is `{ sourceSha256, rightsHolder, licenseRef,
+clearedForClipping, territories? }`; a malformed one is a configuration error (the engine or the
+run refuses to start), and only one with `clearedForClipping: true` clears.
+
+**A clearance is tied to the exact bytes.** It names the file's sha256, not its path or name, so
+a re-encoded, trimmed or otherwise changed file is a different source and needs its own
+clearance. Get the sha256 with `shasum -a 256 game.mp4`, or from `media_source_open`'s result.
 
 Whether a video may be shown or published stays the operator's responsibility; the switch
 does not clear footage.

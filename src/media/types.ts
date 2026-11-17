@@ -2,6 +2,8 @@
  * Shared types for the media stories module.
  */
 
+import type { RightsAuthorization } from "../highlights/types.js";
+
 export const ARTIFACT_KINDS = [
   "source",
   "clock-map",
@@ -38,6 +40,13 @@ export interface Artifact {
 
 export type RightsCheckMode = "require" | "off";
 
+/**
+ * Footage clearance for one exact file (its sha256). It comes only from operator config
+ * (media.clearances) or from the app starting a run (RunOptions.mediaClearances), never
+ * from a tool call, so the model cannot clear a video.
+ */
+export type MediaClearance = RightsAuthorization & { sourceSha256: string };
+
 export interface MediaConfig {
   workspaceDir: string;
   rightsCheck?: RightsCheckMode;
@@ -49,4 +58,6 @@ export interface MediaConfig {
    * data tools. Host and MCP tools are not facts unless listed here. Default: none.
    */
   factTools?: string[];
+  /** Operator clearances, each tied to one source file's sha256 (used when rightsCheck is "require"). */
+  clearances?: MediaClearance[];
 }
