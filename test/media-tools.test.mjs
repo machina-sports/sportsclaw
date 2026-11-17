@@ -642,6 +642,73 @@ describe("media story tools: facts and checks", () => {
   });
 });
 
+describe("media story tools: errors the model sees", () => {
+  const KEY = "sk-live-0123456789abcdefSECRET";
+  /** A provider that fails every call and echoes a key in its error body. */
+  async function leakyServer() {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${KEY}` } }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    disposers.push(() => new Promise((resolve) => server.close(resolve)));
+    return `http://127.0.0.1:${server.address().port}/v1`;
+  }
+
+  it("a failed writer call -> model_call_failed with the router's code, never the provider's text", async () => {
+    const baseUrl = await leakyServer();
+    const { call } = await make({ inference: { roles: { writer: { route: "nim", model: "writer", baseUrl } } } });
+    const { indexId } = await openAndIndex(call);
+    const r = await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1"], brief: "b" });
+    refused(r, "model_call_failed");
+    assert.equal(r.code, "auth");
+    assert.ok(!JSON.stringify(r).includes("sk-live"), JSON.stringify(r));
+    assert.ok(!JSON.stringify(r).includes("127.0.0.1"), JSON.stringify(r));
+  });
+
+  it("a failed speech call -> speech_failed with its code only", async () => {
+    const baseUrl = await leakyServer();
+    const { call } = await make({ inference: { ...INFERENCE, speech: { route: "nim", format: "openai", model: "tts", voice: "v", baseUrl } } });
+    const p = await openAndIndex(call);
+    const checked = ok(await call("story_check_lines", { indexArtifactId: p.indexId, lines: [WRITER_LINES[0]] }));
+    const r = await call("speech_synthesize", { linesArtifactId: checked.linesArtifactId, lineIds: ["line_1"] });
+    refused(r, "speech_failed");
+    assert.ok(!JSON.stringify(r).includes("sk-live"), JSON.stringify(r));
+  });
+
+  it("any other error -> failed with a generic message: no absolute path reaches the model", async () => {
+    const { call, workspaceDir } = await make();
+    writeFileSync(join(workspaceDir, "story"), "a file where the tools' directory should be");
+    const r = await call("story_facts_collect");
+    refused(r, "failed");
+    assert.ok(!r.message.includes(workspaceDir) && !r.message.includes(tmp), r.message);
+  });
+
+  it("a job's error and facts reach the model capped (2 KiB, 8 KiB) with truncated: true, and without absolute paths", async () => {
+    const { call } = await make();
+    const big = ok(await call("media_job_start", { skill: SKILL, kind: "hand-off", input: { pad: 20000 } }));
+    const st = ok(await call("media_job_status", { jobId: big.jobId, waitSec: 30 }));
+    assert.equal(st.state, "succeeded", st.error);
+    assert.equal(st.truncated, true);
+    // Over the cap, facts become the first 8 KiB of their JSON.
+    assert.equal(typeof st.facts, "string");
+    assert.equal(st.facts.length, 8 * 1024);
+
+    const failing = ok(await call("media_job_start", { skill: SKILL, kind: "hand-off", input: { fail: 5000 } }));
+    const st2 = ok(await call("media_job_status", { jobId: failing.jobId, waitSec: 30 }));
+    assert.equal(st2.state, "failed");
+    assert.equal(st2.truncated, true);
+    assert.ok(st2.error.length <= 2 * 1024, `${st2.error.length}`);
+    assert.ok(!st2.error.includes("/Users/someone"), st2.error);
+
+    const small = ok(await call("media_job_status", { jobId: ok(await call("media_job_start", { skill: SKILL, kind: "hand-off", input: {} })).jobId, waitSec: 30 }));
+    assert.equal(small.truncated, undefined);
+  });
+});
+
 describe("media story tools: jobs and sources", () => {
   it("media_job_status caps waitSec at 60 s, and a negative wait returns at once", async () => {
     const { call } = await make();
@@ -666,6 +733,7 @@ describe("media story tools: jobs and sources", () => {
     const stA = ok(await a.call("media_job_status", { jobId: jobA.jobId, waitSec: 30 }));
     assert.equal(stA.state, "failed");
     assert.match(stA.error, /spawn_failed/);
+    assert.ok(!stA.error.includes(missing), `no absolute path in what the model sees: ${stA.error}`);
 
     const b = await make({ pythonPath: missing, config: { interpreters: { default: ["python3"] } } });
     const jobB = ok(await b.call("media_job_start", { skill: SKILL, kind: "hand-off", input: {} }));

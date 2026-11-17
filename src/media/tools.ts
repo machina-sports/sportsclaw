@@ -9,7 +9,12 @@
  * Every input that names an artifact is checked with ArtifactStore.require: known, of the kind the step
  * needs, made in this run (or shared for a source opened in this run), and its file unchanged. A refused
  * call returns `{ error_code, message }` as its tool result; it never throws into the run. Each successful
- * call appends `{ tool, artifactIds, jobId? }` to `steps`, in call order.
+ * call appends `{ tool, artifactIds, jobId?, checker? }` to `steps`, in call order.
+ *
+ * Errors the model sees: the engine's own refusals, with absolute paths replaced by "<path>"; a failed
+ * writer or speech call as `model_call_failed` / `speech_failed` with the router's error code (`code`) and
+ * no provider text; anything else as `failed` with a generic message. Job views cap the error at 2 KiB and
+ * facts JSON at 8 KiB (`truncated: true`).
  *
  * Choices made here:
  *   - Paths: a source must resolve (realpath) to a regular file inside media.workspaceDir. Files the tools
@@ -46,7 +51,8 @@ import type { RightsAuthorization } from "../highlights/types.js";
 import type { ModelRoleRouterConfig } from "../inference/model-role-router.js";
 import type { ModelRole } from "../inference/model-roles.js";
 import type { InferenceReceipt } from "../inference/receipt.js";
-import { synthesizeSpeech } from "../inference/speech.js";
+import { InferenceRouteError } from "../inference/model-role-router.js";
+import { SpeechRouteError, synthesizeSpeech } from "../inference/speech.js";
 import type { HostToolDef, RunToolResult, SkillGuide } from "../types.js";
 import { ArtifactError, ArtifactStore, hashFile } from "./artifacts.js";
 import { approvedJobBundles, type ApprovedBundle, type JobKindDecl } from "./bundle.js";
@@ -122,10 +128,41 @@ const MAX_JSON_ARTIFACT_BYTES = 32 * 1024 * 1024;
 const CHECK_KIND = "check-lines";
 
 class Refusal extends Error {
+  /** model_call_failed / speech_failed: the router's error code (a closed enum, never provider text). */
+  public routeCode?: string;
   constructor(public code: string, message: string) {
     super(message);
     this.name = "Refusal";
   }
+}
+
+/** Longest error text and facts JSON a job view shows the model. */
+export const MAX_VIEW_ERROR_CHARS = 2 * 1024;
+export const MAX_VIEW_FACTS_CHARS = 8 * 1024;
+
+/** An absolute POSIX path (not the second half of "a/b"): what fs, spawn and job stderr text can carry. */
+const ABS_PATH_RE = /(?<![\w.~-])\/[^\s"'`<>|,;()]+/g;
+
+/** Text for the model: absolute paths replaced by "<path>". */
+function pathFree(text: string): string {
+  return text.replace(ABS_PATH_RE, "<path>");
+}
+
+function routeResult(r: Refusal): Record<string, unknown> {
+  return { error_code: r.code, code: r.routeCode, message: r.message };
+}
+
+function routeRefusal(kind: "model_call_failed" | "speech_failed", code: string | undefined): Refusal {
+  const what = kind === "speech_failed" ? "speech" : "model";
+  const r = new Refusal(kind, `The ${what} call failed (${code ?? "unknown"}).`);
+  r.routeCode = code ?? "unknown";
+  return r;
+}
+
+/** `value`, or when its JSON is longer than `max`, the first `max` characters of that JSON. */
+function capJson(value: Record<string, unknown>, max: number): { value: unknown; cut: boolean } {
+  const text = JSON.stringify(value);
+  return text.length <= max ? { value, cut: false } : { value: text.slice(0, max), cut: true };
 }
 
 function refuse(code: string, message: string): never {
@@ -521,18 +558,39 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     if (rec.state === "succeeded") for (const a of rec.artifacts) producers.set(a.id, rec.skill);
   }
 
+  /**
+   * A job record as the model sees it: no absolute paths in the error, the error capped at
+   * MAX_VIEW_ERROR_CHARS and each facts object's JSON at MAX_VIEW_FACTS_CHARS (cut to a string),
+   * with `truncated: true` when anything was cut.
+   */
   function jobView(rec: JobRecord): Record<string, unknown> {
-    return {
+    let truncated = false;
+    let error: string | undefined;
+    if (rec.error) {
+      error = pathFree(rec.error);
+      if (error.length > MAX_VIEW_ERROR_CHARS) {
+        error = error.slice(0, MAX_VIEW_ERROR_CHARS);
+        truncated = true;
+      }
+    }
+    const facts = (f: Record<string, unknown>) => {
+      const capped = capJson(f, MAX_VIEW_FACTS_CHARS);
+      truncated ||= capped.cut;
+      return capped.value;
+    };
+    const view: Record<string, unknown> = {
       jobId: rec.jobId,
       skill: rec.skill,
       kind: rec.kind,
       state: rec.state,
-      ...(rec.error ? { error: rec.error } : {}),
-      artifacts: rec.artifacts.map((a) => ({ artifactId: a.id, kind: a.kind, ...(a.facts ? { facts: a.facts } : {}) })),
-      facts: rec.facts,
+      ...(error !== undefined ? { error } : {}),
+      artifacts: rec.artifacts.map((a) => ({ artifactId: a.id, kind: a.kind, ...(a.facts ? { facts: facts(a.facts) } : {}) })),
+      facts: facts(rec.facts),
       ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}),
       ...(rec.rights ? { rights: rec.rights } : {}),
     };
+    if (truncated) view.truncated = true;
+    return view;
   }
 
   /** The artifacts map for a job: every id in an x-artifact-kind property of its input. */
@@ -634,6 +692,24 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       out[a.id] = { kind: a.kind, path: a.path, sha256: a.sha256 };
     }
     return out;
+  }
+
+  /**
+   * A writer or speech call. A route failure becomes model_call_failed / speech_failed with the router's
+   * error code from the call's receipt: the error's own message can carry provider text that echoes keys.
+   */
+  async function routed<T>(kind: "model_call_failed" | "speech_failed", call: (onReceipt: (r: InferenceReceipt) => void) => Promise<T>): Promise<T> {
+    let code: string | undefined;
+    const onReceipt = (r: InferenceReceipt) => {
+      if (r.errorCode) code = r.errorCode;
+      ctx.onReceipt?.(r);
+    };
+    try {
+      return await call(onReceipt);
+    } catch (err) {
+      if (!(err instanceof InferenceRouteError) && !(err instanceof SpeechRouteError)) throw err;
+      throw routeRefusal(kind, code);
+    }
   }
 
   const handlers: Record<MediaToolName, (a: Record<string, unknown>, abortSignal?: AbortSignal) => Promise<StepResult>> = {
@@ -750,7 +826,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const byId = new Map(index.events.map((e) => [e.eventId, e]));
       const events = eventIds.map((id) => byId.get(id) ?? refuse("unknown_event", `No event ${id.slice(0, 60)} in the index.`));
       if (!ctx.inference?.roles?.writer) refuse("no_writer", "No writer role is configured (inference.roles.writer).");
-      const lines = await draftLines({ inference: ctx.inference, brief, events, facts, maxLines, abortSignal, onReceipt: ctx.onReceipt });
+      const inference = ctx.inference;
+      const lines = await routed("model_call_failed", (onReceipt) => draftLines({ inference, brief, events, facts, maxLines, abortSignal, onReceipt }));
       return { result: { lines }, artifactIds: [] };
     },
 
@@ -787,15 +864,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const chosen = lineIds.map((id) => lines.get(id) ?? refuse("unknown_line", `${id.slice(0, 60)} is not a line that passed the check.`));
       if (!ctx.inference?.speech) refuse("no_speech", "No speech route is configured (inference.speech).");
       const voices: { lineId: string; voiceArtifactId: string; durationMs: number }[] = [];
+      const inference = ctx.inference;
       for (const line of chosen) {
-        const said = await synthesizeSpeech({
-          text: line.text,
-          config: ctx.inference,
-          ...(voice ? { voice } : {}),
-          abortSignal,
-          onReceipt: ctx.onReceipt,
-          env,
-        });
+        const said = await routed("speech_failed", (onReceipt) =>
+          synthesizeSpeech({ text: line.text, config: inference, ...(voice ? { voice } : {}), abortSignal, onReceipt, env }),
+        );
         const file = `${await storyFile("voice")}.wav`;
         await fs.writeFile(file, said.audio, { mode: 0o600 });
         const artifact = await mint({ kind: "voice", path: file });
@@ -843,7 +916,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         });
         jobs.set(started.jobId, approved);
         const rec = await waitForJob(started.jobId, abortSignal);
-        if (rec.state !== "succeeded") refuse("render_failed", rec.error ?? `the render job ended ${rec.state}`);
+        if (rec.state !== "succeeded") refuse("render_failed", (rec.error ?? `the render job ended ${rec.state}`).slice(0, MAX_VIEW_ERROR_CHARS));
         const video = rec.artifacts.find((x) => x.kind === "video");
         if (!video) refuse("render_failed", "The renderer made no video artifact.");
         let durationSec: number | null = Number((await probeVideo(video.path).catch(() => undefined))?.format?.duration);
@@ -900,10 +973,17 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
           });
           return out.result;
         } catch (err) {
+          // Only the engine's own refusals carry a message (paths removed); anything else is generic.
           if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {
-            return { error_code: err.code, message: err.message };
+            return {
+              error_code: err.code,
+              ...(err instanceof Refusal && err.routeCode ? { code: err.routeCode } : {}),
+              message: pathFree(err.message),
+            };
           }
-          return { error_code: "failed", message: err instanceof Error ? err.message : String(err) };
+          if (err instanceof InferenceRouteError) return routeResult(routeRefusal("model_call_failed", undefined));
+          if (err instanceof SpeechRouteError) return routeResult(routeRefusal("speech_failed", undefined));
+          return { error_code: "failed", message: `${name} failed for an internal reason; the details are not shown.` };
         }
       },
     };
