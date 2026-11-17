@@ -12,7 +12,7 @@ André wants SportsClaw itself to run a story from request to finished video, bu
 
 1. The agent runs every step of a media story as tool calls: find, ground, follow, write, check, speak, render.
 2. The engine parts are generic: no sport, model or look is named in engine code.
-3. A sport-specific pack (a portable skill) supplies the models, the vision questions, the checks and the look.
+3. A sport-specific skill (a portable skill) supplies the models, the vision questions, the checks and the look.
 4. The order and the checks are enforced by the engine, not by the prompt. A story cannot be rendered from unchecked lines.
 5. It works inside OpenShell: the agent is sandboxed, GPU work runs on the host behind a named door.
 6. Proven on a second sport before it is called generic.
@@ -32,7 +32,7 @@ André wants SportsClaw itself to run a story from request to finished video, bu
 - The model ever receives footage bytes or file contents it did not need, or writes files itself.
 - Ordering or checking depends on the prompt being obeyed.
 - A script that the operator did not approve runs.
-- The model or a skill pack can switch the rights check off. Only the operator can.
+- The model or a skill skill can switch the rights check off. Only the operator can.
 - The demo gets slower or flakier on stage than it is today.
 
 ## What exists today (verified on SportsClaw main, 0.30.1)
@@ -48,7 +48,7 @@ André wants SportsClaw itself to run a story from request to finished video, bu
 
 **A. More host tools in the demo.** Keep the pipeline in `server.py` and expose each step as a `hostTool`. Fast, and the agent would call every step. But nothing becomes reusable: the next sport copies `server.py`. Rejected: it does not meet goal 2.
 
-**B. Generic engine primitives plus a skill pack (chosen, my call).** Add four small engine parts (media jobs, clock map, story timeline, claim checks). Sport-specific work lives in a portable skill whose scripts run as jobs. The agent composes them. This is the smallest design in which the second sport is a new skill, not new engine code.
+**B. Generic engine primitives plus a skill skill (chosen, my call).** Add four small engine parts (media jobs, clock map, story timeline, claim checks). Sport-specific work lives in a portable skill whose scripts run as jobs. The agent composes them. This is the smallest design in which the second sport is a new skill, not new engine code.
 
 **C. A workflow engine inside SportsClaw.** Declare the story as a pipeline the engine executes step by step. Reliable, but the agent decides nothing again, and it is a large new subsystem. Rejected: it rebuilds what `server.py` does today inside the engine, and breaks goal 1.
 
@@ -60,14 +60,14 @@ A job is long-running work on media that returns files. It generalizes the highl
 
 - **Agent tools:** `media_job_start`, `media_job_status`, `media_job_result`, `media_job_cancel`.
 - **A job kind** is declared by a skill: a name, a JSON Schema for its input, the entry script, a time limit and an output budget in bytes.
-- **Approval is per bundle, not per file (my call).** Today's `skill_run_script` hashes one file and runs it with `python -I` and a stripped environment. The pack's scripts import each other and need torch, OpenCV and model weights, so that cannot run them. A job kind is approved as a bundle: one sha256 over a sorted list of every file in the pack's `scripts/` folder and its dependency lockfile. The operator's allowlist holds `{skill, kind, bundleSha256}`. The interpreter or environment for a kind is named in operator config, never by the pack. Model weights and per-game data files are inputs, recorded by path and sha256 in the manifest, not part of the bundle. An unapproved or changed bundle does not exist for the agent.
-- **No keys reach a job (my call).** A job gets no credentials. When a script needs a model (reading the scoreboard, reading a jersey), it calls a role proxy: a loopback URL and a one-time token the runner hands it. The engine makes the model call through its role router, so receipts are kept and model names stay in config, not in the pack. A media worker runs the same proxy with its own operator config.
+- **Approval is per bundle, not per file (my call).** Today's `skill_run_script` hashes one file and runs it with `python -I` and a stripped environment. The skill's scripts import each other and need torch, OpenCV and model weights, so that cannot run them. A job kind is approved as a bundle: one sha256 over a sorted list of every file in the skill's `scripts/` folder and its dependency lockfile. The operator's allowlist holds `{skill, kind, bundleSha256}`. The interpreter or environment for a kind is named in operator config, never by the skill. Model weights and per-game data files are inputs, recorded by path and sha256 in the manifest, not part of the bundle. An unapproved or changed bundle does not exist for the agent.
+- **No keys reach a job (my call).** A job gets no credentials. When a script needs a model (reading the scoreboard, reading a jersey), it calls a role proxy: a loopback URL and a one-time token the runner hands it. The engine makes the model call through its role router, so receipts are kept and model names stay in config, not in the skill. A media worker runs the same proxy with its own operator config.
 - **States:** `queued`, `running`, `succeeded`, `failed`, `canceled` (the existing `HighlightsJobState`).
 - **Result:** a manifest listing typed artifacts: `{id, kind, path, sha256, sizeBytes}` plus small JSON facts the agent may read (counts, coverage). The model sees the manifest, never file bytes.
 - **Runners** sit behind one interface:
   - `local`: a subprocess on the same machine (phase 1).
   - `worker`: HTTP to a media worker on another host, for GPU work when the agent is in a sandbox (phase 2).
-- **Rights check, an operator switch (André's decision):** the operator must be able to run this on any video. One setting, `media.rightsCheck`, with `require` or `off`, set in operator config or by `SPORTSCLAW_MEDIA_RIGHTS_CHECK`. It is never a tool input and never set by a pack, so the model cannot change it.
+- **Rights check, an operator switch (André's decision):** the operator must be able to run this on any video. One setting, `media.rightsCheck`, with `require` or `off`, set in operator config or by `SPORTSCLAW_MEDIA_RIGHTS_CHECK`. It is never a tool input and never set by a skill, so the model cannot change it.
   - `require` (the default **(my call)**, and what the highlights core does today): a job that reads source media needs a `RightsAuthorization` with `clearedForClipping: true`, and fails closed without one.
   - `off`: no authorization is needed. Every manifest from that run records `rightsCheck: "off (operator)"`, so the output shows it was made without one.
   - The same switch applies to `sportsclaw clip`, `sportsclaw highlights run` and the relay job API, so there is one rule, not two.
@@ -128,7 +128,7 @@ Extends `groundingCheck` from "numbers in the answer" to "lines against evidence
 - GPU work runs in a media worker on the host. The sandbox reaches it at `host.openshell.internal:<port>` through a provider profile and a policy rule, like `nim-local`.
 - The worker enforces the same allowlist and rights checks. The sandbox never sees footage; it sees manifests.
 
-### 9. The basketball pack
+### 9. The basketball-highlights skill
 
 A portable skill (first home: the demo repo; **my call**), built from the demo's existing scripts:
 
@@ -138,7 +138,7 @@ A portable skill (first home: the demo repo; **my call**), built from the demo's
 | track people | `tracks_game.py` | `subject-tracks` |
 | identify people | `identity.py` | `subject-identity` |
 | follow subject | `follow.py` | `subject-tracks` (one subject) |
-| render follow story | `follow_story.py` | `video` |
+| render follow story | `follow_story.py` (the cut), `follow_reel.py` (drawing) | `video` |
 | check lines | `story.py` checks | checker script |
 
 The demo's `server.py` keeps the studio UI and stops owning the pipeline.
@@ -147,13 +147,13 @@ The demo's `server.py` keeps the studio UI and stops owning the pipeline.
 
 **Phase 0, now, no engine change.** Reword the deck to match what runs. Move the studio agent to Nemotron: `studio_agent.mjs` refuses any model endpoint that is not loopback, on purpose. Allow exactly one more, `https://integrate.api.nvidia.com`, with the key read from a named environment variable, as `brain.py` already does for the story writer **(my call)**. In the sandbox this becomes the `nvidia-native` provider, so the agent never holds the key.
 
-**Phase 1, SportsClaw 0.31.0.** Media jobs with the local runner, typed artifacts and preconditions, clock map with countdown clocks, event index and `media_find_events`, `story_check_lines`, `speech_synthesize`, `story_timeline_build`, the plain renderer. The basketball pack. The studio's agent runs all steps on one machine.
+**Phase 1, SportsClaw 0.31.0.** Media jobs with the local runner, typed artifacts and preconditions, clock map with countdown clocks, event index and `media_find_events`, `story_check_lines`, `speech_synthesize`, `story_timeline_build`, the plain renderer. The basketball-highlights skill. The studio's agent runs all steps on one machine.
 
 **Phase 2, 0.32.0.** The media worker and its runner, the OpenShell provider profile and policy rule, the gRPC speech format if needed. The demo runs with the agent sandboxed.
 
-**Phase 3, 0.33.0.** A second sport (soccer, from `machina-avlm-soccer`; **my call**) built as a pack with no engine change. Fold the relay's `/api/highlights/jobs` into media jobs. Docs.
+**Phase 3, 0.33.0.** A second sport (soccer, from `machina-avlm-soccer`; **my call**) built as a skill with no engine change. Fold the relay's `/api/highlights/jobs` into media jobs. Docs.
 
-**The talk (1 Dec) (decided by André, 16 Nov).** The deck describes the finished system, so phases 1 and 2 and the basketball pack ship before the talk. There is no fallback to today's pipeline. A full sandboxed rehearsal on 24 Nov is the gate: if phase 2 is not ready, the demo runs phase 1 + pack unsandboxed and slides 11–12 are reworded. Schedule: `docs/superpowers/plans/2026-11-16-media-stories-to-the-talk.md`. Phase 0's studio_agent change is dropped, because SportsClaw replaces the studio agent for story runs.
+**The talk (1 Dec) (decided by André, 16 Nov).** The deck describes the finished system, so phases 1 and 2 and the basketball-highlights skill ship before the talk. There is no fallback to today's pipeline. A full sandboxed rehearsal on 24 Nov is the gate: if phase 2 is not ready, the demo runs phase 1 + skill unsandboxed and slides 11–12 are reworded. Schedule: `docs/superpowers/plans/2026-11-16-media-stories-to-the-talk.md`. Phase 0's studio_agent change is dropped, because SportsClaw replaces the studio agent for story runs.
 
 **Each release:** npm publish (André), GitHub release, the OpenShell image rebuilt, docs. The docs site deploy is blocked on the Azure secret; fix that first or the docs do not ship.
 
@@ -168,7 +168,7 @@ The demo's `server.py` keeps the studio UI and stops owning the pipeline.
 
 - One story run's manifest shows the agent called every step, with artifact ids chaining find → follow → draft → check → voice → timeline → render.
 - Rendering with an unchecked caption fails in a test, whatever the prompt says.
-- The soccer pack ships without a diff in `src/` beyond bug fixes.
+- The soccer skill ships without a diff in `src/` beyond bug fixes.
 - The demo's time from request to video is within 20% of today's.
 
 ## Decided by André

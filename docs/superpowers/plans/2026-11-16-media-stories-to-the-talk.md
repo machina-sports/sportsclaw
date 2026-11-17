@@ -13,13 +13,13 @@ The deck now describes the finished system: SportsClaw runs every step (media jo
 
 | Slide | Claim | Needs |
 |---|---|---|
-| 2 | SportsClaw found, followed, wrote, spoke, checked | Phase 1 engine + basketball pack; clip re-rendered on the new engine |
-| 10 | SportsClaw runs the story; basketball is a skill pack | Phase 1 + pack |
+| 2 | SportsClaw found, followed, wrote, spoke, checked | Phase 1 engine + basketball-highlights skill; clip re-rendered on the new engine |
+| 10 | SportsClaw runs the story; basketball is a skill skill | Phase 1 + skill |
 | 11 | Agent in OpenShell sandbox; media jobs to a media worker on the host | Phase 2 (worker, provider profile, policy rule) |
 | 12 | SportsClaw calls every step as a tool, runs in the sandbox | Phase 1 + phase 2 |
 | 14 | Each step is a tool; nothing spoken or drawn unchecked | Phase 1 (preconditions) |
 
-Cut line: if phase 2 slips, phase 1 + pack still makes slides 2, 10 and 14 true. Only slides 11 and 12 (the sandbox and worker) depend on phase 2. Their fallback is wording ("runs next to OpenShell"), not a different demo.
+Cut line: if phase 2 slips, phase 1 + skill still makes slides 2, 10 and 14 true. Only slides 11 and 12 (the sandbox and worker) depend on phase 2. Their fallback is wording ("runs next to OpenShell"), not a different demo.
 
 ## Workstreams
 
@@ -29,9 +29,9 @@ Tasks 1–4 done (types, rights switch, artifact store, bundles, local job runne
 
 Done when: the "How we will know it worked" tests in the spec pass without a GPU, and 0.31.0 is on npm.
 
-### B. Basketball pack (demo repo `machina-sports-intelligence`), starts once Task 10's tool shapes are fixed
+### B. Basketball highlights skill (demo repo `machina-sports-intelligence`, plan: `docs/superpowers/plans/2026-11-16-basketball-highlights-skill.md`), starts once Task 10's tool shapes are fixed
 
-The pack wraps scripts that already exist on demo main. No new vision code.
+The skill wraps scripts that already exist on demo main. No new vision code.
 
 | Job kind | Wraps (demo main) | Produces |
 |---|---|---|
@@ -39,7 +39,7 @@ The pack wraps scripts that already exist on demo main. No new vision code.
 | `track-people` | `tracks_game.py` | `subject-tracks` |
 | `identify-people` | `identity.py` | `subject-identity` |
 | `follow-subject` | `follow.py` | `subject-tracks` (one subject) |
-| `render-story` | `follow_story.py` (the spec calls it `follow_reel.py`; fix the spec) | `video` |
+| `render-story` | `follow_story.py` (the cut) and `follow_reel.py` (drawing) | `video` |
 | `check-lines` | the checks in `story.py` | checker verdicts |
 
 Plus `SKILL.md` (the recipe in plain language) and `jobs.json`. The studio's `server.py` keeps the UI and calls SportsClaw instead of owning the pipeline. `studio_agent.mjs` is retired for story runs, so phase 0's "allow integrate.api.nvidia.com in studio_agent" is no longer needed. Nemotron is reached through SportsClaw's `brain` route.
@@ -66,19 +66,19 @@ Done when: the B run works with the agent inside OpenShell and the sandbox never
 | Date | Milestone |
 |---|---|
 | Tue 17 – Wed 18 Nov | A: Tasks 5–10, final review, PR |
-| Thu 19 Nov | A: 0.31.0 released. B: pack plan written, job wrappers start |
-| Fri 20 – Sat 21 Nov | B: pack runs on a GPU box end to end (unsandboxed). C: worker + policy start |
+| Thu 19 Nov | A: 0.31.0 released. B: skill plan written, job wrappers start |
+| Fri 20 – Sat 21 Nov | B: skill runs on a GPU box end to end (unsandboxed). C: worker + policy start |
 | Mon 23 Nov | C: 0.32.0 PR; Magpie wire format settled |
 | **Tue 24 Nov** | **Rehearsal 1: full sandboxed run on the GPU box. Re-render slide 2. Gate for the cut line.** |
 | Wed 25 – Fri 27 Nov | Fixes; Rehearsal 2 on 27 Nov; freeze (no engine changes after this) |
 | Sat 28 – Mon 30 Nov | Travel; decks final; offline backup of the rendered clip on the laptop |
 | Tue 1 Dec | Talk, 1:30 pm PT, booth #812 |
 
-The gate on 24 Nov decides between: everything as written, or phase 1 + pack with slides 11 and 12 reworded. It no longer decides between the new system and today's pipeline.
+The gate on 24 Nov decides between: everything as written, or phase 1 + skill with slides 11 and 12 reworded. It no longer decides between the new system and today's pipeline.
 
 ## Risks
 
-- **Time.** About 8 working days for two releases and a pack. Mitigation: B starts on Task 10's interfaces before A merges. C reuses A's runner, not a new one.
+- **Time.** About 8 working days for two releases and a skill. Mitigation: B starts on Task 10's interfaces before A merges. C reuses A's runner, not a new one.
 - **Agent reliability.** Nemotron must call 8–10 tools in order. Mitigation: the engine's preconditions refuse out-of-order steps. A turn limit of 16. Rehearse the exact prompt.
 - **Latency.** The spec requires request-to-video within 20% of today's. Prep runs once per game, before the talk. On stage only the per-story steps run.
 - **Magpie over gRPC** may add a day to C.
