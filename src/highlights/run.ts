@@ -272,7 +272,7 @@ export async function runHighlights(
     rights: req.rights,
     ...(opts?.rightsCheck === "off" ? { rightsCheck: RIGHTS_OFF_NOTE } : {}),
     source: { ...req.source, ffprobe: sourceEvidence, sha256: sourceIntegrity.sha256, sizeBytes: sourceIntegrity.sizeBytes },
-    syncAnchor: req.syncAnchor,
+    ...(req.clockMap ? { clockMap: req.clockMap } : { syncAnchor: req.syncAnchor }),
     window: req.window ?? DEFAULT_WINDOW_POLICY,
     windows,
     clips,

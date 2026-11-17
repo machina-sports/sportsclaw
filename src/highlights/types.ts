@@ -8,6 +8,8 @@
  * object-store references can be added later without breaking consumers.
  */
 
+import type { ClockMap } from "../media/clock-map.js";
+
 /** Rights/source authorization metadata. Extraction refuses to run without it. */
 export interface RightsAuthorization {
   /** Owner of the source media rights (broadcaster, league, internal). */
@@ -37,16 +39,19 @@ export interface CanonicalEventId {
 }
 
 /**
- * Clock semantics the deterministic mapper supports. Anything else (countdown
- * clocks, per-period resets without absolute elapsed time) is rejected
- * explicitly rather than guessed.
+ * Clock semantics the deterministic mapper supports (see CLOCK_SEMANTICS in
+ * media/clock-map). Anything else is rejected explicitly rather than guessed.
+ * SUPPORTED_CLOCK_SEMANTICS is the default, used with a syncAnchor.
  */
 export const SUPPORTED_CLOCK_SEMANTICS = "elapsed-ascending";
 
 export interface PBPClock {
-  /** Must equal SUPPORTED_CLOCK_SEMANTICS in V1. */
+  /** "elapsed-ascending" or "countdown-per-period"; must match the request's clock map. */
   semantics: string;
-  /** Seconds elapsed since the event's clock origin (ascending). */
+  /**
+   * Seconds elapsed since the event's clock origin (ascending), or, under
+   * "countdown-per-period", the clock as shown (seconds remaining in the period).
+   */
   elapsedSec: number;
 }
 
@@ -88,7 +93,9 @@ export interface HighlightsRequest {
   source: SourceMediaRef;
   event: CanonicalEventId;
   actions: PBPAction[];
-  syncAnchor: SyncAnchor;
+  /** Exactly one of syncAnchor or clockMap is required. */
+  syncAnchor?: SyncAnchor;
+  clockMap?: ClockMap;
   window?: WindowPolicy;
   outputDir: string;
 }
@@ -154,7 +161,8 @@ export interface ClipManifest {
   /** Set when the operator turned the rights check off for this run. */
   rightsCheck?: "off (operator)";
   source: SourceMediaRef & { ffprobe: FfprobeEvidence; sha256?: string; sizeBytes?: number };
-  syncAnchor: SyncAnchor;
+  syncAnchor?: SyncAnchor;
+  clockMap?: ClockMap;
   window: WindowPolicy;
   windows: CandidateWindow[];
   clips: ClipArtifact[];
