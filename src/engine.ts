@@ -167,6 +167,11 @@ import {
   type SlipDecisionResult,
 } from "./slip-decision.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
+import { randomUUID } from "node:crypto";
+import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
+import { MediaPrep } from "./media/prep.js";
+import { parseClearances } from "./media/rights.js";
+import type { InferenceReceipt } from "./inference/receipt.js";
 import {
   buildResultOverview,
   findArrays,
@@ -394,6 +399,22 @@ function toolFinishDetails(event: {
       ? { outputChars: output.length, truncated: output.includes(TOOL_OUTPUT_TRUNCATED_MARKER) }
       : {}),
   };
+}
+
+const MEDIA_TOOLS: ReadonlySet<string> = new Set(MEDIA_TOOL_NAMES);
+
+/**
+ * A media story tool returns a refusal as `{ error_code, message }` instead of throwing, so the SDK reports
+ * the call as a success; it is a failed call all the same (tool metrics, tool results).
+ */
+function mediaRefused(toolName: string, output: unknown): boolean {
+  if (!MEDIA_TOOLS.has(toolName) || typeof output !== "string") return false;
+  try {
+    const value: unknown = JSON.parse(output);
+    return !!value && typeof value === "object" && typeof (value as { error_code?: unknown }).error_code === "string";
+  } catch {
+    return false;
+  }
 }
 
 /** A number, or a capitalised name after the first word: the reply states a fact. */
@@ -1141,6 +1162,12 @@ export class sportsclawEngine {
   private _media?: MediaAttachment[];
   /** Markers registered for this run's media (openai-compatible), released when it ends. */
   private _mediaMarkers?: Array<{ marker: string; kind: MediaAttachment["kind"] }>;
+  /** This run's media story tools (config.media), created when the run starts and disposed when it ends. */
+  private _runMediaTools?: Awaited<ReturnType<typeof createMediaTools>>;
+  /** Tool results of the current run as they finish (story_facts_collect reads them mid-run); kept only while media tools are live. */
+  private _runToolResults: RunToolResult[] = [];
+  /** Prep media jobs (jobs.json "prep": true): they outlive runs; closeMedia() cancels them. */
+  private _mediaPrep?: MediaPrep;
 
   /** Sanitized evidence-verification receipts from the last run(). */
   get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
@@ -1195,7 +1222,10 @@ export class sportsclawEngine {
    * allowlist. Includes built-in tools and installed sport/MCP tools.
    */
   listToolNames(): string[] {
-    return Object.keys(this.buildTools()).sort();
+    const names = new Set(Object.keys(this.buildTools()));
+    // Media tools are built per run; outside a run, list their names when config.media offers them.
+    if (this.config.media) for (const name of MEDIA_TOOL_NAMES) names.add(name);
+    return [...names].sort();
   }
 
   /**
@@ -1291,6 +1321,8 @@ export class sportsclawEngine {
       );
     }
     this.mainModelId = readModelId(this.mainModel);
+    // A malformed operator clearance is a configuration error: fail at construction, not mid-run.
+    if (this.config.media) parseClearances(this.config.media.clearances, "media.clearances");
     this.registry = new ToolRegistry();
     this.registry.configureCaching({
       enabled: this.config.cacheEnabled,
@@ -1370,6 +1402,8 @@ export class sportsclawEngine {
     callerSystemPrompt?: string;
     /** Tools offered this turn; the prompt lists only these. Omitted lists all. */
     activeToolNames?: ReadonlyArray<string>;
+    /** Media story tools offered this turn. */
+    mediaToolNames?: ReadonlyArray<string>;
   }): string {
     const { installed, available } = getInstalledVsAvailable();
     const discordCfg = loadConfig().chatIntegrations?.discord;
@@ -1399,6 +1433,7 @@ export class sportsclawEngine {
       hasMemory: args.hasMemory,
       agents: args.agents,
       diskSkillGuides: this.skillGuides,
+      ...(args.mediaToolNames?.length ? { mediaToolNames: args.mediaToolNames } : {}),
       strategyContent: args.strategyContent,
       callerSystemPrompt: args.callerSystemPrompt,
       userSystemPrompt: this.config.systemPrompt,
@@ -4654,11 +4689,18 @@ export class sportsclawEngine {
     return toolMap;
   }
 
-  /** sportsclawConfig.hostTools, wrapped as model tools with the same output cap as data tools. */
+  /**
+   * sportsclawConfig.hostTools, plus this run's media story tools when config.media is set,
+   * wrapped as model tools with the same output cap as data tools.
+   */
   private addHostTools(toolMap: ToolSet): void {
-    for (const [name, def] of Object.entries(this.config.hostTools ?? {})) {
+    const media = new Set<string>(this.config.media ? MEDIA_TOOL_NAMES : []);
+    const defs = [...Object.entries(this.config.hostTools ?? {}), ...Object.entries(this._runMediaTools?.tools ?? {})];
+    for (const [name, def] of defs) {
       if (!HOST_TOOL_NAME.test(name)) throw new Error(`invalid host tool name: ${name}`);
-      if (toolMap[name]) throw new Error(`host tool name collides with an engine tool: ${name}`);
+      if (toolMap[name] || (media.has(name) && this.config.hostTools?.[name])) {
+        throw new Error(`host tool name collides with an engine tool: ${name}`);
+      }
       if (!def || typeof def.execute !== "function" || typeof def.description !== "string") {
         throw new Error(`host tool ${name} needs a description and an execute function`);
       }
@@ -5017,11 +5059,66 @@ export class sportsclawEngine {
   }
 
   private async runExclusive(userPrompt: string, options?: RunOptions): Promise<string> {
+    this._runToolResults = [];
+    // Before anything can throw: a run that fails early must not leave its media steps on the last run's trace.
+    this._lastRunTrace = null;
+    const mediaReceipts: InferenceReceipt[] = [];
     try {
+      if (this.config.media) {
+        const registry = this.registry;
+        this._mediaPrep ??= new MediaPrep({
+          config: this.config.media,
+          ...(this.config.inference ? { inference: this.config.inference } : {}),
+          ...(this.config.pythonPath ? { pythonPath: this.config.pythonPath } : {}),
+        });
+        this._runMediaTools = await createMediaTools({
+          prep: this._mediaPrep,
+          // Writer, speech and role-proxy calls: sanitized receipts, kept on the trace.
+          onReceipt: (receipt) => mediaReceipts.push({ ...receipt }),
+          config: this.config.media,
+          guides: this.skillGuides,
+          ...(this.config.inference ? { inference: this.config.inference } : {}),
+          runId: `run_${randomUUID()}`,
+          getToolResults: () => [...this._runToolResults],
+          // Sports Skills data tools are the registry's routed tools; MCP and host tools are not.
+          isDataTool: (name) => registry.getSkillName(name) !== undefined,
+          pythonPath: this.config.pythonPath,
+          ...(options?.mediaClearances !== undefined ? { clearances: options.mediaClearances } : {}),
+        });
+      }
       return await this.runExclusiveTurn(userPrompt, options);
     } finally {
       this.releaseRunMedia();
+      const media = this._runMediaTools;
+      this._runMediaTools = undefined;
+      if (media) {
+        // Dispose first: it closes the role proxy, so no receipt arrives after the trace is written.
+        await media.dispose();
+        // The run set its own trace (or none); TypeScript still sees the null assigned above.
+        const trace = this._lastRunTrace as RunTrace | null;
+        if (trace) {
+          trace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
+          trace.mediaReceipts = mediaReceipts;
+        }
+      }
     }
+  }
+
+  /**
+   * Cancels running prep media jobs (jobs.json "prep": true, which outlive the run that started them) and
+   * closes their role proxy. A long-lived host (the studio) calls this on shutdown. A later prep job starts
+   * them again.
+   */
+  async closeMedia(): Promise<void> {
+    await this._mediaPrep?.close();
+  }
+
+  /**
+   * Receipts of prep media jobs' model calls that arrived after the run that started the job had ended
+   * (while it runs they are on that run's trace as mediaReceipts). Returns them and empties the list.
+   */
+  mediaPrepReceipts(): InferenceReceipt[] {
+    return this._mediaPrep?.drainReceipts() ?? [];
   }
 
   /** Forget this run's media markers and leave a short note where each stood in the transcript. */
@@ -5904,7 +6001,8 @@ export class sportsclawEngine {
           maxOutputTokens: budgets.main,
           ...(providerOpts ? { providerOptions: providerOpts } : {}),
           experimental_onToolCallFinish: (event) => {
-            const { toolCall, durationMs, success } = event;
+            const { toolCall, durationMs } = event;
+            const success = event.success && !(this._runMediaTools && mediaRefused(toolCall.toolName, event.output));
             const skillName = this.registry.getSkillName(toolCall.toolName);
             emitProgress?.({
               type: "tool_finish",
@@ -6074,7 +6172,15 @@ export class sportsclawEngine {
     };
     // Tool-finish tracking shared by the main loop and the correction's public reads.
     const trackToolFinish = (event: ToolFinishEvent) => {
-      const { toolCall, durationMs, success } = event;
+      const { toolCall, durationMs } = event;
+      const success = event.success && !(this._runMediaTools && mediaRefused(toolCall.toolName, event.output));
+      if (this._runMediaTools) this._runToolResults.push({
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+        output: typeof event.output === "string" ? event.output : JSON.stringify(event.output) ?? "",
+        isError: !success,
+      });
       const skillName = this.registry.getSkillName(toolCall.toolName);
       emitProgress?.({
         type: "tool_finish",
@@ -6136,6 +6242,9 @@ export class sportsclawEngine {
           strategyContent,
           callerSystemPrompt: options?.systemPrompt,
           ...(activeTools ? { activeToolNames: activeTools } : {}),
+          mediaToolNames: this._runMediaTools
+            ? (activeTools ?? Object.keys(tools)).filter((name) => (MEDIA_TOOL_NAMES as readonly string[]).includes(name))
+            : [],
         }) + slipSection + artifactSection),
         messages: withBrief(messagesOverride ?? this.messages),
         tools: callTools,

@@ -444,6 +444,12 @@ export interface sportsclawConfig {
    * tools and never authorizes a write. Default: false.
    */
   taskBrief?: boolean;
+  /**
+   * Media stories (operator config). When set, a run offers the media story tools
+   * (media_*, story_*, speech_synthesize; see docs/advanced/media-stories.md). Unset
+   * (the default, null) offers none of them.
+   */
+  media?: import("./media/types.js").MediaConfig | null;
 }
 
 /**
@@ -675,6 +681,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   answerFrom: "model",
   inference: { roles: {} },
   taskBrief: false,
+  media: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -971,6 +978,11 @@ export interface RunOptions {
   artifact?: ArtifactTurnInput;
   /** Receives exactly one typed artifact result per successful run with `artifact`. */
   onArtifactResult?: (result: ArtifactTurnResult) => void;
+  /**
+   * Footage clearances for this run only (sportsclawConfig.media), added to media.clearances. Each is
+   * tied to one source file's sha256. Set by the app starting the run; the model cannot supply one.
+   */
+  mediaClearances?: import("./media/types.js").MediaClearance[];
 }
 
 // ---------------------------------------------------------------------------

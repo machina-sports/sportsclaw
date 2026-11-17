@@ -29,6 +29,7 @@ import pc from "picocolors";
 import { executePythonBridge } from "./tools.js";
 import { resolveConfig } from "./config.js";
 import { runHighlights } from "./highlights/run.js";
+import { resolveRightsCheck } from "./media/rights.js";
 import { runHighlightsRequestFile } from "./highlights/cli.js";
 import type { ClipManifest, PBPAction, RightsAuthorization } from "./highlights/types.js";
 
@@ -440,7 +441,7 @@ export async function cmdClip(args: string[] = [], _opts?: { fromChat?: boolean 
       actions: loadPBPActions(pbpInput as string),
       syncAnchor: { videoSec: anchorVideo, clockSec: anchorClock },
       outputDir: resolve(outDirInput as string),
-    });
+    }, { rightsCheck: resolveRightsCheck(undefined, process.env) });
     printManifestSummary(manifest);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -3,18 +3,29 @@
  *
  * Pure functions only: no filesystem, no FFmpeg, no LLM calls. Every invalid
  * or missing input fails closed with a HighlightsValidationError naming the
- * offending field. Mapping from PBP clock time to source-video seconds uses a
- * fixed sync anchor and supports only ascending elapsed clocks in V1 —
- * unsupported clock semantics are rejected explicitly, never guessed.
+ * offending field. PBP clock time maps to source-video seconds through either
+ * a fixed sync anchor (elapsed-ascending clocks) or a clock map (which also
+ * covers countdown-per-period clocks). Unsupported clock semantics are
+ * rejected explicitly, never guessed.
  */
 
 import {
+  CLOCK_SEMANTICS,
+  ClockMapError,
+  clockToVideoSec,
+  parseClockMap,
+} from "../media/clock-map.js";
+import {
   SUPPORTED_CLOCK_SEMANTICS,
   type CandidateWindow,
+  type SyncAnchor,
   type HighlightsRequest,
   type PBPAction,
+  type RightsAuthorization,
   type WindowPolicy,
 } from "./types.js";
+import type { ClockMap } from "../media/clock-map.js";
+import type { RightsCheckMode } from "../media/types.js";
 
 export class HighlightsValidationError extends Error {
   constructor(message: string) {
@@ -72,10 +83,10 @@ function validateAction(value: unknown, field: string): PBPAction {
 
   if (!isRecord(value.clock)) fail(`${field}.clock must be an object`);
   const semantics = requireString(value.clock.semantics, `${field}.clock.semantics`);
-  if (semantics !== SUPPORTED_CLOCK_SEMANTICS) {
+  if (!(CLOCK_SEMANTICS as readonly string[]).includes(semantics)) {
     fail(
       `${field}.clock.semantics "${semantics}" is unsupported — ` +
-      `only "${SUPPORTED_CLOCK_SEMANTICS}" clocks are supported in V1`
+      `only ${CLOCK_SEMANTICS.map((s) => `"${s}"`).join(" and ")} clocks are supported`
     );
   }
   const elapsedSec = requireNumber(value.clock.elapsedSec, `${field}.clock.elapsedSec`, 0);
@@ -102,26 +113,35 @@ function validateAction(value: unknown, field: string): PBPAction {
  * Strictly validate an untyped payload (e.g. parsed JSON) into a
  * HighlightsRequest. Fails closed on any missing or invalid field.
  */
-export function parseHighlightsRequest(value: unknown): HighlightsRequest {
+export function parseHighlightsRequest(
+  value: unknown,
+  opts?: { rightsCheck?: RightsCheckMode },
+): HighlightsRequest {
   if (!isRecord(value)) fail("highlights request must be a JSON object");
 
-  // Rights authorization — refuse to clip without explicit clearance.
-  if (!isRecord(value.rights)) fail("rights authorization block is required");
-  if (value.rights.clearedForClipping !== true) {
-    fail("rights.clearedForClipping must be explicitly true — media is not cleared for clipping");
-  }
-  const territories = value.rights.territories;
-  if (territories !== undefined) {
-    if (!Array.isArray(territories) || territories.some((t) => typeof t !== "string")) {
-      fail("rights.territories must be an array of strings");
+  // Rights authorization — refuse to clip without explicit clearance, unless
+  // the operator turned the rights check off and no block was supplied.
+  let rights: RightsAuthorization | undefined;
+  if (opts?.rightsCheck === "off" && value.rights === undefined) {
+    rights = undefined;
+  } else {
+    if (!isRecord(value.rights)) fail("rights authorization block is required");
+    if (value.rights.clearedForClipping !== true) {
+      fail("rights.clearedForClipping must be explicitly true — media is not cleared for clipping");
     }
+    const territories = value.rights.territories;
+    if (territories !== undefined) {
+      if (!Array.isArray(territories) || territories.some((t) => typeof t !== "string")) {
+        fail("rights.territories must be an array of strings");
+      }
+    }
+    rights = {
+      rightsHolder: requireString(value.rights.rightsHolder, "rights.rightsHolder"),
+      licenseRef: requireString(value.rights.licenseRef, "rights.licenseRef"),
+      clearedForClipping: true,
+      territories: territories as string[] | undefined,
+    };
   }
-  const rights = {
-    rightsHolder: requireString(value.rights.rightsHolder, "rights.rightsHolder"),
-    licenseRef: requireString(value.rights.licenseRef, "rights.licenseRef"),
-    clearedForClipping: true,
-    territories: territories as string[] | undefined,
-  };
 
   // Source media reference — V1 is local-file only.
   if (!isRecord(value.source)) fail("source media reference is required");
@@ -155,15 +175,35 @@ export function parseHighlightsRequest(value: unknown): HighlightsRequest {
     seen.add(a.actionId);
   }
 
-  // Fixed sync anchor.
-  if (!isRecord(value.syncAnchor)) fail("syncAnchor is required to align PBP clock to video time");
-  const syncAnchor = {
-    videoSec: requireNumber(value.syncAnchor.videoSec, "syncAnchor.videoSec", 0),
-    clockSec: requireNumber(value.syncAnchor.clockSec, "syncAnchor.clockSec", 0),
-    period: value.syncAnchor.period as number | undefined,
-  };
-  if (syncAnchor.period !== undefined && (!Number.isInteger(syncAnchor.period) || syncAnchor.period < 1)) {
-    fail("syncAnchor.period must be an integer >= 1");
+  // Exactly one of a fixed sync anchor or a clock map aligns PBP clock to video time.
+  let syncAnchor: SyncAnchor | undefined;
+  let clockMap: ClockMap | undefined;
+  if (value.syncAnchor !== undefined && value.clockMap !== undefined) {
+    fail("syncAnchor and clockMap are mutually exclusive — supply exactly one");
+  }
+  if (value.clockMap !== undefined) {
+    try {
+      clockMap = parseClockMap(value.clockMap);
+    } catch (err) {
+      if (err instanceof ClockMapError) fail(err.message);
+      throw err;
+    }
+  } else {
+    if (!isRecord(value.syncAnchor)) fail("syncAnchor (or clockMap) is required to align PBP clock to video time");
+    syncAnchor = {
+      videoSec: requireNumber(value.syncAnchor.videoSec, "syncAnchor.videoSec", 0),
+      clockSec: requireNumber(value.syncAnchor.clockSec, "syncAnchor.clockSec", 0),
+      period: value.syncAnchor.period as number | undefined,
+    };
+    if (syncAnchor.period !== undefined && (!Number.isInteger(syncAnchor.period) || syncAnchor.period < 1)) {
+      fail("syncAnchor.period must be an integer >= 1");
+    }
+  }
+  const mapSemantics = clockMap?.semantics ?? SUPPORTED_CLOCK_SEMANTICS;
+  for (const [i, a] of actions.entries()) {
+    if (a.clock.semantics !== mapSemantics) {
+      fail(`actions[${i}].clock.semantics "${a.clock.semantics}" must match the request's "${mapSemantics}" clock`);
+    }
   }
 
   // Window policy (optional; defaults applied at planning time).
@@ -185,7 +225,7 @@ export function parseHighlightsRequest(value: unknown): HighlightsRequest {
 
   const outputDir = requireString(value.outputDir, "outputDir");
 
-  return { rights, source, event, actions, syncAnchor, window, outputDir };
+  return { rights, source, event, actions, ...(syncAnchor ? { syncAnchor } : { clockMap }), window, outputDir };
 }
 
 /** Validate a request, throwing HighlightsValidationError on any problem. */
@@ -196,7 +236,9 @@ export function validateHighlightsRequest(value: unknown): void {
 /**
  * Deterministically map real PBP actions to clamped source-video windows.
  *
- * videoSec(action) = anchor.videoSec + (action.elapsedSec - anchor.clockSec)
+ * With a sync anchor: videoSec = anchor.videoSec + (action.elapsedSec - anchor.clockSec).
+ * With a clock map: clockToVideoSec, dropping actions whose clock no running
+ * stretch contains.
  *
  * Actions landing outside [0, sourceDurationSec] are dropped. In primary
  * selection order, remaining windows sharing at least 90% of the shorter
@@ -207,17 +249,22 @@ export function validateHighlightsRequest(value: unknown): void {
 export function planCandidateWindows(
   request: HighlightsRequest | unknown,
   sourceDurationSec: number,
+  opts?: { rightsCheck?: RightsCheckMode },
 ): CandidateWindow[] {
-  const req = parseHighlightsRequest(request);
+  const req = parseHighlightsRequest(request, opts);
   if (!Number.isFinite(sourceDurationSec) || sourceDurationSec <= 0) {
     fail("sourceDurationSec must be a finite number > 0");
   }
   const window = req.window ?? DEFAULT_WINDOW_POLICY;
+  const { clockMap, syncAnchor } = req;
 
   const mapped: CandidateWindow[] = [];
   for (const a of req.actions) {
-    const actionVideoSec = req.syncAnchor.videoSec + (a.clock.elapsedSec - req.syncAnchor.clockSec);
-    if (actionVideoSec < 0 || actionVideoSec > sourceDurationSec) continue;
+    // Anchor requests keep the original formula bit-for-bit; only clock maps go through the map.
+    const actionVideoSec = clockMap
+      ? clockToVideoSec(clockMap, a.period, a.clock.elapsedSec)
+      : syncAnchor!.videoSec + (a.clock.elapsedSec - syncAnchor!.clockSec);
+    if (actionVideoSec === null || actionVideoSec < 0 || actionVideoSec > sourceDurationSec) continue;
     const startSec = Math.max(0, actionVideoSec - window.preRollSec);
     const endSec = Math.min(sourceDurationSec, actionVideoSec + window.postRollSec);
     if (endSec <= startSec) continue;

@@ -1,0 +1,7 @@
+{
+  "jobs": [
+    { "kind": "check-lines", "entry": "check_lines.py", "readsSource": false, "produces": [],
+      "inputSchema": { "type": "object", "required": ["lines", "evidence"], "additionalProperties": false,
+                       "properties": { "lines": { "type": "array" }, "evidence": { "type": "object" } } } }
+  ]
+}

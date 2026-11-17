@@ -1,0 +1,13 @@
+{
+  "jobs": [
+    {
+      "kind": "echo-job",
+      "entry": "echo_job.py",
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } },
+      "readsSource": false,
+      "timeLimitSec": 30,
+      "maxOutputBytes": 1048576,
+      "produces": ["subject-identity"]
+    }
+  ]
+}

@@ -12,6 +12,8 @@ import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import { join, resolve } from "node:path";
 import { extractSegment, probeVideo } from "./ffmpeg.js";
+import { RIGHTS_OFF_NOTE } from "../media/rights.js";
+import type { RightsCheckMode } from "../media/types.js";
 import { DEFAULT_WINDOW_POLICY, parseHighlightsRequest, planCandidateWindows } from "./plan.js";
 import type { ClipArtifact, ClipManifest, FfprobeEvidence } from "./types.js";
 
@@ -112,8 +114,11 @@ async function probeEvidence(file: string, what: string): Promise<FfprobeEvidenc
 }
 
 /** Execute a validated highlights request and return the clip manifest. */
-export async function runHighlights(request: unknown): Promise<ClipManifest> {
-  const req = parseHighlightsRequest(request);
+export async function runHighlights(
+  request: unknown,
+  opts?: { rightsCheck?: RightsCheckMode },
+): Promise<ClipManifest> {
+  const req = parseHighlightsRequest(request, opts);
 
   if (!existsSync(req.source.path)) {
     throw new HighlightsRunError(`Input file not found: ${req.source.path}`);
@@ -132,7 +137,7 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
 
   const sourceIntegrity = await fileIntegrity(sourceReal);
   const sourceEvidence = await probeEvidence(sourceReal, "source video");
-  const windows = planCandidateWindows(req, sourceEvidence.durationSec);
+  const windows = planCandidateWindows(req, sourceEvidence.durationSec, opts);
   if (windows.length === 0) {
     throw new HighlightsRunError(
       "No candidate windows fall inside the source video — check the sync anchor and PBP clock values"
@@ -265,8 +270,9 @@ export async function runHighlights(request: unknown): Promise<ClipManifest> {
     state: "succeeded",
     event: req.event,
     rights: req.rights,
+    ...(opts?.rightsCheck === "off" ? { rightsCheck: RIGHTS_OFF_NOTE } : {}),
     source: { ...req.source, ffprobe: sourceEvidence, sha256: sourceIntegrity.sha256, sizeBytes: sourceIntegrity.sizeBytes },
-    syncAnchor: req.syncAnchor,
+    ...(req.clockMap ? { clockMap: req.clockMap } : { syncAnchor: req.syncAnchor }),
     window: req.window ?? DEFAULT_WINDOW_POLICY,
     windows,
     clips,

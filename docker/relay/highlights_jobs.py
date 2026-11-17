@@ -264,10 +264,14 @@ def validate_job_request(body, media_root):
     camelCase HighlightsRequest the core consumes (outputDir added later)."""
     if not isinstance(body, dict):
         raise JobValidationError("request body must be a JSON object")
+    # Operator switch: with the relay's SPORTSCLAW_MEDIA_RIGHTS_CHECK exactly
+    # "off", rights is optional (the CLI subprocess inherits the same env).
+    rights_optional = os.environ.get("SPORTSCLAW_MEDIA_RIGHTS_CHECK") == "off"
     _require_dict(
         body, "request body",
         allowed=("source_path", "event", "rights", "actions", "sync_anchor", "window"),
-        required=("source_path", "event", "rights", "actions", "sync_anchor"),
+        required=("source_path", "event", "actions", "sync_anchor")
+        + (() if rights_optional else ("rights",)),
     )
 
     source_path = _require_str(body["source_path"], "source_path")
@@ -276,13 +280,15 @@ def validate_job_request(body, media_root):
     event = _require_dict(body["event"], "event",
                           allowed=("provider", "sport", "event_id"),
                           required=("provider", "sport", "event_id"))
-    rights = _require_dict(body["rights"], "rights",
-                           allowed=("rights_holder", "license_ref", "cleared_for_clipping"),
-                           required=("rights_holder", "license_ref", "cleared_for_clipping"))
-    if rights["cleared_for_clipping"] is not True:
-        raise JobValidationError(
-            "rights.cleared_for_clipping must be explicitly true — media is not cleared for clipping"
-        )
+    rights = None
+    if "rights" in body:
+        rights = _require_dict(body["rights"], "rights",
+                               allowed=("rights_holder", "license_ref", "cleared_for_clipping"),
+                               required=("rights_holder", "license_ref", "cleared_for_clipping"))
+        if rights["cleared_for_clipping"] is not True:
+            raise JobValidationError(
+                "rights.cleared_for_clipping must be explicitly true — media is not cleared for clipping"
+            )
 
     if not isinstance(body["actions"], list) or not body["actions"]:
         raise JobValidationError("actions must be a non-empty array of real PBP actions")
@@ -315,12 +321,7 @@ def validate_job_request(body, media_root):
                                           1, MAX_CANDIDATES_CEILING),
         }
 
-    return {
-        "rights": {
-            "rightsHolder": _require_str(rights["rights_holder"], "rights.rights_holder"),
-            "licenseRef": _require_str(rights["license_ref"], "rights.license_ref"),
-            "clearedForClipping": True,
-        },
+    core_request = {
         "source": {"kind": "local-file", "path": os.path.join(*source_components)},
         "event": {
             "provider": _require_str(event["provider"], "event.provider"),
@@ -331,6 +332,16 @@ def validate_job_request(body, media_root):
         "syncAnchor": sync_anchor,
         "window": window,
     }
+    if rights is not None:
+        core_request = {
+            "rights": {
+                "rightsHolder": _require_str(rights["rights_holder"], "rights.rights_holder"),
+                "licenseRef": _require_str(rights["license_ref"], "rights.license_ref"),
+                "clearedForClipping": True,
+            },
+            **core_request,
+        }
+    return core_request
 
 
 # ---------------------------------------------------------------------------

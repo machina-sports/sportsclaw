@@ -146,6 +146,8 @@ test("run trace is reported but excluded from config_sha256", () => {
     verification: null,
     number_grounding: null,
     data_answer: null,
+    media_steps: null,
+    media_receipts: null,
   });
 });
 
