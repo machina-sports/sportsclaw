@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { after, describe, it } from "node:test";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
@@ -474,6 +474,24 @@ describe("media story tools: footage clearance comes from the operator or the ap
     refused(r, "rights_required");
     assert.match(r.message, /operator config/);
     assert.match(r.message, /not from the model/);
+  });
+
+  it("a source annotation must name the job's own source (source_mismatch), under require and off", async () => {
+    for (const rightsCheck of ["require", "off"]) {
+      const { call, workspaceDir } = await make({ kinds: [...APPROVED, "source-hand-off"], config: { rightsCheck } });
+      writeFileSync(join(workspaceDir, "media", "other.mp4"), "other uncleared bytes");
+      const x = ok(await call("media_source_open", { path: "media/game.mp4" }));
+      const y = ok(await call("media_source_open", { path: "media/other.mp4" }));
+      const start = (input, sourceArtifactId) => call("media_job_start", { skill: SKILL, kind: "source-hand-off", input, ...(sourceArtifactId ? { sourceArtifactId } : {}) });
+      const r = await start({ clip: y.sourceArtifactId }, x.sourceArtifactId);
+      refused(r, "source_mismatch");
+      refused(await start({ clip: x.sourceArtifactId }), "source_mismatch");
+      assert.equal(existsSync(join(workspaceDir, "jobs")), false, `no job may start (${rightsCheck})`);
+      const job = ok(await start({ clip: x.sourceArtifactId }, x.sourceArtifactId));
+      const st = ok(await call("media_job_status", { jobId: job.jobId, waitSec: 30 }));
+      assert.equal(st.state, "succeeded", st.error);
+      assert.deepEqual(Object.keys(st.facts.artifacts), [x.sourceArtifactId]);
+    }
   });
 
   it("off: no clearance is needed and the record says off (operator)", async () => {

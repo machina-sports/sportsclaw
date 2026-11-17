@@ -16,7 +16,8 @@
  *     write go under <workspaceDir>/story/<random>/.
  *   - Artifact hand-off: in a job kind's inputSchema, a property annotated "x-artifact-kind": "<kind>" whose
  *     type is "string" (one id) or "array" (of ids) holds artifact ids. Each id is required as that kind and
- *     handed to the job in input.json's `artifacts` map. A "source" annotation needs a readsSource kind.
+ *     handed to the job in input.json's `artifacts` map. A "source" annotation needs a readsSource kind and
+ *     must name the job's own source (same sha256 as sourceArtifactId), else `source_mismatch`.
  *   - Facts: Sports Skills data tools (ctx.isDataTool) plus media.factTools; nothing else.
  *   - Line checks: the skill's "check-lines" job runs when the skill whose job made the index (in this run)
  *     has that kind approved. For an index from an earlier run, the one approved skill with a "check-lines"
@@ -532,6 +533,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (!ids) refuse("invalid_input", `"${key}" must hold ${kind} artifact id(s).`);
       for (const id of ids) {
         const a = await need(id, kind as ArtifactKind, sourceSha);
+        // One source per job: its clearance (authorize) is for sourceArtifactId's bytes only.
+        if (kind === "source" && (sourceSha === undefined || a.sha256 !== sourceSha)) {
+          refuse("source_mismatch", `"${key}" must name the job's own source (sourceArtifactId).`);
+        }
         out[a.id] = { kind: a.kind, path: a.path, sha256: a.sha256 };
       }
     }
@@ -638,8 +643,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (!isPlainObject(a.input)) refuse("invalid_input", "input must be an object.");
       const { bundle, decl } = approved;
       const source = a.sourceArtifactId === undefined ? undefined : await needSource(a.sourceArtifactId);
-      if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
       const artifacts = await artifactInputs(decl, a.input, source?.artifact.sha256);
+      if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
       const rights = decl.readsSource && source ? authorize(source.artifact.sha256).rights : undefined;
       const rec = await runner.start({
         decl,

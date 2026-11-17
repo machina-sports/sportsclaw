@@ -199,6 +199,10 @@ Kinds that are not approved are not shown to the model at all.
   starts, each id must exist, be of that kind, come from this run (or be shared for the
   job's source) and still match its sha256; then it appears in `artifacts` with its path. A
   `source` annotation is allowed only on a kind that reads the source.
+- **One source per job.** Every `source` id in a job's input must be the job's own source:
+  an artifact with the same sha256 as `sourceArtifactId`. Another source, or a `source`
+  annotation without a `sourceArtifactId`, is refused with `source_mismatch` (whatever the
+  rights setting), and no job starts. The job's clearance covers its own source's bytes only.
 - Limits: `timeLimitSec` (default 600) and `maxOutputBytes` for everything under `out/`. Over
   a limit, or on cancel, the process group is killed.
 - On exit 0 the job writes `out/manifest.json`:
