@@ -9,7 +9,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { Artifact, ArtifactKind } from "./types.js";
 
 export type ArtifactErrorCode =
@@ -60,10 +60,12 @@ async function readJson<T>(path: string): Promise<T | undefined> {
   }
 }
 
+/** One write chain per registry directory, shared by every store instance in this process. */
+const queues = new Map<string, Promise<unknown>>();
+
 export class ArtifactStore {
   private readonly workspaceDir: string;
   private readonly runId: string;
-  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: { workspaceDir: string; runId: string }) {
     this.workspaceDir = opts.workspaceDir;
@@ -74,10 +76,16 @@ export class ArtifactStore {
     return join(this.workspaceDir, "artifacts");
   }
 
-  /** Serialise registry writes within this process (index files are read-modify-write). */
+  /** Serialise registry writes per workspace within this process (index files are read-modify-write). */
   private serial<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(fn, fn);
-    this.queue = next.catch(() => undefined);
+    const key = resolve(this.dir);
+    const prev = queues.get(key) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    const tail = next.catch(() => undefined);
+    queues.set(key, tail);
+    void tail.then(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
     return next;
   }
 

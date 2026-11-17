@@ -131,6 +131,21 @@ describe("ArtifactStore", () => {
     await assert.rejects(s.register({ kind: "source", path: link }), /outside workspace/);
   });
 
+  it("concurrent stores on one workspace lose no shared ids", async () => {
+    const w3 = join(root, "ws-concurrent");
+    mkdirSync(w3);
+    const stores = ["runA", "runB"].map((runId) => new ArtifactStore({ workspaceDir: w3, runId }));
+    const jobs = [];
+    for (let i = 0; i < 8; i++) {
+      const f = join(w3, `c${i}`);
+      writeFileSync(f, `c${i}`);
+      jobs.push(stores[i % 2].register({ kind: "clock-map", path: f, sourceSha256: SRC_X, shared: true }));
+    }
+    const made = await Promise.all(jobs);
+    const listed = (await stores[0].forSource(SRC_X)).map((a) => a.id).sort();
+    assert.deepEqual(listed, made.map((a) => a.id).sort());
+  });
+
   it("refuses shared registration without a valid sourceSha256", async () => {
     const s = new ArtifactStore({ workspaceDir: ws, runId: "runA" });
     await assert.rejects(s.register({ kind: "clock-map", path: mk(), shared: true }), /sourceSha256/);
