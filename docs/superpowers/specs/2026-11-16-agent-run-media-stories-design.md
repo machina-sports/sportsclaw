@@ -174,6 +174,7 @@ The demo's `server.py` keeps the studio UI and stops owning the pipeline.
 ## Decided by André
 
 - **Rights check is an operator switch** (16 Nov): it can be turned off so any video can be used. The demo runs with it `off`. Whether a given video may be shown or published stays the operator's responsibility; the switch does not clear footage.
+- **Clearance comes from the operator side, never the model** (16 Nov): `media_source_open` takes no `rights` input. Under `require`, a source needs a clearance whose `sourceSha256` matches its bytes, from operator config (`media.clearances`) or from the app that starts the run. The model cannot clear a video.
 
 ## Left to the builder
 
