@@ -125,6 +125,33 @@ describe("resolveTimeline", () => {
   });
 });
 
+describe("renderPlain input hardening (needs no FFmpeg)", () => {
+  it("refuses a playlist voice file and an ffconcat source before rendering", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "media-timeline-harden-"));
+    try {
+      const dummy = join(dir, "dummy.mp4");
+      writeFileSync(dummy, "not a real video");
+      const playlist = join(dir, "voice.m3u");
+      writeFileSync(playlist, "#EXTM3U\n#EXTINF:1,\nfile:///etc/passwd\n");
+      const concat = join(dir, "source.ffconcat");
+      writeFileSync(concat, "ffconcat version 1.0\nfile '/etc/passwd'\n");
+      const voiced = await resolveTimeline(timeline([clip({ voiceArtifactId: "voice_1" })]), ctx);
+      await assert.rejects(
+        renderPlain({ timeline: voiced, sourcePath: dummy, voicePaths: { voice_1: playlist }, outPath: join(dir, "pl.mp4") }),
+        /Playlist and concat/,
+      );
+      const card = await resolveTimeline(timeline([{ kind: "card", cardSeconds: 2 }]), ctx);
+      await assert.rejects(
+        renderPlain({ timeline: card, sourcePath: concat, voicePaths: {}, outPath: join(dir, "cc.mp4") }),
+        /Playlist and concat/,
+      );
+    assert.equal(existsSync(join(dir, "pl.mp4")) || existsSync(join(dir, "cc.mp4")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("renderPlain", { skip: !HAVE_FFMPEG && "FFmpeg not available" }, () => {
   let dir, source, voice;
   const probe = (file) => {

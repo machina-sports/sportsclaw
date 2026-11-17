@@ -13,7 +13,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { probeVideo } from "../highlights/ffmpeg.js";
+import { INPUT_FORMAT_ALLOWLIST, INPUT_PROTOCOL_ALLOWLIST, probeVideo, rejectIndirectInput } from "../highlights/ffmpeg.js";
 import type { ResolvedTimeline, TimelineSegment } from "./timeline.js";
 
 const WIDTH = 1280;
@@ -69,6 +69,12 @@ function runFfmpeg(args: string[], cwd: string, abortSignal?: AbortSignal): Prom
   });
 }
 
+/** Demuxers accepted for a voice file: wav, mp3, ogg (incl. opus), flac, mov (incl. mp4/m4a), matroska/webm (opus). */
+const VOICE_FORMAT_ALLOWLIST = "wav,mp3,ogg,flac,mov,matroska,webm";
+
+/** Per-input hardening, as in the highlights path: file protocol only, named demuxers only. */
+const hardenInput = (formats: string): string[] => ["-protocol_whitelist", INPUT_PROTOCOL_ALLOWLIST, "-format_whitelist", formats];
+
 const AUDIO_NORMALISE = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
 export async function renderPlain(args: {
@@ -93,6 +99,9 @@ export async function renderPlain(args: {
       throw new Error(`No file for voice artifact ${seg.voiceArtifactId}`);
     }
   }
+  // Playlist and concat files would make ffmpeg fetch URLs or read local files into the output.
+  await rejectIndirectInput(sourcePath);
+  for (const p of Object.values(voicePaths)) await rejectIndirectInput(p);
   const sourceHasAudio = segments.some((s) => s.kind === "clip")
     ? (await probeVideo(sourcePath)).streams.some((s) => s.codec_type === "audio")
     : false;
@@ -111,7 +120,7 @@ export async function renderPlain(args: {
 
     await writeFile(join(work, "list.txt"), segmentFiles.map((f) => `file '${f}'`).join("\n") + "\n");
     await runFfmpeg(
-      ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "-movflags", "+faststart", "joined.mp4"],
+      ["-f", "concat", "-safe", "0", "-protocol_whitelist", "file", "-i", "list.txt", "-c", "copy", "-movflags", "+faststart", "joined.mp4"],
       work,
       abortSignal,
     );
@@ -153,12 +162,12 @@ async function renderSegment(
   let audioLabel: string;
   const filters: string[] = [video];
   if (isClip) {
-    inputs.push("-ss", String(seg.startSec), "-t", String(length), "-i", sourcePath);
+    inputs.push("-ss", String(seg.startSec), "-t", String(length), ...hardenInput(INPUT_FORMAT_ALLOWLIST), "-i", sourcePath);
   } else {
     inputs.push("-f", "lavfi", "-i", `color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}:d=${length}`);
   }
   if (voicePath !== undefined) {
-    inputs.push("-i", voicePath);
+    inputs.push(...hardenInput(VOICE_FORMAT_ALLOWLIST), "-i", voicePath);
     filters.push(`[1:a]${AUDIO_NORMALISE},apad[a]`);
     audioLabel = "[a]";
   } else if (isClip && sourceHasAudio) {

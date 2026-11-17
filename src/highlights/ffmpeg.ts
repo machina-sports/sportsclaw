@@ -11,13 +11,13 @@ import { open, rm } from "node:fs/promises";
 import { extname } from "node:path";
 import type { FfprobeData } from "fluent-ffmpeg";
 
-const INPUT_PROTOCOL_ALLOWLIST = "file";
+export const INPUT_PROTOCOL_ALLOWLIST = "file";
 const FFMPEG_PROTOCOL_ALLOWLIST = "file,pipe";
-const INPUT_FORMAT_ALLOWLIST = "mov,matroska,webm,avi,mpegts";
+export const INPUT_FORMAT_ALLOWLIST = "mov,matroska,webm,avi,mpegts";
 const INDIRECT_EXTENSIONS = new Set([".m3u", ".m3u8", ".ffconcat"]);
 const MAX_PROBE_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-async function rejectIndirectInput(filePath: string): Promise<void> {
+export async function rejectIndirectInput(filePath: string): Promise<void> {
   if (INDIRECT_EXTENSIONS.has(extname(filePath).toLowerCase())) {
     throw new Error("Playlist and concat inputs are not supported");
   }
