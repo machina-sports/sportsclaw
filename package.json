@@ -108,6 +108,7 @@
     "test:media-clock-map": "npm run build && node --test test/media-clock-map.test.mjs",
     "test:media-event-index": "npm run build && node --test test/media-event-index.test.mjs",
     "test:media-role-proxy": "npm run build && node --test test/media-role-proxy.test.mjs",
+    "test:media-lines": "npm run build && node --test test/media-lines.test.mjs",
     "test:highlights-providers": "npm run build && node --test test/highlights-providers.test.mjs"
   },
   "keywords": [
