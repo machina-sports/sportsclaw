@@ -20,7 +20,9 @@
  *   - On exit 0 the job must have written `<out dir>/manifest.json` (max 1 MiB):
  *     `{ "artifacts": [{ "kind", "file", "facts"?, "shared"? }], "facts": {} }`. Each `file` must be a relative
  *     path to a regular file (not a symlink) inside the out dir after realpath, and each `kind` must be in the
- *     sealed declaration's `produces`. Every entry is validated before any is registered.
+ *     sealed declaration's `produces`. Every entry is validated before any is registered. A runner built with
+ *     `shareArtifacts` (prep jobs) registers every artifact as shared for the source.
+ *   - `roleProxyToken` on start gives that job its own role-proxy token instead of the runner's.
  */
 
 import { spawn } from "node:child_process";

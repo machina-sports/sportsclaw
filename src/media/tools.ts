@@ -407,7 +407,17 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
 
 function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
   const list = kinds.length
-    ? kinds.map((d) => `${d.skill}/${d.kind} (produces ${d.produces.join(", ") || "facts only"}${d.readsSource ? "; needs sourceArtifactId" : ""})`).join("; ")
+    ? kinds
+        .map((d) => {
+          const notes = [
+            `produces ${d.produces.join(", ") || "facts only"}`,
+            ...(d.readsSource ? ["needs sourceArtifactId"] : []),
+            ...(d.produces.includes("video") ? ["a renderer: run it with story_render"] : []),
+            ...(d.prep ? ["prep: keeps running after this run"] : []),
+          ];
+          return `${d.skill}/${d.kind} (${notes.join("; ")})`;
+        })
+        .join("; ")
     : "none";
   return {
     media_source_open: "Open a video in the media workspace as this run's source. Returns its artifact id, duration and the artifacts already prepared for it.",
