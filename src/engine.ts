@@ -169,6 +169,7 @@ import {
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import { randomUUID } from "node:crypto";
 import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
+import { MediaPrep } from "./media/prep.js";
 import { parseClearances } from "./media/rights.js";
 import type { InferenceReceipt } from "./inference/receipt.js";
 import {
@@ -1147,8 +1148,10 @@ export class sportsclawEngine {
   private _mediaMarkers?: Array<{ marker: string; kind: MediaAttachment["kind"] }>;
   /** This run's media story tools (config.media), created when the run starts and disposed when it ends. */
   private _runMediaTools?: Awaited<ReturnType<typeof createMediaTools>>;
-  /** Tool results of the current run as they finish (story_facts_collect reads them mid-run). */
+  /** Tool results of the current run as they finish (story_facts_collect reads them mid-run); kept only while media tools are live. */
   private _runToolResults: RunToolResult[] = [];
+  /** Prep media jobs (jobs.json "prep": true): they outlive runs; closeMedia() cancels them. */
+  private _mediaPrep?: MediaPrep;
 
   /** Sanitized evidence-verification receipts from the last run(). */
   get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
@@ -5041,11 +5044,19 @@ export class sportsclawEngine {
 
   private async runExclusive(userPrompt: string, options?: RunOptions): Promise<string> {
     this._runToolResults = [];
+    // Before anything can throw: a run that fails early must not leave its media steps on the last run's trace.
+    this._lastRunTrace = null;
     const mediaReceipts: InferenceReceipt[] = [];
     try {
       if (this.config.media) {
         const registry = this.registry;
+        this._mediaPrep ??= new MediaPrep({
+          config: this.config.media,
+          ...(this.config.inference ? { inference: this.config.inference } : {}),
+          ...(this.config.pythonPath ? { pythonPath: this.config.pythonPath } : {}),
+        });
         this._runMediaTools = await createMediaTools({
+          prep: this._mediaPrep,
           // Writer, speech and role-proxy calls: sanitized receipts, kept on the trace.
           onReceipt: (receipt) => mediaReceipts.push({ ...receipt }),
           config: this.config.media,
@@ -5067,12 +5078,31 @@ export class sportsclawEngine {
       if (media) {
         // Dispose first: it closes the role proxy, so no receipt arrives after the trace is written.
         await media.dispose();
-        if (this._lastRunTrace) {
-          this._lastRunTrace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
-          this._lastRunTrace.mediaReceipts = mediaReceipts;
+        // The run set its own trace (or none); TypeScript still sees the null assigned above.
+        const trace = this._lastRunTrace as RunTrace | null;
+        if (trace) {
+          trace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
+          trace.mediaReceipts = mediaReceipts;
         }
       }
     }
+  }
+
+  /**
+   * Cancels running prep media jobs (jobs.json "prep": true, which outlive the run that started them) and
+   * closes their role proxy. A long-lived host (the studio) calls this on shutdown. A later prep job starts
+   * them again.
+   */
+  async closeMedia(): Promise<void> {
+    await this._mediaPrep?.close();
+  }
+
+  /**
+   * Receipts of prep media jobs' model calls that arrived after the run that started the job had ended
+   * (while it runs they are on that run's trace as mediaReceipts). Returns them and empties the list.
+   */
+  mediaPrepReceipts(): InferenceReceipt[] {
+    return this._mediaPrep?.drainReceipts() ?? [];
   }
 
   /** Forget this run's media markers and leave a short note where each stood in the transcript. */
@@ -6126,7 +6156,7 @@ export class sportsclawEngine {
     // Tool-finish tracking shared by the main loop and the correction's public reads.
     const trackToolFinish = (event: ToolFinishEvent) => {
       const { toolCall, durationMs, success } = event;
-      this._runToolResults.push({
+      if (this._runMediaTools) this._runToolResults.push({
         toolName: toolCall.toolName,
         toolCallId: toolCall.toolCallId,
         input: toolCall.input,

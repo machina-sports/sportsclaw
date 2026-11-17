@@ -14,6 +14,10 @@
  * A declaration whose `produces` names a kind only the story tools make (facts, lines-checked, voice,
  * timeline: TOOL_MINTED_KINDS) is invalid and dropped like any other invalid declaration: a job could
  * otherwise write unchecked lines, voice or evidence.
+ *
+ * `"prep": true` marks a prep job (it outlives its run; see prep.ts). It is valid only on a kind that reads
+ * the source (its artifacts are shared for that source) and whose every `produces` kind is a per-game kind
+ * (PREP_KINDS: clock-map, event-index, subject-tracks, subject-identity); otherwise the declaration is dropped.
  */
 
 import { createHash } from "node:crypto";
@@ -21,7 +25,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { SkillGuide } from "../types.js";
-import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type ArtifactKind } from "./types.js";
+import { ARTIFACT_KINDS, PREP_KINDS, TOOL_MINTED_KINDS, type ArtifactKind } from "./types.js";
 
 export const JOB_ALLOWLIST_ENV = "SPORTSCLAW_MEDIA_JOB_ALLOWLIST";
 
@@ -40,6 +44,8 @@ export interface JobKindDecl {
   timeLimitSec?: number;
   maxOutputBytes?: number;
   produces: ArtifactKind[];
+  /** A prep job: runs on the engine, outlives the run, its artifacts shared (present only when true). */
+  prep?: true;
 }
 
 export class BundleError extends Error {
@@ -191,6 +197,8 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
       !Array.isArray(j.produces) ||
       !j.produces.every((p) => typeof p === "string" && (ARTIFACT_KINDS as readonly string[]).includes(p)) ||
       j.produces.some((p) => TOOL_MINTED_KINDS.has(p as ArtifactKind)) ||
+      (j.prep !== undefined && typeof j.prep !== "boolean") ||
+      (j.prep === true && (!j.readsSource || !j.produces.every((p) => PREP_KINDS.has(p as ArtifactKind)))) ||
       !(await entryIsInside(skillDir, j.entry))
     ) {
       continue;
@@ -205,6 +213,7 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
     };
     if (j.timeLimitSec !== undefined) decl.timeLimitSec = j.timeLimitSec as number;
     if (j.maxOutputBytes !== undefined) decl.maxOutputBytes = j.maxOutputBytes as number;
+    if (j.prep === true) decl.prep = true;
     out.push(decl);
   }
   return out;

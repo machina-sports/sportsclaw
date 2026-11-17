@@ -26,6 +26,12 @@ export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
  */
 export const TOOL_MINTED_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>(["facts", "lines-checked", "voice", "timeline"]);
 
+/**
+ * Per-game kinds a prep job may make ("prep": true in jobs.json). Prep jobs outlive the run that started
+ * them and their artifacts are shared for the source (prep.ts).
+ */
+export const PREP_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>(["clock-map", "event-index", "subject-tracks", "subject-identity"]);
+
 export interface Artifact {
   id: string;
   kind: ArtifactKind;

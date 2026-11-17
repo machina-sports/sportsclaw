@@ -41,6 +41,10 @@
  *     one is accepted only if these tools registered it in this run (`artifact_not_minted`), so no job,
  *     earlier run or shared registry entry can supply unchecked text, voice or evidence.
  *   - A role proxy (for every configured role but brain) runs while the tools live; dispose closes it.
+ *   - Prep jobs (kinds declared "prep": true) run on ctx.prep, the engine's MediaPrep: dispose does not cancel
+ *     them, and media_job_status / media_job_cancel take a prep job's id from any run on that engine. A run
+ *     may start config.maxJobsPerRun prep jobs, besides its own jobs. Without ctx.prep the tools keep their
+ *     own MediaPrep and dispose closes it.
  */
 
 import { randomBytes } from "node:crypto";
@@ -57,8 +61,9 @@ import type { HostToolDef, RunToolResult, SkillGuide } from "../types.js";
 import { ArtifactError, ArtifactStore, hashFile } from "./artifacts.js";
 import { approvedJobBundles, type ApprovedBundle, type JobKindDecl } from "./bundle.js";
 import { findEvents, type EventIndex, type IndexedEvent } from "./event-index.js";
-import { JobError, LocalJobRunner, rightsCleared, type JobArtifactRef, type JobRecord } from "./jobs.js";
+import { DEFAULT_MAX_JOBS_PER_RUN, JobError, LocalJobRunner, rightsCleared, type JobArtifactRef, type JobRecord, type JobRunner } from "./jobs.js";
 import { LinesError, checkLines, collectFacts, draftLines, jobLineChecker, type CheckedLine, type DraftLine, type Fact, type LineChecker } from "./lines.js";
+import { MediaPrep, type PrepSink } from "./prep.js";
 import { renderPlain } from "./render-plain.js";
 import { RIGHTS_OFF_NOTE, parseClearances, resolveRightsCheck } from "./rights.js";
 import { startRoleProxy, type RoleProxy } from "./role-proxy.js";
@@ -116,6 +121,11 @@ export interface MediaToolsContext {
   pythonPath?: string;
   /** Clearances the app starting this run supplies (RunOptions.mediaClearances), on top of media.clearances. */
   clearances?: MediaClearance[];
+  /**
+   * The engine's prep jobs (kinds declared "prep": true), which outlive this run. Absent: these tools keep
+   * their own, closed by dispose().
+   */
+  prep?: MediaPrep;
 }
 
 /** Story checks per run: the first and two rewrite rounds. */
@@ -469,8 +479,15 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     ...(proxy ? { roleProxy: { url: proxy.url, token: proxy.token } } : {}),
   });
 
+  // Prep jobs run on the engine's MediaPrep; their receipts come here until dispose() ends this run.
+  const ownPrep = ctx.prep ? undefined : new MediaPrep({ config, ...(ctx.inference ? { inference: ctx.inference } : {}), env, ...(ctx.pythonPath ? { pythonPath: ctx.pythonPath } : {}) });
+  const prep = ctx.prep ?? ownPrep!;
+  const prepSink: PrepSink = { ...(ctx.onReceipt ? { onReceipt: ctx.onReceipt } : {}), ended: false };
+  let prepStarted = 0;
+
   const steps: MediaStep[] = [];
   const sources = new Map<string, OpenedSource>();
+  /** Jobs this run started on its own runner (not prep jobs); dispose cancels them. */
   const jobs = new Map<string, Approved>();
   /** artifact id -> skill whose job made it (this run). */
   const producers = new Map<string, string>();
@@ -620,6 +637,13 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     return out;
   }
 
+  /** A job of this run, or a prep job on this engine (any run's). */
+  function runnerOf(jobId: string): Pick<JobRunner, "status" | "cancel"> {
+    if (jobs.has(jobId)) return runner;
+    if (prep.has(jobId)) return prep;
+    return refuse("unknown_job", "No such job in this run, and no prep job by that id.");
+  }
+
   async function waitForJob(jobId: string, abortSignal?: AbortSignal): Promise<JobRecord> {
     let rec = await runner.status(jobId);
     while (rec.state === "running") {
@@ -756,7 +780,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const artifacts = await artifactInputs(decl, a.input, source?.artifact.sha256);
       if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
       const rights = decl.readsSource && source ? authorize(source.artifact.sha256).rights : undefined;
-      const rec = await runner.start({
+      const req = {
         decl,
         skillDir: bundle.skillDir,
         bundleSha256: bundle.bundleSha256,
@@ -765,25 +789,31 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
           ? { source: { path: source.artifact.path, sha256: source.artifact.sha256, ...(rights ? { rights } : {}) } }
           : {}),
         artifacts,
-      });
+      };
+      if (decl.prep) {
+        const maxJobs = config.maxJobsPerRun ?? DEFAULT_MAX_JOBS_PER_RUN;
+        if (prepStarted >= maxJobs) refuse("job_budget", `This run already started its ${maxJobs} prep jobs.`);
+        const rec = await prep.start(req, prepSink);
+        prepStarted++;
+        return { result: { jobId: rec.jobId, state: rec.state, prep: true }, artifactIds: [], jobId: rec.jobId };
+      }
+      const rec = await runner.start(req);
       jobs.set(rec.jobId, approved);
       return { result: { jobId: rec.jobId, state: rec.state }, artifactIds: [], jobId: rec.jobId };
     },
 
     async media_job_status(a) {
       const jobId = str(a, "jobId", 100);
-      if (!jobs.has(jobId)) refuse("unknown_job", "No such job in this run.");
       const raw = a.waitSec;
       const waitSec = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.min(MAX_STATUS_WAIT_SEC, raw) : 0;
-      const rec = await runner.status(jobId, { waitSec });
+      const rec = await runnerOf(jobId).status(jobId, { waitSec });
       noteProducers(rec);
       return { result: jobView(rec), artifactIds: rec.artifacts.map((x) => x.id), jobId };
     },
 
     async media_job_cancel(a) {
       const jobId = str(a, "jobId", 100);
-      if (!jobs.has(jobId)) refuse("unknown_job", "No such job in this run.");
-      const rec = await runner.cancel(jobId);
+      const rec = await runnerOf(jobId).cancel(jobId);
       noteProducers(rec);
       return { result: jobView(rec), artifactIds: rec.artifacts.map((x) => x.id), jobId };
     },
@@ -995,7 +1025,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     steps,
     dispose() {
       disposed ??= (async () => {
+        // This run's jobs end with it; prep jobs on the engine's MediaPrep keep running.
+        prepSink.ended = true;
         for (const jobId of jobs.keys()) await runner.cancel(jobId).catch(() => undefined);
+        await ownPrep?.close();
         await proxy?.close();
       })();
       return disposed;

@@ -37,7 +37,7 @@ import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
 import { ARTIFACT_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
 
 const DEFAULT_TIME_LIMIT_SEC = 600;
-const DEFAULT_MAX_JOBS_PER_RUN = 12;
+export const DEFAULT_MAX_JOBS_PER_RUN = 12;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_STDERR_CHARS = 4000;
@@ -90,6 +90,8 @@ export interface JobRunner {
     source?: { path: string; sha256: string; rights?: RightsAuthorization };
     /** Artifacts handed to the job, already checked by the caller (ArtifactStore.require). */
     artifacts?: Record<string, JobArtifactRef>;
+    /** A role-proxy token for this job only, instead of the runner's (prep jobs: receipts per job). */
+    roleProxyToken?: string;
   }): Promise<JobRecord>;
   status(jobId: string, opts?: { waitSec?: number }): Promise<JobRecord>;
   cancel(jobId: string): Promise<JobRecord>;
@@ -112,6 +114,7 @@ export class JobError extends Error {
       | "source_outside"
       | "source_mismatch"
       | "rights_required"
+      | "prep_busy"
       | "unknown_job",
     message: string,
   ) {
@@ -254,6 +257,7 @@ export class LocalJobRunner implements JobRunner {
   private readonly config: MediaConfig;
   private readonly env: Record<string, string | undefined>;
   private readonly roleProxy?: { url: string; token: string };
+  private readonly shareArtifacts: boolean;
   private readonly jobs = new Map<string, LiveJob>();
   private started = 0;
 
@@ -262,11 +266,14 @@ export class LocalJobRunner implements JobRunner {
     config: MediaConfig;
     env?: Record<string, string | undefined>;
     roleProxy?: { url: string; token: string };
+    /** Register every artifact a job makes as shared for its source (prep jobs). */
+    shareArtifacts?: boolean;
   }) {
     this.store = opts.store;
     this.config = opts.config;
     this.env = opts.env ?? process.env;
     this.roleProxy = opts.roleProxy;
+    this.shareArtifacts = opts.shareArtifacts === true;
   }
 
   async start(req: Parameters<JobRunner["start"]>[0]): Promise<JobRecord> {
@@ -351,7 +358,7 @@ export class LocalJobRunner implements JobRunner {
     }
     if (this.roleProxy) {
       env.SPORTSCLAW_ROLE_PROXY_URL = this.roleProxy.url;
-      env.SPORTSCLAW_ROLE_PROXY_TOKEN = this.roleProxy.token;
+      env.SPORTSCLAW_ROLE_PROXY_TOKEN = req.roleProxyToken ?? this.roleProxy.token;
     }
 
     const timeLimitSec = decl.timeLimitSec ?? DEFAULT_TIME_LIMIT_SEC;
@@ -434,7 +441,11 @@ export class LocalJobRunner implements JobRunner {
           } else {
             const artifacts: Artifact[] = [];
             for (const item of intake.items) {
-              artifacts.push(await this.store.register({ ...item, ...(sourceSha256 ? { sourceSha256 } : {}) }));
+              artifacts.push(await this.store.register({
+                ...item,
+                ...(sourceSha256 ? { sourceSha256 } : {}),
+                ...(this.shareArtifacts && sourceSha256 ? { shared: true } : {}),
+              }));
             }
             record.artifacts = artifacts;
             record.facts = intake.facts;

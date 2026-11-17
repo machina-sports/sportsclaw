@@ -26,8 +26,10 @@ export const MAX_ROLE_PROXY_BODY_BYTES = 64 * 1024 * 1024;
 export interface RoleProxy {
   /** Base URL, e.g. `http://127.0.0.1:41234`; callers POST to `${url}/role/<role>`. */
   url: string;
-  /** 32 random bytes, hex; valid until `close()`. */
+  /** 32 random bytes, hex; valid until `close()`. Its calls' receipts go to `onReceipt`. */
   token: string;
+  /** Another token, valid until `close()`, whose calls' receipts go to `onReceipt` (one per prep job). */
+  addToken(onReceipt?: (r: InferenceReceipt) => void): string;
   /** Stops listening and drops open connections. Safe to call more than once. */
   close(): Promise<void>;
 }
@@ -40,12 +42,16 @@ function reply(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-function tokenMatches(header: string | undefined, token: string): boolean {
+/** The bearer token in `header` if it is one of `tokens` (compared in constant time per token). */
+function matchingToken(header: string | undefined, tokens: Iterable<string>): string | undefined {
   const m = /^Bearer (.+)$/.exec(header ?? "");
-  if (!m) return false;
+  if (!m) return undefined;
   const given = Buffer.from(m[1]);
-  const want = Buffer.from(token);
-  return given.length === want.length && timingSafeEqual(given, want);
+  for (const token of tokens) {
+    const want = Buffer.from(token);
+    if (given.length === want.length && timingSafeEqual(given, want)) return token;
+  }
+  return undefined;
 }
 
 /** Reads the body, giving up as soon as it passes the cap. */
@@ -77,6 +83,8 @@ export async function startRoleProxy(opts: {
   onReceipt?: (r: InferenceReceipt) => void;
 }): Promise<RoleProxy> {
   const token = randomBytes(32).toString("hex");
+  /** token -> where its calls' receipts go */
+  const tokens = new Map<string, ((r: InferenceReceipt) => void) | undefined>([[token, opts.onReceipt]]);
   const allowed = new Set<string>(opts.allowRoles);
   const sockets = new Set<Socket>();
   let port = 0;
@@ -101,7 +109,9 @@ export async function startRoleProxy(opts: {
     if (!match) return reply(res, 404, { error: "not found" });
     if (req.method !== "POST") return reply(res, 405, { error: "method not allowed" });
 
-    if (!tokenMatches(req.headers.authorization, token)) return reply(res, 401, { error: "unauthorized" });
+    const caller = matchingToken(req.headers.authorization, tokens.keys());
+    if (caller === undefined) return reply(res, 401, { error: "unauthorized" });
+    const onReceipt = tokens.get(caller);
 
     const role = match[1];
     if (!allowed.has(role)) return reply(res, 403, { error: "role not allowed" });
@@ -142,12 +152,12 @@ export async function startRoleProxy(opts: {
         onReceipt: (receipt) => {
           observed = true;
           errorCode = receipt.errorCode;
-          opts.onReceipt?.(receipt);
+          onReceipt?.(receipt);
         },
       });
       // Chat routes report their own receipt; the mock route makes none, so report from the trace.
       if (!observed) {
-        opts.onReceipt?.({
+        onReceipt?.({
           kind: "generate",
           purpose: "model_role",
           route: result.trace.route,
@@ -173,6 +183,11 @@ export async function startRoleProxy(opts: {
   return {
     url: `http://127.0.0.1:${port}`,
     token,
+    addToken(onReceipt) {
+      const t = randomBytes(32).toString("hex");
+      tokens.set(t, onReceipt);
+      return t;
+    },
     close() {
       closing ??= new Promise<void>((resolve) => {
         server.close(() => resolve());

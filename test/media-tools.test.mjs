@@ -39,6 +39,7 @@ const { createMediaTools, MEDIA_TOOL_NAMES } = await import(join(repoRoot, "dist
 const { ArtifactStore } = await import(join(repoRoot, "dist/media/artifacts.js"));
 const { bundleSha256, JOB_ALLOWLIST_ENV } = await import(join(repoRoot, "dist/media/bundle.js"));
 const { buildRunManifest } = await import(join(repoRoot, "dist/run-manifest.js"));
+const { MediaPrep } = await import(join(repoRoot, "dist/media/prep.js")).catch(() => ({}));
 const { MockLanguageModelV3 } = await import("ai/test");
 const { sportsclawEngine } = await import(join(repoRoot, "dist/engine.js"));
 
@@ -133,6 +134,7 @@ async function make(over = {}) {
     ...(over.pythonPath ? { pythonPath: over.pythonPath } : {}),
     ...(over.onReceipt ? { onReceipt: over.onReceipt } : {}),
     ...(over.clearances ? { clearances: over.clearances } : {}),
+    ...(over.prep ? { prep: over.prep } : {}),
   });
   disposers.push(media.dispose);
   const call = (name, input = {}) => media.tools[name].execute(input, {});
@@ -774,6 +776,74 @@ describe("media story tools: role proxy", () => {
   });
 });
 
+describe("media story tools: prep jobs outlive the run", () => {
+  const PREP_KINDS = [...APPROVED, "prep-index"];
+  function newPrep(workspaceDir) {
+    const prep = new MediaPrep({ config: { workspaceDir }, inference: INFERENCE, env: process.env });
+    disposers.push(() => prep.close());
+    return prep;
+  }
+  const prepIndex = (call, sourceArtifactId, input = {}) =>
+    call("media_job_start", { skill: SKILL, kind: "prep-index", input: { events: EVENTS, ...input }, sourceArtifactId });
+
+  it("a prep job keeps running after its run ends, succeeds, is shared, and a later run reads its status; non-prep jobs are cancelled", async () => {
+    const workspaceDir = newWorkspace();
+    const prep = newPrep(workspaceDir);
+    const run1 = await make({ workspaceDir, prep, kinds: PREP_KINDS });
+    const src = ok(await run1.call("media_source_open", { path: "media/game.mp4" }));
+    const p = ok(await prepIndex(run1.call, src.sourceArtifactId, { sleep: 1, mode: "unshared" }));
+    const h = ok(await run1.call("media_job_start", { skill: SKILL, kind: "hand-off", input: { sleep: 30 } }));
+    await run1.media.dispose();
+    assert.equal(ok(await run1.call("media_job_status", { jobId: h.jobId })).state, "canceled");
+
+    const run2 = await make({ workspaceDir, prep, kinds: PREP_KINDS });
+    const st = ok(await run2.call("media_job_status", { jobId: p.jobId, waitSec: 30 }));
+    assert.equal(st.state, "succeeded", st.error);
+    const indexId = st.artifacts[0].artifactId;
+    // The job did not mark it shared; a prep job's artifacts are shared on success.
+    const again = ok(await run2.call("media_source_open", { path: "media/game.mp4" }));
+    assert.deepEqual(again.shared.map((a) => [a.artifactId, a.kind]), [[indexId, "event-index"]]);
+    ok(await run2.call("media_find_events", { indexArtifactId: indexId }));
+    // A job of another run that is not a prep job stays unknown.
+    refused(await run2.call("media_job_status", { jobId: h.jobId }), "unknown_job");
+  });
+
+  it("closing the prep jobs cancels a running one", async () => {
+    const workspaceDir = newWorkspace();
+    const prep = newPrep(workspaceDir);
+    const { call } = await make({ workspaceDir, prep, kinds: PREP_KINDS });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const p = ok(await prepIndex(call, src.sourceArtifactId, { sleep: 30 }));
+    assert.equal(ok(await call("media_job_status", { jobId: p.jobId })).state, "running");
+    await prep.close();
+    assert.equal(ok(await call("media_job_status", { jobId: p.jobId })).state, "canceled");
+  });
+
+  it("at most 4 prep jobs run at once (prep_busy)", async () => {
+    const workspaceDir = newWorkspace();
+    const prep = newPrep(workspaceDir);
+    const { call } = await make({ workspaceDir, prep, kinds: PREP_KINDS });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    for (let i = 0; i < 4; i++) ok(await prepIndex(call, src.sourceArtifactId, { sleep: 30 }));
+    refused(await prepIndex(call, src.sourceArtifactId, { sleep: 30 }), "prep_busy");
+    await prep.close();
+  });
+
+  it("without an engine's prep jobs the tools keep their own, closed with the tools", async () => {
+    const { call, media } = await make({ kinds: PREP_KINDS });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const p = ok(await prepIndex(call, src.sourceArtifactId, { sleep: 30 }));
+    await media.dispose();
+    assert.equal(ok(await call("media_job_status", { jobId: p.jobId })).state, "canceled");
+  });
+
+  it("a prep declaration whose produces is not all per-game kinds (video) is dropped", async () => {
+    const { media, call } = await make({ kinds: [...PREP_KINDS, "prep-video"] });
+    refused(await call("media_job_start", { skill: SKILL, kind: "prep-video", input: {} }), "unknown_kind");
+    assert.ok(!JSON.stringify(Object.values(media.tools).map((t) => t.description)).includes("prep-video"));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Engine wiring
 // ---------------------------------------------------------------------------
@@ -912,5 +982,79 @@ describe("engine wiring", () => {
     } finally {
       delete process.env[JOB_ALLOWLIST_ENV];
     }
+  });
+
+  /** An engine whose model makes the tool calls in `steps` (one per turn), then answers "Done.". */
+  function scriptedEngine(config) {
+    let steps = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        if (isVerdictCall(call)) return generated([{ type: "text", text: JSON.stringify({ isValid: true, discrepancies: [] }) }]);
+        const tools = call.prompt.filter((m) => m.role === "tool");
+        const next = steps[tools.length];
+        if (!next) return generated([{ type: "text", text: "Done." }]);
+        const input = typeof next[1] === "function" ? next[1](JSON.stringify(tools)) : next[1];
+        return generated([{ type: "tool-call", toolCallId: `c${tools.length}`, toolName: next[0], input: JSON.stringify(input) }]);
+      },
+    });
+    const engine = new sportsclawEngine({ thinkingBudget: 0, ...config });
+    engine.mainModel = model;
+    engine.registry = { getInstalledSkills: () => [], getAllToolSpecs: () => [], getSkillName: () => undefined };
+    engine.skillGuides = GUIDES;
+    engine.setToolAllowlist([...MEDIA_TOOL_NAMES]);
+    const run = async (s) => {
+      steps = s;
+      return engine.runDetailed("Go.", { historyMode: "caller" });
+    };
+    const out = (result, tool) => JSON.parse(result.toolResults.filter((r) => r.toolName === tool).at(-1).output);
+    return { engine, run, out };
+  }
+
+  it("a prep job outlives its run: a later run reads it and sees its artifact shared; its late receipt goes to mediaPrepReceipts; closeMedia cancels", async () => {
+    const workspaceDir = newWorkspace();
+    const { engine, run, out } = scriptedEngine({
+      media: { workspaceDir, clearances: CLEARED }, inference: { roles: { eyes: INFERENCE.roles.eyes } },
+    });
+    process.env[JOB_ALLOWLIST_ENV] = allow([...APPROVED, "prep-index"])[JOB_ALLOWLIST_ENV];
+    const startPrep = (sleep) => (tools) => ({
+      skill: SKILL, kind: "prep-index", input: { events: EVENTS, sleep }, sourceArtifactId: /art_[0-9a-f]{16}/.exec(tools)[0],
+    });
+    try {
+      const first = await run([["media_source_open", { path: "media/game.mp4" }], ["media_job_start", startPrep(2)]]);
+      const { jobId } = out(first, "media_job_start");
+      assert.match(jobId ?? "", /^job_/, JSON.stringify(out(first, "media_job_start")));
+      assert.deepEqual(first.trace.mediaReceipts, [], "the job's model call comes after its run ended");
+
+      const second = await run([["media_job_status", { jobId, waitSec: 30 }], ["media_source_open", { path: "media/game.mp4" }]]);
+      const st = out(second, "media_job_status");
+      assert.equal(st.state, "succeeded", st.error);
+      assert.deepEqual(out(second, "media_source_open").shared.map((a) => a.artifactId), [st.artifacts[0].artifactId]);
+      assert.deepEqual(second.trace.mediaReceipts, []);
+      assert.deepEqual(engine.mediaPrepReceipts().map((r) => [r.kind, r.modelId, r.status]), [["generate", "eyes-model", "completed"]]);
+      assert.deepEqual(engine.mediaPrepReceipts(), [], "drained");
+
+      const third = await run([["media_source_open", { path: "media/game.mp4" }], ["media_job_start", startPrep(30)]]);
+      const slow = out(third, "media_job_start").jobId;
+      await engine.closeMedia();
+      const fourth = await run([["media_job_status", { jobId: slow }]]);
+      assert.equal(out(fourth, "media_job_status").state, "canceled");
+    } finally {
+      delete process.env[JOB_ALLOWLIST_ENV];
+      await engine.closeMedia();
+    }
+  });
+
+  it("a run that fails before its turn leaves no trace, not the last run's trace with its steps", async () => {
+    const { engine, run } = scriptedEngine({ media: { workspaceDir: newWorkspace() } });
+    const first = await run([["story_facts_collect", {}]]);
+    assert.equal(first.trace.mediaSteps.length, 1);
+    await assert.rejects(engine.runDetailed("Go.", { historyMode: "caller", media: [{ kind: "nope" }] }));
+    assert.equal(engine.lastRunTrace, null);
+  });
+
+  it("tool results are kept for story_facts_collect only when the run has media tools", async () => {
+    const { engine } = storyEngine({});
+    await engine.runDetailed("Make the story.", { historyMode: "caller" });
+    assert.deepEqual(engine._runToolResults, []);
   });
 });

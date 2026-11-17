@@ -175,6 +175,21 @@ describe("approvedJobKinds", () => {
     assert.deepEqual(kinds.map((k) => k.kind), ["echo-job"]);
     assert.equal(kinds[0].readsSource, true);
   });
+  it("prep: true is kept only on a source-reading kind whose produces are all per-game kinds", async () => {
+    const dir = copyPack();
+    const ok = { kind: "p-ok", entry: "echo_job.py", inputSchema: {}, readsSource: true, prep: true, produces: ["clock-map", "event-index", "subject-tracks", "subject-identity"] };
+    const variants = [
+      { ...ok, kind: "p-video", produces: ["event-index", "video"] },
+      { ...ok, kind: "p-nosource", readsSource: false },
+      { ...ok, kind: "p-string", prep: "yes" },
+    ];
+    const plain = { ...ok, kind: "p-plain", prep: false };
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify({ jobs: [...variants, ok, plain] }));
+    const sha = await bundleSha256(dir);
+    const allowed = [...variants, ok, plain].map((j) => ({ skill: "pack-ok", kind: j.kind, bundleSha256: sha }));
+    const kinds = await approvedJobKinds([guide(dir)], allow(allowed));
+    assert.deepEqual(kinds.map((k) => [k.kind, k.prep]), [["p-ok", true], ["p-plain", undefined]]);
+  });
   it("duplicate kinds in jobs.json deny the skill", async () => {
     const dir = copyPack();
     const ok = { kind: "echo-job", entry: "echo_job.py", inputSchema: {}, readsSource: false, produces: [] };
