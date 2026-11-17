@@ -16,12 +16,14 @@
  *     `config_sha256`.
  *
  * The manifest never contains prompt text, credentials, or tool payloads —
- * only hashes and names.
+ * only hashes and names. The one exception is `run.media_steps`: the inputs of
+ * media story tool calls (artifact ids, line ids, a brief), strings capped at 200 characters.
  */
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { endpointHost } from "./openai-compatible.js";
+import type { InferenceReceipt } from "./inference/receipt.js";
 import type { LLMProvider, SamplingConfig } from "./types.js";
 
 export const RUN_MANIFEST_VERSION = 1;
@@ -159,10 +161,21 @@ export interface RunTrace {
    */
   dataAnswer?: { tools: string[]; facts: string; draft?: string; unsupported?: string[] };
   /**
-   * Successful media story tool calls in call order (sportsclawConfig.media): the tool and the
-   * artifact ids it produced, plus the job it started or read. Absent when no media tool succeeded.
+   * Successful media story tool calls in call order (sportsclawConfig.media): the tool, its input
+   * (strings capped at 200 characters), the artifact ids it produced, and the job it started or read.
+   * Absent when the run had no media tools; empty when none succeeded.
    */
-  mediaSteps?: { tool: string; artifactIds: string[]; jobId?: string }[];
+  mediaSteps?: MediaStepRecord[];
+  /** Receipts of the media tools' model calls (writer, speech, role proxy). Absent when the run had no media tools. */
+  mediaReceipts?: InferenceReceipt[];
+}
+
+/** One successful media tool call (see RunTrace.mediaSteps). */
+export interface MediaStepRecord {
+  tool: string;
+  artifactIds: string[];
+  jobId?: string;
+  input: unknown;
 }
 
 /**
@@ -221,6 +234,10 @@ export interface RunManifest {
     number_grounding: { action: "flag" | "withhold"; unsupported: string[]; draft: string | null } | null;
     /** What code wrote into the answer from the tool data, and the model's draft when the data replaced it. */
     data_answer: { tools: string[]; facts: string; draft: string | null; unsupported: string[] | null } | null;
+    /** Media story steps in call order (null when the run had no media tools). */
+    media_steps: MediaStepRecord[] | null;
+    /** Sanitized receipts of the media tools' model calls (null when there were none). */
+    media_receipts: InferenceReceipt[] | null;
   } | null;
 }
 
@@ -309,6 +326,15 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
                 unsupported: trace.dataAnswer.unsupported ? [...trace.dataAnswer.unsupported] : null,
               }
             : null,
+          media_steps: trace.mediaSteps
+            ? trace.mediaSteps.map((s) => ({
+                tool: s.tool,
+                artifactIds: [...s.artifactIds],
+                ...(s.jobId !== undefined ? { jobId: s.jobId } : {}),
+                input: structuredClone(s.input),
+              }))
+            : null,
+          media_receipts: trace.mediaReceipts?.length ? trace.mediaReceipts.map((r) => ({ ...r })) : null,
         }
       : null,
   };

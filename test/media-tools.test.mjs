@@ -37,6 +37,7 @@ globalThis.AI_SDK_LOG_WARNINGS = false;
 const { createMediaTools, MEDIA_TOOL_NAMES } = await import(join(repoRoot, "dist/media/tools.js"));
 const { ArtifactStore } = await import(join(repoRoot, "dist/media/artifacts.js"));
 const { bundleSha256, JOB_ALLOWLIST_ENV } = await import(join(repoRoot, "dist/media/bundle.js"));
+const { buildRunManifest } = await import(join(repoRoot, "dist/run-manifest.js"));
 const { MockLanguageModelV3 } = await import("ai/test");
 const { sportsclawEngine } = await import(join(repoRoot, "dist/engine.js"));
 
@@ -91,7 +92,11 @@ const writer = http.createServer((req, res) => {
 });
 await new Promise((resolve) => writer.listen(0, "127.0.0.1", resolve));
 const INFERENCE = {
-  roles: { writer: { route: "nim", model: "writer", baseUrl: `http://127.0.0.1:${writer.address().port}/v1` } },
+  roles: {
+    writer: { route: "nim", model: "writer", baseUrl: `http://127.0.0.1:${writer.address().port}/v1` },
+    // Jobs call this one through the role proxy (scripts/ask_proxy.py).
+    eyes: { route: "nim", model: "eyes-model", baseUrl: `http://127.0.0.1:${writer.address().port}/v1` },
+  },
   speech: { route: "mock", voice: "v1" },
 };
 
@@ -122,6 +127,7 @@ async function make(over = {}) {
     env: { ...process.env, ...allow(over.kinds ?? APPROVED) },
     isDataTool: over.isDataTool ?? ((name) => name === "stats_get_player"),
     ...(over.pythonPath ? { pythonPath: over.pythonPath } : {}),
+    ...(over.onReceipt ? { onReceipt: over.onReceipt } : {}),
   });
   disposers.push(media.dispose);
   const call = (name, input = {}) => media.tools[name].execute(input, {});
@@ -171,7 +177,8 @@ const timelineOf = (p, extra = {}) => ({
 
 describe("media story tools: the whole chain", () => {
   it("open -> index job -> find -> facts -> draft -> check -> speak -> timeline -> render plain gives a video, every step recorded", { skip: NO_FFMPEG }, async () => {
-    const { media, call, workspaceDir, runId } = await make();
+    const receipts = [];
+    const { media, call, workspaceDir, runId } = await make({ onReceipt: (r) => receipts.push(r) });
     const { src, job, indexId } = await openAndIndex(call);
     assert.ok(Math.abs(src.durationSec - 12) < 0.5, `duration ${src.durationSec}`);
 
@@ -205,7 +212,7 @@ describe("media story tools: the whole chain", () => {
     const store = new ArtifactStore({ workspaceDir, runId });
     await store.require(video.videoArtifactId, "video");
 
-    assert.deepEqual(media.steps, [
+    assert.deepEqual(media.steps.map(({ input, ...step }) => step), [
       { tool: "media_source_open", artifactIds: [src.sourceArtifactId] },
       { tool: "media_job_start", artifactIds: [], jobId: job.jobId },
       { tool: "media_job_status", artifactIds: [indexId], jobId: job.jobId },
@@ -217,6 +224,31 @@ describe("media story tools: the whole chain", () => {
       { tool: "story_timeline_build", artifactIds: [built.timelineArtifactId] },
       { tool: "story_render", artifactIds: [video.videoArtifactId] },
     ]);
+    // Each step records its input, so the manifest shows ids chaining step to step.
+    assert.deepEqual(media.steps[1].input.sourceArtifactId, src.sourceArtifactId);
+    assert.deepEqual(media.steps[3].input, { indexArtifactId: indexId, people: ["Ann Smith"] });
+    assert.deepEqual(media.steps[7].input, { linesArtifactId: checked.linesArtifactId, lineIds: ["line_1", "line_2"] });
+    assert.equal(media.steps[9].input.timelineArtifactId, built.timelineArtifactId);
+
+    const manifest = buildRunManifest({
+      sportsclawVersion: "test", provider: "openai", model: "m", sampling: {}, maxOutputTokens: 1, maxTurns: 1, thinkingBudget: 0,
+      env: {},
+      trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps, mediaReceipts: receipts },
+    });
+    assert.deepEqual(manifest.run.media_steps, JSON.parse(JSON.stringify(media.steps)));
+    const kinds = manifest.run.media_receipts.map((r) => `${r.kind}:${r.modelId ?? ""}:${r.status}`);
+    assert.ok(kinds.includes("generate:eyes-model:completed"), `role-proxy receipt from the index job: ${kinds}`);
+    assert.ok(kinds.includes("generate:writer:completed"), `writer receipt: ${kinds}`);
+    assert.equal(kinds.filter((k) => k.startsWith("speech:")).length, 2, `speech receipts: ${kinds}`);
+    for (const r of manifest.run.media_receipts) assert.ok(!JSON.stringify(r).includes("Smith"), "receipts carry no text");
+  });
+
+  it("a step's input keeps its shape with every string capped at 200 characters", async () => {
+    const { media, call } = await make();
+    const long = "x".repeat(300);
+    refused(await call("media_find_events", { indexArtifactId: long }), "artifact_unknown");
+    ok(await call("story_facts_collect", { note: long, nested: { list: [long, 7] } }));
+    assert.deepEqual(media.steps.map((s) => s.input), [{ note: "x".repeat(200), nested: { list: ["x".repeat(200), 7] } }]);
   });
 });
 
@@ -262,6 +294,12 @@ describe("media story tools: what the model is offered", () => {
     assert.ok(!surface.includes("secret-kind"), "unapproved kind leaked into the tool list");
     assert.ok(surface.includes("make-index"), "approved kinds are listed");
     assert.deepEqual(Object.keys(media.tools).sort(), [...MEDIA_TOOL_NAMES].sort());
+  });
+
+  it("a kind declaring a tool-made artifact kind (lines-checked) is dropped even when allowlisted", async () => {
+    const { media, call } = await make({ kinds: [...APPROVED, "fake-lines"] });
+    refused(await call("media_job_start", { skill: SKILL, kind: "fake-lines", input: {} }), "unknown_kind");
+    assert.ok(!JSON.stringify(Object.values(media.tools).map((t) => t.description)).includes("fake-lines"));
   });
 
   it("no tool's JSON Schema has a property named rightsCheck, interpreter or allowlist", async () => {
@@ -324,6 +362,47 @@ describe("media story tools: artifact hand-off to jobs", () => {
     const voicePath = JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${p.voices[1]}.json`), "utf8")).artifact.path;
     appendFileSync(voicePath, "tampered");
     refused(await call("media_job_start", { skill: SKILL, kind: "hand-off", input: { voices: [p.voices[1]] } }), "artifact_changed");
+  });
+});
+
+describe("media story tools: only the tools make facts, checked lines, voice and timelines", () => {
+  /** Registers `doc` as `kind` straight in the store (as a job or another process could), outside the tools. */
+  async function planted(workspaceDir, runId, kind, doc, extra = {}) {
+    const file = join(workspaceDir, `planted-${n++}.json`);
+    writeFileSync(file, typeof doc === "string" ? doc : JSON.stringify(doc));
+    return (await new ArtifactStore({ workspaceDir, runId }).register({ kind, path: file, ...extra })).id;
+  }
+  const LINES_DOC = (indexId) => ({ version: 1, indexArtifactId: indexId, lines: [{ lineId: "line_1", text: "Smith scores 99.", cites: ["ev_1"] }] });
+
+  it("facts registered outside the tools -> artifact_not_minted at story_draft_lines and story_check_lines", async () => {
+    const { call, workspaceDir, runId } = await make();
+    const { indexId } = await openAndIndex(call);
+    const factsId = await planted(workspaceDir, runId, "facts", { version: 1, facts: [{ factId: "fact_1", toolName: "x", output: "99" }] });
+    refused(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1"], factsArtifactId: factsId, brief: "b" }), "artifact_not_minted");
+    refused(await call("story_check_lines", { indexArtifactId: indexId, factsArtifactId: factsId, lines: [{ text: "Smith scores 99.", cites: ["fact_1"] }] }), "artifact_not_minted");
+  });
+
+  it("lines-checked registered outside the tools, in this run or shared from an earlier one -> artifact_not_minted at speech and timeline", async () => {
+    const { call, workspaceDir, runId } = await make();
+    const { src, indexId } = await openAndIndex(call);
+    const here = await planted(workspaceDir, runId, "lines-checked", LINES_DOC(indexId));
+    const shared = await planted(workspaceDir, "an_earlier_run", "lines-checked", LINES_DOC(indexId), { sourceSha256: src.sha256, shared: true });
+    for (const id of [here, shared]) {
+      refused(await call("speech_synthesize", { linesArtifactId: id, lineIds: ["line_1"] }), "artifact_not_minted");
+      const t = { version: 1, sourceArtifactId: src.sourceArtifactId, linesArtifactId: id, segments: [{ kind: "card", cardSeconds: 2, lineId: "line_1" }] };
+      refused(await call("story_timeline_build", { timeline: t }), "artifact_not_minted");
+    }
+  });
+
+  it("a voice or timeline registered outside the tools -> artifact_not_minted at story_timeline_build and story_render", { skip: NO_FFMPEG }, async () => {
+    const { call, workspaceDir, runId } = await make();
+    const p = await prepared(call);
+    const voice = await planted(workspaceDir, runId, "voice", "RIFF");
+    refused(await call("story_timeline_build", { timeline: timelineOf({ ...p, voices: [voice, p.voices[1]] }) }), "artifact_not_minted");
+    const built = ok(await call("story_timeline_build", { timeline: timelineOf(p) }));
+    const doc = readFileSync(JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${built.timelineArtifactId}.json`), "utf8")).artifact.path, "utf8");
+    const timeline = await planted(workspaceDir, runId, "timeline", doc);
+    refused(await call("story_render", { timelineArtifactId: timeline }), "artifact_not_minted");
   });
 });
 
@@ -538,7 +617,8 @@ describe("engine wiring", () => {
     const result = await engine.runDetailed("Make the story.", { historyMode: "caller" });
     const factsOut = JSON.parse(result.toolResults.find((r) => r.toolName === "story_facts_collect").output);
     assert.deepEqual(factsOut.facts, []);
-    assert.deepEqual(result.trace.mediaSteps, [{ tool: "story_facts_collect", artifactIds: [factsOut.factsArtifactId] }]);
+    assert.deepEqual(result.trace.mediaSteps, [{ tool: "story_facts_collect", artifactIds: [factsOut.factsArtifactId], input: {} }]);
+    assert.deepEqual(result.trace.mediaReceipts, []);
     const prompt = systemText(model.doGenerateCalls[0]);
     assert.match(prompt, /story_facts_collect/);
     assert.match(prompt, /SKILL\.md/);
@@ -549,9 +629,43 @@ describe("engine wiring", () => {
     assert.deepEqual(f2.facts, [{ factId: "fact_1", toolName: "host_scores" }]);
   });
 
-  it("without config.media the prompt has no media section", async () => {
+  it("without config.media the prompt has no media section and the trace no media fields", async () => {
     const { model, engine } = storyEngine({});
-    await engine.runDetailed("Make the story.", { historyMode: "caller" });
+    const result = await engine.runDetailed("Make the story.", { historyMode: "caller" });
     assert.doesNotMatch(systemText(model.doGenerateCalls[0]), /media_source_open|## Media stories/);
+    assert.equal(result.trace.mediaSteps, undefined);
+    assert.equal(result.trace.mediaReceipts, undefined);
+  });
+
+  it("a job's role-proxy call leaves its receipt on the run trace", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        if (isVerdictCall(call)) return generated([{ type: "text", text: JSON.stringify({ isValid: true, discrepancies: [] }) }]);
+        const toolText = JSON.stringify(call.prompt.filter((m) => m.role === "tool"));
+        const jobId = /job_[0-9a-f]{16}/.exec(toolText)?.[0];
+        if (!jobId) {
+          return generated([{ type: "tool-call", toolCallId: "t1", toolName: "media_job_start", input: JSON.stringify({ skill: SKILL, kind: "hand-off", input: { callProxy: true } }) }]);
+        }
+        if (!toolText.includes("succeeded")) {
+          return generated([{ type: "tool-call", toolCallId: "t2", toolName: "media_job_status", input: JSON.stringify({ jobId, waitSec: 30 }) }]);
+        }
+        return generated([{ type: "text", text: "Done." }]);
+      },
+    });
+    const engine = new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace() }, inference: { roles: { eyes: INFERENCE.roles.eyes } } });
+    engine.mainModel = model;
+    engine.registry = { getInstalledSkills: () => [], getAllToolSpecs: () => [], getSkillName: () => undefined };
+    engine.skillGuides = GUIDES;
+    engine.setToolAllowlist(["media_job_start", "media_job_status"]);
+    process.env[JOB_ALLOWLIST_ENV] = allow(APPROVED)[JOB_ALLOWLIST_ENV];
+    try {
+      const result = await engine.runDetailed("Run the job.", { historyMode: "caller" });
+      assert.deepEqual(result.trace.mediaSteps.map((s) => s.tool), ["media_job_start", "media_job_status"]);
+      const status = JSON.parse(result.toolResults.find((r) => r.toolName === "media_job_status").output);
+      assert.equal(status.facts.proxyStatus, 200);
+      assert.deepEqual(result.trace.mediaReceipts.map((r) => [r.kind, r.modelId, r.status]), [["generate", "eyes-model", "completed"]]);
+    } finally {
+      delete process.env[JOB_ALLOWLIST_ENV];
+    }
   });
 });

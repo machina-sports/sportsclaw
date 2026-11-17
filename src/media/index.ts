@@ -2,7 +2,7 @@
  * Media stories — the public surface of src/media/ (see docs/advanced/media-stories.md).
  */
 
-export { ARTIFACT_KINDS } from "./types.js";
+export { ARTIFACT_KINDS, TOOL_MINTED_KINDS } from "./types.js";
 export type { Artifact, ArtifactKind, MediaConfig, RightsCheckMode } from "./types.js";
 export { RIGHTS_CHECK_ENV, RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
 export { ArtifactError, ArtifactStore, hashFile } from "./artifacts.js";
@@ -22,5 +22,5 @@ export type { CheckedLine, DraftLine, Fact, LineChecker, LineVerdict } from "./l
 export { TimelineError, resolveTimeline } from "./timeline.js";
 export type { ResolvedTimeline, StoryTimeline, TimelineSegment } from "./timeline.js";
 export { renderPlain } from "./render-plain.js";
-export { MAX_CHECK_ROUNDS, MAX_STATUS_WAIT_SEC, MEDIA_TOOL_NAMES, createMediaTools } from "./tools.js";
+export { MAX_CHECK_ROUNDS, MAX_STATUS_WAIT_SEC, MEDIA_TOOL_NAMES, STEP_INPUT_STRING_CHARS, createMediaTools } from "./tools.js";
 export type { MediaStep, MediaToolName, MediaToolsContext } from "./tools.js";

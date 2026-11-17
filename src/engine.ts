@@ -169,6 +169,7 @@ import {
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
 import { randomUUID } from "node:crypto";
 import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
+import type { InferenceReceipt } from "./inference/receipt.js";
 import {
   buildResultOverview,
   findArrays,
@@ -5037,10 +5038,13 @@ export class sportsclawEngine {
 
   private async runExclusive(userPrompt: string, options?: RunOptions): Promise<string> {
     this._runToolResults = [];
+    const mediaReceipts: InferenceReceipt[] = [];
     try {
       if (this.config.media) {
         const registry = this.registry;
         this._runMediaTools = await createMediaTools({
+          // Writer, speech and role-proxy calls: sanitized receipts, kept on the trace.
+          onReceipt: (receipt) => mediaReceipts.push({ ...receipt }),
           config: this.config.media,
           guides: this.skillGuides,
           ...(this.config.inference ? { inference: this.config.inference } : {}),
@@ -5057,8 +5061,12 @@ export class sportsclawEngine {
       const media = this._runMediaTools;
       this._runMediaTools = undefined;
       if (media) {
-        if (media.steps.length > 0 && this._lastRunTrace) this._lastRunTrace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
+        // Dispose first: it closes the role proxy, so no receipt arrives after the trace is written.
         await media.dispose();
+        if (this._lastRunTrace) {
+          this._lastRunTrace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
+          this._lastRunTrace.mediaReceipts = mediaReceipts;
+        }
       }
     }
   }

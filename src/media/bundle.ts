@@ -10,6 +10,10 @@
  * (the same shape as a skill dir). `entry` resolves as <sealed>/scripts/<entry>,
  * and the runner must use the decls returned by sealBundle, never the live file. The allowlist is parsed as
  * strictly as skill-runtime's script policy: anything malformed denies all.
+ *
+ * A declaration whose `produces` names a kind only the story tools make (facts, lines-checked, voice,
+ * timeline: TOOL_MINTED_KINDS) is invalid and dropped like any other invalid declaration: a job could
+ * otherwise write unchecked lines, voice or evidence.
  */
 
 import { createHash } from "node:crypto";
@@ -17,7 +21,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { SkillGuide } from "../types.js";
-import { ARTIFACT_KINDS, type ArtifactKind } from "./types.js";
+import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type ArtifactKind } from "./types.js";
 
 export const JOB_ALLOWLIST_ENV = "SPORTSCLAW_MEDIA_JOB_ALLOWLIST";
 
@@ -186,6 +190,7 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
       !optionalPositiveInt(j.maxOutputBytes) ||
       !Array.isArray(j.produces) ||
       !j.produces.every((p) => typeof p === "string" && (ARTIFACT_KINDS as readonly string[]).includes(p)) ||
+      j.produces.some((p) => TOOL_MINTED_KINDS.has(p as ArtifactKind)) ||
       !(await entryIsInside(skillDir, j.entry))
     ) {
       continue;

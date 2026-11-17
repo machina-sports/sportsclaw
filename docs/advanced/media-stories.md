@@ -81,13 +81,21 @@ naming them and pointing to the skill's `SKILL.md` for the recipe.
 
 A refused call returns `{ "error_code", "message" }` as its tool result, for example
 `artifact_wrong_kind`, `artifact_wrong_run`, `artifact_changed`, `unknown_kind`,
-`unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`.
+`unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`,
+`artifact_not_minted`.
 
 Rules the engine enforces:
 
 - **Checked lines only.** A timeline names captions by `lineId`, never by text, and the text
   comes from the exact `lines-checked` artifact the timeline names. Speech takes only lines
   from a `lines-checked` artifact. A line that failed the check has no `lineId`.
+- **Made by the tools only.** `facts`, `lines-checked`, `voice` and `timeline` artifacts are
+  accepted only if these tools registered them in the same run (`artifact_not_minted`
+  otherwise): not from a job, not from an earlier run, not from the shared registry. A job
+  kind whose `produces` names one of them is invalid and never offered.
+- **Overlays are presentation only.** A segment's `overlay` (score, clock, names) is not
+  checked against anything. A renderer must not draw overlay values as claims: numbers shown
+  on screen come from the record (the event index or the facts), not from the overlay.
 - **Rewrites.** A run gets three `story_check_lines` calls (the first and two rewrite
   rounds); the fourth returns `rewrite_limit`.
 - **Timelines.** `story_timeline_build` and `story_render` use only a timeline that the
@@ -101,8 +109,13 @@ Rules the engine enforces:
   A later run that opens the same file sees them in `shared` and can use them.
 
 Every successful call is recorded on the run trace as `mediaSteps`
-(`{ tool, artifactIds, jobId? }`, in call order), next to `numberGrounding`, so a run shows
-the agent ran each step.
+(`{ tool, artifactIds, jobId?, input }`, in call order; `input` is the call's arguments with
+every string cut to 200 characters), next to `numberGrounding`, so a run shows the agent ran
+each step and which ids each step took. The receipts of the tools' model calls (the writer,
+speech, and every role-proxy call a job makes) are on the trace as `mediaReceipts`. The run
+manifest writes both as `run.media_steps` (null when the run had no media tools) and
+`run.media_receipts` (null when there were none). Receipts are metadata only: route, model
+id, status, latency; never text.
 
 ### Line checks
 
@@ -185,7 +198,10 @@ Kinds that are not approved are not shown to the model at all.
   a limit, or on cancel, the process group is killed.
 - On exit 0 the job writes `out/manifest.json`:
   `{ "artifacts": [{ "kind", "file", "facts"?, "shared"? }], "facts": {} }`. Each file must be
-  a regular file inside `out/`, and each kind must be in the kind's `produces`.
+  a regular file inside `out/`, and each kind must be in the kind's `produces`. `produces` may
+  not name `facts`, `lines-checked`, `voice` or `timeline` (only the story tools make those);
+  a declaration that does is dropped. A job's small results go in the manifest's `facts`
+  object instead.
 - A renderer kind (`story_render` with `renderer: "<skill>/<kind>"`) must read the source and
   produce `video`. Its input is `{ "timeline": <resolved timeline, with captions> }`, and
   `artifacts` holds the source, the `lines-checked` artifact, and every voice and

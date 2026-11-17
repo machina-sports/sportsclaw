@@ -1,6 +1,7 @@
 # Writes the events it is given as a shared event-index for the source.
 # mode "bad-sha" names another source; mode "extra-field" adds a key the index shape does not have.
 import json, os, sys
+from ask_proxy import ask_eyes
 a = sys.argv
 doc = json.load(open(a[a.index("--input") + 1]))
 out = a[a.index("--out") + 1]
@@ -8,6 +9,7 @@ inp = doc["input"]
 mode = inp.get("mode", "")
 events = inp["events"]
 sha = doc["source"]["sha256"]
+ask_eyes("read the scoreboard")
 if mode == "bad-sha":
     sha = "0" * 64
 if mode == "extra-field":

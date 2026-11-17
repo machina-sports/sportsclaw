@@ -7,7 +7,7 @@
       "readsSource": false,
       "timeLimitSec": 30,
       "maxOutputBytes": 1048576,
-      "produces": ["facts"]
+      "produces": ["subject-identity"]
     }
   ]
 }

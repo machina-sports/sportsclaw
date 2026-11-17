@@ -17,6 +17,13 @@ export const ARTIFACT_KINDS = [
 
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
+/**
+ * Kinds only the story tools make (facts, checked lines, voice, timelines). A job kind whose produces
+ * names one is invalid (bundle.ts), and the tools accept such an artifact only if they registered it
+ * in the same run (tools.ts, `artifact_not_minted`).
+ */
+export const TOOL_MINTED_KINDS: ReadonlySet<ArtifactKind> = new Set<ArtifactKind>(["facts", "lines-checked", "voice", "timeline"]);
+
 export interface Artifact {
   id: string;
   kind: ArtifactKind;

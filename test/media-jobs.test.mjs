@@ -89,11 +89,11 @@ describe("LocalJobRunner", () => {
     assert.ok(rec.endedAt);
     assert.equal(rec.artifacts.length, 1);
     const art = rec.artifacts[0];
-    assert.equal(art.kind, "facts");
+    assert.equal(art.kind, "subject-identity");
     assert.deepEqual(art.facts, { n: 1 });
     const file = join(workspaceDir, "jobs", rec.jobId, "out", "result.json");
     assert.equal(art.sha256, createHash("sha256").update(readFileSync(file)).digest("hex"));
-    assert.deepEqual(await store.require(art.id, "facts"), art);
+    assert.deepEqual(await store.require(art.id, "subject-identity"), art);
     assert.equal(rec.rightsCheck, undefined);
   });
 
@@ -277,7 +277,7 @@ describe("LocalJobRunner", () => {
     const dir = copyPack();
     writeFileSync(join(dir, "scripts/-x.py"), "print(1)\n");
     const jobs = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
-    jobs.jobs.push({ kind: "dash-job", entry: "-x.py", readsSource: false, produces: ["facts"], inputSchema: { type: "object" } });
+    jobs.jobs.push({ kind: "dash-job", entry: "-x.py", readsSource: false, produces: ["subject-identity"], inputSchema: { type: "object" } });
     writeFileSync(join(dir, "jobs.json"), JSON.stringify(jobs));
     const B = await approved(dir);
     assert.ok(B.decl("dash-job"));

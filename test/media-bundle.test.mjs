@@ -93,7 +93,7 @@ describe("approvedJobKinds", () => {
     assert.equal(kinds[0].entry, "echo_job.py");
     assert.equal(kinds[0].readsSource, false);
     assert.equal(kinds[0].timeLimitSec, 30);
-    assert.deepEqual(kinds[0].produces, ["facts"]);
+    assert.deepEqual(kinds[0].produces, ["subject-identity"]);
   });
   it("a bundle edited after approval yields nothing", async () => {
     const dir = copyPack();
@@ -154,7 +154,7 @@ describe("approvedJobKinds", () => {
   });
   it("drops declarations that are invalid, keeps the valid ones", async () => {
     const dir = copyPack();
-    const ok = { kind: "echo-job", entry: "echo_job.py", inputSchema: {}, readsSource: true, produces: ["facts"] };
+    const ok = { kind: "echo-job", entry: "echo_job.py", inputSchema: {}, readsSource: true, produces: ["subject-identity"] };
     const variants = [
       { ...ok, kind: "b-escape", entry: "../SKILL.md" },
       { ...ok, kind: "b-abs", entry: "/etc/passwd" },

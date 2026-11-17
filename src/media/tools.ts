@@ -23,6 +23,9 @@
  *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
  *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`.
  *   - Rendering reads the source, so the plain renderer applies the same rights rule as a job.
+ *   - facts, lines-checked, voice and timeline (TOOL_MINTED_KINDS) are made only by these tools: an id of
+ *     one is accepted only if these tools registered it in this run (`artifact_not_minted`), so no job,
+ *     earlier run or shared registry entry can supply unchecked text, voice or evidence.
  *   - A role proxy (for every configured role but brain) runs while the tools live; dispose closes it.
  */
 
@@ -45,7 +48,7 @@ import { renderPlain } from "./render-plain.js";
 import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
 import { startRoleProxy, type RoleProxy } from "./role-proxy.js";
 import { TimelineError, resolveTimeline, type ResolvedTimeline } from "./timeline.js";
-import { ARTIFACT_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
+import { ARTIFACT_KINDS, TOOL_MINTED_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
 
 export const MEDIA_TOOL_NAMES = [
   "media_source_open",
@@ -68,6 +71,18 @@ export interface MediaStep {
   tool: string;
   artifactIds: string[];
   jobId?: string;
+  /** The call's input, every string capped at STEP_INPUT_STRING_CHARS. */
+  input: unknown;
+}
+
+export const STEP_INPUT_STRING_CHARS = 200;
+
+/** A JSON copy of `v` with every string cut to STEP_INPUT_STRING_CHARS. */
+function capStrings(v: unknown): unknown {
+  if (typeof v === "string") return v.slice(0, STEP_INPUT_STRING_CHARS);
+  if (Array.isArray(v)) return v.map(capStrings);
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x)]));
+  return typeof v === "number" && !Number.isFinite(v) ? null : v;
 }
 
 export interface MediaToolsContext {
@@ -402,8 +417,28 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
 
   const openedShas = () => [...new Set([...sources.values()].map((s) => s.artifact.sha256))];
 
-  /** require(), and for a shared artifact from an earlier run, require() for `sourceSha` or a source opened in this run. */
+  /** Ids of TOOL_MINTED_KINDS artifacts these tools registered in this run. */
+  const minted = new Set<string>();
+
+  async function mint(input: Parameters<ArtifactStore["register"]>[0]): Promise<Artifact> {
+    const artifact = await store.register(input);
+    minted.add(artifact.id);
+    return artifact;
+  }
+
+  /**
+   * require(), and for a shared artifact from an earlier run, require() for `sourceSha` or a source opened
+   * in this run. A TOOL_MINTED_KINDS artifact must also have been registered by these tools in this run.
+   */
   async function need(id: unknown, kind: ArtifactKind, sourceSha?: string): Promise<Artifact> {
+    const artifact = await requireAny(id, kind, sourceSha);
+    if (TOOL_MINTED_KINDS.has(kind) && !minted.has(artifact.id)) {
+      refuse("artifact_not_minted", `Artifact ${artifact.id} is a ${kind} the story tools did not make in this run.`);
+    }
+    return artifact;
+  }
+
+  async function requireAny(id: unknown, kind: ArtifactKind, sourceSha?: string): Promise<Artifact> {
     if (typeof id !== "string" || id === "") refuse("invalid_input", `A ${kind} artifact id is required.`);
     try {
       return await store.require(id, kind);
@@ -630,7 +665,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const facts = collectFacts(ctx.getToolResults(), { isDataTool });
       const file = await storyFile("facts");
       await fs.writeFile(file, JSON.stringify({ version: 1, facts }), { mode: 0o600 });
-      const artifact = await store.register({ kind: "facts", path: file });
+      const artifact = await mint({ kind: "facts", path: file });
       return {
         result: { factsArtifactId: artifact.id, facts: facts.map((f) => ({ factId: f.factId, toolName: f.toolName })) },
         artifactIds: [artifact.id],
@@ -662,7 +697,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const { verdicts, passed } = await checkLines({ lines, events: index.events, facts, checker });
       const file = await storyFile("lines");
       await fs.writeFile(file, JSON.stringify({ version: 1, indexArtifactId: indexArtifact.id, lines: passed }), { mode: 0o600 });
-      const artifact = await store.register({ kind: "lines-checked", path: file });
+      const artifact = await mint({ kind: "lines-checked", path: file });
       return {
         result: {
           verdicts,
@@ -692,7 +727,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         });
         const file = `${await storyFile("voice")}.wav`;
         await fs.writeFile(file, said.audio, { mode: 0o600 });
-        const artifact = await store.register({ kind: "voice", path: file });
+        const artifact = await mint({ kind: "voice", path: file });
         voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
       }
       return { result: { voices }, artifactIds: voices.map((v) => v.voiceArtifactId) };
@@ -703,7 +738,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const { captions: _captions, ...timeline } = resolved;
       const file = await storyFile("timeline");
       await fs.writeFile(file, JSON.stringify(timeline), { mode: 0o600 });
-      const artifact = await store.register({ kind: "timeline", path: file });
+      const artifact = await mint({ kind: "timeline", path: file });
       return { result: { timelineArtifactId: artifact.id, segments: resolved.segments.length }, artifactIds: [artifact.id] };
     },
 
@@ -774,7 +809,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       async execute(input, { abortSignal }) {
         try {
           const out = await handlers[name](args(input ?? {}), abortSignal);
-          steps.push({ tool: name, artifactIds: out.artifactIds, ...(out.jobId ? { jobId: out.jobId } : {}) });
+          steps.push({ tool: name, artifactIds: out.artifactIds, ...(out.jobId ? { jobId: out.jobId } : {}), input: capStrings(input ?? {}) });
           return out.result;
         } catch (err) {
           if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {
