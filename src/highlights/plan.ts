@@ -3,15 +3,15 @@
  *
  * Pure functions only: no filesystem, no FFmpeg, no LLM calls. Every invalid
  * or missing input fails closed with a HighlightsValidationError naming the
- * offending field. Mapping from PBP clock time to source-video seconds uses a
- * fixed sync anchor and supports only ascending elapsed clocks in V1 —
- * unsupported clock semantics are rejected explicitly, never guessed.
+ * offending field. PBP clock time maps to source-video seconds through either
+ * a fixed sync anchor (elapsed-ascending clocks) or a clock map (which also
+ * covers countdown-per-period clocks). Unsupported clock semantics are
+ * rejected explicitly, never guessed.
  */
 
 import {
   CLOCK_SEMANTICS,
   ClockMapError,
-  clockMapFromSyncAnchor,
   clockToVideoSec,
   parseClockMap,
 } from "../media/clock-map.js";
@@ -236,9 +236,9 @@ export function validateHighlightsRequest(value: unknown): void {
 /**
  * Deterministically map real PBP actions to clamped source-video windows.
  *
- * Through a clock map (a sync anchor is the one-stretch case:
- * videoSec = anchor.videoSec + (action.elapsedSec - anchor.clockSec)).
- * Actions whose clock no running stretch contains are dropped.
+ * With a sync anchor: videoSec = anchor.videoSec + (action.elapsedSec - anchor.clockSec).
+ * With a clock map: clockToVideoSec, dropping actions whose clock no running
+ * stretch contains.
  *
  * Actions landing outside [0, sourceDurationSec] are dropped. In primary
  * selection order, remaining windows sharing at least 90% of the shorter
@@ -256,11 +256,14 @@ export function planCandidateWindows(
     fail("sourceDurationSec must be a finite number > 0");
   }
   const window = req.window ?? DEFAULT_WINDOW_POLICY;
-  const clockMap = req.clockMap ?? clockMapFromSyncAnchor(req.syncAnchor!);
+  const { clockMap, syncAnchor } = req;
 
   const mapped: CandidateWindow[] = [];
   for (const a of req.actions) {
-    const actionVideoSec = clockToVideoSec(clockMap, a.period, a.clock.elapsedSec);
+    // Anchor requests keep the original formula bit-for-bit; only clock maps go through the map.
+    const actionVideoSec = clockMap
+      ? clockToVideoSec(clockMap, a.period, a.clock.elapsedSec)
+      : syncAnchor!.videoSec + (a.clock.elapsedSec - syncAnchor!.clockSec);
     if (actionVideoSec === null || actionVideoSec < 0 || actionVideoSec > sourceDurationSec) continue;
     const startSec = Math.max(0, actionVideoSec - window.preRollSec);
     const endSec = Math.min(sourceDurationSec, actionVideoSec + window.postRollSec);

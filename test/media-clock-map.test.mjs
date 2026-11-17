@@ -62,18 +62,6 @@ describe("clockMapFromSyncAnchor", () => {
     const map = clockMapFromSyncAnchor({ videoSec: 5, clockSec: 0 });
     assert.deepEqual(parseClockMap(JSON.parse(JSON.stringify(map))), map);
   });
-
-  it("reproduces video = v + (clock - c), dropping only negative video", () => {
-    for (const [v, c] of [[5, 0], [0, 5], [30, 10], [0, 0], [12.5, 3.25]]) {
-      const map = clockMapFromSyncAnchor({ videoSec: v, clockSec: c });
-      for (const e of [0, 1, 3, 5, 7.5, 100, 99999]) {
-        const direct = v + (e - c);
-        const got = clockToVideoSec(map, 1, e);
-        if (direct < 0) assert.equal(got, null);
-        else assert.ok(Math.abs(got - direct) < 1e-9, `v=${v} c=${c} e=${e}`);
-      }
-    }
-  });
 });
 
 describe("parseClockMap", () => {
@@ -123,6 +111,38 @@ describe("highlights request", () => {
   });
   it("rejects neither", () => {
     assert.throws(() => parseHighlightsRequest(base()), /syncAnchor/);
+  });
+  it("anchor requests give bit-identical windows to the old formula, fractional grid included", () => {
+    const grid = [0, 0.1, 0.2, 0.5, 0.7, 1, 3.25, 5, 12.5];
+    const pre = 8, post = 12, dur = 1000;
+    for (const v of grid) for (const c of grid) {
+      const actions = grid.map((e, k) => ({
+        actionId: `a${k}`, provider: "p", period: 1, label: "L", type: "t", provenance: "f",
+        importance: 50 + k, clock: { semantics: "elapsed-ascending", elapsedSec: e },
+      }));
+      const got = planCandidateWindows(
+        base({ actions, syncAnchor: { videoSec: v, clockSec: c }, window: { preRollSec: pre, postRollSec: post, maxCandidates: 20 } }), dur);
+      const expected = new Map();
+      for (const e of grid.keys()) {
+        const sec = v + (grid[e] - c);
+        if (sec < 0 || sec > dur) continue;
+        expected.set(`a${e}`, sec);
+      }
+      for (const [id, sec] of expected) {
+        const w = got.find((x) => x.actionId === id);
+        if (w) assert.ok(Object.is(w.actionVideoSec, sec), `v=${v} c=${c} ${id}`);
+        else assert.ok(got.some((x) => x.mergedActions?.some((m) => m.actionId === id)), `dropped ${id} v=${v} c=${c}`);
+      }
+    }
+  });
+  it("keeps the fractional-anchor boundary action the old code kept", () => {
+    const req = base({
+      actions: [{ ...base().actions[0], clock: { semantics: "elapsed-ascending", elapsedSec: 0.2 } }],
+      syncAnchor: { videoSec: 0.5, clockSec: 0.7 },
+    });
+    const [w] = planCandidateWindows(req, 1000);
+    assert.equal(w.actionVideoSec, 0.5 + (0.2 - 0.7));
+    assert.ok(w.actionVideoSec >= 0 && w.actionVideoSec < 1e-9, "kept at video ~0");
   });
   it("plans through the clock map and drops actions that map to null", () => {
     const req = base({ clockMap: map });
