@@ -97,6 +97,33 @@ describe("LocalJobRunner", () => {
     assert.equal(rec.rightsCheck, undefined);
   });
 
+  it("an ended job leaves jobs/<jobId>/status.json: succeeded, failed with its code, canceled", async () => {
+    const { runner, workspaceDir } = setup();
+    const statusOf = (jobId) => JSON.parse(readFileSync(join(workspaceDir, "jobs", jobId, "status.json"), "utf8"));
+
+    const good = await run(runner, "ok-job", { text: "hi" });
+    assert.equal(good.state, "succeeded", good.error);
+    assert.deepEqual(statusOf(good.jobId), { jobId: good.jobId, state: "succeeded", endedAt: good.endedAt });
+
+    const bad = await run(runner, "ok-job", { text: "x", kind: "video" });
+    assert.equal(bad.state, "failed");
+    const failed = statusOf(bad.jobId);
+    assert.deepEqual(Object.keys(failed).sort(), ["endedAt", "error", "errorCode", "jobId", "state"]);
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.errorCode, "artifact_kind");
+    assert.equal(`${failed.errorCode}: ${failed.error}`, bad.error);
+    assert.equal(failed.endedAt, bad.endedAt);
+
+    const slow = await runner.start({ decl: A.decl("slow-job"), skillDir: pack, bundleSha256: A.sha, input: {} });
+    assert.ok(!existsSync(join(workspaceDir, "jobs", slow.jobId, "status.json")), "no status.json while the job runs");
+    await runner.cancel(slow.jobId);
+    assert.deepEqual(
+      { ...statusOf(slow.jobId), endedAt: "t" },
+      { jobId: slow.jobId, state: "canceled", errorCode: "canceled", error: "canceled", endedAt: "t" },
+    );
+    assert.deepEqual(readdirSync(join(workspaceDir, "jobs", slow.jobId)).sort(), ["input.json", "out", "status.json"]);
+  });
+
   it("runs the sealed script by absolute path under <sealed>/scripts/", async () => {
     const { runner } = setup();
     const rec = await run(runner, "ok-job", { text: "hi" });

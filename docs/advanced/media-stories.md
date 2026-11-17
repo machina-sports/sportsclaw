@@ -134,11 +134,14 @@ Rules the engine enforces:
   `video` or `subject-tracks` artifact from an earlier run is used only if this run has a
   clearance for its source (`rights_required` otherwise).
 
-Every successful call is recorded on the run trace as `mediaSteps`
+Every call is recorded on the run trace as `mediaSteps`
 (`{ tool, artifactIds, jobId?, input }`, in call order; `input` is the call's arguments with
 every string cut to 200 characters; `story_check_lines` steps also name the `checker` that
 ran), next to `numberGrounding`, so a run shows the agent ran
-each step and which ids each step took. The receipts of the tools' model calls (the writer,
+each step and which ids each step took. A refused call is a step too, with `refused: "<error_code>"`
+(for example `job_budget`, `bundle_changed`, `prep_busy`) and no artifact ids, so a run where the
+model claims it started a job that was refused shows the refusal; the tool metrics count it as a
+failed call. The receipts of the tools' model calls (the writer,
 speech, and every role-proxy call a job makes) are on the trace as `mediaReceipts`. The run
 manifest writes both as `run.media_steps` (null when the run had no media tools) and
 `run.media_receipts` (null when there were none). Receipts are metadata only: route, model
@@ -233,6 +236,18 @@ job must validate what it relies on. `x-artifact-kind` is the engine's own annot
 
   `source` is there only for `readsSource` kinds. `artifacts` is always there (`{}` when
   none): every artifact the input names, already checked.
+- **`status.json`.** When a job ends (succeeded, failed or canceled) the engine writes
+  `<workspaceDir>/jobs/<jobId>/status.json`, before `media_job_status` reports the end:
+
+  ```json
+  { "jobId": "job_…", "state": "failed", "errorCode": "time_limit", "error": "the job exceeded …", "endedAt": "2026-11-17T…Z" }
+  ```
+
+  `errorCode` and `error` are there only when the job did not succeed (`"canceled"` for a
+  cancel). Job state otherwise lives in the engine's memory, so a poller outside the engine
+  (a studio waiting on a prep job) reads this file to learn a job died without waiting out its
+  own time limit. No file means the job is still running (or the engine stopped before it
+  ended).
 - **`x-artifact-kind`.** In `inputSchema`, a property with `"x-artifact-kind": "<kind>"`
   holds an artifact id (type `string`) or a list of ids (type `array`). Before the job
   starts, each id must exist, be of that kind, come from this run (or be shared for the

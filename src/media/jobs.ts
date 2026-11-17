@@ -23,6 +23,8 @@
  *     sealed declaration's `produces`. Every entry is validated before any is registered. A runner built with
  *     `shareArtifacts` (prep jobs) registers every artifact as shared for the source.
  *   - `roleProxyToken` on start gives that job its own role-proxy token instead of the runner's.
+ *   - When the job ends (succeeded, failed or canceled) the runner writes `<workspaceDir>/jobs/<jobId>/status.json`
+ *     (JobStatusFile) before status() reports the end, so a poller outside the engine sees a dead job at once.
  */
 
 import { spawn } from "node:child_process";
@@ -59,6 +61,17 @@ export interface JobRecord {
   rightsCheck?: "off (operator)";
   /** The authorization the source was read under (rightsCheck "require" and a source-reading kind). */
   rights?: { rightsHolder: string; licenseRef: string; territories?: string[] };
+}
+
+/** `<workspaceDir>/jobs/<jobId>/status.json`, written once when the job ends. */
+export interface JobStatusFile {
+  jobId: string;
+  state: "succeeded" | "failed" | "canceled";
+  /** The failure's code (time_limit, exit_code, artifact_kind, ...) or "canceled"; absent on success. */
+  errorCode?: string;
+  /** The failure's message; absent on success. */
+  error?: string;
+  endedAt: string;
 }
 
 /** One entry of input.json's `artifacts` map. */
@@ -129,6 +142,13 @@ interface LiveJob {
   record: JobRecord;
   done: Promise<void>;
   cancel(): void;
+}
+
+/** Written to a temp file and renamed, so a reader never sees half a status. */
+async function writeStatusFile(jobDir: string, status: JobStatusFile): Promise<void> {
+  const tmp = join(jobDir, `.status-${randomBytes(4).toString("hex")}.json`);
+  await fs.writeFile(tmp, JSON.stringify(status), { mode: 0o600 });
+  await fs.rename(tmp, join(jobDir, "status.json"));
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -415,9 +435,13 @@ export class LocalJobRunner implements JobRunner {
       child.once("exit", (code) => resolveExit({ code }));
     });
 
+    let errorCode: string | undefined;
+    let errorMessage: string | undefined;
     const fail = (code: string, message: string) => {
       record.state = "failed";
       record.error = `${code}: ${message}`;
+      errorCode = code;
+      errorMessage = message;
     };
     const done = (async () => {
       const { code, spawnError } = await exited;
@@ -428,6 +452,7 @@ export class LocalJobRunner implements JobRunner {
         if (stopped === "cancel") {
           record.state = "canceled";
           record.error = "canceled";
+          errorCode = errorMessage = "canceled";
         } else if (stopped === "time") {
           fail("time_limit", `the job exceeded its time limit of ${timeLimitSec}s and was killed`);
         } else if (stopped === "output" || (code === 0 && (await treeBytes(outDir)) > maxBytes)) {
@@ -459,6 +484,16 @@ export class LocalJobRunner implements JobRunner {
       } finally {
         record.endedAt = new Date().toISOString();
         await sealed.dispose().catch(() => undefined);
+        const status: JobStatusFile = {
+          jobId,
+          state: record.state as JobStatusFile["state"],
+          ...(errorCode !== undefined ? { errorCode, error: errorMessage } : {}),
+          endedAt: record.endedAt,
+        };
+        // Best effort: without it a poller only waits out its own limit, as before.
+        await writeStatusFile(jobDir, status).catch((err) => {
+          console.error(`[sportsclaw] media job ${jobId}: could not write status.json: ${err instanceof Error ? err.message : String(err)}`);
+        });
       }
     })();
 

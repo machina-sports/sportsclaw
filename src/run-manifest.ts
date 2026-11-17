@@ -161,22 +161,25 @@ export interface RunTrace {
    */
   dataAnswer?: { tools: string[]; facts: string; draft?: string; unsupported?: string[] };
   /**
-   * Successful media story tool calls in call order (sportsclawConfig.media): the tool, its input
-   * (strings capped at 200 characters), the artifact ids it produced, and the job it started or read.
-   * Absent when the run had no media tools; empty when none succeeded.
+   * Media story tool calls in call order (sportsclawConfig.media): the tool, its input (strings capped at
+   * 200 characters), the artifact ids it produced, and the job it started or read. A refused call has
+   * `refused` (its error_code) and no artifact ids. Absent when the run had no media tools; empty when none
+   * was called.
    */
   mediaSteps?: MediaStepRecord[];
   /** Receipts of the media tools' model calls (writer, speech, role proxy). Absent when the run had no media tools. */
   mediaReceipts?: InferenceReceipt[];
 }
 
-/** One successful media tool call (see RunTrace.mediaSteps). */
+/** One media tool call (see RunTrace.mediaSteps). */
 export interface MediaStepRecord {
   tool: string;
   artifactIds: string[];
   jobId?: string;
   /** story_check_lines: the checker that ran ("<skill>/check-lines" or "built-in"). */
   checker?: string;
+  /** The error_code of a refused call; absent when it succeeded. */
+  refused?: string;
   input: unknown;
 }
 
@@ -334,6 +337,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
                 artifactIds: [...s.artifactIds],
                 ...(s.jobId !== undefined ? { jobId: s.jobId } : {}),
                 ...(s.checker !== undefined ? { checker: s.checker } : {}),
+                ...(s.refused !== undefined ? { refused: s.refused } : {}),
                 input: structuredClone(s.input),
               }))
             : null,

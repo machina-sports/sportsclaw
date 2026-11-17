@@ -401,6 +401,22 @@ function toolFinishDetails(event: {
   };
 }
 
+const MEDIA_TOOLS: ReadonlySet<string> = new Set(MEDIA_TOOL_NAMES);
+
+/**
+ * A media story tool returns a refusal as `{ error_code, message }` instead of throwing, so the SDK reports
+ * the call as a success; it is a failed call all the same (tool metrics, tool results).
+ */
+function mediaRefused(toolName: string, output: unknown): boolean {
+  if (!MEDIA_TOOLS.has(toolName) || typeof output !== "string") return false;
+  try {
+    const value: unknown = JSON.parse(output);
+    return !!value && typeof value === "object" && typeof (value as { error_code?: unknown }).error_code === "string";
+  } catch {
+    return false;
+  }
+}
+
 /** A number, or a capitalised name after the first word: the reply states a fact. */
 function carriesData(text: string): boolean {
   return /\d/.test(text) || /\s\p{Lu}/u.test(text);
@@ -5985,7 +6001,8 @@ export class sportsclawEngine {
           maxOutputTokens: budgets.main,
           ...(providerOpts ? { providerOptions: providerOpts } : {}),
           experimental_onToolCallFinish: (event) => {
-            const { toolCall, durationMs, success } = event;
+            const { toolCall, durationMs } = event;
+            const success = event.success && !(this._runMediaTools && mediaRefused(toolCall.toolName, event.output));
             const skillName = this.registry.getSkillName(toolCall.toolName);
             emitProgress?.({
               type: "tool_finish",
@@ -6155,7 +6172,8 @@ export class sportsclawEngine {
     };
     // Tool-finish tracking shared by the main loop and the correction's public reads.
     const trackToolFinish = (event: ToolFinishEvent) => {
-      const { toolCall, durationMs, success } = event;
+      const { toolCall, durationMs } = event;
+      const success = event.success && !(this._runMediaTools && mediaRefused(toolCall.toolName, event.output));
       if (this._runMediaTools) this._runToolResults.push({
         toolName: toolCall.toolName,
         toolCallId: toolCall.toolCallId,

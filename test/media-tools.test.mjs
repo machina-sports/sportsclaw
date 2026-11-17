@@ -257,7 +257,34 @@ describe("media story tools: the whole chain", () => {
     const long = "x".repeat(300);
     refused(await call("media_find_events", { indexArtifactId: long }), "artifact_unknown");
     ok(await call("story_facts_collect", { note: long, nested: { list: [long, 7] } }));
-    assert.deepEqual(media.steps.map((s) => s.input), [{ note: "x".repeat(200), nested: { list: ["x".repeat(200), 7] } }]);
+    assert.deepEqual(media.steps.map((s) => s.input), [
+      { indexArtifactId: "x".repeat(200) },
+      { note: "x".repeat(200), nested: { list: ["x".repeat(200), 7] } },
+    ]);
+  });
+
+  it("a refused call is a step with its refusal code and no artifacts, in the manifest too", async () => {
+    const { media, call } = await make({ config: { maxJobsPerRun: 1 } });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    refused(await call("media_job_start", { skill: SKILL, kind: "secret-kind", input: {} }), "unknown_kind");
+    refused(await call("media_job_start", { skill: SKILL, kind: "make-index" }), "invalid_input");
+    const input = { skill: SKILL, kind: "make-index", input: { events: EVENTS }, sourceArtifactId: src.sourceArtifactId };
+    const job = ok(await call("media_job_start", input));
+    refused(await call("media_job_start", input), "job_budget");
+    assert.deepEqual(media.steps.map(({ input: _input, ...step }) => step), [
+      { tool: "media_source_open", artifactIds: [src.sourceArtifactId] },
+      { tool: "media_job_start", artifactIds: [], refused: "unknown_kind" },
+      { tool: "media_job_start", artifactIds: [], refused: "invalid_input" },
+      { tool: "media_job_start", artifactIds: [], jobId: job.jobId },
+      { tool: "media_job_start", artifactIds: [], refused: "job_budget" },
+    ]);
+    assert.deepEqual(media.steps[1].input, { skill: SKILL, kind: "secret-kind", input: {} });
+    const manifest = buildRunManifest({
+      sportsclawVersion: "test", provider: "openai", model: "m", sampling: {}, maxOutputTokens: 1, maxTurns: 1, thinkingBudget: 0,
+      env: {},
+      trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps },
+    });
+    assert.deepEqual(manifest.run.media_steps.map((s) => s.refused ?? null), [null, "unknown_kind", "invalid_input", null, "job_budget"]);
   });
 });
 

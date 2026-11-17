@@ -88,13 +88,16 @@ export const MEDIA_TOOL_NAMES = [
 
 export type MediaToolName = (typeof MEDIA_TOOL_NAMES)[number];
 
-/** The record that the agent ran a step: what it produced. */
+/** The record that the agent ran a step: what it produced, or the code it was refused with. */
 export interface MediaStep {
   tool: string;
+  /** Empty for a refused step. */
   artifactIds: string[];
   jobId?: string;
   /** story_check_lines: the checker that ran, "<skill>/check-lines" or "built-in". */
   checker?: string;
+  /** The error_code the call returned (e.g. job_budget, bundle_changed); absent when the call succeeded. */
+  refused?: string;
   /** The call's input, every string capped at STEP_INPUT_STRING_CHARS. */
   input: unknown;
 }
@@ -177,6 +180,20 @@ function routeRefusal(kind: "model_call_failed" | "speech_failed", code: string 
 function capJson(value: Record<string, unknown>, max: number): { value: unknown; cut: boolean } {
   const text = JSON.stringify(value);
   return text.length <= max ? { value, cut: false } : { value: text.slice(0, max), cut: true };
+}
+
+/** What the model sees for a call that threw: only the engine's own refusals carry a message (paths removed). */
+function refusalResult(name: string, err: unknown): Record<string, unknown> {
+  if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {
+    return {
+      error_code: err.code,
+      ...(err instanceof Refusal && err.routeCode ? { code: err.routeCode } : {}),
+      message: pathFree(err.message),
+    };
+  }
+  if (err instanceof InferenceRouteError) return routeResult(routeRefusal("model_call_failed", undefined));
+  if (err instanceof SpeechRouteError) return routeResult(routeRefusal("speech_failed", undefined));
+  return { error_code: "failed", message: `${name} failed for an internal reason; the details are not shown.` };
 }
 
 function refuse(code: string, message: string): never {
@@ -454,7 +471,7 @@ type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobI
 
 export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   tools: Record<MediaToolName, HostToolDef>;
-  /** Successful calls in order (the run trace's mediaSteps). */
+  /** Calls in order, refused ones with their code (the run trace's mediaSteps). */
   steps: MediaStep[];
   dispose(): Promise<void>;
 }> {
@@ -1019,17 +1036,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
           });
           return out.result;
         } catch (err) {
-          // Only the engine's own refusals carry a message (paths removed); anything else is generic.
-          if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {
-            return {
-              error_code: err.code,
-              ...(err instanceof Refusal && err.routeCode ? { code: err.routeCode } : {}),
-              message: pathFree(err.message),
-            };
-          }
-          if (err instanceof InferenceRouteError) return routeResult(routeRefusal("model_call_failed", undefined));
-          if (err instanceof SpeechRouteError) return routeResult(routeRefusal("speech_failed", undefined));
-          return { error_code: "failed", message: `${name} failed for an internal reason; the details are not shown.` };
+          const out = refusalResult(name, err);
+          // A refused call is a step too: the trace must not read as if it never happened (or as if it ran).
+          steps.push({ tool: name, artifactIds: [], refused: String(out.error_code), input: capStrings(input ?? {}) });
+          return out;
         }
       },
     };
