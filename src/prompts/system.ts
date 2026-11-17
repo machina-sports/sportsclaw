@@ -77,6 +77,9 @@ export interface SystemPromptContext {
   hasMemory: boolean;
   agents?: AgentDef[];
 
+  /** Media story tools offered this turn (sportsclawConfig.media); the section appears only when non-empty. */
+  mediaToolNames?: ReadonlyArray<string>;
+
   /** Disk-loaded skill guides (from SPORTSCLAW_SKILL_GUIDES_DIR). */
   diskSkillGuides: ReadonlyArray<SkillGuide>;
 
@@ -158,6 +161,11 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   // ---- Active agents ----
   if (ctx.agents && ctx.agents.length > 0) {
     sections.push(agentsSection(ctx.agents));
+  }
+
+  // ---- Media stories (only when the tools are offered) ----
+  if (ctx.mediaToolNames && ctx.mediaToolNames.length > 0) {
+    sections.push(mediaStoriesSection(ctx.mediaToolNames));
   }
 
   // ---- Skill guides (filtered by selected skills + installed) ----
@@ -420,6 +428,18 @@ function agentsSection(agents: AgentDef[]): string {
     }
   }
   return lines.join("\n");
+}
+
+function mediaStoriesSection(names: ReadonlyArray<string>): string {
+  return [
+    "## Media stories",
+    "",
+    `Tools for making a video story from footage in the media workspace: ${names.map((n) => `\`${n}\``).join(", ")}.`,
+    "The skill's `SKILL.md` holds the recipe for a story: read it and follow its steps.",
+    "The engine enforces the order: each step takes the artifact ids earlier steps returned, so pass them exactly as given. " +
+      "Captions and voice come only from lines that passed `story_check_lines`. " +
+      "A refused call returns `error_code` and `message`: fix the input or run the missing step; never work around a refusal.",
+  ].join("\n");
 }
 
 function skillGuidesSection(guides: SkillGuide[], toolSpecs: ToolSpec[]): string {

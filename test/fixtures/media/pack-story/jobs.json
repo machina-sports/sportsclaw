@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    { "kind": "make-index", "entry": "make_index.py", "readsSource": true, "produces": ["event-index"],
+      "inputSchema": { "type": "object", "required": ["events"], "additionalProperties": false,
+                       "properties": { "events": { "type": "array" }, "mode": { "type": "string" } } } },
+    { "kind": "check-lines", "entry": "check_lines.py", "readsSource": false, "produces": [],
+      "inputSchema": { "type": "object", "required": ["lines", "evidence"], "additionalProperties": false,
+                       "properties": { "lines": { "type": "array" }, "evidence": { "type": "object" } } } },
+    { "kind": "hand-off", "entry": "hand_off.py", "readsSource": false, "produces": ["facts"],
+      "inputSchema": { "type": "object", "additionalProperties": false,
+                       "properties": { "lines": { "type": "string", "x-artifact-kind": "lines-checked" },
+                                       "voices": { "type": "array", "items": { "type": "string" }, "x-artifact-kind": "voice" },
+                                       "sleep": { "type": "number" } } } },
+    { "kind": "render-video", "entry": "render_video.py", "readsSource": true, "produces": ["video"],
+      "inputSchema": { "type": "object", "required": ["timeline"], "additionalProperties": false,
+                       "properties": { "timeline": { "type": "object" } } } },
+    { "kind": "secret-kind", "entry": "hand_off.py", "readsSource": false, "produces": ["facts"],
+      "inputSchema": { "type": "object" } }
+  ]
+}

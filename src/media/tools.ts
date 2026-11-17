@@ -1,0 +1,801 @@
+/**
+ * Media story tools — the agent runs every step of a media story through these, and the
+ * preconditions here (not the prompt) enforce the order.
+ *
+ *   media_source_open -> media_job_start / media_job_status / media_job_cancel -> media_find_events
+ *   -> story_facts_collect -> story_draft_lines -> story_check_lines -> speech_synthesize
+ *   -> story_timeline_build -> story_render
+ *
+ * Every input that names an artifact is checked with ArtifactStore.require: known, of the kind the step
+ * needs, made in this run (or shared for a source opened in this run), and its file unchanged. A refused
+ * call returns `{ error_code, message }` as its tool result; it never throws into the run. Each successful
+ * call appends `{ tool, artifactIds, jobId? }` to `steps`, in call order.
+ *
+ * Choices made here:
+ *   - Paths: a source must resolve (realpath) to a regular file inside media.workspaceDir. Files the tools
+ *     write go under <workspaceDir>/story/<random>/.
+ *   - Artifact hand-off: in a job kind's inputSchema, a property annotated "x-artifact-kind": "<kind>" whose
+ *     type is "string" (one id) or "array" (of ids) holds artifact ids. Each id is required as that kind and
+ *     handed to the job in input.json's `artifacts` map. A "source" annotation needs a readsSource kind.
+ *   - Facts: Sports Skills data tools (ctx.isDataTool) plus media.factTools; nothing else.
+ *   - Line checks: the skill's "check-lines" job runs when the skill whose job made the index (in this run)
+ *     has that kind approved. For an index from an earlier run, the one approved skill with a "check-lines"
+ *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
+ *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`.
+ *   - Rendering reads the source, so the plain renderer applies the same rights rule as a job.
+ *   - A role proxy (for every configured role but brain) runs while the tools live; dispose closes it.
+ */
+
+import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
+import { join, resolve, sep } from "node:path";
+import { probeVideo } from "../highlights/ffmpeg.js";
+import type { RightsAuthorization } from "../highlights/types.js";
+import type { ModelRoleRouterConfig } from "../inference/model-role-router.js";
+import type { ModelRole } from "../inference/model-roles.js";
+import type { InferenceReceipt } from "../inference/receipt.js";
+import { synthesizeSpeech } from "../inference/speech.js";
+import type { HostToolDef, RunToolResult, SkillGuide } from "../types.js";
+import { ArtifactError, ArtifactStore, hashFile } from "./artifacts.js";
+import { approvedJobBundles, type ApprovedBundle, type JobKindDecl } from "./bundle.js";
+import { findEvents, type EventIndex, type IndexedEvent } from "./event-index.js";
+import { JobError, LocalJobRunner, rightsCleared, type JobArtifactRef, type JobRecord } from "./jobs.js";
+import { LinesError, checkLines, collectFacts, draftLines, jobLineChecker, type CheckedLine, type DraftLine, type Fact, type LineChecker } from "./lines.js";
+import { renderPlain } from "./render-plain.js";
+import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
+import { startRoleProxy, type RoleProxy } from "./role-proxy.js";
+import { TimelineError, resolveTimeline, type ResolvedTimeline } from "./timeline.js";
+import { ARTIFACT_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
+
+export const MEDIA_TOOL_NAMES = [
+  "media_source_open",
+  "media_job_start",
+  "media_job_status",
+  "media_job_cancel",
+  "media_find_events",
+  "story_facts_collect",
+  "story_draft_lines",
+  "story_check_lines",
+  "speech_synthesize",
+  "story_timeline_build",
+  "story_render",
+] as const;
+
+export type MediaToolName = (typeof MEDIA_TOOL_NAMES)[number];
+
+/** The record that the agent ran a step: what it produced. */
+export interface MediaStep {
+  tool: string;
+  artifactIds: string[];
+  jobId?: string;
+}
+
+export interface MediaToolsContext {
+  config: MediaConfig;
+  guides: ReadonlyArray<SkillGuide>;
+  inference?: ModelRoleRouterConfig;
+  runId: string;
+  getToolResults: () => RunToolResult[];
+  env?: Record<string, string | undefined>;
+  onReceipt?: (r: InferenceReceipt) => void;
+  /** True for the engine's Sports Skills data tools. Absent: only media.factTools count as facts. */
+  isDataTool?: (toolName: string) => boolean;
+  /** The operator's Python (sportsclawConfig.pythonPath): the job interpreter when media.interpreters has no default. */
+  pythonPath?: string;
+}
+
+/** Story checks per run: the first and two rewrite rounds. */
+export const MAX_CHECK_ROUNDS = 3;
+/** Longest wait one media_job_status call may ask for. */
+export const MAX_STATUS_WAIT_SEC = 60;
+const DEFAULT_MAX_LINES = 8;
+const MAX_LINES = 20;
+const MAX_JSON_ARTIFACT_BYTES = 32 * 1024 * 1024;
+const CHECK_KIND = "check-lines";
+
+class Refusal extends Error {
+  constructor(public code: string, message: string) {
+    super(message);
+    this.name = "Refusal";
+  }
+}
+
+function refuse(code: string, message: string): never {
+  throw new Refusal(code, message);
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+// ---------------------------------------------------------------------------
+// Input readers: the model's arguments are untrusted.
+// ---------------------------------------------------------------------------
+
+function args(input: unknown): Record<string, unknown> {
+  return isPlainObject(input) ? input : refuse("invalid_input", "Arguments must be a JSON object.");
+}
+
+function str(a: Record<string, unknown>, key: string, max = 500): string {
+  const v = a[key];
+  if (typeof v !== "string" || v === "" || v.length > max) refuse("invalid_input", `"${key}" must be a non-empty string.`);
+  return v;
+}
+
+function optStr(a: Record<string, unknown>, key: string, max = 500): string | undefined {
+  return a[key] === undefined ? undefined : str(a, key, max);
+}
+
+function strList(a: Record<string, unknown>, key: string, maxItems: number): string[] {
+  const v = a[key];
+  if (!Array.isArray(v) || v.length === 0 || v.length > maxItems || !v.every((s) => typeof s === "string" && s !== "" && s.length <= 500)) {
+    refuse("invalid_input", `"${key}" must be a list of 1 to ${maxItems} non-empty strings.`);
+  }
+  return v as string[];
+}
+
+function optInt(a: Record<string, unknown>, key: string, min: number, max: number): number | undefined {
+  const v = a[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) refuse("invalid_input", `"${key}" must be an integer from ${min} to ${max}.`);
+  return v;
+}
+
+function draftLinesArg(a: Record<string, unknown>): DraftLine[] {
+  const v = a.lines;
+  const good = (l: unknown): l is DraftLine =>
+    isPlainObject(l) && typeof l.text === "string" && l.text.trim() !== "" && l.text.length <= 1000 &&
+    Array.isArray(l.cites) && l.cites.length <= 40 && l.cites.every((c) => typeof c === "string");
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_LINES || !v.every(good)) {
+    refuse("invalid_input", `"lines" must be 1 to ${MAX_LINES} lines of { text, cites: string[] }.`);
+  }
+  return (v as DraftLine[]).map((l) => ({ text: l.text, cites: [...l.cites] }));
+}
+
+function clock(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Artifact documents written by the tools or by jobs
+// ---------------------------------------------------------------------------
+
+async function readJsonArtifact(a: Artifact, code: string): Promise<unknown> {
+  if (a.sizeBytes > MAX_JSON_ARTIFACT_BYTES) refuse(code, `Artifact ${a.id} is larger than ${MAX_JSON_ARTIFACT_BYTES} bytes.`);
+  try {
+    return JSON.parse(await fs.readFile(a.path, "utf8"));
+  } catch {
+    return refuse(code, `Artifact ${a.id} is not valid JSON.`);
+  }
+}
+
+const EVENT_KEYS = "actionId,clockSec,endSec,eventId,label,people,period,startSec,type,videoSec";
+
+function isIndexedEvent(e: unknown): e is IndexedEvent {
+  const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  return (
+    isPlainObject(e) &&
+    Object.keys(e).sort().join(",") === EVENT_KEYS &&
+    typeof e.eventId === "string" && e.eventId !== "" &&
+    typeof e.actionId === "string" &&
+    typeof e.period === "number" && Number.isInteger(e.period) && e.period >= 1 &&
+    finite(e.clockSec) && finite(e.videoSec) && finite(e.startSec) && finite(e.endSec) &&
+    typeof e.label === "string" && typeof e.type === "string" &&
+    Array.isArray(e.people) && e.people.every((p) => typeof p === "string")
+  );
+}
+
+/** Task 7's EventIndex shape, exactly, for one of the given sources. */
+function parseIndex(doc: unknown, sourceShas: string[]): EventIndex {
+  const bad: (why: string) => never = (why) => refuse("bad_index", `The event index is not usable: ${why}.`);
+  if (!isPlainObject(doc) || Object.keys(doc).sort().join(",") !== "events,skipped,sourceSha256,version") {
+    bad("it must be { version, sourceSha256, events, skipped }");
+  }
+  if (doc.version !== 1) bad("version must be 1");
+  if (typeof doc.sourceSha256 !== "string" || !sourceShas.includes(doc.sourceSha256)) bad("it is for another source");
+  if (!Array.isArray(doc.events) || !doc.events.every(isIndexedEvent)) bad("each event must have exactly the indexed-event fields");
+  const ids = new Set((doc.events as IndexedEvent[]).map((e) => e.eventId));
+  if (ids.size !== (doc.events as IndexedEvent[]).length) bad("event ids repeat");
+  const skippedOk = (s: unknown) =>
+    isPlainObject(s) && Object.keys(s).sort().join(",") === "actionId,reason" && typeof s.actionId === "string" && s.reason === "no_stretch";
+  if (!Array.isArray(doc.skipped) || !doc.skipped.every(skippedOk)) bad("skipped must be a list of { actionId, reason }");
+  return doc as unknown as EventIndex;
+}
+
+function parseFacts(doc: unknown): Fact[] {
+  const ok = (f: unknown): f is Fact =>
+    isPlainObject(f) && Object.keys(f).sort().join(",") === "factId,output,toolName" &&
+    typeof f.factId === "string" && typeof f.toolName === "string" && typeof f.output === "string";
+  if (!isPlainObject(doc) || doc.version !== 1 || !Array.isArray(doc.facts) || !doc.facts.every(ok)) {
+    refuse("bad_facts", "The facts artifact is not usable.");
+  }
+  return doc.facts as Fact[];
+}
+
+function parseLines(doc: unknown): CheckedLine[] {
+  const ok = (l: unknown): l is CheckedLine =>
+    isPlainObject(l) && typeof l.lineId === "string" && typeof l.text === "string" &&
+    Array.isArray(l.cites) && l.cites.every((c) => typeof c === "string");
+  if (!isPlainObject(doc) || doc.version !== 1 || !Array.isArray(doc.lines) || !doc.lines.every(ok)) {
+    refuse("bad_lines", "The lines-checked artifact is not usable.");
+  }
+  return doc.lines as CheckedLine[];
+}
+
+// ---------------------------------------------------------------------------
+// Tool schemas (none names an operator setting)
+// ---------------------------------------------------------------------------
+
+const ID = { type: "string", description: "An artifact id (art_...)." };
+const IDS = { type: "array", items: { type: "string" } };
+
+const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
+  media_source_open: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "The video file, relative to the media workspace." },
+      rights: {
+        type: "object",
+        description: "The rights authorization for this footage, when the operator requires one.",
+        properties: { rightsHolder: { type: "string" }, licenseRef: { type: "string" }, clearedForClipping: { type: "boolean" } },
+      },
+    },
+    required: ["path"],
+  },
+  media_job_start: {
+    type: "object",
+    properties: {
+      skill: { type: "string" },
+      kind: { type: "string" },
+      input: { type: "object", description: "The job's input, as its skill's jobs.json schema describes." },
+      sourceArtifactId: ID,
+    },
+    required: ["skill", "kind", "input"],
+  },
+  media_job_status: {
+    type: "object",
+    properties: { jobId: { type: "string" }, waitSec: { type: "number", description: `Wait up to this long (max ${MAX_STATUS_WAIT_SEC}) for the job to end.` } },
+    required: ["jobId"],
+  },
+  media_job_cancel: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"] },
+  media_find_events: {
+    type: "object",
+    properties: {
+      indexArtifactId: ID,
+      text: { type: "string", description: "Words that must all appear in the play's label." },
+      people: { ...IDS, description: "People who must all be in the play." },
+      period: { type: "integer" },
+      type: { type: "string" },
+      limit: { type: "integer" },
+    },
+    required: ["indexArtifactId"],
+  },
+  story_facts_collect: { type: "object", properties: {} },
+  story_draft_lines: {
+    type: "object",
+    properties: {
+      indexArtifactId: ID,
+      eventIds: { ...IDS, description: "The plays the story is about." },
+      factsArtifactId: ID,
+      brief: { type: "string", description: "The angle of the story." },
+      maxLines: { type: "integer" },
+    },
+    required: ["indexArtifactId", "eventIds", "brief"],
+  },
+  story_check_lines: {
+    type: "object",
+    properties: {
+      indexArtifactId: ID,
+      factsArtifactId: ID,
+      lines: {
+        type: "array",
+        items: { type: "object", properties: { text: { type: "string" }, cites: IDS }, required: ["text", "cites"] },
+      },
+    },
+    required: ["indexArtifactId", "lines"],
+  },
+  speech_synthesize: {
+    type: "object",
+    properties: { linesArtifactId: ID, lineIds: IDS, voice: { type: "string" } },
+    required: ["linesArtifactId", "lineIds"],
+  },
+  story_timeline_build: {
+    type: "object",
+    properties: {
+      timeline: {
+        type: "object",
+        description:
+          "{ version: 1, sourceArtifactId, linesArtifactId?, segments: [{ kind: 'clip', startSec, endSec, eventId?, lineId?, " +
+          "voiceArtifactId?, subjectTracksArtifactId?, overlay? } | { kind: 'card', cardSeconds, lineId?, voiceArtifactId?, overlay? }] }. " +
+          "Captions are named by lineId, never written.",
+      },
+    },
+    required: ["timeline"],
+  },
+  story_render: {
+    type: "object",
+    properties: { timelineArtifactId: ID, renderer: { type: "string", description: '"plain" (default) or an approved "<skill>/<kind>".' } },
+    required: ["timelineArtifactId"],
+  },
+};
+
+function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
+  const list = kinds.length
+    ? kinds.map((d) => `${d.skill}/${d.kind} (produces ${d.produces.join(", ") || "facts only"}${d.readsSource ? "; needs sourceArtifactId" : ""})`).join("; ")
+    : "none";
+  return {
+    media_source_open: "Open a video in the media workspace as this run's source. Returns its artifact id, duration and the artifacts already prepared for it.",
+    media_job_start: `Start an approved media job. Approved kinds: ${list}.`,
+    media_job_status: "A job's state; when it is done, its artifact ids and facts.",
+    media_job_cancel: "Cancel a running job.",
+    media_find_events: "Search an event-index artifact for plays. Returns eventId, period, clock, label and people.",
+    story_facts_collect: "Store this run's data-tool results as a facts artifact. Returns fact ids with their tool names.",
+    story_draft_lines: "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked.",
+    story_check_lines: `Check lines against the plays and facts they cite. Returns verdicts and a lines-checked artifact of the lines that passed. ${MAX_CHECK_ROUNDS} checks per run.`,
+    speech_synthesize: "Speak checked lines. One voice artifact per line.",
+    story_timeline_build: "Validate a story timeline and store it as a timeline artifact.",
+    story_render: "Render a timeline artifact to a video artifact.",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// createMediaTools
+// ---------------------------------------------------------------------------
+
+interface OpenedSource {
+  artifact: Artifact;
+  rights?: RightsAuthorization;
+  durationSec: number | null;
+}
+
+interface Approved {
+  bundle: ApprovedBundle;
+  decl: JobKindDecl;
+}
+
+type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string };
+
+export async function createMediaTools(ctx: MediaToolsContext): Promise<{
+  tools: Record<MediaToolName, HostToolDef>;
+  /** Successful calls in order (the run trace's mediaSteps). */
+  steps: MediaStep[];
+  dispose(): Promise<void>;
+}> {
+  const env = ctx.env ?? process.env;
+  const config = ctx.config;
+  const interpreters = { ...config.interpreters };
+  if (!interpreters.default && ctx.pythonPath) interpreters.default = [ctx.pythonPath];
+
+  const bundles = await approvedJobBundles(ctx.guides, env);
+  const kinds = new Map<string, Approved>();
+  for (const bundle of bundles) for (const decl of bundle.decls) kinds.set(`${bundle.skill}/${decl.kind}`, { bundle, decl });
+
+  await fs.mkdir(config.workspaceDir, { recursive: true });
+  const workspace = await fs.realpath(config.workspaceDir);
+  const storyDir = join(workspace, "story", `run_${randomBytes(8).toString("hex")}`);
+  let storyDirReady: Promise<unknown> | undefined;
+  const storyFile = async (name: string): Promise<string> => {
+    storyDirReady ??= fs.mkdir(storyDir, { recursive: true, mode: 0o700 });
+    await storyDirReady;
+    return join(storyDir, `${name}-${randomBytes(6).toString("hex")}`);
+  };
+
+  const roles = Object.keys(ctx.inference?.roles ?? {}).filter((r) => r !== "brain") as ModelRole[];
+  const proxy: RoleProxy | undefined =
+    ctx.inference && roles.length > 0 ? await startRoleProxy({ inference: ctx.inference, allowRoles: roles, onReceipt: ctx.onReceipt }) : undefined;
+
+  const store = new ArtifactStore({ workspaceDir: workspace, runId: ctx.runId });
+  const runner = new LocalJobRunner({
+    store,
+    config: { ...config, workspaceDir: workspace, interpreters },
+    env,
+    ...(proxy ? { roleProxy: { url: proxy.url, token: proxy.token } } : {}),
+  });
+
+  const steps: MediaStep[] = [];
+  const sources = new Map<string, OpenedSource>();
+  const jobs = new Map<string, Approved>();
+  /** artifact id -> skill whose job made it (this run). */
+  const producers = new Map<string, string>();
+  let checkRounds = 0;
+
+  const openedShas = () => [...new Set([...sources.values()].map((s) => s.artifact.sha256))];
+
+  /** require(), and for a shared artifact from an earlier run, require() for `sourceSha` or a source opened in this run. */
+  async function need(id: unknown, kind: ArtifactKind, sourceSha?: string): Promise<Artifact> {
+    if (typeof id !== "string" || id === "") refuse("invalid_input", `A ${kind} artifact id is required.`);
+    try {
+      return await store.require(id, kind);
+    } catch (err) {
+      if (!(err instanceof ArtifactError) || err.code !== "artifact_wrong_source") throw err;
+      for (const sha of sourceSha ? [sourceSha] : openedShas()) {
+        try {
+          return await store.require(id, kind, { sourceSha256: sha });
+        } catch (again) {
+          if (!(again instanceof ArtifactError) || again.code !== "artifact_wrong_source") throw again;
+        }
+      }
+      throw err;
+    }
+  }
+
+  async function needSource(id: unknown): Promise<OpenedSource> {
+    const artifact = await need(id, "source");
+    return sources.get(artifact.id) ?? { artifact, durationSec: null };
+  }
+
+  async function loadIndex(id: unknown): Promise<{ artifact: Artifact; index: EventIndex }> {
+    const artifact = await need(id, "event-index");
+    const shas = artifact.sourceSha256 ? [artifact.sourceSha256] : openedShas();
+    return { artifact, index: parseIndex(await readJsonArtifact(artifact, "bad_index"), shas) };
+  }
+
+  async function loadFacts(id: unknown): Promise<Fact[]> {
+    if (id === undefined) return [];
+    return parseFacts(await readJsonArtifact(await need(id, "facts"), "bad_facts"));
+  }
+
+  async function loadLines(id: unknown): Promise<CheckedLine[]> {
+    return parseLines(await readJsonArtifact(await need(id, "lines-checked"), "bad_lines"));
+  }
+
+  function noteProducers(rec: JobRecord): void {
+    if (rec.state === "succeeded") for (const a of rec.artifacts) producers.set(a.id, rec.skill);
+  }
+
+  function jobView(rec: JobRecord): Record<string, unknown> {
+    return {
+      jobId: rec.jobId,
+      skill: rec.skill,
+      kind: rec.kind,
+      state: rec.state,
+      ...(rec.error ? { error: rec.error } : {}),
+      artifacts: rec.artifacts.map((a) => ({ artifactId: a.id, kind: a.kind, ...(a.facts ? { facts: a.facts } : {}) })),
+      facts: rec.facts,
+      ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}),
+    };
+  }
+
+  /** The artifacts map for a job: every id in an x-artifact-kind property of its input. */
+  async function artifactInputs(decl: JobKindDecl, input: Record<string, unknown>, sourceSha?: string): Promise<Record<string, JobArtifactRef>> {
+    const out: Record<string, JobArtifactRef> = {};
+    const props = isPlainObject(decl.inputSchema.properties) ? decl.inputSchema.properties : {};
+    for (const [key, prop] of Object.entries(props)) {
+      if (!isPlainObject(prop) || prop["x-artifact-kind"] === undefined) continue;
+      const kind = prop["x-artifact-kind"];
+      if (typeof kind !== "string" || !(ARTIFACT_KINDS as readonly string[]).includes(kind)) {
+        refuse("invalid_input", `The job kind's schema names an unknown artifact kind for "${key}".`);
+      }
+      if (kind === "source" && !decl.readsSource) refuse("invalid_input", "Only a job kind that reads the source may take a source artifact.");
+      if (!Object.hasOwn(input, key)) continue;
+      const v = input[key];
+      const ids = typeof v === "string" ? [v] : Array.isArray(v) && v.every((s) => typeof s === "string") ? (v as string[]) : undefined;
+      if (!ids) refuse("invalid_input", `"${key}" must hold ${kind} artifact id(s).`);
+      for (const id of ids) {
+        const a = await need(id, kind as ArtifactKind, sourceSha);
+        out[a.id] = { kind: a.kind, path: a.path, sha256: a.sha256 };
+      }
+    }
+    return out;
+  }
+
+  async function waitForJob(jobId: string, abortSignal?: AbortSignal): Promise<JobRecord> {
+    let rec = await runner.status(jobId);
+    while (rec.state === "running") {
+      if (abortSignal?.aborted) {
+        await runner.cancel(jobId);
+        refuse("aborted", "The run was aborted.");
+      }
+      rec = await runner.status(jobId, { waitSec: 1 });
+    }
+    noteProducers(rec);
+    return rec;
+  }
+
+  function checkerFor(index: Artifact): LineChecker | undefined {
+    const withChecker = bundles.filter((b) => b.decls.some((d) => d.kind === CHECK_KIND));
+    let skill = producers.get(index.id);
+    if (skill === undefined) {
+      if (withChecker.length > 1) refuse("checker_ambiguous", "Several skills declare a line checker and none made this index in this run.");
+      skill = withChecker[0]?.skill;
+    }
+    const b = withChecker.find((x) => x.skill === skill);
+    return b ? jobLineChecker({ runner, skill: { skillDir: b.skillDir, bundleSha256: b.bundleSha256, decls: b.decls } }) : undefined;
+  }
+
+  /** A timeline only ever comes out of resolveTimeline, with lines from the exact artifact it names. */
+  async function resolveForStory(t: unknown): Promise<{ resolved: ResolvedTimeline; source: OpenedSource }> {
+    if (!isPlainObject(t)) refuse("invalid_input", "timeline must be an object.");
+    const source = await needSource(t.sourceArtifactId);
+    const lines = typeof t.linesArtifactId === "string" ? await loadLines(t.linesArtifactId) : [];
+    const sourceDurationSec = source.durationSec;
+    if (sourceDurationSec === null || !Number.isFinite(sourceDurationSec)) {
+      refuse("source_duration_unknown", "The source's duration could not be read, so clips cannot be placed on it.");
+    }
+    const sha = source.artifact.sha256;
+    const resolved = await resolveTimeline(t, {
+      lines,
+      sourceDurationSec,
+      hasArtifact: async (id, kind) => {
+        await need(id, kind, sha);
+        return true;
+      },
+    });
+    return { resolved, source };
+  }
+
+  async function timelineArtifacts(resolved: ResolvedTimeline, source: OpenedSource): Promise<Record<string, JobArtifactRef>> {
+    const sha = source.artifact.sha256;
+    const refs: [string, ArtifactKind][] = [[resolved.sourceArtifactId, "source"]];
+    if (resolved.linesArtifactId) refs.push([resolved.linesArtifactId, "lines-checked"]);
+    for (const s of resolved.segments) {
+      if (s.voiceArtifactId) refs.push([s.voiceArtifactId, "voice"]);
+      if (s.subjectTracksArtifactId) refs.push([s.subjectTracksArtifactId, "subject-tracks"]);
+    }
+    const out: Record<string, JobArtifactRef> = {};
+    for (const [id, kind] of refs) {
+      const a = await need(id, kind, sha);
+      out[a.id] = { kind: a.kind, path: a.path, sha256: a.sha256 };
+    }
+    return out;
+  }
+
+  const handlers: Record<MediaToolName, (a: Record<string, unknown>, abortSignal?: AbortSignal) => Promise<StepResult>> = {
+    async media_source_open(a) {
+      const path = str(a, "path", 4096);
+      if (a.rights !== undefined && !isPlainObject(a.rights)) refuse("invalid_input", "rights must be an object.");
+      const real = await fs.realpath(resolve(workspace, path)).catch(() => undefined);
+      if (real === undefined) refuse("source_not_found", "No file at that path in the media workspace.");
+      if (!real.startsWith(workspace + sep)) refuse("source_outside", "The source must be a file inside the media workspace.");
+      const st = await fs.stat(real);
+      if (!st.isFile()) refuse("source_not_found", "The source is not a regular file.");
+      const sha = await hashFile(real);
+      const artifact = await store.register({ kind: "source", path: real, sourceSha256: sha });
+      let durationSec: number | null = null;
+      try {
+        const d = Number((await probeVideo(real)).format?.duration);
+        if (Number.isFinite(d) && d > 0) durationSec = d;
+      } catch {
+        durationSec = null;
+      }
+      sources.set(artifact.id, { artifact, durationSec, ...(a.rights ? { rights: a.rights as unknown as RightsAuthorization } : {}) });
+      const shared = (await store.forSource(sha)).map((s) => ({
+        artifactId: s.id,
+        kind: s.kind,
+        createdAt: s.createdAt,
+        ...(s.facts ? { facts: s.facts } : {}),
+      }));
+      return { result: { sourceArtifactId: artifact.id, sha256: sha, durationSec, shared }, artifactIds: [artifact.id] };
+    },
+
+    async media_job_start(a) {
+      const skill = str(a, "skill", 200);
+      const kind = str(a, "kind", 200);
+      const approved = kinds.get(`${skill}/${kind}`);
+      if (!approved) refuse("unknown_kind", `No approved job kind ${skill}/${kind}.`);
+      if (!isPlainObject(a.input)) refuse("invalid_input", "input must be an object.");
+      const { bundle, decl } = approved;
+      const source = a.sourceArtifactId === undefined ? undefined : await needSource(a.sourceArtifactId);
+      if (decl.readsSource && !source) refuse("source_required", "This job kind reads the source: give sourceArtifactId.");
+      const artifacts = await artifactInputs(decl, a.input, source?.artifact.sha256);
+      const rec = await runner.start({
+        decl,
+        skillDir: bundle.skillDir,
+        bundleSha256: bundle.bundleSha256,
+        input: a.input,
+        ...(decl.readsSource && source
+          ? { source: { path: source.artifact.path, sha256: source.artifact.sha256, ...(source.rights ? { rights: source.rights } : {}) } }
+          : {}),
+        artifacts,
+      });
+      jobs.set(rec.jobId, approved);
+      return { result: { jobId: rec.jobId, state: rec.state }, artifactIds: [], jobId: rec.jobId };
+    },
+
+    async media_job_status(a) {
+      const jobId = str(a, "jobId", 100);
+      if (!jobs.has(jobId)) refuse("unknown_job", "No such job in this run.");
+      const raw = a.waitSec;
+      const waitSec = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.min(MAX_STATUS_WAIT_SEC, raw) : 0;
+      const rec = await runner.status(jobId, { waitSec });
+      noteProducers(rec);
+      return { result: jobView(rec), artifactIds: rec.artifacts.map((x) => x.id), jobId };
+    },
+
+    async media_job_cancel(a) {
+      const jobId = str(a, "jobId", 100);
+      if (!jobs.has(jobId)) refuse("unknown_job", "No such job in this run.");
+      const rec = await runner.cancel(jobId);
+      noteProducers(rec);
+      return { result: jobView(rec), artifactIds: rec.artifacts.map((x) => x.id), jobId };
+    },
+
+    async media_find_events(a) {
+      const { index } = await loadIndex(a.indexArtifactId);
+      const people = a.people === undefined ? undefined : strList(a, "people", 10);
+      const rows = findEvents(index, {
+        text: optStr(a, "text"),
+        people,
+        period: optInt(a, "period", 1, 100),
+        type: optStr(a, "type", 100),
+        limit: optInt(a, "limit", 1, 1000),
+      }).map((e) => ({ eventId: e.eventId, period: e.period, clock: clock(e.clockSec), label: e.label, people: e.people }));
+      return { result: { events: rows }, artifactIds: [] };
+    },
+
+    async story_facts_collect() {
+      const listed = new Set(config.factTools ?? []);
+      const isDataTool = (name: string) => listed.has(name) || (ctx.isDataTool?.(name) ?? false);
+      const facts = collectFacts(ctx.getToolResults(), { isDataTool });
+      const file = await storyFile("facts");
+      await fs.writeFile(file, JSON.stringify({ version: 1, facts }), { mode: 0o600 });
+      const artifact = await store.register({ kind: "facts", path: file });
+      return {
+        result: { factsArtifactId: artifact.id, facts: facts.map((f) => ({ factId: f.factId, toolName: f.toolName })) },
+        artifactIds: [artifact.id],
+      };
+    },
+
+    async story_draft_lines(a, abortSignal) {
+      const { index } = await loadIndex(a.indexArtifactId);
+      const eventIds = strList(a, "eventIds", 40);
+      const brief = str(a, "brief", 2000);
+      const maxLines = optInt(a, "maxLines", 1, MAX_LINES) ?? DEFAULT_MAX_LINES;
+      const facts = await loadFacts(a.factsArtifactId);
+      const byId = new Map(index.events.map((e) => [e.eventId, e]));
+      const events = eventIds.map((id) => byId.get(id) ?? refuse("unknown_event", `No event ${id.slice(0, 60)} in the index.`));
+      if (!ctx.inference?.roles?.writer) refuse("no_writer", "No writer role is configured (inference.roles.writer).");
+      const lines = await draftLines({ inference: ctx.inference, brief, events, facts, maxLines, abortSignal, onReceipt: ctx.onReceipt });
+      return { result: { lines }, artifactIds: [] };
+    },
+
+    async story_check_lines(a) {
+      const lines = draftLinesArg(a);
+      const { artifact: indexArtifact, index } = await loadIndex(a.indexArtifactId);
+      const facts = await loadFacts(a.factsArtifactId);
+      if (checkRounds >= MAX_CHECK_ROUNDS) {
+        refuse("rewrite_limit", `This run has used its ${MAX_CHECK_ROUNDS} checks (two rewrite rounds); drop the lines that failed.`);
+      }
+      const checker = checkerFor(indexArtifact);
+      checkRounds++;
+      const { verdicts, passed } = await checkLines({ lines, events: index.events, facts, checker });
+      const file = await storyFile("lines");
+      await fs.writeFile(file, JSON.stringify({ version: 1, indexArtifactId: indexArtifact.id, lines: passed }), { mode: 0o600 });
+      const artifact = await store.register({ kind: "lines-checked", path: file });
+      return {
+        result: {
+          verdicts,
+          linesArtifactId: artifact.id,
+          passed: passed.map((l) => ({ lineId: l.lineId, text: l.text })),
+          rewritesLeft: MAX_CHECK_ROUNDS - checkRounds,
+        },
+        artifactIds: [artifact.id],
+      };
+    },
+
+    async speech_synthesize(a, abortSignal) {
+      const lineIds = strList(a, "lineIds", MAX_LINES);
+      const voice = optStr(a, "voice", 200);
+      const lines = new Map((await loadLines(a.linesArtifactId)).map((l) => [l.lineId, l]));
+      const chosen = lineIds.map((id) => lines.get(id) ?? refuse("unknown_line", `${id.slice(0, 60)} is not a line that passed the check.`));
+      if (!ctx.inference?.speech) refuse("no_speech", "No speech route is configured (inference.speech).");
+      const voices: { lineId: string; voiceArtifactId: string; durationMs: number }[] = [];
+      for (const line of chosen) {
+        const said = await synthesizeSpeech({
+          text: line.text,
+          config: ctx.inference,
+          ...(voice ? { voice } : {}),
+          abortSignal,
+          onReceipt: ctx.onReceipt,
+          env,
+        });
+        const file = `${await storyFile("voice")}.wav`;
+        await fs.writeFile(file, said.audio, { mode: 0o600 });
+        const artifact = await store.register({ kind: "voice", path: file });
+        voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
+      }
+      return { result: { voices }, artifactIds: voices.map((v) => v.voiceArtifactId) };
+    },
+
+    async story_timeline_build(a) {
+      const { resolved } = await resolveForStory(a.timeline);
+      const { captions: _captions, ...timeline } = resolved;
+      const file = await storyFile("timeline");
+      await fs.writeFile(file, JSON.stringify(timeline), { mode: 0o600 });
+      const artifact = await store.register({ kind: "timeline", path: file });
+      return { result: { timelineArtifactId: artifact.id, segments: resolved.segments.length }, artifactIds: [artifact.id] };
+    },
+
+    async story_render(a, abortSignal) {
+      const timelineArtifact = await need(a.timelineArtifactId, "timeline");
+      const renderer = optStr(a, "renderer", 200) ?? "plain";
+      const { resolved, source } = await resolveForStory(await readJsonArtifact(timelineArtifact, "bad_timeline"));
+      const sha = source.artifact.sha256;
+
+      if (renderer !== "plain") {
+        const approved = kinds.get(renderer);
+        if (!approved) refuse("unknown_kind", `No approved renderer ${renderer}.`);
+        const { bundle, decl } = approved;
+        if (!decl.produces.includes("video") || !decl.readsSource) {
+          refuse("renderer_invalid", `${renderer} is not a renderer: it must read the source and produce video.`);
+        }
+        const started = await runner.start({
+          decl,
+          skillDir: bundle.skillDir,
+          bundleSha256: bundle.bundleSha256,
+          input: { timeline: resolved },
+          source: { path: source.artifact.path, sha256: sha, ...(source.rights ? { rights: source.rights } : {}) },
+          artifacts: await timelineArtifacts(resolved, source),
+        });
+        jobs.set(started.jobId, approved);
+        const rec = await waitForJob(started.jobId, abortSignal);
+        if (rec.state !== "succeeded") refuse("render_failed", rec.error ?? `the render job ended ${rec.state}`);
+        const video = rec.artifacts.find((x) => x.kind === "video");
+        if (!video) refuse("render_failed", "The renderer made no video artifact.");
+        let durationSec: number | null = Number((await probeVideo(video.path).catch(() => undefined))?.format?.duration);
+        if (!Number.isFinite(durationSec)) durationSec = null;
+        return {
+          result: { videoArtifactId: video.id, durationSec, renderer, jobId: rec.jobId, ...(rec.rightsCheck ? { rightsCheck: rec.rightsCheck } : {}) },
+          artifactIds: rec.artifacts.map((x) => x.id),
+          jobId: rec.jobId,
+        };
+      }
+
+      const rightsOff = resolveRightsCheck(config, env) === "off";
+      if (!rightsOff && !rightsCleared(source.rights)) {
+        refuse("rights_required", "Rendering cuts the source: open it with a rights block with clearedForClipping: true.");
+      }
+      const voicePaths: Record<string, string> = {};
+      for (const s of resolved.segments) {
+        if (s.voiceArtifactId) voicePaths[s.voiceArtifactId] = (await need(s.voiceArtifactId, "voice", sha)).path;
+      }
+      const outPath = `${await storyFile("video")}.mp4`;
+      const { durationSec } = await renderPlain({ timeline: resolved, sourcePath: source.artifact.path, voicePaths, outPath, abortSignal });
+      const video = await store.register({
+        kind: "video",
+        path: outPath,
+        sourceSha256: sha,
+        ...(rightsOff ? { facts: { rightsCheck: RIGHTS_OFF_NOTE } } : {}),
+      });
+      return {
+        result: { videoArtifactId: video.id, durationSec, renderer, ...(rightsOff ? { rightsCheck: RIGHTS_OFF_NOTE } : {}) },
+        artifactIds: [video.id],
+      };
+    },
+  };
+
+  const descriptions = descriptionsFor([...kinds.values()].map((k) => k.decl));
+  const tools = {} as Record<MediaToolName, HostToolDef>;
+  for (const name of MEDIA_TOOL_NAMES) {
+    tools[name] = {
+      description: descriptions[name],
+      inputSchema: SCHEMAS[name],
+      async execute(input, { abortSignal }) {
+        try {
+          const out = await handlers[name](args(input ?? {}), abortSignal);
+          steps.push({ tool: name, artifactIds: out.artifactIds, ...(out.jobId ? { jobId: out.jobId } : {}) });
+          return out.result;
+        } catch (err) {
+          if (err instanceof Refusal || err instanceof ArtifactError || err instanceof JobError || err instanceof TimelineError || err instanceof LinesError) {
+            return { error_code: err.code, message: err.message };
+          }
+          return { error_code: "failed", message: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    };
+  }
+
+  let disposed: Promise<void> | undefined;
+  return {
+    tools,
+    steps,
+    dispose() {
+      disposed ??= (async () => {
+        for (const jobId of jobs.keys()) await runner.cancel(jobId).catch(() => undefined);
+        await proxy?.close();
+      })();
+      return disposed;
+    },
+  };
+}

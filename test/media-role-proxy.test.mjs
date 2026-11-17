@@ -156,6 +156,27 @@ describe("role proxy", () => {
     }
   });
 
+  it("a failed model call answers 502 with a generic message and the router's error code, and logs nothing", async () => {
+    process.env.ROLE_PROXY_TEST_KEY = "sk-another-secret-987654";
+    const proxy = await startRoleProxy({ inference, allowRoles: ["eyes"] });
+    const logged = [];
+    const saved = {};
+    for (const m of ["log", "info", "warn", "error", "debug"]) {
+      saved[m] = console[m];
+      console[m] = (...args) => logged.push(args);
+    }
+    try {
+      const res = await request(proxy.url, { path: "/role/eyes", headers: json(proxy.token), body: JSON.stringify({ input: "x" }) });
+      assert.equal(res.status, 502);
+      assert.match(JSON.parse(res.text).error, /^model call failed: [a-z_]+$/);
+    } finally {
+      Object.assign(console, saved);
+      delete process.env.ROLE_PROXY_TEST_KEY;
+      await proxy.close();
+    }
+    assert.deepEqual(logged, []);
+  });
+
   it("close() refuses new connections, is idempotent, and drops open ones", async () => {
     const proxy = await startRoleProxy({ inference, allowRoles: ["brain"] });
     const port = new URL(proxy.url).port;

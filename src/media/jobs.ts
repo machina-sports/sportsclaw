@@ -8,8 +8,10 @@
  *     sealed dir, own process group, environment = PASSTHROUGH_ENV (skill-runtime) plus
  *     SPORTSCLAW_ROLE_PROXY_URL / SPORTSCLAW_ROLE_PROXY_TOKEN when a role proxy is configured. Nothing else.
  *     The interpreter is `config.interpreters["<skill>/<kind>"] ?? config.interpreters.default ?? ["python3"]`.
- *   - input.json is `{ "input": <validated input>, "source"?: { "path", "sha256" } }` (source only for
- *     `readsSource` kinds). Before the rights check the runner binds the source: its realpath must be a regular
+ *   - input.json is `{ "input": <validated input>, "source"?: { "path", "sha256" }, "artifacts": { "<id>":
+ *     { "kind", "path", "sha256" } } }` (source only for `readsSource` kinds; artifacts is the map the caller
+ *     resolved and checked against the store, `{}` when none — the runner checks only its shape). Before the
+ *     rights check the runner binds the source: its realpath must be a regular
  *     file inside the workspace (`source_outside`) whose sha256 is the given one (`source_mismatch`); input.json
  *     carries that realpath. Files: `<workspaceDir>/jobs/<jobId>/input.json` and `.../out/` (0700).
  *   - Limits: `timeLimitSec` (default 600) and `maxOutputBytes` (default DEFAULT_MAX_JOB_OUTPUT_BYTES), the total
@@ -32,7 +34,7 @@ import { PASSTHROUGH_ENV } from "../skill-runtime.js";
 import { hashFile, type ArtifactStore } from "./artifacts.js";
 import { BundleError, sealBundle, type JobKindDecl } from "./bundle.js";
 import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
-import type { Artifact, ArtifactKind, MediaConfig } from "./types.js";
+import { ARTIFACT_KINDS, type Artifact, type ArtifactKind, type MediaConfig } from "./types.js";
 
 const DEFAULT_TIME_LIMIT_SEC = 600;
 const DEFAULT_MAX_JOBS_PER_RUN = 12;
@@ -55,6 +57,28 @@ export interface JobRecord {
   rightsCheck?: "off (operator)";
 }
 
+/** One entry of input.json's `artifacts` map. */
+export interface JobArtifactRef {
+  kind: ArtifactKind;
+  path: string;
+  sha256: string;
+}
+
+const ARTIFACT_ID_RE = /^art_[0-9a-f]{16}$/;
+
+function isArtifactMap(v: unknown): v is Record<string, JobArtifactRef> {
+  if (!isPlainObject(v)) return false;
+  return Object.entries(v).every(
+    ([id, a]) =>
+      ARTIFACT_ID_RE.test(id) &&
+      isPlainObject(a) &&
+      Object.keys(a).sort().join(",") === "kind,path,sha256" &&
+      (ARTIFACT_KINDS as readonly unknown[]).includes(a.kind) &&
+      typeof a.path === "string" && isAbsolute(a.path) &&
+      typeof a.sha256 === "string" && SHA_RE.test(a.sha256),
+  );
+}
+
 export interface JobRunner {
   start(req: {
     decl: JobKindDecl;
@@ -62,6 +86,8 @@ export interface JobRunner {
     bundleSha256: string;
     input: unknown;
     source?: { path: string; sha256: string; rights?: RightsAuthorization };
+    /** Artifacts handed to the job, already checked by the caller (ArtifactStore.require). */
+    artifacts?: Record<string, JobArtifactRef>;
   }): Promise<JobRecord>;
   status(jobId: string, opts?: { waitSec?: number }): Promise<JobRecord>;
   cancel(jobId: string): Promise<JobRecord>;
@@ -132,7 +158,8 @@ function inputErrors(schema: Record<string, unknown>, input: unknown): string | 
   return undefined;
 }
 
-function rightsCleared(r: RightsAuthorization | undefined): boolean {
+/** A rights block that clears the source for clipping (also used by the plain renderer). */
+export function rightsCleared(r: RightsAuthorization | undefined): boolean {
   return (
     isPlainObject(r) &&
     r.clearedForClipping === true &&
@@ -281,6 +308,8 @@ export class LocalJobRunner implements JobRunner {
 
     const problem = inputErrors(decl.inputSchema, req.input);
     if (problem) throw new JobError("invalid_input", `Input does not match the job's inputSchema: ${problem}.`);
+    const artifacts = req.artifacts ?? {};
+    if (!isArtifactMap(artifacts)) throw new JobError("invalid_input", "artifacts must map artifact ids to { kind, path, sha256 }.");
     const inputJson: Record<string, unknown> = { input: req.input };
 
     let rightsOff = false;
@@ -297,6 +326,7 @@ export class LocalJobRunner implements JobRunner {
       }
       inputJson.source = { path: sourcePath, sha256: src.sha256 };
     }
+    inputJson.artifacts = artifacts;
     const inputText = JSON.stringify(inputJson);
     if (Buffer.byteLength(inputText) > MAX_INPUT_BYTES) throw new JobError("invalid_input", "Input is larger than 1 MiB.");
     const sourceSha256 = decl.readsSource ? req.source!.sha256 : undefined;

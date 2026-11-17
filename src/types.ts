@@ -444,6 +444,12 @@ export interface sportsclawConfig {
    * tools and never authorizes a write. Default: false.
    */
   taskBrief?: boolean;
+  /**
+   * Media stories (operator config). When set, a run offers the media story tools
+   * (media_*, story_*, speech_synthesize; see docs/advanced/media-stories.md). Unset
+   * (the default, null) offers none of them.
+   */
+  media?: import("./media/types.js").MediaConfig | null;
 }
 
 /**
@@ -675,6 +681,7 @@ export const DEFAULT_CONFIG: Required<sportsclawConfig> = {
   answerFrom: "model",
   inference: { roles: {} },
   taskBrief: false,
+  media: null,
 };
 
 // ---------------------------------------------------------------------------

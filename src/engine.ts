@@ -167,6 +167,8 @@ import {
   type SlipDecisionResult,
 } from "./slip-decision.js";
 import { buildSystemPrompt as composeSystemPrompt, type SystemPromptContext } from "./prompts/system.js";
+import { randomUUID } from "node:crypto";
+import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
 import {
   buildResultOverview,
   findArrays,
@@ -1141,6 +1143,10 @@ export class sportsclawEngine {
   private _media?: MediaAttachment[];
   /** Markers registered for this run's media (openai-compatible), released when it ends. */
   private _mediaMarkers?: Array<{ marker: string; kind: MediaAttachment["kind"] }>;
+  /** This run's media story tools (config.media), created when the run starts and disposed when it ends. */
+  private _runMediaTools?: Awaited<ReturnType<typeof createMediaTools>>;
+  /** Tool results of the current run as they finish (story_facts_collect reads them mid-run). */
+  private _runToolResults: RunToolResult[] = [];
 
   /** Sanitized evidence-verification receipts from the last run(). */
   get evidenceReceipts(): readonly EvidenceVerificationReceipt[] {
@@ -1195,7 +1201,10 @@ export class sportsclawEngine {
    * allowlist. Includes built-in tools and installed sport/MCP tools.
    */
   listToolNames(): string[] {
-    return Object.keys(this.buildTools()).sort();
+    const names = new Set(Object.keys(this.buildTools()));
+    // Media tools are built per run; outside a run, list their names when config.media offers them.
+    if (this.config.media) for (const name of MEDIA_TOOL_NAMES) names.add(name);
+    return [...names].sort();
   }
 
   /**
@@ -1370,6 +1379,8 @@ export class sportsclawEngine {
     callerSystemPrompt?: string;
     /** Tools offered this turn; the prompt lists only these. Omitted lists all. */
     activeToolNames?: ReadonlyArray<string>;
+    /** Media story tools offered this turn. */
+    mediaToolNames?: ReadonlyArray<string>;
   }): string {
     const { installed, available } = getInstalledVsAvailable();
     const discordCfg = loadConfig().chatIntegrations?.discord;
@@ -1399,6 +1410,7 @@ export class sportsclawEngine {
       hasMemory: args.hasMemory,
       agents: args.agents,
       diskSkillGuides: this.skillGuides,
+      ...(args.mediaToolNames?.length ? { mediaToolNames: args.mediaToolNames } : {}),
       strategyContent: args.strategyContent,
       callerSystemPrompt: args.callerSystemPrompt,
       userSystemPrompt: this.config.systemPrompt,
@@ -4654,11 +4666,18 @@ export class sportsclawEngine {
     return toolMap;
   }
 
-  /** sportsclawConfig.hostTools, wrapped as model tools with the same output cap as data tools. */
+  /**
+   * sportsclawConfig.hostTools, plus this run's media story tools when config.media is set,
+   * wrapped as model tools with the same output cap as data tools.
+   */
   private addHostTools(toolMap: ToolSet): void {
-    for (const [name, def] of Object.entries(this.config.hostTools ?? {})) {
+    const media = new Set<string>(this.config.media ? MEDIA_TOOL_NAMES : []);
+    const defs = [...Object.entries(this.config.hostTools ?? {}), ...Object.entries(this._runMediaTools?.tools ?? {})];
+    for (const [name, def] of defs) {
       if (!HOST_TOOL_NAME.test(name)) throw new Error(`invalid host tool name: ${name}`);
-      if (toolMap[name]) throw new Error(`host tool name collides with an engine tool: ${name}`);
+      if (toolMap[name] || (media.has(name) && this.config.hostTools?.[name])) {
+        throw new Error(`host tool name collides with an engine tool: ${name}`);
+      }
       if (!def || typeof def.execute !== "function" || typeof def.description !== "string") {
         throw new Error(`host tool ${name} needs a description and an execute function`);
       }
@@ -5017,10 +5036,30 @@ export class sportsclawEngine {
   }
 
   private async runExclusive(userPrompt: string, options?: RunOptions): Promise<string> {
+    this._runToolResults = [];
     try {
+      if (this.config.media) {
+        const registry = this.registry;
+        this._runMediaTools = await createMediaTools({
+          config: this.config.media,
+          guides: this.skillGuides,
+          ...(this.config.inference ? { inference: this.config.inference } : {}),
+          runId: `run_${randomUUID()}`,
+          getToolResults: () => [...this._runToolResults],
+          // Sports Skills data tools are the registry's routed tools; MCP and host tools are not.
+          isDataTool: (name) => registry.getSkillName(name) !== undefined,
+          pythonPath: this.config.pythonPath,
+        });
+      }
       return await this.runExclusiveTurn(userPrompt, options);
     } finally {
       this.releaseRunMedia();
+      const media = this._runMediaTools;
+      this._runMediaTools = undefined;
+      if (media) {
+        if (media.steps.length > 0 && this._lastRunTrace) this._lastRunTrace.mediaSteps = media.steps.map((s) => ({ ...s, artifactIds: [...s.artifactIds] }));
+        await media.dispose();
+      }
     }
   }
 
@@ -6075,6 +6114,13 @@ export class sportsclawEngine {
     // Tool-finish tracking shared by the main loop and the correction's public reads.
     const trackToolFinish = (event: ToolFinishEvent) => {
       const { toolCall, durationMs, success } = event;
+      this._runToolResults.push({
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        input: toolCall.input,
+        output: typeof event.output === "string" ? event.output : JSON.stringify(event.output) ?? "",
+        isError: !success,
+      });
       const skillName = this.registry.getSkillName(toolCall.toolName);
       emitProgress?.({
         type: "tool_finish",
@@ -6136,6 +6182,9 @@ export class sportsclawEngine {
           strategyContent,
           callerSystemPrompt: options?.systemPrompt,
           ...(activeTools ? { activeToolNames: activeTools } : {}),
+          mediaToolNames: this._runMediaTools
+            ? (activeTools ?? Object.keys(tools)).filter((name) => (MEDIA_TOOL_NAMES as readonly string[]).includes(name))
+            : [],
         }) + slipSection + artifactSection),
         messages: withBrief(messagesOverride ?? this.messages),
         tools: callTools,

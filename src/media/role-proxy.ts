@@ -7,7 +7,8 @@
  *
  * The proxy runs in the harness process, which owns the keys; the job only gets `url` and `token`
  * (see LocalJobRunner's `roleProxy`). Checks run in this order: Host (403), token (401), role
- * allowlist (403), body size (413), JSON (400), then the model call (502 on failure).
+ * allowlist (403), body size (413), JSON (400), then the model call (502 on failure, with the body
+ * `{ error: "model call failed: <router error code>" }` and nothing logged: provider text can echo keys).
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -16,7 +17,7 @@ import type { Socket } from "node:net";
 
 import { invokeModelRole, type ModelRoleRouterConfig } from "../inference/model-role-router.js";
 import type { ModelRole } from "../inference/model-roles.js";
-import type { InferenceReceipt } from "../inference/receipt.js";
+import type { InferenceErrorCode, InferenceReceipt } from "../inference/receipt.js";
 import type { MediaAttachment } from "../types.js";
 
 /** Largest request body the proxy reads. Media travels inline as base64. */
@@ -128,6 +129,7 @@ export async function startRoleProxy(opts: {
     }
 
     let observed = false;
+    let errorCode: InferenceErrorCode | undefined;
     try {
       const result = await invokeModelRole({
         role: role as ModelRole,
@@ -139,6 +141,7 @@ export async function startRoleProxy(opts: {
         sampling: body.sampling as { maxOutputTokens?: number; temperature?: number; topP?: number } | undefined,
         onReceipt: (receipt) => {
           observed = true;
+          errorCode = receipt.errorCode;
           opts.onReceipt?.(receipt);
         },
       });
@@ -154,8 +157,9 @@ export async function startRoleProxy(opts: {
         });
       }
       reply(res, 200, { output: result.output });
-    } catch (err) {
-      reply(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    } catch {
+      // A provider's error text can echo key fragments: send a fixed message and the router's code, log nothing.
+      reply(res, 502, { error: `model call failed: ${errorCode ?? "unknown"}` });
     }
   }
 

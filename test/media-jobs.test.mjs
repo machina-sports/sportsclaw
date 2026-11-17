@@ -286,6 +286,18 @@ describe("LocalJobRunner", () => {
     assert.equal(existsSync(join(workspaceDir, "jobs")), false);
   });
 
+  it("input.json carries the resolved artifacts map ({} when none) next to input and source", async () => {
+    const { runner, workspaceDir } = setup();
+    const artifacts = { art_0123456789abcdef: { kind: "voice", path: join(workspaceDir, "v.wav"), sha256: "a".repeat(64) } };
+    const rec = await run(runner, "ok-job", { text: "hi" }, { artifacts });
+    assert.equal(rec.state, "succeeded", rec.error);
+    const input = JSON.parse(readFileSync(join(workspaceDir, "jobs", rec.jobId, "input.json"), "utf8"));
+    assert.deepEqual(input, { input: { text: "hi" }, artifacts });
+    const plain = await run(runner, "ok-job", { text: "hi" });
+    assert.deepEqual(JSON.parse(readFileSync(join(workspaceDir, "jobs", plain.jobId, "input.json"), "utf8")).artifacts, {});
+    await rejects(runner.start({ decl: A.decl("ok-job"), skillDir: pack, bundleSha256: A.sha, input: { text: "x" }, artifacts: { art_1: { kind: "voice", path: "rel", sha256: "x" } } }), "invalid_input");
+  });
+
   it("every sealed bundle is disposed once its job ends or is refused", () => {
     assert.equal(tmpdir(), SEAL_TMP);
     assert.deepEqual(readdirSync(SEAL_TMP).filter((f) => f.startsWith("sportsclaw-bundle-")), []);

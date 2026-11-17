@@ -205,14 +205,22 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
   return out;
 }
 
-/** Kinds from <skill>/jobs.json whose (skill, kind, bundleSha256) is in the allowlist. Malformed allowlist or jobs.json -> []. */
-export async function approvedJobKinds(
+/** One skill's approved kinds with the bundle hash they were approved under (what a runner needs to start them). */
+export interface ApprovedBundle {
+  skill: string;
+  skillDir: string;
+  bundleSha256: string;
+  decls: JobKindDecl[];
+}
+
+/** Per skill: kinds from jobs.json whose (skill, kind, bundleSha256) is in the allowlist. Skills with none are left out. */
+export async function approvedJobBundles(
   guides: ReadonlyArray<SkillGuide>,
   env: Record<string, string | undefined> = process.env,
-): Promise<JobKindDecl[]> {
+): Promise<ApprovedBundle[]> {
   const policy = loadJobPolicy(env);
   if (!policy) return [];
-  const result: JobKindDecl[] = [];
+  const result: ApprovedBundle[] = [];
   for (const guide of guides) {
     if (!guide.dir || !policy.some((p) => p.skill === guide.id)) continue;
     const decls = await readJobDecls(guide.id, guide.dir);
@@ -223,11 +231,18 @@ export async function approvedJobKinds(
     } catch {
       continue;
     }
-    for (const d of decls) {
-      if (policy.some((p) => p.skill === d.skill && p.kind === d.kind && p.bundleSha256 === sha)) result.push(d);
-    }
+    const approved = decls.filter((d) => policy.some((p) => p.skill === d.skill && p.kind === d.kind && p.bundleSha256 === sha));
+    if (approved.length) result.push({ skill: guide.id, skillDir: guide.dir, bundleSha256: sha, decls: approved });
   }
   return result;
+}
+
+/** Kinds from <skill>/jobs.json whose (skill, kind, bundleSha256) is in the allowlist. Malformed allowlist or jobs.json -> []. */
+export async function approvedJobKinds(
+  guides: ReadonlyArray<SkillGuide>,
+  env: Record<string, string | undefined> = process.env,
+): Promise<JobKindDecl[]> {
+  return (await approvedJobBundles(guides, env)).flatMap((b) => b.decls);
 }
 
 /**

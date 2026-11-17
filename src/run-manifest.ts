@@ -158,6 +158,11 @@ export interface RunTrace {
    * the numbers in that draft no source contains.
    */
   dataAnswer?: { tools: string[]; facts: string; draft?: string; unsupported?: string[] };
+  /**
+   * Successful media story tool calls in call order (sportsclawConfig.media): the tool and the
+   * artifact ids it produced, plus the job it started or read. Absent when no media tool succeeded.
+   */
+  mediaSteps?: { tool: string; artifactIds: string[]; jobId?: string }[];
 }
 
 /**

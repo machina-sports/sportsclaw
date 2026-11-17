@@ -164,6 +164,7 @@ import {
 import { cmdOperate } from "./operate.js";
 import { cmdOpenshell } from "./openshell-cli.js";
 import { cmdQuickstart } from "./quickstart.js";
+import { bundleSha256 } from "./media/bundle.js";
 import { cmdMachina } from "./machina.js";
 import { cmdGames } from "./games.js";
 import { cmdPremierLeagueRecap } from "./premier-league-recap.js";
@@ -540,6 +541,8 @@ export type {
   SpeechTrace,
   SynthesizeSpeechArgs,
 } from "./inference/speech.js";
+// Media stories — the agent's media tools (sportsclawConfig.media) and the parts they are built from.
+export * from "./media/index.js";
 export type { JudgeConfig, JudgeSeams } from "./inference/judge.js";
 export type {
   ChoiceAnswer,
@@ -3705,6 +3708,10 @@ async function main(): Promise<void> {
   if (args[0] === "quickstart") {
     return cmdQuickstart(args.slice(1));
   }
+  // Offline too: prints a skill's media bundle hash for the operator's job allowlist.
+  if (args[0] === "media") {
+    return cmdMedia(args.slice(1));
+  }
 
   // Load ~/.sportsclaw/.env and persisted config into process.env before any
   // routing, so every command sees the same precedence (shell env > .env >
@@ -3806,6 +3813,21 @@ case "plugin":
     default:
       // Not a subcommand — treat the entire args as a query prompt
       return cmdQuery(args);
+  }
+}
+
+/** `sportsclaw media bundle-hash <skill dir>`: the bundleSha256 to put in SPORTSCLAW_MEDIA_JOB_ALLOWLIST. */
+async function cmdMedia(args: string[]): Promise<void> {
+  if (args[0] !== "bundle-hash" || args.length !== 2) {
+    console.error("Usage: sportsclaw media bundle-hash <skill dir>");
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    console.log(await bundleSha256(args[1]));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
   }
 }
 
