@@ -2,15 +2,20 @@
  * Media job kinds — a skill's `scripts/` is approved as one hashed bundle.
  *
  * A job kind runs only if the operator listed (skill, kind, bundleSha256) in
- * SPORTSCLAW_MEDIA_JOB_ALLOWLIST. Any change to any file under scripts/ changes
- * the hash, so approval never survives an edit. The allowlist is parsed as
+ * SPORTSCLAW_MEDIA_JOB_ALLOWLIST. The hash covers every file under scripts/ AND
+ * the skill's jobs.json (entry, limits, produces, schema), so approval never
+ * survives an edit to either.
+ *
+ * Sealed layout: sealBundle copies to <sealed>/scripts/... and <sealed>/jobs.json
+ * (the same shape as a skill dir). `entry` resolves as <sealed>/scripts/<entry>,
+ * and the runner must use the decls returned by sealBundle, never the live file. The allowlist is parsed as
  * strictly as skill-runtime's script policy: anything malformed denies all.
  */
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { SkillGuide } from "../types.js";
 import { ARTIFACT_KINDS, type ArtifactKind } from "./types.js";
 
@@ -66,21 +71,31 @@ async function listRegularFiles(root: string): Promise<string[]> {
   return out;
 }
 
-async function hashScriptsDir(scriptsDir: string): Promise<string> {
-  const files = (await listRegularFiles(scriptsDir)).map((rel) => Buffer.from(rel, "utf8"));
-  files.sort(Buffer.compare);
+const JOBS_RECORD_PATH = "/jobs.json"; // reserved: a leading slash cannot occur in a relative path
+
+/** Hash of <root>/scripts/** plus <root>/jobs.json, as the sorted records "<path>\0<file sha256>\n". */
+async function hashBundleRoot(root: string): Promise<string> {
+  const files = new Map<string, string>(); // record path -> absolute file
+  for (const rel of await listRegularFiles(join(root, "scripts"))) files.set(rel, join(root, "scripts", rel));
+  const jobs = join(root, "jobs.json");
+  const st = await fs.lstat(jobs).catch(() => undefined);
+  if (st) {
+    if (!st.isFile()) throw new BundleError("bundle_symlink", "jobs.json is not a regular file.");
+    files.set(JOBS_RECORD_PATH, jobs);
+  }
+  const paths = [...files.keys()].map((p) => Buffer.from(p, "utf8"));
+  paths.sort(Buffer.compare);
   const h = createHash("sha256");
-  for (const relBuf of files) {
-    const rel = relBuf.toString("utf8");
-    const fileSha = createHash("sha256").update(await fs.readFile(join(scriptsDir, rel))).digest("hex");
-    h.update(Buffer.concat([relBuf, Buffer.from(`\0${fileSha}\n`)]));
+  for (const pathBuf of paths) {
+    const fileSha = createHash("sha256").update(await fs.readFile(files.get(pathBuf.toString("utf8"))!)).digest("hex");
+    h.update(Buffer.concat([pathBuf, Buffer.from(`\0${fileSha}\n`)]));
   }
   return h.digest("hex");
 }
 
-/** sha256 over the sorted list "<relative path>\0<file sha256>\n" of every regular file under scripts/. */
+/** sha256 over the sorted records "<relative path>\0<file sha256>\n" of every regular file under scripts/, plus "/jobs.json". */
 export function bundleSha256(skillDir: string): Promise<string> {
-  return hashScriptsDir(join(skillDir, "scripts"));
+  return hashBundleRoot(skillDir);
 }
 
 interface AllowEntry {
@@ -215,29 +230,41 @@ export async function approvedJobKinds(
   return result;
 }
 
-/** Copies scripts/ to a fresh private temp dir, re-hashes the copy, and throws BundleError("bundle_changed") unless it equals `expected`. */
+/**
+ * Copies scripts/ and jobs.json to a fresh private temp dir (same layout as a skill dir), re-hashes the copy,
+ * and throws BundleError("bundle_changed") unless it equals `expected`. Returns the declarations parsed from
+ * the sealed copy. `skill` defaults to the skill dir's name (the guide id).
+ */
 export async function sealBundle(
   skillDir: string,
   expected: string,
-): Promise<{ dir: string; dispose(): Promise<void> }> {
-  const src = join(skillDir, "scripts");
+  skill: string = basename(skillDir),
+): Promise<{ dir: string; decls: JobKindDecl[]; dispose(): Promise<void> }> {
   const dir = await fs.mkdtemp(join(tmpdir(), "sportsclaw-bundle-"));
   const dispose = () => fs.rm(dir, { recursive: true, force: true });
+  let decls: JobKindDecl[];
   try {
     await fs.chmod(dir, 0o700);
-    const files = await listRegularFiles(src);
-    for (const rel of files) {
-      const to = join(dir, rel);
-      await fs.mkdir(join(to, ".."), { recursive: true, mode: 0o700 });
-      const data = await fs.readFile(join(src, rel));
-      await fs.writeFile(to, data, { mode: 0o600 });
+    const src = join(skillDir, "scripts");
+    for (const rel of await listRegularFiles(src)) {
+      const to = join(dir, "scripts", rel);
+      await fs.mkdir(dirname(to), { recursive: true, mode: 0o700 });
+      await fs.writeFile(to, await fs.readFile(join(src, rel)), { mode: 0o600 });
     }
-    if ((await hashScriptsDir(dir)) !== expected) {
-      throw new BundleError("bundle_changed", "The skill's scripts changed since they were approved.");
+    const jst = await fs.lstat(join(skillDir, "jobs.json")).catch(() => undefined);
+    if (jst) {
+      if (!jst.isFile()) throw new BundleError("bundle_symlink", "jobs.json is not a regular file.");
+      await fs.writeFile(join(dir, "jobs.json"), await fs.readFile(join(skillDir, "jobs.json")), { mode: 0o600 });
     }
+    if ((await hashBundleRoot(dir)) !== expected) {
+      throw new BundleError("bundle_changed", "The skill's scripts or jobs.json changed since they were approved.");
+    }
+    const parsed = await readJobDecls(skill, dir);
+    if (!parsed) throw new BundleError("bundle_invalid", "jobs.json is missing or malformed.");
+    decls = parsed;
   } catch (err) {
     await dispose();
     throw err;
   }
-  return { dir, dispose };
+  return { dir, decls, dispose };
 }

@@ -101,6 +101,17 @@ describe("approvedJobKinds", () => {
     writeFileSync(join(dir, "scripts/helper.py"), "evil");
     assert.deepEqual(await approvedJobKinds([guide(dir)], allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }])), []);
   });
+  it("editing jobs.json after approval changes the hash and drops the kind", async () => {
+    const dir = copyPack();
+    const sha = await bundleSha256(dir);
+    const env = allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }]);
+    assert.equal((await approvedJobKinds([guide(dir)], env)).length, 1);
+    const j = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    j.jobs[0].readsSource = true;
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify(j));
+    assert.notEqual(await bundleSha256(dir), sha);
+    assert.deepEqual(await approvedJobKinds([guide(dir)], env), []);
+  });
   it("a bundle with a symlink yields nothing", async () => {
     const dir = copyPack();
     const sha = await bundleSha256(dir);
@@ -132,18 +143,17 @@ describe("approvedJobKinds", () => {
   });
   it("malformed jobs.json yields nothing", async () => {
     const dir = copyPack();
-    const sha = await bundleSha256(dir);
-    const env = allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }]);
     for (const content of ["nope", "[]", '{"jobs":{}}', "{}"]) {
       writeFileSync(join(dir, "jobs.json"), content);
+      const env = allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: await bundleSha256(dir) }]);
       assert.deepEqual(await approvedJobKinds([guide(dir)], env), [], content);
     }
     rmSync(join(dir, "jobs.json"));
+    const env = allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: await bundleSha256(dir) }]);
     assert.deepEqual(await approvedJobKinds([guide(dir)], env), []);
   });
   it("drops declarations that are invalid, keeps the valid ones", async () => {
     const dir = copyPack();
-    const sha = await bundleSha256(dir);
     const ok = { kind: "echo-job", entry: "echo_job.py", inputSchema: {}, readsSource: true, produces: ["facts"] };
     const variants = [
       { ...ok, kind: "b-escape", entry: "../SKILL.md" },
@@ -159,6 +169,7 @@ describe("approvedJobKinds", () => {
       { ...ok, kind: "b-reads", readsSource: "yes" },
     ];
     writeFileSync(join(dir, "jobs.json"), JSON.stringify({ jobs: [...variants, ok] }));
+    const sha = await bundleSha256(dir);
     const allowed = [...variants, ok].map((j) => ({ skill: "pack-ok", kind: j.kind, bundleSha256: sha }));
     const kinds = await approvedJobKinds([guide(dir)], allow(allowed));
     assert.deepEqual(kinds.map((k) => k.kind), ["echo-job"]);
@@ -166,9 +177,9 @@ describe("approvedJobKinds", () => {
   });
   it("duplicate kinds in jobs.json deny the skill", async () => {
     const dir = copyPack();
-    const sha = await bundleSha256(dir);
     const ok = { kind: "echo-job", entry: "echo_job.py", inputSchema: {}, readsSource: false, produces: [] };
     writeFileSync(join(dir, "jobs.json"), JSON.stringify({ jobs: [ok, ok] }));
+    const sha = await bundleSha256(dir);
     assert.deepEqual(await approvedJobKinds([guide(dir)], allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }])), []);
   });
 });
@@ -179,8 +190,8 @@ describe("sealBundle", () => {
     const sha = await bundleSha256(dir);
     const sealed = await sealBundle(dir, sha);
     assert.notEqual(sealed.dir, dir);
-    assert.equal(await bundleSha256Dir(sealed.dir), sha);
-    assert.equal(readFileSync(join(sealed.dir, "echo_job.py"), "utf8"), readFileSync(join(dir, "scripts/echo_job.py"), "utf8"));
+    assert.equal(await bundleSha256(sealed.dir), sha);
+    assert.equal(readFileSync(join(sealed.dir, "scripts/echo_job.py"), "utf8"), readFileSync(join(dir, "scripts/echo_job.py"), "utf8"));
     await sealed.dispose();
     assert.equal(existsSync(sealed.dir), false);
     await sealed.dispose();
@@ -194,6 +205,29 @@ describe("sealBundle", () => {
     const after = readdirSync(tmpdir()).filter((f) => f.startsWith("sportsclaw-bundle-"));
     assert.deepEqual(after.sort(), before.sort());
   });
+  it("edit jobs.json between hash and seal -> bundle_changed and the sealed dir is removed", async () => {
+    const dir = copyPack();
+    const sha = await bundleSha256(dir);
+    const j = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    j.jobs[0].readsSource = true;
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify(j));
+    const before = readdirSync(tmpdir()).filter((f) => f.startsWith("sportsclaw-bundle-"));
+    await assert.rejects(sealBundle(dir, sha), (e) => e instanceof BundleError && e.code === "bundle_changed");
+    const after = readdirSync(tmpdir()).filter((f) => f.startsWith("sportsclaw-bundle-"));
+    assert.deepEqual(after.sort(), before.sort());
+  });
+  it("returns the declarations parsed from the sealed copy, equal to the approved ones", async () => {
+    const dir = copyPack();
+    const sha = await bundleSha256(dir);
+    const approved = await approvedJobKinds([guide(dir)], allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }]));
+    const sealed = await sealBundle(dir, sha, "pack-ok");
+    try {
+      assert.deepEqual(sealed.decls, approved);
+      assert.equal(existsSync(join(sealed.dir, "scripts", sealed.decls[0].entry)), true);
+    } finally {
+      await sealed.dispose();
+    }
+  });
   it("refuses a symlink and leaves no copy behind", async () => {
     const dir = copyPack();
     const sha = await bundleSha256(dir);
@@ -204,10 +238,3 @@ describe("sealBundle", () => {
     assert.deepEqual(after.sort(), before.sort());
   });
 });
-
-// Hash of a sealed dir: wrap it as <x>/scripts so bundleSha256 can be reused.
-async function bundleSha256Dir(sealedDir) {
-  const wrap = join(tmp, `wrap-${n++}`);
-  cpSync(sealedDir, join(wrap, "scripts"), { recursive: true });
-  return bundleSha256(wrap);
-}
