@@ -138,7 +138,7 @@ A portable skill (first home: the demo repo; **my call**), built from the demo's
 | track people | `tracks_game.py` | `subject-tracks` |
 | identify people | `identity.py` | `subject-identity` |
 | follow subject | `follow.py` | `subject-tracks` (one subject) |
-| render follow story | `follow_reel.py` | `video` |
+| render follow story | `follow_story.py` | `video` |
 | check lines | `story.py` checks | checker script |
 
 The demo's `server.py` keeps the studio UI and stops owning the pipeline.
@@ -153,7 +153,7 @@ The demo's `server.py` keeps the studio UI and stops owning the pipeline.
 
 **Phase 3, 0.33.0.** A second sport (soccer, from `machina-avlm-soccer`; **my call**) built as a pack with no engine change. Fold the relay's `/api/highlights/jobs` into media jobs. Docs.
 
-**The talk (1 Dec) (my call).** Phase 1 goes on stage only if a full rehearsal is green by 24 Nov. Otherwise the demo runs today's pipeline with the honest wording from phase 0, and the talk shows this design as what ships next.
+**The talk (1 Dec) (decided by André, 16 Nov).** The deck describes the finished system, so phases 1 and 2 and the basketball pack ship before the talk. There is no fallback to today's pipeline. A full sandboxed rehearsal on 24 Nov is the gate: if phase 2 is not ready, the demo runs phase 1 + pack unsandboxed and slides 11–12 are reworded. Schedule: `docs/superpowers/plans/2026-11-16-media-stories-to-the-talk.md`. Phase 0's studio_agent change is dropped, because SportsClaw replaces the studio agent for story runs.
 
 **Each release:** npm publish (André), GitHub release, the OpenShell image rebuilt, docs. The docs site deploy is blocked on the Azure secret; fix that first or the docs do not ship.
 
