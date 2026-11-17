@@ -83,7 +83,8 @@ export interface WindowPolicy {
 
 /** The full typed request the core executes. */
 export interface HighlightsRequest {
-  rights: RightsAuthorization;
+  /** Required unless the operator turned the rights check off. */
+  rights?: RightsAuthorization;
   source: SourceMediaRef;
   event: CanonicalEventId;
   actions: PBPAction[];
@@ -149,7 +150,9 @@ export interface ClipManifest {
   generatedAt: string;
   state: "succeeded";
   event: CanonicalEventId;
-  rights: RightsAuthorization;
+  rights?: RightsAuthorization;
+  /** Set when the operator turned the rights check off for this run. */
+  rightsCheck?: "off (operator)";
   source: SourceMediaRef & { ffprobe: FfprobeEvidence; sha256?: string; sizeBytes?: number };
   syncAnchor: SyncAnchor;
   window: WindowPolicy;

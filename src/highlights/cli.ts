@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { resolveRightsCheck } from "../media/rights.js";
 import { parseHighlightsRequest } from "./plan.js";
 import { runHighlights } from "./run.js";
 import type { ClipManifest } from "./types.js";
@@ -46,7 +47,8 @@ function parseRunFlags(args: string[]): HighlightsRunFlags {
  * `sportsclaw highlights run` and `sportsclaw clip --request`.
  */
 export async function runHighlightsRequestFile(requestPath: string): Promise<ClipManifest> {
-  return runHighlights(parseHighlightsRequest(readRequestFile(requestPath)));
+  const opts = { rightsCheck: resolveRightsCheck(undefined, process.env) };
+  return runHighlights(parseHighlightsRequest(readRequestFile(requestPath), opts), opts);
 }
 
 function readRequestFile(requestPath: string): unknown {
@@ -187,7 +189,8 @@ export async function cmdHighlights(args: string[]): Promise<void> {
       validateManifestOutput(flags.outputPath, flags.requestPath, rawRequest);
       canWriteFailure = true;
     }
-    const manifest = await runHighlights(parseHighlightsRequest(rawRequest));
+    const opts = { rightsCheck: resolveRightsCheck(undefined, process.env) };
+    const manifest = await runHighlights(parseHighlightsRequest(rawRequest, opts), opts);
     if (flags.outputPath) writeManifestAtomic(flags.outputPath, manifest);
     console.log(
       `highlights: ${manifest.clips.length} clip(s) written to ${manifest.clips[0] ? manifest.clips.map((c) => c.file).join(", ") : "(none)"}`

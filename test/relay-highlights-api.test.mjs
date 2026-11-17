@@ -121,7 +121,7 @@ for i, action in enumerate(request["actions"]):
     })
 manifest = {
     "version": 1, "state": "succeeded",
-    "event": request["event"], "rights": request["rights"],
+    "event": request["event"], "rights": request.get("rights"),
     "source": dict(request["source"], ffprobe={"durationSec": 60, "formatName": "mov,mp4"}),
     "windows": [], "clips": clips,
 }
@@ -356,6 +356,29 @@ async def scenario_lifecycle():
         "missing_artifacts_status": missing_arts.status,
         "persisted_after_restart": persisted.data,
         "job_json_exists": os.path.exists(job_json),
+    })
+
+
+async def scenario_rights_optional():
+    # Create a job with no rights block, then report what the relay wrote for
+    # the CLI subprocess (request.json) once the job settles.
+    app = relay_server.create_app()
+    body = valid_body()
+    del body["rights"]
+    created = await create(app, body=body)
+    job_id = created.data.get("job_id")
+    final = None
+    request_json = None
+    if created.status == 202:
+        final = await wait_state(app, job_id, ("succeeded", "failed", "canceled"))
+        jobs_root = os.environ["HIGHLIGHTS_JOBS_ROOT"]
+        with open(os.path.join(jobs_root, job_id, "request.json")) as handle:
+            request_json = json.load(handle)
+    out({
+        "status": created.status,
+        "error": created.data.get("error", ""),
+        "final_state": (final or {}).get("state"),
+        "request_has_rights": None if request_json is None else "rights" in request_json,
     })
 
 
@@ -1219,6 +1242,7 @@ SCENARIOS = {
     "routes": scenario_routes,
     "validation": scenario_validation,
     "lifecycle": scenario_lifecycle,
+    "rights_optional": scenario_rights_optional,
     "orphan": scenario_orphan,
     "cancel": scenario_cancel,
     "source_snapshot": scenario_source_snapshot,
@@ -1451,6 +1475,25 @@ describe("relay highlights job lifecycle", () => {
     assert.equal(result.missing_status, 404);
     assert.equal(result.missing_artifacts_status, 404);
     assert.equal(result.persisted_after_restart.state, "succeeded", "restart must see terminal state from disk");
+  });
+
+  it("requires rights by default and when the rights switch is anything but exactly off", () => {
+    for (const value of [undefined, "OFF", "false"]) {
+      const env = value === undefined ? {} : { SPORTSCLAW_MEDIA_RIGHTS_CHECK: value };
+      const result = runScenario("rights_optional", { ...freshRoots(`rights-req-${value ?? "unset"}`), env });
+      assert.equal(result.status, 400, String(value));
+      assert.match(result.error, /rights/);
+    }
+  });
+
+  it("makes rights optional when SPORTSCLAW_MEDIA_RIGHTS_CHECK is exactly off, and omits it from the CLI request", () => {
+    const result = runScenario("rights_optional", {
+      ...freshRoots("rights-off"),
+      env: { SPORTSCLAW_MEDIA_RIGHTS_CHECK: "off" },
+    });
+    assert.equal(result.status, 202, JSON.stringify(result));
+    assert.equal(result.final_state, "succeeded", JSON.stringify(result));
+    assert.equal(result.request_has_rights, false, "rights must be omitted from the request JSON passed to the CLI");
   });
 
   it("reports jobs orphaned by a relay restart as terminal, not stuck running", () => {

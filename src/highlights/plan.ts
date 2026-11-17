@@ -13,8 +13,10 @@ import {
   type CandidateWindow,
   type HighlightsRequest,
   type PBPAction,
+  type RightsAuthorization,
   type WindowPolicy,
 } from "./types.js";
+import type { RightsCheckMode } from "../media/types.js";
 
 export class HighlightsValidationError extends Error {
   constructor(message: string) {
@@ -102,26 +104,35 @@ function validateAction(value: unknown, field: string): PBPAction {
  * Strictly validate an untyped payload (e.g. parsed JSON) into a
  * HighlightsRequest. Fails closed on any missing or invalid field.
  */
-export function parseHighlightsRequest(value: unknown): HighlightsRequest {
+export function parseHighlightsRequest(
+  value: unknown,
+  opts?: { rightsCheck?: RightsCheckMode },
+): HighlightsRequest {
   if (!isRecord(value)) fail("highlights request must be a JSON object");
 
-  // Rights authorization — refuse to clip without explicit clearance.
-  if (!isRecord(value.rights)) fail("rights authorization block is required");
-  if (value.rights.clearedForClipping !== true) {
-    fail("rights.clearedForClipping must be explicitly true — media is not cleared for clipping");
-  }
-  const territories = value.rights.territories;
-  if (territories !== undefined) {
-    if (!Array.isArray(territories) || territories.some((t) => typeof t !== "string")) {
-      fail("rights.territories must be an array of strings");
+  // Rights authorization — refuse to clip without explicit clearance, unless
+  // the operator turned the rights check off and no block was supplied.
+  let rights: RightsAuthorization | undefined;
+  if (opts?.rightsCheck === "off" && value.rights === undefined) {
+    rights = undefined;
+  } else {
+    if (!isRecord(value.rights)) fail("rights authorization block is required");
+    if (value.rights.clearedForClipping !== true) {
+      fail("rights.clearedForClipping must be explicitly true — media is not cleared for clipping");
     }
+    const territories = value.rights.territories;
+    if (territories !== undefined) {
+      if (!Array.isArray(territories) || territories.some((t) => typeof t !== "string")) {
+        fail("rights.territories must be an array of strings");
+      }
+    }
+    rights = {
+      rightsHolder: requireString(value.rights.rightsHolder, "rights.rightsHolder"),
+      licenseRef: requireString(value.rights.licenseRef, "rights.licenseRef"),
+      clearedForClipping: true,
+      territories: territories as string[] | undefined,
+    };
   }
-  const rights = {
-    rightsHolder: requireString(value.rights.rightsHolder, "rights.rightsHolder"),
-    licenseRef: requireString(value.rights.licenseRef, "rights.licenseRef"),
-    clearedForClipping: true,
-    territories: territories as string[] | undefined,
-  };
 
   // Source media reference — V1 is local-file only.
   if (!isRecord(value.source)) fail("source media reference is required");
@@ -207,8 +218,9 @@ export function validateHighlightsRequest(value: unknown): void {
 export function planCandidateWindows(
   request: HighlightsRequest | unknown,
   sourceDurationSec: number,
+  opts?: { rightsCheck?: RightsCheckMode },
 ): CandidateWindow[] {
-  const req = parseHighlightsRequest(request);
+  const req = parseHighlightsRequest(request, opts);
   if (!Number.isFinite(sourceDurationSec) || sourceDurationSec <= 0) {
     fail("sourceDurationSec must be a finite number > 0");
   }
