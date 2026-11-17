@@ -9,7 +9,9 @@
  *     SPORTSCLAW_ROLE_PROXY_URL / SPORTSCLAW_ROLE_PROXY_TOKEN when a role proxy is configured. Nothing else.
  *     The interpreter is `config.interpreters["<skill>/<kind>"] ?? config.interpreters.default ?? ["python3"]`.
  *   - input.json is `{ "input": <validated input>, "source"?: { "path", "sha256" } }` (source only for
- *     `readsSource` kinds). Files: `<workspaceDir>/jobs/<jobId>/input.json` and `.../out/` (0700).
+ *     `readsSource` kinds). Before the rights check the runner binds the source: its realpath must be a regular
+ *     file inside the workspace (`source_outside`) whose sha256 is the given one (`source_mismatch`); input.json
+ *     carries that realpath. Files: `<workspaceDir>/jobs/<jobId>/input.json` and `.../out/` (0700).
  *   - Limits: `timeLimitSec` (default 600) and `maxOutputBytes` (default DEFAULT_MAX_JOB_OUTPUT_BYTES), the total
  *     size of files under out/, checked every 250 ms and at exit. Over a limit, or on cancel, the whole process
  *     group is killed.
@@ -27,7 +29,7 @@ import { isDeepStrictEqual } from "node:util";
 import { DEFAULT_MAX_JOB_OUTPUT_BYTES } from "../highlights/run.js";
 import type { HighlightsJobState, RightsAuthorization } from "../highlights/types.js";
 import { PASSTHROUGH_ENV } from "../skill-runtime.js";
-import type { ArtifactStore } from "./artifacts.js";
+import { hashFile, type ArtifactStore } from "./artifacts.js";
 import { BundleError, sealBundle, type JobKindDecl } from "./bundle.js";
 import { RIGHTS_OFF_NOTE, resolveRightsCheck } from "./rights.js";
 import type { Artifact, ArtifactKind, MediaConfig } from "./types.js";
@@ -79,6 +81,8 @@ export class JobError extends Error {
       | "invalid_interpreter"
       | "invalid_input"
       | "source_required"
+      | "source_outside"
+      | "source_mismatch"
       | "rights_required"
       | "unknown_job",
     message: string,
@@ -202,6 +206,20 @@ async function readManifest(outDir: string, decl: JobKindDecl, hasSource: boolea
   return { ok: true, facts: (doc.facts as Record<string, unknown> | undefined) ?? {}, items };
 }
 
+/** Ties the caller's source path to its sha256: returns the realpath of a regular file inside the workspace. */
+async function bindSource(workspaceDir: string, path: string, sha256: string): Promise<string> {
+  const realWs = await fs.realpath(workspaceDir).catch(() => undefined);
+  const real = await fs.realpath(path).catch(() => undefined);
+  if (!realWs || !real || !real.startsWith(realWs + sep)) {
+    throw new JobError("source_outside", "The source must be a file inside the workspace.");
+  }
+  const st = await fs.lstat(real).catch(() => undefined);
+  if (!st || !st.isFile() || (await hashFile(real).catch(() => "")) !== sha256) {
+    throw new JobError("source_mismatch", "The source file is not a regular file with the given sha256.");
+  }
+  return real;
+}
+
 export class LocalJobRunner implements JobRunner {
   private readonly store: ArtifactStore;
   private readonly config: MediaConfig;
@@ -266,16 +284,18 @@ export class LocalJobRunner implements JobRunner {
     const inputJson: Record<string, unknown> = { input: req.input };
 
     let rightsOff = false;
+    let sourcePath: string;
     if (decl.readsSource) {
       const src = req.source;
       if (!src || typeof src.path !== "string" || typeof src.sha256 !== "string" || !SHA_RE.test(src.sha256)) {
         throw new JobError("source_required", "This job kind reads the source; give { path, sha256 }.");
       }
+      sourcePath = await bindSource(this.config.workspaceDir, src.path, src.sha256);
       if (resolveRightsCheck(this.config, this.env) === "off") rightsOff = true;
       else if (!rightsCleared(src.rights)) {
         throw new JobError("rights_required", "This job kind reads the source; a rights block with clearedForClipping: true is required.");
       }
-      inputJson.source = { path: src.path, sha256: src.sha256 };
+      inputJson.source = { path: sourcePath, sha256: src.sha256 };
     }
     const inputText = JSON.stringify(inputJson);
     if (Buffer.byteLength(inputText) > MAX_INPUT_BYTES) throw new JobError("invalid_input", "Input is larger than 1 MiB.");

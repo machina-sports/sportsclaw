@@ -36,7 +36,7 @@ interface StoredArtifact {
 const ID_RE = /^art_[0-9a-f]{16}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
 
-function hashFile(path: string): Promise<string> {
+export function hashFile(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const h = createHash("sha256");
     createReadStream(path)

@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it, after } from "node:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,7 +70,12 @@ async function rejects(promise, code) {
   });
 }
 
-const SRC = { path: "/media/game.mp4", sha256: "a".repeat(64) };
+/** Writes a source file at `path` and returns { path, sha256 } with its real sha256. */
+function sourceAt(path, body = "game video bytes") {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, body);
+  return { path, sha256: createHash("sha256").update(body).digest("hex") };
+}
 const RIGHTS = { rightsHolder: "League", licenseRef: "L-1", clearedForClipping: true };
 
 describe("LocalJobRunner", () => {
@@ -111,7 +116,9 @@ describe("LocalJobRunner", () => {
 
   it("readsSource without rights under require -> rights_required; under off it runs and notes it", async () => {
     const req = { decl: A.decl("source-job"), skillDir: pack, bundleSha256: A.sha, input: {} };
-    const strict = setup({ rightsCheck: "require" }).runner;
+    const strictWs = setup({ rightsCheck: "require" });
+    const strict = strictWs.runner;
+    const SRC = sourceAt(join(strictWs.workspaceDir, "media", "game.mp4"));
     await rejects(strict.start({ ...req, source: SRC }), "rights_required");
     await rejects(strict.start({ ...req, source: { ...SRC, rights: { ...RIGHTS, clearedForClipping: false } } }), "rights_required");
     const cleared = await run(strict, "source-job", {}, { source: { ...SRC, rights: RIGHTS } });
@@ -119,11 +126,50 @@ describe("LocalJobRunner", () => {
     assert.equal(cleared.rightsCheck, undefined);
     assert.equal(cleared.artifacts[0].sourceSha256, SRC.sha256);
 
-    const off = setup({ rightsCheck: "off" }).runner;
-    const rec = await run(off, "source-job", {}, { source: SRC });
+    const offWs = setup({ rightsCheck: "off" });
+    const OFF_SRC = sourceAt(join(offWs.workspaceDir, "media", "game.mp4"));
+    const rec = await run(offWs.runner, "source-job", {}, { source: OFF_SRC });
     assert.equal(rec.state, "succeeded", rec.error);
     assert.equal(rec.rightsCheck, "off (operator)");
-    assert.deepEqual(rec.facts.source, { path: SRC.path, sha256: SRC.sha256 });
+    assert.deepEqual(rec.facts.source, { path: realpathSync(OFF_SRC.path), sha256: OFF_SRC.sha256 });
+  });
+
+  it("source inside the workspace but with another file's sha256 -> source_mismatch, no job dir", async () => {
+    const { runner, workspaceDir } = setup({ rightsCheck: "require" });
+    const a = sourceAt(join(workspaceDir, "media", "a.mp4"), "cleared source A");
+    const b = sourceAt(join(workspaceDir, "media", "b.mp4"), "other source B");
+    const req = { decl: A.decl("source-job"), skillDir: pack, bundleSha256: A.sha, input: {} };
+    await rejects(runner.start({ ...req, source: { path: b.path, sha256: a.sha256, rights: RIGHTS } }), "source_mismatch");
+    assert.equal(existsSync(join(workspaceDir, "jobs")), false);
+  });
+
+  it("source outside the workspace, even with its correct sha256 -> source_outside, no job dir", async () => {
+    const { runner, workspaceDir } = setup({ rightsCheck: "require" });
+    const outside = sourceAt(join(tmp, `outside-${n++}`, "game.mp4"));
+    const req = { decl: A.decl("source-job"), skillDir: pack, bundleSha256: A.sha, input: {} };
+    await rejects(runner.start({ ...req, source: { ...outside, rights: RIGHTS } }), "source_outside");
+    assert.equal(existsSync(join(workspaceDir, "jobs")), false);
+  });
+
+  it("a symlink inside the workspace pointing outside -> source_outside, no job dir", async () => {
+    const { runner, workspaceDir } = setup({ rightsCheck: "require" });
+    const outside = sourceAt(join(tmp, `outside-${n++}`, "game.mp4"));
+    mkdirSync(join(workspaceDir, "media"));
+    const link = join(workspaceDir, "media", "game.mp4");
+    symlinkSync(outside.path, link);
+    const req = { decl: A.decl("source-job"), skillDir: pack, bundleSha256: A.sha, input: {} };
+    await rejects(runner.start({ ...req, source: { path: link, sha256: outside.sha256, rights: RIGHTS } }), "source_outside");
+    assert.equal(existsSync(join(workspaceDir, "jobs")), false);
+  });
+
+  it("a bound source runs and input.json carries the source's realpath", async () => {
+    const { runner, workspaceDir } = setup({ rightsCheck: "require" });
+    const src = sourceAt(join(workspaceDir, "media", "game.mp4"));
+    const spelled = `${workspaceDir}/media/./../media/game.mp4`;
+    const rec = await run(runner, "source-job", {}, { source: { path: spelled, sha256: src.sha256, rights: RIGHTS } });
+    assert.equal(rec.state, "succeeded", rec.error);
+    const input = JSON.parse(readFileSync(join(workspaceDir, "jobs", rec.jobId, "input.json"), "utf8"));
+    assert.deepEqual(input.source, { path: realpathSync(src.path), sha256: src.sha256 });
   });
 
   it("slow_job past timeLimitSec is killed: failed, error mentions the limit, no artifacts", async () => {
