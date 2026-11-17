@@ -9,6 +9,7 @@
  * (see LocalJobRunner's `roleProxy`). Checks run in this order: Host (403), token (401), role
  * allowlist (403), body size (413), JSON (400), then the model call (502 on failure, with the body
  * `{ error: "model call failed: <router error code>" }` and nothing logged: provider text can echo keys).
+ * With `unref: true` the listening server does not keep the process alive (a one-shot host can exit).
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -26,10 +27,12 @@ export const MAX_ROLE_PROXY_BODY_BYTES = 64 * 1024 * 1024;
 export interface RoleProxy {
   /** Base URL, e.g. `http://127.0.0.1:41234`; callers POST to `${url}/role/<role>`. */
   url: string;
-  /** 32 random bytes, hex; valid until `close()`. Its calls' receipts go to `onReceipt`. */
+  /** 32 random bytes, hex; valid until `close()` or `revokeToken`. Its calls' receipts go to `onReceipt`. */
   token: string;
-  /** Another token, valid until `close()`, whose calls' receipts go to `onReceipt` (one per prep job). */
+  /** Another token, valid until `close()` or `revokeToken`, whose calls' receipts go to `onReceipt` (one per prep job). */
   addToken(onReceipt?: (r: InferenceReceipt) => void): string;
+  /** Removes that token: later calls with it get 401. An unknown token is a no-op. */
+  revokeToken(token: string): void;
   /** Stops listening and drops open connections. Safe to call more than once. */
   close(): Promise<void>;
 }
@@ -81,6 +84,8 @@ export async function startRoleProxy(opts: {
   inference: ModelRoleRouterConfig;
   allowRoles: ModelRole[];
   onReceipt?: (r: InferenceReceipt) => void;
+  /** Do not let the listening server keep the process alive (accepted sockets are unchanged). */
+  unref?: boolean;
 }): Promise<RoleProxy> {
   const token = randomBytes(32).toString("hex");
   /** token -> where its calls' receipts go */
@@ -178,6 +183,7 @@ export async function startRoleProxy(opts: {
     server.listen(0, "127.0.0.1", () => resolve());
   });
   port = (server.address() as { port: number }).port;
+  if (opts.unref) server.unref();
 
   let closing: Promise<void> | undefined;
   return {
@@ -187,6 +193,9 @@ export async function startRoleProxy(opts: {
       const t = randomBytes(32).toString("hex");
       tokens.set(t, onReceipt);
       return t;
+    },
+    revokeToken(t) {
+      if (t !== token) tokens.delete(t);
     },
     close() {
       closing ??= new Promise<void>((resolve) => {

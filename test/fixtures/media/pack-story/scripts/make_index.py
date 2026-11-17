@@ -1,6 +1,6 @@
 # Writes the events it is given as a shared event-index for the source.
 # mode "bad-sha" names another source; mode "extra-field" adds a key the index shape does not have;
-# mode "unshared" does not mark it shared. "sleep" waits that many seconds first.
+# mode "unshared" does not mark it shared; mode "leak-token" puts its proxy url and token in the facts (tests only). "sleep" waits that many seconds first.
 import json, os, sys, time
 from ask_proxy import ask_eyes
 a = sys.argv
@@ -17,5 +17,5 @@ if mode == "bad-sha":
 if mode == "extra-field":
     events = [dict(e, extra=1) for e in events]
 json.dump({"version": 1, "sourceSha256": sha, "events": events, "skipped": []}, open(os.path.join(out, "index.json"), "w"))
-json.dump({"artifacts": [{"kind": "event-index", "file": "index.json", "shared": mode != "unshared"}], "facts": {"events": len(events)}},
+json.dump({"artifacts": [{"kind": "event-index", "file": "index.json", "shared": mode != "unshared"}], "facts": dict({"events": len(events)}, **({"url": os.environ.get("SPORTSCLAW_ROLE_PROXY_URL", ""), "token": os.environ.get("SPORTSCLAW_ROLE_PROXY_TOKEN", "")} if mode == "leak-token" else {}))},
           open(os.path.join(out, "manifest.json"), "w"))

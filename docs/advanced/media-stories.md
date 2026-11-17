@@ -282,7 +282,8 @@ an hour. A kind declared `"prep": true` is a **prep job**:
 `prep` is dropped. A prep job:
 
 - runs on the engine, not the run: an engine-wide runner and role proxy, started with the first
-  prep job from the engine's `media` and `inference` config;
+  prep job from the engine's `media` and `inference` config. The job has its own role-proxy token,
+  revoked when the job ends, and the proxy does not keep the process alive by itself;
 - is **not** cancelled when the run that started it ends (the run's other jobs are);
 - registers every artifact it makes as `shared` for the source when it succeeds, so a later run
   that opens the same file finds it in `shared`;

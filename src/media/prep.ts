@@ -9,7 +9,7 @@
  *     the source, so a later run that opens the same file finds it.
  *   - A later run on the same engine can read them by jobId (media_job_status, media_job_cancel).
  *   - At most MAX_PREP_JOBS run at once; the next start is refused with `prep_busy`.
- *   - Each job gets its own role-proxy token. Its receipts go to the run that started it while that run is
+ *   - Each job gets its own role-proxy token, revoked when the job ends. Its receipts go to the run that started it while that run is
  *     live (`sink.ended` false), and to this object's list after it ended (drainReceipts()).
  *
  * close() cancels running prep jobs and closes the proxy; their records stay readable. A prep job started
@@ -66,7 +66,7 @@ export class MediaPrep {
       const interpreters = { ...config.interpreters };
       if (!interpreters.default && pythonPath) interpreters.default = [pythonPath];
       const roles = Object.keys(inference?.roles ?? {}).filter((r) => r !== "brain") as ModelRole[];
-      const proxy = inference && roles.length > 0 ? await startRoleProxy({ inference, allowRoles: roles }) : undefined;
+      const proxy = inference && roles.length > 0 ? await startRoleProxy({ inference, allowRoles: roles, unref: true }) : undefined;
       const runner = new LocalJobRunner({
         store: new ArtifactStore({ workspaceDir, runId: `prep_${randomBytes(8).toString("hex")}` }),
         // The engine-wide cap is MAX_PREP_JOBS at once; each run counts the prep jobs it starts.
@@ -98,9 +98,22 @@ export class MediaPrep {
         if (sink.ended) this.receipts.push({ ...r });
         else sink.onReceipt?.(r);
       };
-      const rec = await runner.start({ ...req, ...(proxy ? { roleProxyToken: proxy.addToken(onReceipt) } : {}) });
+      const token = proxy?.addToken(onReceipt);
+      let rec: JobRecord;
+      try {
+        rec = await runner.start({ ...req, ...(token ? { roleProxyToken: token } : {}) });
+      } catch (err) {
+        if (token) proxy?.revokeToken(token);
+        throw err;
+      }
       this.jobs.set(rec.jobId, runner);
       this.running.add(rec.jobId);
+      // Promise reactions are not timers: this does not hold the process, and both branches are handled.
+      const release = () => {
+        if (token) proxy?.revokeToken(token);
+        this.running.delete(rec.jobId);
+      };
+      void runner.ended(rec.jobId).then(release, release);
       return rec;
     } finally {
       this.starting--;

@@ -487,6 +487,11 @@ export class LocalJobRunner implements JobRunner {
     return this.snapshot(job.record);
   }
 
+  /** Resolves when the job's `done` settles (any end state). Not on `JobRunner`: only local callers need it. */
+  async ended(jobId: string): Promise<void> {
+    await this.live(jobId).done;
+  }
+
   async cancel(jobId: string): Promise<JobRecord> {
     const job = this.live(jobId);
     if (job.record.state === "running") {

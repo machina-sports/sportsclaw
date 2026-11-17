@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { after, describe, it } from "node:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -834,6 +834,58 @@ describe("media story tools: prep jobs outlive the run", () => {
     assert.equal(ok(await call("media_job_status", { jobId: p.jobId })).state, "running");
     await prep.close();
     assert.equal(ok(await call("media_job_status", { jobId: p.jobId })).state, "canceled");
+  });
+
+  it("a prep job's role-proxy token is refused once the job has ended", async () => {
+    const workspaceDir = newWorkspace();
+    const prep = newPrep(workspaceDir);
+    const { call } = await make({ workspaceDir, prep, kinds: PREP_KINDS });
+    const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
+    const p = ok(await prepIndex(call, src.sourceArtifactId, { mode: "leak-token" }));
+    const st = ok(await call("media_job_status", { jobId: p.jobId, waitSec: 30 }));
+    assert.equal(st.state, "succeeded", st.error);
+    const { url, token } = st.facts;
+    assert.match(token, /^[0-9a-f]{64}$/);
+    const post = (bearer) => new Promise((resolve, reject) => {
+      const req = http.request(`${url}/role/eyes`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` } },
+        (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); });
+      req.on("error", reject);
+      req.end(JSON.stringify({ input: "x" }));
+    });
+    // Revocation is chained on the job's end; give that microtask-scale step a moment.
+    for (let i = 0; i < 50 && (await post(token)) !== 401; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(await post(token), 401);
+    // A job started after it still gets a working token.
+    const p2 = ok(await prepIndex(call, src.sourceArtifactId, { mode: "leak-token", sleep: 1 }));
+    const st2 = ok(await call("media_job_status", { jobId: p2.jobId, waitSec: 30 }));
+    assert.notEqual(st2.facts.token, token);
+  });
+
+  it("a host that ran a prep job exits by itself, without closeMedia()", async () => {
+    const workspaceDir = newWorkspace();
+    const decl = { skill: SKILL, ...JSON.parse(readFileSync(join(pack, "jobs.json"), "utf8")).jobs.find((j) => j.kind === "prep-index") };
+    const script = join(tmp, `host-${n++}.mjs`);
+    writeFileSync(script, `
+import { MediaPrep } from ${JSON.stringify(join(repoRoot, "dist/media/prep.js"))};
+const o = JSON.parse(process.argv[2]);
+const prep = new MediaPrep({ config: { workspaceDir: o.workspaceDir }, inference: o.inference, env: process.env });
+const rec = await prep.start({ skillDir: o.skillDir, bundleSha256: o.sha, decl: o.decl, input: { events: o.events },
+  source: { path: o.workspaceDir + "/media/game.mp4", sha256: o.sourceSha, rights: o.rights } }, { ended: false });
+const st = await prep.status(rec.jobId, { waitSec: 30 });
+console.log("state:" + st.state);
+`);
+    const arg = JSON.stringify({ workspaceDir, inference: INFERENCE, skillDir: pack, sha: SHA, decl, events: EVENTS, sourceSha: SOURCE_SHA, rights: RIGHTS });
+    // Async spawn: this process also serves the mock model the job calls.
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [script, arg], { env: { ...process.env, ...allow(PREP_KINDS) } });
+      let stdout = "";
+      child.stdout.on("data", (c) => (stdout += c));
+      child.stderr.on("data", (c) => (stdout += c));
+      const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+      child.on("exit", (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout }); });
+    });
+    assert.deepEqual([out.code, out.signal], [0, null], `host did not exit by itself: ${out.stdout}`);
+    assert.match(out.stdout, /state:succeeded/);
   });
 
   it("at most 4 prep jobs run at once (prep_busy)", async () => {

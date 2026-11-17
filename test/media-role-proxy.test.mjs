@@ -68,6 +68,21 @@ describe("role proxy", () => {
     }
   });
 
+  it("revokeToken makes that token 401; the base token, another added token and unknown tokens are unaffected", async () => {
+    const proxy = await startRoleProxy({ inference, allowRoles: ["brain"] });
+    try {
+      const a = proxy.addToken();
+      const b = proxy.addToken();
+      const ask = (token) => request(proxy.url, { path: "/role/brain", headers: json(token), body: JSON.stringify({ input: "hi" }) });
+      assert.equal((await ask(a)).status, 200);
+      proxy.revokeToken(a);
+      proxy.revokeToken("not-a-token");
+      assert.deepEqual([(await ask(a)).status, (await ask(b)).status, (await ask(proxy.token)).status], [401, 200, 200]);
+    } finally {
+      await proxy.close();
+    }
+  });
+
   it("answers 403 for a role outside allowRoles, before touching the route", async () => {
     const proxy = await startRoleProxy({ inference, allowRoles: ["brain"] });
     try {
