@@ -33,7 +33,7 @@ const MAX_STDERR_CHARS = 4000;
 const REFERENCE_EXTENSIONS = [".md", ".txt", ".json", ".yaml", ".yml", ".html"];
 const ALLOWLIST_ENV = "SPORTSCLAW_SKILL_SCRIPT_ALLOWLIST";
 // Non-secret basics only: never credentials, HOME, PYTHONPATH or SPORTSCLAW_*.
-const PASSTHROUGH_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR"];
+export const PASSTHROUGH_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR"];
 // Runs the verified bytes from stdin as __main__ with __file__/argv of the real path.
 const PYTHON_BOOTSTRAP =
   "import sys;sys.argv=sys.argv[1:];__file__=sys.argv[0];" +

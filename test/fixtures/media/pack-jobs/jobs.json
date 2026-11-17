@@ -1,0 +1,17 @@
+{
+  "jobs": [
+    { "kind": "ok-job", "entry": "ok_job.py", "readsSource": false, "produces": ["facts"],
+      "inputSchema": { "type": "object", "required": ["text"], "additionalProperties": false,
+                       "properties": { "text": { "type": "string" }, "kind": { "type": "string" } } } },
+    { "kind": "source-job", "entry": "ok_job.py", "readsSource": true, "produces": ["facts"],
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } } },
+    { "kind": "slow-job", "entry": "slow_job.py", "readsSource": false, "timeLimitSec": 1, "produces": ["facts"],
+      "inputSchema": { "type": "object" } },
+    { "kind": "big-job", "entry": "big_job.py", "readsSource": false, "maxOutputBytes": 200000, "produces": ["facts"],
+      "inputSchema": { "type": "object" } },
+    { "kind": "escape-job", "entry": "escape_job.py", "readsSource": false, "produces": ["facts"],
+      "inputSchema": { "type": "object", "properties": { "mode": { "type": "string" } } } },
+    { "kind": "env-job", "entry": "env_job.py", "readsSource": false, "produces": ["facts"],
+      "inputSchema": { "type": "object" } }
+  ]
+}

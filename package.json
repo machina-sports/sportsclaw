@@ -104,6 +104,7 @@
     "test:media-artifacts": "npm run build && node --test test/media-artifacts.test.mjs",
     "test:media-bundle": "npm run build && node --test test/media-bundle.test.mjs",
     "test:media-rights": "npm run build && node --test test/media-rights.test.mjs",
+    "test:media-jobs": "npm run build && node --test test/media-jobs.test.mjs",
     "test:highlights-providers": "npm run build && node --test test/highlights-providers.test.mjs"
   },
   "keywords": [
