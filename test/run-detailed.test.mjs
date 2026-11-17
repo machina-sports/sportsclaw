@@ -4,7 +4,7 @@
 // never share a turn. Real engine.run; only the model, registry and tool bodies
 // are stubbed. All state lives under a mkdtemp HOME.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -303,6 +303,38 @@ describe("host tools: defined in the embedding app, no MCP server", () => {
     const result = await engine.runDetailed("go", caller);
     const out = result.toolResults[0].output;
     assert.ok(out.length < 31_000 && out.includes("[... output truncated"), `length ${out.length}`);
+  });
+});
+
+describe("a refused media tool call is visible", () => {
+  it("is a step with its refusal code on the trace, and a failed call in the tool metrics", async () => {
+    const workspaceDir = join(root, "media-ws");
+    const model = new MockLanguageModelV3({
+      doGenerate: async (call) => {
+        if (isVerdictCall(call)) return generated([{ type: "text", text: JSON.stringify({ isValid: true, discrepancies: [] }) }]);
+        const offered = (call.tools ?? []).map((t) => t.name);
+        if (!sawToolResult(call) && offered.includes("media_job_start")) {
+          const input = { skill: "pack", kind: "identify-people", input: {} };
+          return generated([{ type: "tool-call", toolCallId: "media_1", toolName: "media_job_start", input: JSON.stringify(input) }]);
+        }
+        return generated([{ type: "text", text: "The job could not start." }]);
+      },
+    });
+    const engine = new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir } });
+    engine.mainModel = model;
+    engine.registry = { getInstalledSkills: () => [], getAllToolSpecs: () => [], getSkillName: () => undefined };
+    engine.setToolAllowlist(["media_job_start"]);
+    try {
+      const result = await engine.runDetailed("Start the identify-people job.", caller);
+      assert.match(result.toolResults[0].output, /"error_code":"unknown_kind"/);
+      const steps = engine.lastRunTrace.mediaSteps;
+      assert.deepEqual(steps.map(({ input: _input, ...step }) => step), [{ tool: "media_job_start", artifactIds: [], refused: "unknown_kind" }]);
+      const metrics = JSON.parse(readFileSync(join(root, ".sportsclaw", "analytics", "tool_metrics.json"), "utf8"));
+      assert.equal(metrics.media_job_start.successCount, 0);
+      assert.equal(metrics.media_job_start.failCount, 1);
+    } finally {
+      await engine.closeMedia?.();
+    }
   });
 });
 

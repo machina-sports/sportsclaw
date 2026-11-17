@@ -10,7 +10,7 @@ export type { ArtifactErrorCode } from "./artifacts.js";
 export { BundleError, JOB_ALLOWLIST_ENV, approvedJobBundles, approvedJobKinds, bundleSha256, sealBundle } from "./bundle.js";
 export type { ApprovedBundle, JobKindDecl } from "./bundle.js";
 export { JobError, LocalJobRunner } from "./jobs.js";
-export type { JobArtifactRef, JobRecord, JobRunner } from "./jobs.js";
+export type { JobArtifactRef, JobRecord, JobRunner, JobStatusFile } from "./jobs.js";
 export { MAX_ROLE_PROXY_BODY_BYTES, startRoleProxy } from "./role-proxy.js";
 export type { RoleProxy } from "./role-proxy.js";
 export { ClockMapError, clockMapFromSyncAnchor, clockToVideoSec, parseClockMap } from "./clock-map.js";
