@@ -426,6 +426,29 @@ describe("media story tools: renderers", () => {
     assert.deepEqual(Object.keys(st.facts.artifacts).sort(), [p.src.sourceArtifactId, p.checked.linesArtifactId, ...p.voices].sort());
   });
 
+  it("story_render passes a renderer its own input beside the timeline, checked against its schema and the one-source rule", { skip: NO_FFMPEG }, async () => {
+    const { call, workspaceDir } = await make();
+    const p = await prepared(call);
+    const built = ok(await call("story_timeline_build", { timeline: timelineOf(p, { lineId: "line_1" }) }));
+    const render = (input) => call("story_render", { timelineArtifactId: built.timelineArtifactId, renderer: `${SKILL}/render-video`, input });
+
+    const video = ok(await render({ espnEventId: "401", alt: p.src.sourceArtifactId }));
+    const st = ok(await call("media_job_status", { jobId: video.jobId }));
+    assert.deepEqual(st.facts.input, { espnEventId: "401", alt: p.src.sourceArtifactId });
+    assert.deepEqual(st.facts.captions, ["Smith hits from deep.", null]);
+    assert.ok(Object.keys(st.facts.artifacts).includes(p.src.sourceArtifactId));
+
+    refused(await render({ timeline: { captions: ["UNCHECKED"] } }), "invalid_input");
+    refused(await render({ espnEventId: 401 }), "invalid_input");
+    refused(await render({ colour: "red" }), "invalid_input");
+    refused(await render("401"), "invalid_input");
+    refused(await render({ alt: p.checked.linesArtifactId }), "artifact_wrong_kind");
+    writeFileSync(join(workspaceDir, "media", "other.mp4"), "other bytes");
+    const other = ok(await call("media_source_open", { path: "media/other.mp4" }));
+    refused(await render({ alt: other.sourceArtifactId }), "source_mismatch");
+    refused(await call("story_render", { timelineArtifactId: built.timelineArtifactId, input: { espnEventId: "401" } }), "invalid_input");
+  });
+
   it("media_job_start refuses a renderer kind (renderer_only): captions nobody checked never reach a renderer", async () => {
     const { call, workspaceDir } = await make();
     const src = ok(await call("media_source_open", { path: "media/game.mp4" }));

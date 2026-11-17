@@ -26,6 +26,8 @@
  *     result and its step name the checker that ran ("<skill>/check-lines" or "built-in").
  *   - Renderers: a kind whose produces includes "video" runs only through story_render; media_job_start
  *     refuses it (`renderer_only`), so a renderer never gets a timeline the engine did not resolve.
+ *     story_render's optional `input` (never `timeline`) is merged as { timeline, ...input }, validated
+ *     against the renderer's schema, and its x-artifact-kind ids go through the same checks as a job's.
  *   - Rights: under rightsCheck "require", reading the source (a source-reading job, a skill renderer, the
  *     plain renderer) needs a clearance whose sourceSha256 is the source's sha256, from operator config
  *     (media.clearances) or the app starting the run (ctx.clearances). No tool takes a rights input, so
@@ -343,7 +345,11 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
   },
   story_render: {
     type: "object",
-    properties: { timelineArtifactId: ID, renderer: { type: "string", description: '"plain" (default) or an approved "<skill>/<kind>".' } },
+    properties: {
+      timelineArtifactId: ID,
+      renderer: { type: "string", description: '"plain" (default) or an approved "<skill>/<kind>".' },
+      input: { type: "object", description: "A skill renderer's own input, as its jobs.json schema describes; the engine adds timeline." },
+    },
     required: ["timelineArtifactId"],
   },
 };
@@ -810,6 +816,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     async story_render(a, abortSignal) {
       const timelineArtifact = await need(a.timelineArtifactId, "timeline");
       const renderer = optStr(a, "renderer", 200) ?? "plain";
+      if (a.input !== undefined && !isPlainObject(a.input)) refuse("invalid_input", "input must be an object.");
+      const extra = a.input ?? {};
+      if (Object.hasOwn(extra, "timeline")) refuse("invalid_input", '"timeline" is reserved: story_render passes the timeline it resolved.');
+      if (renderer === "plain" && Object.keys(extra).length > 0) refuse("invalid_input", "input is for a skill renderer; the plain renderer takes none.");
       const { resolved, source } = await resolveForStory(await readJsonArtifact(timelineArtifact, "bad_timeline"));
       const sha = source.artifact.sha256;
 
@@ -820,14 +830,16 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         if (!decl.produces.includes("video") || !decl.readsSource) {
           refuse("renderer_invalid", `${renderer} is not a renderer: it must read the source and produce video.`);
         }
+        // The renderer's own input (its schema, x-artifact-kind ids, one source) beside the resolved timeline.
+        const artifacts = { ...(await artifactInputs(decl, extra, sha)), ...(await timelineArtifacts(resolved, source)) };
         const { rights } = authorize(sha);
         const started = await runner.start({
           decl,
           skillDir: bundle.skillDir,
           bundleSha256: bundle.bundleSha256,
-          input: { timeline: resolved },
+          input: { timeline: resolved, ...extra },
           source: { path: source.artifact.path, sha256: sha, ...(rights ? { rights } : {}) },
-          artifacts: await timelineArtifacts(resolved, source),
+          artifacts,
         });
         jobs.set(started.jobId, approved);
         const rec = await waitForJob(started.jobId, abortSignal);
