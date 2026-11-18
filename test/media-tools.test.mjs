@@ -668,7 +668,7 @@ describe("media story tools: timelines", () => {
     const p = await prepared(call);
     const t = {
       version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
-      segments: [{ kind: "clip", eventId: "ev_1", lineId: "line_1" }, { kind: "clip", eventId: "ev_2", startSec: 5, endSec: 9 }],
+      segments: [{ kind: "clip", eventId: "ev_1", lineId: "line_1", voiceArtifactId: p.voices[0] }, { kind: "clip", eventId: "ev_2", startSec: 5, endSec: 9 }],
     };
     const built = ok(await call("story_timeline_build", { timeline: t }));
     const doc = JSON.parse(readFileSync(JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${built.timelineArtifactId}.json`), "utf8")).artifact.path, "utf8"));
@@ -715,6 +715,111 @@ describe("media story tools: timelines", () => {
     assert.equal(src.durationSec, null);
     const t = { version: 1, sourceArtifactId: src.sourceArtifactId, segments: [{ kind: "card", cardSeconds: 2 }] };
     refused(await call("story_timeline_build", { timeline: t }), "source_duration_unknown");
+  });
+});
+
+describe("media story tools: a voiced story has a voice", { skip: NO_FFMPEG }, () => {
+  /** Index and checked lines (line_1 cites ev_1, line_2 cites fact_1); nothing spoken yet. */
+  async function checkedOnly(call) {
+    const { src, indexId } = await openAndIndex(call);
+    const facts = ok(await call("story_facts_collect"));
+    const checked = ok(await call("story_check_lines", { indexArtifactId: indexId, factsArtifactId: facts.factsArtifactId, lines: WRITER_LINES }));
+    return { src, checked };
+  }
+  /** Two captioned segments (voiced when a voice id is given) and a clip with no caption. */
+  const story = (p, voices = []) => ({
+    timeline: {
+      version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
+      segments: [
+        { kind: "clip", eventId: "ev_1", lineId: "line_1", ...(voices[0] ? { voiceArtifactId: voices[0] } : {}) },
+        { kind: "card", cardSeconds: 2, lineId: "line_2", ...(voices[1] ? { voiceArtifactId: voices[1] } : {}) },
+        { kind: "clip", startSec: 6, endSec: 9 },
+      ],
+    },
+  });
+  const speak = (call, p, lineIds) => call("speech_synthesize", { linesArtifactId: p.checked.linesArtifactId, lineIds });
+
+  /** A speech service (openai format) that fails with 503 while `down` is true, else answers a short WAV. */
+  async function speechService() {
+    const wav = Buffer.alloc(44 + 1600);
+    wav.write("RIFF", 0); wav.writeUInt32LE(36 + 1600, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16);
+    wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28);
+    wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(1600, 40);
+    const service = { down: true };
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (service.down) {
+          res.statusCode = 503;
+          res.end("unavailable");
+        } else {
+          res.setHeader("content-type", "audio/wav");
+          res.end(wav);
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    disposers.push(() => new Promise((resolve) => server.close(resolve)));
+    service.inference = { ...INFERENCE, speech: { route: "nim", format: "openai", model: "tts", voice: "v", baseUrl: `http://127.0.0.1:${server.address().port}/v1` } };
+    return service;
+  }
+
+  it("with speech configured, a captioned segment with no voiceArtifactId -> voice_missing, naming the segments and their lines", async () => {
+    const { call, media } = await make();
+    const p = await checkedOnly(call);
+
+    // The agent never called speech_synthesize.
+    const silent = await call("story_timeline_build", story(p));
+    refused(silent, "voice_missing");
+    assert.match(silent.message, /segment 0 \(line_1\), segment 1 \(line_2\)/);
+    assert.match(silent.message, /speech_synthesize/);
+    assert.equal(media.steps.at(-1).refused, "voice_missing");
+
+    // A refused speech call (the agent's mistake, not the service's) excuses nothing.
+    refused(await speak(call, p, ["line_9"]), "unknown_line");
+    refused(await call("story_timeline_build", story(p)), "voice_missing");
+
+    const one = ok(await speak(call, p, ["line_1"])).voices[0].voiceArtifactId;
+    const half = await call("story_timeline_build", story(p, [one]));
+    refused(half, "voice_missing");
+    assert.match(half.message, /segment 1 \(line_2\)/);
+    assert.doesNotMatch(half.message, /line_1/);
+
+    const two = ok(await speak(call, p, ["line_2"])).voices[0].voiceArtifactId;
+    ok(await call("story_timeline_build", story(p, [one, two])));
+  });
+
+  it("without inference.speech a captioned timeline needs no voice, as before", async () => {
+    const { call } = await make({ inference: { roles: INFERENCE.roles } });
+    const p = await checkedOnly(call);
+    ok(await call("story_timeline_build", story(p)));
+  });
+
+  it("a line whose speech_synthesize call failed in this run may go without a voice; a line never tried may not", async () => {
+    const service = await speechService();
+    const { call } = await make({ inference: service.inference });
+    const p = await checkedOnly(call);
+
+    refused(await speak(call, p, ["line_1"]), "speech_failed");
+    const untried = await call("story_timeline_build", story(p));
+    refused(untried, "voice_missing");
+    assert.match(untried.message, /segment 1 \(line_2\)/);
+    assert.doesNotMatch(untried.message, /line_1/);
+
+    refused(await speak(call, p, ["line_1", "line_2"]), "speech_failed");
+    ok(await call("story_timeline_build", story(p)));
+  });
+
+  it("once speech works for a line, its voice is required again", async () => {
+    const service = await speechService();
+    const { call } = await make({ inference: service.inference });
+    const p = await checkedOnly(call);
+    refused(await speak(call, p, ["line_1", "line_2"]), "speech_failed");
+
+    service.down = false;
+    const voices = ok(await speak(call, p, ["line_1", "line_2"])).voices.map((v) => v.voiceArtifactId);
+    refused(await call("story_timeline_build", story(p)), "voice_missing");
+    ok(await call("story_timeline_build", story(p, voices)));
   });
 });
 

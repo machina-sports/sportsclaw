@@ -33,6 +33,11 @@
  *     story_draft_lines' writer prompt word for word, whatever the brief says. Whose guide: chosen as the line
  *     checker is (the skill whose job made the index in this run; for an earlier run's index, the one approved
  *     skill with a guide; several -> writing_guide_ambiguous). The result names that skill (`writingGuide`).
+ *   - Voice: with inference.speech configured, story_timeline_build refuses (`voice_missing`) a segment that has
+ *     a caption (lineId) and no voiceArtifactId, unless the latest speech_synthesize call for that line in this
+ *     run failed in the speech service (`speech_failed`). Checked when the timeline is built, not at render: a
+ *     timeline artifact is only ever made here, in this run, so none reaches a renderer unchecked, and the
+ *     agent learns of it one cheap call earlier than a render.
  *   - Renderers: a kind whose produces includes "video" runs only through story_render; media_job_start
  *     refuses it (`renderer_only`), so a renderer never gets a timeline the engine did not resolve.
  *     story_render's optional `input` (never `timeline`) is merged as { timeline, ...input }, validated
@@ -457,7 +462,9 @@ function descriptionsFor(kinds: JobKindDecl[], guideSkills: string[]): Record<Me
         : ""),
     story_check_lines: `Check lines against the plays and facts they cite. Returns verdicts and a lines-checked artifact of the lines that passed. ${MAX_CHECK_ROUNDS} checks per run.`,
     speech_synthesize: "Speak checked lines. One voice artifact per line.",
-    story_timeline_build: "Validate a story timeline and store it as a timeline artifact.",
+    story_timeline_build:
+      "Validate a story timeline and store it as a timeline artifact. When speech is configured, every segment with a lineId " +
+      "needs that line's voiceArtifactId (voice_missing), unless speech_synthesize failed for the line in this run.",
     story_render: "Render a timeline artifact to a video artifact.",
   };
 }
@@ -532,6 +539,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   /** artifact id -> skill whose job made it (this run). */
   const producers = new Map<string, string>();
   let checkRounds = 0;
+  /**
+   * "<linesArtifactId>/<lineId>" of each line whose latest speech_synthesize call in this run failed in the
+   * speech service (speech_failed): the lines story_timeline_build lets go without a voice.
+   */
+  const speechFailed = new Set<string>();
 
   const openedShas = () => [...new Set([...sources.values()].map((s) => s.artifact.sha256))];
 
@@ -962,20 +974,45 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (!ctx.inference?.speech) refuse("no_speech", "No speech route is configured (inference.speech).");
       const voices: { lineId: string; voiceArtifactId: string; durationMs: number }[] = [];
       const inference = ctx.inference;
-      for (const line of chosen) {
-        const said = await routed("speech_failed", (onReceipt) =>
-          synthesizeSpeech({ text: line.text, config: inference, ...(voice ? { voice } : {}), abortSignal, onReceipt, env }),
-        );
-        const file = `${await storyFile("voice")}.wav`;
-        await fs.writeFile(file, said.audio, { mode: 0o600 });
-        const artifact = await mint({ kind: "voice", path: file });
-        voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
+      const keys = chosen.map((line) => `${a.linesArtifactId}/${line.lineId}`);
+      try {
+        for (const line of chosen) {
+          const said = await routed("speech_failed", (onReceipt) =>
+            synthesizeSpeech({ text: line.text, config: inference, ...(voice ? { voice } : {}), abortSignal, onReceipt, env }),
+          );
+          const file = `${await storyFile("voice")}.wav`;
+          await fs.writeFile(file, said.audio, { mode: 0o600 });
+          const artifact = await mint({ kind: "voice", path: file });
+          voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
+        }
+      } catch (err) {
+        // A failed call returns no voice id for any of its lines, also those spoken before the failing one.
+        if (err instanceof Refusal && err.code === "speech_failed") for (const key of keys) speechFailed.add(key);
+        throw err;
       }
+      for (const key of keys) speechFailed.delete(key);
       return { result: { voices }, artifactIds: voices.map((v) => v.voiceArtifactId) };
     },
 
     async story_timeline_build(a) {
       const { resolved } = await resolveForStory(a.timeline);
+      // A voiced story has a voice: with speech configured, every captioned segment carries its line's voice,
+      // unless speaking that line failed in this run.
+      if (ctx.inference?.speech) {
+        const unvoiced = resolved.segments.flatMap((s, i) =>
+          s.lineId !== undefined && s.voiceArtifactId === undefined && !speechFailed.has(`${resolved.linesArtifactId}/${s.lineId}`)
+            ? [`segment ${i} (${s.lineId})`]
+            : [],
+        );
+        if (unvoiced.length > 0) {
+          refuse(
+            "voice_missing",
+            `Speech is configured, but ${unvoiced.join(", ")} ${unvoiced.length > 1 ? "have" : "has"} a caption and no voiceArtifactId. ` +
+              "Call speech_synthesize for those lineIds and put each line's voiceArtifactId on its segment. " +
+              "A line may go without a voice only when speech_synthesize failed for it (speech_failed) in this run.",
+          );
+        }
+      }
       const { captions: _captions, ...timeline } = resolved;
       const file = await storyFile("timeline");
       await fs.writeFile(file, JSON.stringify(timeline), { mode: 0o600 });

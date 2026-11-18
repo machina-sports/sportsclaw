@@ -88,7 +88,7 @@ A refused call returns `{ "error_code", "message" }` as its tool result, for exa
 `artifact_wrong_kind`, `artifact_wrong_run`, `artifact_changed`, `unknown_kind`,
 `unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`,
 `artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`,
-`writing_guide_ambiguous`, `caption_not_event`.
+`writing_guide_ambiguous`, `caption_not_event`, `voice_missing`.
 
 What the model sees of an error is bounded:
 
@@ -130,6 +130,14 @@ Rules the engine enforces:
   clip's, the timeline is refused with `caption_not_event`, and the message names the checked
   line that does cite the play (or says that none does). A line that cites only facts may go
   on any clip; a clip placed by seconds alone and a card are not checked.
+- **A voiced story has a voice.** When `inference.speech` is configured, every segment with a
+  `lineId` needs that line's `voiceArtifactId`, or `story_timeline_build` refuses the timeline
+  with `voice_missing` and names the segments and lines. A line may go without a voice only
+  if its latest `speech_synthesize` call in this run failed in the speech service
+  (`speech_failed`); a call refused for another reason (`unknown_line`, a wrong id) does not
+  count, and once a line has been spoken its voice is required. The check runs when the
+  timeline is built, so `story_render` never receives a timeline that skipped it. Without
+  `inference.speech` a captioned timeline needs no voice.
 - **Event index.** `media_find_events` reads a job-made `event-index` artifact and refuses
   (`bad_index`) one that is not exactly `{ version: 1, sourceSha256, events, skipped }` for
   the source, with each event exactly `{ eventId, actionId, period, clockSec, label, type,
