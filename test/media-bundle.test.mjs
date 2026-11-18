@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE = join(repoRoot, "test/fixtures/media/pack-ok");
-const { bundleSha256, approvedJobKinds, sealBundle, BundleError, JOB_ALLOWLIST_ENV } = await import(
+const { bundleSha256, approvedJobKinds, approvedJobBundles, sealBundle, BundleError, JOB_ALLOWLIST_ENV, MAX_WRITING_GUIDE_CHARS } = await import(
   join(repoRoot, "dist/media/bundle.js")
 );
 
@@ -196,6 +196,67 @@ describe("approvedJobKinds", () => {
     writeFileSync(join(dir, "jobs.json"), JSON.stringify({ jobs: [ok, ok] }));
     const sha = await bundleSha256(dir);
     assert.deepEqual(await approvedJobKinds([guide(dir)], allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }])), []);
+  });
+});
+
+describe("a skill's writing guide", () => {
+  const GUIDE = "One line per play.\nAt most 14 words a line.\n";
+  /** A copy of the pack whose jobs.json names `value` as its writing guide, approved under its own hash. */
+  async function withGuide(value, files = { "writing-guide.md": GUIDE }) {
+    const dir = copyPack();
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, "scripts", name), text);
+    const j = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify({ ...j, writingGuide: value }));
+    const env = allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: await bundleSha256(dir) }]);
+    return { dir, env, bundles: await approvedJobBundles([guide(dir)], env) };
+  }
+
+  it("jobs.json names a file under scripts/ as writingGuide: the approved bundle carries its text, word for word", async () => {
+    const { bundles } = await withGuide("writing-guide.md");
+    assert.equal(bundles.length, 1);
+    assert.equal(bundles[0].writingGuide, GUIDE);
+    assert.deepEqual(bundles[0].decls.map((d) => d.kind), ["echo-job"]);
+  });
+
+  it("a skill that declares none has no writingGuide", async () => {
+    const sha = await bundleSha256(FIXTURE);
+    const [bundle] = await approvedJobBundles([guide(FIXTURE)], allow([{ skill: "pack-ok", kind: "echo-job", bundleSha256: sha }]));
+    assert.equal("writingGuide" in bundle, false);
+  });
+
+  it("the guide is part of the approved bundle: editing it after approval drops the skill", async () => {
+    const { dir, env } = await withGuide("writing-guide.md");
+    writeFileSync(join(dir, "scripts", "writing-guide.md"), "Say anything.");
+    assert.deepEqual(await approvedJobBundles([guide(dir)], env), []);
+  });
+
+  it("a declared guide that cannot be used denies the skill: no story is written without the rules it declares", async () => {
+    const cases = [
+      ["missing.md", undefined],
+      ["../SKILL.md", undefined],
+      ["/etc/hosts", undefined],
+      [7, undefined],
+      ["", undefined],
+      ["writing-guide.md", { "writing-guide.md": "  \n" }],
+      ["writing-guide.md", { "writing-guide.md": "x".repeat(MAX_WRITING_GUIDE_CHARS + 1) }],
+    ];
+    for (const [value, files] of cases) {
+      const { bundles } = await withGuide(value, files);
+      assert.deepEqual(bundles, [], JSON.stringify(value));
+    }
+    const atLimit = await withGuide("writing-guide.md", { "writing-guide.md": "x".repeat(MAX_WRITING_GUIDE_CHARS) });
+    assert.equal(atLimit.bundles.length, 1);
+  });
+
+  it("a sealed copy carries the guide file, and its declarations are unchanged", async () => {
+    const { dir, bundles } = await withGuide("writing-guide.md");
+    const sealed = await sealBundle(dir, bundles[0].bundleSha256, "pack-ok");
+    try {
+      assert.deepEqual(sealed.decls, bundles[0].decls);
+      assert.equal(readFileSync(join(sealed.dir, "scripts", "writing-guide.md"), "utf8"), GUIDE);
+    } finally {
+      await sealed.dispose();
+    }
   });
 });
 

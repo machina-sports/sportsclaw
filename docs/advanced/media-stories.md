@@ -74,7 +74,7 @@ Skills are found as for portable skills (`SPORTSCLAW_SKILL_GUIDES_DIR`).
 | `media_job_cancel` | `{ jobId }` | as `media_job_status` | state |
 | `media_find_events` | `{ indexArtifactId, text?, people?, period?, type?, limit? }` | `event-index` | rows: `eventId`, `period`, `clock`, `label`, `people`, `type`, and where the play is in the video: `videoSec` and its clip window `startSec`–`endSec` |
 | `story_facts_collect` | `{}` | — | `facts` artifact id, fact ids with tool names |
-| `story_draft_lines` | `{ indexArtifactId, eventIds, factsArtifactId?, brief, maxLines? }` | `event-index`, `facts`, a writer role | draft lines (not an artifact) |
+| `story_draft_lines` | `{ indexArtifactId, eventIds, factsArtifactId?, brief, maxLines? }` | `event-index`, `facts`, a writer role | draft lines (not an artifact), and `writingGuide`: the skill whose [writing guide](#the-writing-guide) the writer was given, when there is one |
 | `story_check_lines` | `{ indexArtifactId, factsArtifactId?, lines }` | `event-index`; `facts` is optional (without it a line can cite only events) | verdicts, a `lines-checked` artifact of the lines that passed, `rewritesLeft`, and `checker`: the checker that ran (`<skill>/check-lines` or `built-in`) |
 | `speech_synthesize` | `{ linesArtifactId, lineIds, voice? }` | `lines-checked`; `inference.speech` | one `voice` artifact id per line |
 | `story_timeline_build` | `{ timeline }` | every artifact id it names | `timeline` artifact id |
@@ -87,7 +87,8 @@ naming them and pointing to the skill's `SKILL.md` for the recipe.
 A refused call returns `{ "error_code", "message" }` as its tool result, for example
 `artifact_wrong_kind`, `artifact_wrong_run`, `artifact_changed`, `unknown_kind`,
 `unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`,
-`artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`.
+`artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`,
+`writing_guide_ambiguous`.
 
 What the model sees of an error is bounded:
 
@@ -187,6 +188,30 @@ A skill declares job kinds in `jobs.json` beside `SKILL.md`:
   ]
 }
 ```
+
+### The writing guide
+
+A skill's rules for the story writer (how many lines, how long, what not to say) do not depend
+on the agent copying them into `brief`. Put them in a text file under `scripts/` and name it
+at the top of `jobs.json`:
+
+```json
+{ "writingGuide": "writing-guide.md", "jobs": [ ... ] }
+```
+
+- `story_draft_lines` puts the file's text into the writer prompt word for word, after the
+  brief and before the plays and facts, whatever the brief says. `brief` is then only the
+  story's angle, and the tool's description tells the agent so.
+- The file is under `scripts/`, so the bundle hash covers it: editing the guide needs a new
+  approval, like editing a script. It may be at most 4000 characters.
+- Whose guide is used is chosen as the [line checker](#line-checks) is: the skill whose job
+  made the index in this run; for an index prepared in an earlier run, the one approved skill
+  that declares a guide (if several do, the call is refused with `writing_guide_ambiguous`).
+  The model cannot choose it. The call's result names the skill as `writingGuide`.
+- A declared guide that cannot be used (not a plain path under `scripts/`, missing, blank or
+  too long) makes `jobs.json` unusable: the skill has no job kinds until it is fixed.
+- With no guide declared, the writer prompt is unchanged. The engine has no writing rules of
+  its own. Engine 0.31.0 ignores the key.
 
 ### Approval: a bundle hash
 

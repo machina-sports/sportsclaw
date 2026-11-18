@@ -29,6 +29,10 @@
  *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
  *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`. The
  *     result and its step name the checker that ran ("<skill>/check-lines" or "built-in").
+ *   - Writing rules: a skill's writing guide (jobs.json "writingGuide", part of its approved bundle) goes into
+ *     story_draft_lines' writer prompt word for word, whatever the brief says. Whose guide: chosen as the line
+ *     checker is (the skill whose job made the index in this run; for an earlier run's index, the one approved
+ *     skill with a guide; several -> writing_guide_ambiguous). The result names that skill (`writingGuide`).
  *   - Renderers: a kind whose produces includes "video" runs only through story_render; media_job_start
  *     refuses it (`renderer_only`), so a renderer never gets a timeline the engine did not resolve.
  *     story_render's optional `input` (never `timeline`) is merged as { timeline, ...input }, validated
@@ -422,7 +426,7 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
   },
 };
 
-function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
+function descriptionsFor(kinds: JobKindDecl[], guideSkills: string[]): Record<MediaToolName, string> {
   const list = kinds.length
     ? kinds
         .map((d) => {
@@ -445,7 +449,11 @@ function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
       "Search an event-index artifact for plays. Returns eventId, period, clock, label, people, type, and where the play is in the " +
       "video: videoSec and its clip window startSec-endSec.",
     story_facts_collect: "Store this run's data-tool results as a facts artifact. Returns fact ids with their tool names.",
-    story_draft_lines: "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked.",
+    story_draft_lines:
+      "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked." +
+      (guideSkills.length
+        ? ` The writer is also given the writing rules of the index's skill (${guideSkills.join(", ")}), so brief is only the story's angle: do not copy rules into it.`
+        : ""),
     story_check_lines: `Check lines against the plays and facts they cite. Returns verdicts and a lines-checked artifact of the lines that passed. ${MAX_CHECK_ROUNDS} checks per run.`,
     speech_synthesize: "Speak checked lines. One voice artifact per line.",
     story_timeline_build: "Validate a story timeline and store it as a timeline artifact.",
@@ -690,20 +698,42 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     return rec;
   }
 
-  /** The line checker for an index and its name ("<skill>/check-lines", or "built-in" when there is none). */
-  function checkerFor(index: Artifact): { checker?: LineChecker; name: string } {
-    const withChecker = bundles.filter((b) => b.decls.some((d) => d.kind === CHECK_KIND));
+  /**
+   * The approved skill an index belongs to, among those that `has` picks: the skill whose job made the index
+   * in this run, else (an index from an earlier run) the only such skill; with several, `ambiguous` refuses.
+   */
+  function skillFor(index: Artifact, has: (b: ApprovedBundle) => boolean, ambiguous: () => never): ApprovedBundle | undefined {
+    const having = bundles.filter(has);
     let skill = producers.get(index.id);
     if (skill === undefined) {
-      if (withChecker.length > 1) refuse("checker_ambiguous", "Several skills declare a line checker and none made this index in this run.");
-      skill = withChecker[0]?.skill;
+      if (having.length > 1) ambiguous();
+      skill = having[0]?.skill;
     }
-    const b = withChecker.find((x) => x.skill === skill);
+    return having.find((x) => x.skill === skill);
+  }
+
+  /** The line checker for an index and its name ("<skill>/check-lines", or "built-in" when there is none). */
+  function checkerFor(index: Artifact): { checker?: LineChecker; name: string } {
+    const b = skillFor(
+      index,
+      (x) => x.decls.some((d) => d.kind === CHECK_KIND),
+      () => refuse("checker_ambiguous", "Several skills declare a line checker and none made this index in this run."),
+    );
     if (!b) return { name: "built-in" };
     return {
       checker: jobLineChecker({ runner, skill: { skillDir: b.skillDir, bundleSha256: b.bundleSha256, decls: b.decls } }),
       name: `${b.skill}/${CHECK_KIND}`,
     };
+  }
+
+  /** The writing guide for an index: its skill's (chosen as the line checker is), or none. The model cannot pick it. */
+  function guideFor(index: Artifact): { skill: string; text: string } | undefined {
+    const b = skillFor(
+      index,
+      (x) => x.writingGuide !== undefined,
+      () => refuse("writing_guide_ambiguous", "Several skills declare a writing guide and none made this index in this run."),
+    );
+    return b?.writingGuide === undefined ? undefined : { skill: b.skill, text: b.writingGuide };
   }
 
   /** A timeline only ever comes out of resolveTimeline, with lines from the exact artifact it names. */
@@ -881,7 +911,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     },
 
     async story_draft_lines(a, abortSignal) {
-      const { index } = await loadIndex(a.indexArtifactId);
+      const { artifact: indexArtifact, index } = await loadIndex(a.indexArtifactId);
       const eventIds = strList(a, "eventIds", 40);
       const brief = str(a, "brief", 2000);
       const maxLines = optInt(a, "maxLines", 1, MAX_LINES) ?? DEFAULT_MAX_LINES;
@@ -890,8 +920,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const events = eventIds.map((id) => byId.get(id) ?? refuse("unknown_event", `No event ${id.slice(0, 60)} in the index.`));
       if (!ctx.inference?.roles?.writer) refuse("no_writer", "No writer role is configured (inference.roles.writer).");
       const inference = ctx.inference;
-      const lines = await routed("model_call_failed", (onReceipt) => draftLines({ inference, brief, events, facts, maxLines, abortSignal, onReceipt }));
-      return { result: { lines }, artifactIds: [] };
+      const guide = guideFor(indexArtifact);
+      const lines = await routed("model_call_failed", (onReceipt) =>
+        draftLines({ inference, brief, ...(guide ? { guide: guide.text } : {}), events, facts, maxLines, abortSignal, onReceipt }),
+      );
+      return { result: { lines, ...(guide ? { writingGuide: guide.skill } : {}) }, artifactIds: [] };
     },
 
     async story_check_lines(a) {
@@ -1018,7 +1051,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     },
   };
 
-  const descriptions = descriptionsFor([...kinds.values()].map((k) => k.decl));
+  const descriptions = descriptionsFor(
+    [...kinds.values()].map((k) => k.decl),
+    bundles.filter((b) => b.writingGuide !== undefined).map((b) => b.skill),
+  );
   const tools = {} as Record<MediaToolName, HostToolDef>;
   for (const name of MEDIA_TOOL_NAMES) {
     tools[name] = {

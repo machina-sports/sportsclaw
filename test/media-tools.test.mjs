@@ -83,10 +83,13 @@ const WRITER_LINES = [
 ];
 const RESULTS = [{ toolName: "stats_get_player", toolCallId: "c1", input: {}, output: '{"player":"Ann Smith","pts":38}', isError: false }];
 
-// The writer role: a chat server answering every request with WRITER_LINES.
+// The writer role: a chat server answering every request with WRITER_LINES. writerPrompts keeps what it was sent.
+const writerPrompts = [];
 const writer = http.createServer((req, res) => {
-  req.resume();
+  let body = "";
+  req.on("data", (c) => (body += c));
   req.on("end", () => {
+    writerPrompts.push(JSON.parse(body).messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({
       id: "c1", object: "chat.completion", created: 1, model: "writer",
@@ -125,11 +128,11 @@ async function make(over = {}) {
   const runId = over.runId ?? `run_${n++}`;
   const media = await createMediaTools({
     config: { workspaceDir, clearances: CLEARED, ...over.config },
-    guides: GUIDES,
+    guides: over.guides ?? GUIDES,
     inference: "inference" in over ? over.inference : INFERENCE,
     runId,
     getToolResults: () => over.results ?? RESULTS,
-    env: { ...process.env, ...allow(over.kinds ?? APPROVED) },
+    env: { ...process.env, ...(over.allowlist ? { [JOB_ALLOWLIST_ENV]: JSON.stringify(over.allowlist) } : allow(over.kinds ?? APPROVED)) },
     isDataTool: over.isDataTool ?? ((name) => name === "stats_get_player"),
     ...(over.pythonPath ? { pythonPath: over.pythonPath } : {}),
     ...(over.onReceipt ? { onReceipt: over.onReceipt } : {}),
@@ -152,10 +155,10 @@ function refused(result, code) {
 }
 
 /** Open the source, run make-index, wait for it. */
-async function openAndIndex(call, mode) {
+async function openAndIndex(call, mode, skill = SKILL) {
   const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
   const job = ok(await call("media_job_start", {
-    skill: SKILL, kind: "make-index", input: { events: EVENTS, ...(mode ? { mode } : {}) }, sourceArtifactId: src.sourceArtifactId,
+    skill, kind: "make-index", input: { events: EVENTS, ...(mode ? { mode } : {}) }, sourceArtifactId: src.sourceArtifactId,
   }));
   const st = ok(await call("media_job_status", { jobId: job.jobId, waitSec: 30 }));
   assert.equal(st.state, "succeeded", st.error);
@@ -285,6 +288,66 @@ describe("media story tools: the whole chain", () => {
       trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps },
     });
     assert.deepEqual(manifest.run.media_steps.map((s) => s.refused ?? null), [null, "unknown_kind", "invalid_input", null, "job_budget"]);
+  });
+});
+
+describe("media story tools: the writer gets the skill's writing rules from the engine", () => {
+  const RULES = "One line per play; each line cites exactly one eventId.\nAt most 14 words a line.\n";
+  /** A copy of the story pack under `id` whose jobs.json names a writing guide: its guide entry and allowlist. */
+  async function packWithGuide(id, text = RULES) {
+    const dir = join(tmp, "packs", id);
+    cpSync(join(repoRoot, "test/fixtures/media/pack-story"), dir, { recursive: true });
+    writeFileSync(join(dir, "scripts", "writing-guide.md"), text);
+    const jobs = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify({ ...jobs, writingGuide: "writing-guide.md" }));
+    const sha = await bundleSha256(dir);
+    return {
+      guide: { id, name: id, description: "", body: "", dir },
+      allowlist: APPROVED.map((kind) => ({ skill: id, kind, bundleSha256: sha })),
+    };
+  }
+  const draft = (call, indexId) => call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1", "ev_2"], brief: "Smith's night." });
+
+  it("a declared guide reaches the writer word for word though the brief holds no rules, and the result names the skill", async () => {
+    const guided = await packWithGuide("pack-guided");
+    const { call, media } = await make({ guides: [guided.guide], allowlist: guided.allowlist });
+    const { indexId } = await openAndIndex(call, undefined, "pack-guided");
+    const out = ok(await draft(call, indexId));
+    assert.deepEqual(out.lines, WRITER_LINES);
+    assert.equal(out.writingGuide, "pack-guided");
+    const prompt = writerPrompts.at(-1);
+    assert.ok(prompt.includes("Brief: Smith's night."), prompt);
+    assert.ok(prompt.includes(RULES), "the writer got the rules as the skill wrote them");
+    assert.match(media.tools.story_draft_lines.description, /writing rules/);
+  });
+
+  it("a skill that declares no guide: the prompt has no rules section and the result names none", async () => {
+    const { call, media } = await make();
+    const { indexId } = await openAndIndex(call);
+    const out = ok(await draft(call, indexId));
+    assert.equal("writingGuide" in out, false);
+    assert.ok(!writerPrompts.at(-1).includes("Writing rules"), writerPrompts.at(-1));
+    assert.doesNotMatch(media.tools.story_draft_lines.description, /writing rules/);
+  });
+
+  it("an index prepared in an earlier run takes the one approved skill's guide; with two such skills -> writing_guide_ambiguous", async () => {
+    const guided = await packWithGuide("pack-guided-b");
+    const other = await packWithGuide("pack-guided-c", "Other rules.");
+    const first = await make({ guides: [guided.guide], allowlist: guided.allowlist });
+    await openAndIndex(first.call, undefined, "pack-guided-b");
+
+    // A later run finds the index shared: no job of this run made it.
+    const later = await make({ workspaceDir: first.workspaceDir, guides: [guided.guide], allowlist: guided.allowlist });
+    const src = ok(await later.call("media_source_open", { path: "media/game.mp4" }));
+    const indexId = src.shared.find((a) => a.kind === "event-index").artifactId;
+    assert.equal(ok(await draft(later.call, indexId)).writingGuide, "pack-guided-b");
+    assert.ok(writerPrompts.at(-1).includes(RULES));
+
+    const both = await make({ workspaceDir: first.workspaceDir, guides: [guided.guide, other.guide], allowlist: [...guided.allowlist, ...other.allowlist] });
+    ok(await both.call("media_source_open", { path: "media/game.mp4" }));
+    const sent = writerPrompts.length;
+    refused(await draft(both.call, indexId), "writing_guide_ambiguous");
+    assert.equal(writerPrompts.length, sent, "no writer call without knowing whose rules apply");
   });
 });
 
