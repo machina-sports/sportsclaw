@@ -267,6 +267,14 @@ function optInt(a: Record<string, unknown>, key: string, min: number, max: numbe
   return v;
 }
 
+/** A game clock in seconds: a finite number, zero or more. */
+function optClockSec(a: Record<string, unknown>, key: string): number | undefined {
+  const v = a[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) refuse("invalid_input", `"${key}" must be a number of seconds, 0 or more.`);
+  return v;
+}
+
 function draftLinesArg(a: Record<string, unknown>): DraftLine[] {
   const v = a.lines;
   const good = (l: unknown): l is DraftLine =>
@@ -392,6 +400,8 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
       text: { type: "string", description: "Words that must all appear in the play's label." },
       people: { ...IDS, description: "People who must all be in the play." },
       period: { type: "integer" },
+      clockMinSec: { type: "number", description: "Keep plays whose game clock, in seconds, is this or more." },
+      clockMaxSec: { type: "number", description: "Keep plays whose game clock, in seconds, is this or less." },
       type: { type: "string" },
       limit: { type: "integer" },
     },
@@ -474,7 +484,10 @@ function descriptionsFor(kinds: JobKindDecl[], guideSkills: string[]): Record<Me
     media_job_cancel: "Cancel a running job.",
     media_find_events:
       "Search an event-index artifact for plays. Returns eventId, period, clock, label, people, type, and where the play is in the " +
-      "video: videoSec and its clip window startSec-endSec.",
+      "video: videoSec and its clip window startSec-endSec. For a stretch of the game, filter by clock instead of reading clocks " +
+      "off the rows: clockMinSec and clockMaxSec bound the game clock in seconds, as the clock column shows it (5:00 is 300), " +
+      "within the period you give. On a clock that counts down, the final five minutes of a period are that period with " +
+      "clockMaxSec 300; on a clock that counts up, use clockMinSec.",
     story_facts_collect: "Store this run's data-tool results as a facts artifact. Returns fact ids with their tool names.",
     story_draft_lines:
       "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked." +
@@ -922,6 +935,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         text: optStr(a, "text"),
         people,
         period: optInt(a, "period", 1, 100),
+        clockMinSec: optClockSec(a, "clockMinSec"),
+        clockMaxSec: optClockSec(a, "clockMaxSec"),
         type: optStr(a, "type", 100),
         limit: optInt(a, "limit", 1, 1000),
       }).map((e) => ({

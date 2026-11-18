@@ -119,6 +119,16 @@ describe("findEvents", () => {
     assert.deepEqual(ids({ period: 1, type: "shot", text: "curry" }), ["a1", "a3"]);
   });
 
+  it("keeps plays whose game clock is within clockMinSec..clockMaxSec, both ends included, with the other filters", () => {
+    // Clocks as shown: a1 11:50 (710), a2 11:40 (700), a3 11:30 (690).
+    assert.deepEqual(ids({ clockMaxSec: 700 }), ["a2", "a3"]);
+    assert.deepEqual(ids({ clockMinSec: 700 }), ["a1", "a2"]);
+    assert.deepEqual(ids({ clockMinSec: 695, clockMaxSec: 705 }), ["a2"]);
+    assert.deepEqual(ids({ period: 1, clockMaxSec: 689 }), []);
+    assert.deepEqual(ids({ clockMaxSec: 700, people: ["Stephen Curry"] }), ["a3"]);
+    assert.deepEqual(ids({ period: 2, clockMaxSec: 700 }), []);
+  });
+
   it("matches type ignoring case and surrounding spaces", () => {
     assert.deepEqual(ids({ type: " FOUL " }), ["a2"]);
     assert.deepEqual(ids({ type: "Shot" }), ids({ type: "shot" }));

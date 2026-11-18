@@ -76,9 +76,13 @@ function words(text: string): string[] {
   return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 }
 
+/**
+ * clockMinSec / clockMaxSec keep events whose clockSec (the game clock as the index holds it, the one a row
+ * shows as m:ss) lies in that range, both ends included.
+ */
 export function findEvents(
   index: EventIndex,
-  q: { text?: string; people?: string[]; period?: number; type?: string; limit?: number },
+  q: { text?: string; people?: string[]; period?: number; clockMinSec?: number; clockMaxSec?: number; type?: string; limit?: number },
 ): IndexedEvent[] {
   const limit =
     typeof q.limit === "number" && Number.isInteger(q.limit)
@@ -91,6 +95,8 @@ export function findEvents(
   const out: IndexedEvent[] = [];
   for (const e of index.events) {
     if (q.period !== undefined && e.period !== q.period) continue;
+    if (q.clockMinSec !== undefined && e.clockSec < q.clockMinSec) continue;
+    if (q.clockMaxSec !== undefined && e.clockSec > q.clockMaxSec) continue;
     if (wantType !== undefined && e.type.trim().toLowerCase() !== wantType) continue;
     if (queryWords.length > 0) {
       const labelWords = new Set(words(e.label));

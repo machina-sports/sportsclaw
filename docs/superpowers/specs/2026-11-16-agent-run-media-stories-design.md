@@ -88,7 +88,7 @@ Replaces the single `SyncAnchor` with a map from video time to game time.
 - **Shape:** an ordered list of stretches `{videoStartSec, videoEndSec, period, clockStartSec, clockEndSec, running}`, plus `semantics`: `elapsed-ascending` or `countdown-per-period`.
 - **Sources:** supplied by the caller, or built by a job (the skill's script asks the `eyes` role to read the scoreboard at a fixed step and fits running and stopped stretches).
 - **Highlights core:** `planCandidateWindows` accepts a clock map or a sync anchor. A sync anchor is the one-stretch case, so existing requests keep working.
-- **Event index:** aligning a clock map with play-by-play actions gives an `event-index` artifact: each action with its video window. `media_find_events` searches it (by text, people, period, type) and returns short rows the model can read.
+- **Event index:** aligning a clock map with play-by-play actions gives an `event-index` artifact: each action with its video window. `media_find_events` searches it (by text, people, period, type) and returns short rows the model can read. It also filters by game clock (added 18 Nov 2026, after GPU session 3, where the agent asked for "the final five minutes" and picked a play at 8:59): `clockMinSec` and `clockMaxSec` bound the clock in seconds as the rows show it, so on a countdown clock the final five minutes of a period are that period with `clockMaxSec: 300`.
 
 ### 4. Story timeline and rendering
 

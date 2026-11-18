@@ -724,6 +724,23 @@ describe("media story tools: timelines", () => {
     }]);
   });
 
+  it("media_find_events filters by game clock (clockMinSec, clockMaxSec), and its description says how to ask for the end of a period", async () => {
+    const { call, media } = await make();
+    const { indexId } = await openAndIndex(call); // ev_1 at 0:30, ev_2 at 0:50, both in period 1
+    const found = async (q) => ok(await call("media_find_events", { indexArtifactId: indexId, ...q })).events.map((e) => e.eventId);
+    assert.deepEqual(await found({ period: 1, clockMaxSec: 40 }), ["ev_1"]);
+    assert.deepEqual(await found({ clockMinSec: 40 }), ["ev_2"]);
+    assert.deepEqual(await found({ clockMinSec: 30, clockMaxSec: 50 }), ["ev_1", "ev_2"]);
+    for (const bad of [{ clockMaxSec: "5:00" }, { clockMinSec: -1 }, { clockMaxSec: Infinity }]) {
+      refused(await call("media_find_events", { indexArtifactId: indexId, ...bad }), "invalid_input");
+    }
+    const tool = media.tools.media_find_events;
+    assert.equal(tool.inputSchema.properties.clockMinSec.type, "number");
+    assert.equal(tool.inputSchema.properties.clockMaxSec.type, "number");
+    assert.match(tool.description, /clockMaxSec/);
+    assert.match(tool.description, /final five minutes/);
+  });
+
   it("a clip may name only its eventId: the window comes from the index its lines were checked against, and the renderer gets it", { skip: NO_FFMPEG }, async () => {
     const { call, workspaceDir } = await make();
     const p = await prepared(call);

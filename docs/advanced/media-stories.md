@@ -72,7 +72,7 @@ Skills are found as for portable skills (`SPORTSCLAW_SKILL_GUIDES_DIR`).
 | `media_job_start` | `{ skill, kind, input, sourceArtifactId? }` | an approved kind that is not a renderer (`renderer_only`); artifact ids in `input` (see `x-artifact-kind`) | `jobId` (and `prep: true` for a [prep job](#prep-jobs)) |
 | `media_job_status` | `{ jobId, waitSec? }` | a job of this run, or a prep job of any run on this engine; `waitSec` is capped at 60 | state, artifact ids and facts when done |
 | `media_job_cancel` | `{ jobId }` | as `media_job_status` | state |
-| `media_find_events` | `{ indexArtifactId, text?, people?, period?, type?, limit? }` | `event-index` | rows: `eventId`, `period`, `clock`, `label`, `people`, `type`, and where the play is in the video: `videoSec` and its clip window `startSec`–`endSec` |
+| `media_find_events` | `{ indexArtifactId, text?, people?, period?, clockMinSec?, clockMaxSec?, type?, limit? }` | `event-index` | rows: `eventId`, `period`, `clock`, `label`, `people`, `type`, and where the play is in the video: `videoSec` and its clip window `startSec`–`endSec` |
 | `story_facts_collect` | `{}` | — | `facts` artifact id, fact ids with tool names |
 | `story_draft_lines` | `{ indexArtifactId, eventIds, factsArtifactId?, brief, maxLines? }` | `event-index`, `facts`, a writer role | draft lines (not an artifact), and `writingGuide`: the skill whose [writing guide](#the-writing-guide) the writer was given, when there is one |
 | `story_check_lines` | `{ indexArtifactId, factsArtifactId?, lines }` | `event-index`; `facts` is optional (without it a line can cite only events) | verdicts, a `lines-checked` artifact of the lines that passed, `rewritesLeft`, and `checker`: the checker that ran (`<skill>/check-lines` or `built-in`) |
@@ -138,6 +138,11 @@ Rules the engine enforces:
   count, and once a line has been spoken its voice is required. The check runs when the
   timeline is built, so `story_render` never receives a timeline that skipped it. Without
   `inference.speech` a captioned timeline needs no voice.
+- **A stretch of the game.** `media_find_events` takes `clockMinSec` and `clockMaxSec`: the
+  game clock in seconds, as a row's `clock` shows it (`5:00` is 300), both ends included.
+  With `period`, a clock that counts down gives "the final five minutes" as
+  `{ period: 4, clockMaxSec: 300 }`; a clock that counts up uses `clockMinSec`. The index
+  does not say which way its clock runs, so the caller picks the bound.
 - **Event index.** `media_find_events` reads a job-made `event-index` artifact and refuses
   (`bad_index`) one that is not exactly `{ version: 1, sourceSha256, events, skipped }` for
   the source, with each event exactly `{ eventId, actionId, period, clockSec, label, type,
