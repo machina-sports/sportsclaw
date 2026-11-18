@@ -9,7 +9,10 @@
  * Every input that names an artifact is checked with ArtifactStore.require: known, of the kind the step
  * needs, made in this run (or shared for a source opened in this run), and its file unchanged. A refused
  * call returns `{ error_code, message }` as its tool result; it never throws into the run. Each successful
- * call appends `{ tool, artifactIds, jobId?, checker? }` to `steps`, in call order.
+ * call appends `{ tool, artifactIds, jobId?, checker?, output?, input }` to `steps`, in call order. A step's
+ * input has every string cut to STEP_INPUT_STRING_CHARS, except story_draft_lines' `brief`, kept whole (up to
+ * MAX_BRIEF_CHARS); that step's `output` holds the lines the writer returned and whose writing guide it was
+ * given, so a run shows what the writer was told and what it wrote.
  *
  * Errors the model sees: the engine's own refusals, with absolute paths replaced by "<path>"; a failed
  * writer or speech call as `model_call_failed` / `speech_failed` with the router's error code (`code`) and
@@ -58,7 +61,7 @@
  *     own MediaPrep and dispose closes it.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { probeVideo } from "../highlights/ffmpeg.js";
@@ -107,18 +110,36 @@ export interface MediaStep {
   checker?: string;
   /** The error_code the call returned (e.g. job_budget, bundle_changed); absent when the call succeeded. */
   refused?: string;
-  /** The call's input, every string capped at STEP_INPUT_STRING_CHARS. */
+  /**
+   * story_draft_lines: `{ lines, writingGuide? }`, the lines the writer returned (each text cut to
+   * STEP_OUTPUT_LINE_CHARS) and, when a skill's writing guide was given to it, `{ skill, sha256 }` of that guide.
+   */
+  output?: unknown;
+  /** The call's input, every string capped at STEP_INPUT_STRING_CHARS; story_draft_lines' brief at MAX_BRIEF_CHARS. */
   input: unknown;
 }
 
 export const STEP_INPUT_STRING_CHARS = 200;
+/** The longest brief story_draft_lines takes. Its step keeps all of it: it is what the writer was told. */
+export const MAX_BRIEF_CHARS = 2000;
+/** Longest line text kept in a story_draft_lines step's output. */
+export const STEP_OUTPUT_LINE_CHARS = 1000;
 
-/** A JSON copy of `v` with every string cut to STEP_INPUT_STRING_CHARS. */
-function capStrings(v: unknown): unknown {
-  if (typeof v === "string") return v.slice(0, STEP_INPUT_STRING_CHARS);
-  if (Array.isArray(v)) return v.map(capStrings);
-  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x)]));
+/** A JSON copy of `v` with every string cut to `max` characters. */
+function capStrings(v: unknown, max = STEP_INPUT_STRING_CHARS): unknown {
+  if (typeof v === "string") return v.slice(0, max);
+  if (Array.isArray(v)) return v.map((x) => capStrings(x, max));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x, max)]));
   return typeof v === "number" && !Number.isFinite(v) ? null : v;
+}
+
+/** A step's record of a call's input. */
+function stepInput(tool: MediaToolName, input: unknown): unknown {
+  const capped = capStrings(input);
+  if (tool === "story_draft_lines" && isPlainObject(input) && typeof input.brief === "string") {
+    return { ...(capped as Record<string, unknown>), brief: input.brief.slice(0, MAX_BRIEF_CHARS) };
+  }
+  return capped;
 }
 
 export interface MediaToolsContext {
@@ -483,7 +504,7 @@ interface Approved {
   decl: JobKindDecl;
 }
 
-type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string; checker?: string };
+type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string; checker?: string; output?: unknown };
 
 export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   tools: Record<MediaToolName, HostToolDef>;
@@ -926,7 +947,7 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     async story_draft_lines(a, abortSignal) {
       const { artifact: indexArtifact, index } = await loadIndex(a.indexArtifactId);
       const eventIds = strList(a, "eventIds", 40);
-      const brief = str(a, "brief", 2000);
+      const brief = str(a, "brief", MAX_BRIEF_CHARS);
       const maxLines = optInt(a, "maxLines", 1, MAX_LINES) ?? DEFAULT_MAX_LINES;
       const facts = await loadFacts(a.factsArtifactId);
       const byId = new Map(index.events.map((e) => [e.eventId, e]));
@@ -937,7 +958,14 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       const lines = await routed("model_call_failed", (onReceipt) =>
         draftLines({ inference, brief, ...(guide ? { guide: guide.text } : {}), events, facts, maxLines, abortSignal, onReceipt }),
       );
-      return { result: { lines, ...(guide ? { writingGuide: guide.skill } : {}) }, artifactIds: [] };
+      return {
+        result: { lines, ...(guide ? { writingGuide: guide.skill } : {}) },
+        artifactIds: [],
+        output: {
+          lines: capStrings(lines, STEP_OUTPUT_LINE_CHARS),
+          ...(guide ? { writingGuide: { skill: guide.skill, sha256: createHash("sha256").update(guide.text).digest("hex") } } : {}),
+        },
+      };
     },
 
     async story_check_lines(a) {
@@ -1106,13 +1134,14 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
             artifactIds: out.artifactIds,
             ...(out.jobId ? { jobId: out.jobId } : {}),
             ...(out.checker ? { checker: out.checker } : {}),
-            input: capStrings(input ?? {}),
+            ...(out.output !== undefined ? { output: out.output } : {}),
+            input: stepInput(name, input ?? {}),
           });
           return out.result;
         } catch (err) {
           const out = refusalResult(name, err);
           // A refused call is a step too: the trace must not read as if it never happened (or as if it ran).
-          steps.push({ tool: name, artifactIds: [], refused: String(out.error_code), input: capStrings(input ?? {}) });
+          steps.push({ tool: name, artifactIds: [], refused: String(out.error_code), input: stepInput(name, input ?? {}) });
           return out;
         }
       },

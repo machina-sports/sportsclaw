@@ -152,7 +152,11 @@ Every call is recorded on the run trace as `mediaSteps`
 (`{ tool, artifactIds, jobId?, input }`, in call order; `input` is the call's arguments with
 every string cut to 200 characters; `story_check_lines` steps also name the `checker` that
 ran), next to `numberGrounding`, so a run shows the agent ran
-each step and which ids each step took. A refused call is a step too, with `refused: "<error_code>"`
+each step and which ids each step took. A `story_draft_lines` step shows what the writer was
+told and what it wrote: its `input.brief` is kept whole (the tool takes up to 2000 characters),
+and it has an `output`, `{ lines, writingGuide? }`: the lines the writer returned (each text
+cut at 1000 characters) and, when a skill's writing guide was given to the writer,
+`{ skill, sha256 }` of that guide. A refused call is a step too, with `refused: "<error_code>"`
 (for example `job_budget`, `bundle_changed`, `prep_busy`) and no artifact ids, so a run where the
 model claims it started a job that was refused shows the refusal; the tool metrics count it as a
 failed call. The receipts of the tools' model calls (the writer,

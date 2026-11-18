@@ -230,7 +230,7 @@ describe("media story tools: the whole chain", () => {
       { tool: "media_job_status", artifactIds: [indexId], jobId: job.jobId },
       { tool: "media_find_events", artifactIds: [] },
       { tool: "story_facts_collect", artifactIds: [facts.factsArtifactId] },
-      { tool: "story_draft_lines", artifactIds: [] },
+      { tool: "story_draft_lines", artifactIds: [], output: { lines: WRITER_LINES } },
       { tool: "story_check_lines", artifactIds: [checked.linesArtifactId], checker: `${SKILL}/check-lines` },
       { tool: "speech_synthesize", artifactIds: voices },
       { tool: "story_timeline_build", artifactIds: [built.timelineArtifactId] },
@@ -264,6 +264,62 @@ describe("media story tools: the whole chain", () => {
       { indexArtifactId: "x".repeat(200) },
       { note: "x".repeat(200), nested: { list: ["x".repeat(200), 7] } },
     ]);
+  });
+
+  const manifestOf = (media) => buildRunManifest({
+    sportsclawVersion: "test", provider: "openai", model: "m", sampling: {}, maxOutputTokens: 1, maxTurns: 1, thinkingBudget: 0,
+    env: {},
+    trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps },
+  });
+
+  it("a story_draft_lines step keeps the whole brief and the lines the writer returned, in the manifest too", async () => {
+    const { media, call } = await make();
+    const { indexId } = await openAndIndex(call);
+    const brief = `Smith's night. ${"Rule. ".repeat(300)}`.slice(0, 2000);
+    ok(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1", "ev_2"], brief }));
+    const step = media.steps.at(-1);
+    assert.equal(step.input.brief, brief, "all 2000 characters of the brief, not the first 200");
+    assert.deepEqual(step.output, { lines: WRITER_LINES });
+    const recorded = manifestOf(media).run.media_steps.at(-1);
+    assert.equal(recorded.input.brief, brief);
+    assert.deepEqual(recorded.output, { lines: WRITER_LINES });
+    assert.equal(media.steps.filter((s) => "output" in s).length, 1, "only story_draft_lines records an output");
+  });
+
+  it("a refused story_draft_lines keeps the brief up to the tool's 2000-character limit; its other strings stay at 200", async () => {
+    const { media, call } = await make();
+    const { indexId } = await openAndIndex(call);
+    refused(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["e".repeat(300)], brief: "b".repeat(2500) }), "invalid_input");
+    const step = media.steps.at(-1);
+    assert.equal(step.input.brief, "b".repeat(2000));
+    assert.deepEqual(step.input.eventIds, ["e".repeat(200)]);
+    assert.equal("output" in step, false);
+    // A brief is kept whole only on story_draft_lines.
+    refused(await call("media_find_events", { indexArtifactId: "nope", brief: "b".repeat(2500) }), "artifact_unknown");
+    assert.equal(media.steps.at(-1).input.brief, "b".repeat(200));
+  });
+
+  it("a recorded line is cut at 1000 characters", async () => {
+    const long = [{ text: "x".repeat(1500), cites: ["ev_1"] }];
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({
+          id: "c1", object: "chat.completion", created: 1, model: "writer",
+          choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(long) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    disposers.push(() => new Promise((resolve) => server.close(resolve)));
+    const roles = { ...INFERENCE.roles, writer: { route: "nim", model: "writer", baseUrl: `http://127.0.0.1:${server.address().port}/v1` } };
+    const { media, call } = await make({ inference: { ...INFERENCE, roles } });
+    const { indexId } = await openAndIndex(call);
+    const out = ok(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1"], brief: "b" }));
+    assert.equal(out.lines[0].text.length, 1500, "the agent gets the whole line");
+    assert.deepEqual(media.steps.at(-1).output, { lines: [{ text: "x".repeat(1000), cites: ["ev_1"] }] });
   });
 
   it("a refused call is a step with its refusal code and no artifacts, in the manifest too", async () => {
@@ -319,6 +375,11 @@ describe("media story tools: the writer gets the skill's writing rules from the 
     assert.ok(prompt.includes("Brief: Smith's night."), prompt);
     assert.ok(prompt.includes(RULES), "the writer got the rules as the skill wrote them");
     assert.match(media.tools.story_draft_lines.description, /writing rules/);
+    // The record shows whose rules the writer was given, and exactly which text.
+    assert.deepEqual(media.steps.at(-1).output, {
+      lines: WRITER_LINES,
+      writingGuide: { skill: "pack-guided", sha256: createHash("sha256").update(RULES).digest("hex") },
+    });
   });
 
   it("a skill that declares no guide: the prompt has no rules section and the result names none", async () => {

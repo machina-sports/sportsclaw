@@ -125,6 +125,7 @@ Extends `groundingCheck` from "numbers in the answer" to "lines against evidence
 - The skill's `SKILL.md` gives the recipe in plain language. The engine's preconditions make the recipe safe to get wrong.
 - Raise the turn limit for story runs **(my call: 16)** and give job tools a wait option so a status check does not cost a turn per second.
 - Every step lands in the run manifest: tool, inputs, artifact ids, receipts for each model call.
+- The record shows what the writer was told and what it wrote (added 18 Nov 2026, after GPU session 3). Step inputs keep only the first 200 characters of each string, which cut the writer's brief (up to 2000 characters), so a run could not show whether the writing rules had been passed. A `story_draft_lines` step now keeps the whole `brief`, and has an `output`: the lines the writer returned (each text cut at 1000 characters) and, when a skill's writing guide was given to the writer, that skill and the guide's sha256. Every other string in every step stays cut at 200 characters. No path or key is added to the record: the brief is the agent's own text and the lines are the writer's.
 
 ### 8. OpenShell
 
