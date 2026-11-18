@@ -94,6 +94,7 @@ Replaces the single `SyncAnchor` with a map from video time to game time.
 
 - **Timeline:** a typed document: an ordered list of segments. A segment is a clip window on a source, with optional subject track, caption, voice artifact, and a data overlay (score before and after, clock). Cards (title, outro) are segments without a source.
 - **Tool:** `story_timeline_build` validates a timeline and stores it as an artifact. It refuses captions that are not in a `lines-checked` artifact from this run.
+- **A caption belongs to its clip (added 18 Nov 2026, after GPU session 3):** in one run the agent paired lines to clips by position after the writer joined two plays in one line, so each later caption and voice played over the wrong clip, and the timeline was accepted. `story_timeline_build` now refuses (`caption_not_event`) a clip that names an `eventId` and a `lineId` whose checked line cites one or more plays but not that one; the message names the checked line that does cite the play. A line that cites only facts, a clip placed by seconds alone, and a card are not checked: nothing says which play they are about.
 - **Rendering is a job.** The engine ships one plain renderer (cut, caption, voice, using the existing FFmpeg wrapper). A skill can supply another renderer kind that reads the same timeline (the demo's follow-and-crop look).
 
 ### 4a. Prepared once, used per story (my call)

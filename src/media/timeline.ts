@@ -11,6 +11,10 @@
  * startSec/endSec must lie within the event's [startSec - EVENT_SLACK_SEC, endSec + EVENT_SLACK_SEC]
  * (`clip_not_event`); an eventId not in that index is `unknown_event`. The resolved timeline always
  * carries startSec/endSec on every clip.
+ *
+ * A caption belongs to its clip: when a clip names an eventId and a lineId, and that checked line cites one or
+ * more events of the index, one of them must be the clip's (`caption_not_event`). A line that cites only
+ * facts, a clip placed by seconds alone, and a card are not checked: nothing says which play they are about.
  */
 
 import type { ArtifactKind } from "./types.js";
@@ -50,7 +54,8 @@ export type TimelineErrorCode =
   | "bad_card"
   | "bad_version"
   | "clip_not_event"
-  | "unknown_event";
+  | "unknown_event"
+  | "caption_not_event";
 
 export class TimelineError extends Error {
   constructor(
@@ -140,7 +145,7 @@ export async function resolveTimeline(
     throw new TimelineError("missing_artifact", `No lines-checked artifact ${t.linesArtifactId}`);
   }
 
-  const lineText = new Map(ctx.lines.map((l) => [l.lineId, l.text]));
+  const linesById = new Map(ctx.lines.map((l) => [l.lineId, l]));
   const eventsById = new Map((ctx.events ?? []).map((e) => [e.eventId, e]));
   const segments: TimelineSegment[] = [];
   const captions: (string | null)[] = [];
@@ -214,10 +219,24 @@ export async function resolveTimeline(
       if (t.linesArtifactId === undefined) {
         throw new TimelineError("missing_lines_artifact", `Segment ${i} names line ${lineId} but the timeline has no linesArtifactId`, i);
       }
-      const text = lineText.get(lineId);
-      if (text === undefined) throw new TimelineError("unknown_line", `Segment ${i}: ${lineId} is not a checked line`, i);
+      const line = linesById.get(lineId);
+      if (line === undefined) throw new TimelineError("unknown_line", `Segment ${i}: ${lineId} is not a checked line`, i);
+      if (raw.kind === "clip" && eventId !== undefined) {
+        const cited = line.cites.filter((c) => eventsById.has(c));
+        if (cited.length > 0 && !cited.includes(eventId)) {
+          const citing = ctx.lines.filter((l) => l.cites.includes(eventId)).map((l) => l.lineId);
+          throw new TimelineError(
+            "caption_not_event",
+            `Segment ${i}: ${lineId} cites ${cited.join(", ")}, not this clip's ${eventId}. ` +
+              (citing.length > 0
+                ? `The checked line that cites ${eventId} is ${citing.join(" or ")}: use it as this clip's lineId.`
+                : `No checked line cites ${eventId}: leave this clip without a lineId.`),
+            i,
+          );
+        }
+      }
       seg.lineId = lineId;
-      caption = text;
+      caption = line.text;
     }
 
     const voiceId = optionalString(raw.voiceArtifactId, "voiceArtifactId", i, "missing_artifact");

@@ -88,7 +88,7 @@ A refused call returns `{ "error_code", "message" }` as its tool result, for exa
 `artifact_wrong_kind`, `artifact_wrong_run`, `artifact_changed`, `unknown_kind`,
 `unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`,
 `artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`,
-`writing_guide_ambiguous`.
+`writing_guide_ambiguous`, `caption_not_event`.
 
 What the model sees of an error is bounded:
 
@@ -125,6 +125,11 @@ Rules the engine enforces:
   5 seconds (`clip_not_event`). An `eventId` that is not in that index is `unknown_event`; a
   clip with an `eventId` needs a `linesArtifactId` (`missing_lines_artifact`). The resolved
   timeline, and what a renderer gets, always has `startSec` and `endSec` on every clip.
+- **A caption belongs to its clip.** A clip that names an `eventId` and a `lineId` must use a
+  checked line that cites that play. If the line cites one or more plays and none is the
+  clip's, the timeline is refused with `caption_not_event`, and the message names the checked
+  line that does cite the play (or says that none does). A line that cites only facts may go
+  on any clip; a clip placed by seconds alone and a card are not checked.
 - **Event index.** `media_find_events` reads a job-made `event-index` artifact and refuses
   (`bad_index`) one that is not exactly `{ version: 1, sourceSha256, events, skipped }` for
   the source, with each event exactly `{ eventId, actionId, period, clockSec, label, type,

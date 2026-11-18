@@ -410,7 +410,8 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
           "voiceArtifactId?, subjectTracksArtifactId?, overlay? } | { kind: 'card', cardSeconds, lineId?, voiceArtifactId?, overlay? }] }. " +
           "A clip names its play by eventId (its window comes from the event index the lines were checked against) or gives " +
           `startSec and endSec; with both, the window must be within ${EVENT_SLACK_SEC}s of the event's. ` +
-          "Captions are named by lineId, never written.",
+          "Captions are named by lineId, never written. A clip's lineId is the checked line that cites its eventId, never just the " +
+          "next line in order (caption_not_event).",
       },
     },
     required: ["timeline"],

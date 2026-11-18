@@ -668,14 +668,26 @@ describe("media story tools: timelines", () => {
     const p = await prepared(call);
     const t = {
       version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
-      segments: [{ kind: "clip", eventId: "ev_2", lineId: "line_1" }, { kind: "clip", eventId: "ev_1", startSec: 0, endSec: 4 }],
+      segments: [{ kind: "clip", eventId: "ev_1", lineId: "line_1" }, { kind: "clip", eventId: "ev_2", startSec: 5, endSec: 9 }],
     };
     const built = ok(await call("story_timeline_build", { timeline: t }));
     const doc = JSON.parse(readFileSync(JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${built.timelineArtifactId}.json`), "utf8")).artifact.path, "utf8"));
-    assert.deepEqual(doc.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+    assert.deepEqual(doc.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_1", 1, 5], ["ev_2", 5, 9]]);
     const video = ok(await call("story_render", { timelineArtifactId: built.timelineArtifactId, renderer: `${SKILL}/render-video` }));
     const st = ok(await call("media_job_status", { jobId: video.jobId }));
-    assert.deepEqual(st.facts.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+    assert.deepEqual(st.facts.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_1", 1, 5], ["ev_2", 5, 9]]);
+  });
+
+  it("a clip's caption must be a checked line that cites its play (caption_not_event); a line citing only facts may go on any clip", { skip: NO_FFMPEG }, async () => {
+    const { call, media } = await make();
+    const p = await prepared(call); // line_1 cites ev_1, line_2 cites fact_1
+    const t = (seg) => ({ version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId, segments: [seg] });
+    const wrong = await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_2", lineId: "line_1", voiceArtifactId: p.voices[0] }) });
+    refused(wrong, "caption_not_event");
+    assert.match(wrong.message, /line_1 cites ev_1, not this clip's ev_2/);
+    assert.equal(media.steps.at(-1).refused, "caption_not_event");
+    ok(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_1", lineId: "line_1", voiceArtifactId: p.voices[0] }) }));
+    ok(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_2", lineId: "line_2", voiceArtifactId: p.voices[1] }) }));
   });
 
   it("a clip window away from its event -> clip_not_event; an event not in the index -> unknown_event", { skip: NO_FFMPEG }, async () => {
