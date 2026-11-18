@@ -18,6 +18,12 @@
  * `"prep": true` marks a prep job (it outlives its run; see prep.ts). It is valid only on a kind that reads
  * the source (its artifacts are shared for that source) and whose every `produces` kind is a per-game kind
  * (PREP_KINDS: clock-map, event-index, subject-tracks, subject-identity); otherwise the declaration is dropped.
+ *
+ * `"writingGuide": "<file>"` at the top of jobs.json names a text file under scripts/ (so the bundle hash
+ * covers it): the skill's rules for the story writer, which story_draft_lines gives the writer word for word.
+ * A declared guide that is not a usable file (not a plain path under scripts/, missing, blank, or longer than
+ * MAX_WRITING_GUIDE_CHARS) makes jobs.json unusable, like a duplicate kind: the skill has no job kinds, so no
+ * story is written without the rules its skill declares.
  */
 
 import { createHash } from "node:crypto";
@@ -33,6 +39,8 @@ const KIND_RE = /^[a-z][a-z0-9-]{1,40}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
 const MAX_JOBS_JSON_BYTES = 256 * 1024;
 const MAX_ENTRY_CHARS = 200;
+/** Longest writing guide a skill may declare (it is added to every writer prompt). */
+export const MAX_WRITING_GUIDE_CHARS = 4000;
 
 export interface JobKindDecl {
   skill: string;
@@ -168,8 +176,21 @@ async function entryIsInside(skillDir: string, entry: string): Promise<boolean> 
   return !!st && st.isFile();
 }
 
-/** Declarations from jobs.json; undefined if the file is unusable. Invalid single declarations are dropped. */
-async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDecl[] | undefined> {
+/** The text of the writing guide jobs.json names (a file under scripts/); undefined if it cannot be used. */
+async function readWritingGuide(skillDir: string, name: unknown): Promise<string | undefined> {
+  if (typeof name !== "string" || !(await entryIsInside(skillDir, name))) return undefined;
+  const file = join(skillDir, "scripts", name);
+  // A character is at most 4 bytes of UTF-8: a larger file cannot fit the limit, so it is not read.
+  if ((await fs.lstat(file)).size > MAX_WRITING_GUIDE_CHARS * 4) return undefined;
+  const text = await fs.readFile(file, "utf8");
+  return text.trim() === "" || text.length > MAX_WRITING_GUIDE_CHARS ? undefined : text;
+}
+
+/**
+ * Declarations (and the writing guide, if one is declared) from jobs.json; undefined if the file is unusable.
+ * Invalid single declarations are dropped.
+ */
+async function readJobDecls(skill: string, skillDir: string): Promise<{ decls: JobKindDecl[]; writingGuide?: string } | undefined> {
   const file = join(skillDir, "jobs.json");
   const st = await fs.lstat(file).catch(() => undefined);
   if (!st || !st.isFile() || st.size > MAX_JOBS_JSON_BYTES) return undefined;
@@ -180,6 +201,11 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
     return undefined;
   }
   if (!isPlainObject(doc) || !Array.isArray(doc.jobs)) return undefined;
+  let writingGuide: string | undefined;
+  if (doc.writingGuide !== undefined) {
+    writingGuide = await readWritingGuide(skillDir, doc.writingGuide);
+    if (writingGuide === undefined) return undefined;
+  }
 
   const kinds = new Set<string>();
   const out: JobKindDecl[] = [];
@@ -216,7 +242,7 @@ async function readJobDecls(skill: string, skillDir: string): Promise<JobKindDec
     if (j.prep === true) decl.prep = true;
     out.push(decl);
   }
-  return out;
+  return { decls: out, ...(writingGuide !== undefined ? { writingGuide } : {}) };
 }
 
 /** One skill's approved kinds with the bundle hash they were approved under (what a runner needs to start them). */
@@ -225,6 +251,8 @@ export interface ApprovedBundle {
   skillDir: string;
   bundleSha256: string;
   decls: JobKindDecl[];
+  /** The skill's rules for the story writer (jobs.json "writingGuide"), when it declares them. */
+  writingGuide?: string;
 }
 
 /** Per skill: kinds from jobs.json whose (skill, kind, bundleSha256) is in the allowlist. Skills with none are left out. */
@@ -237,8 +265,9 @@ export async function approvedJobBundles(
   const result: ApprovedBundle[] = [];
   for (const guide of guides) {
     if (!guide.dir || !policy.some((p) => p.skill === guide.id)) continue;
-    const decls = await readJobDecls(guide.id, guide.dir);
-    if (!decls?.length) continue;
+    const jobs = await readJobDecls(guide.id, guide.dir);
+    if (!jobs?.decls.length) continue;
+    const { decls, writingGuide } = jobs;
     let sha: string;
     try {
       sha = await bundleSha256(guide.dir);
@@ -246,7 +275,9 @@ export async function approvedJobBundles(
       continue;
     }
     const approved = decls.filter((d) => policy.some((p) => p.skill === d.skill && p.kind === d.kind && p.bundleSha256 === sha));
-    if (approved.length) result.push({ skill: guide.id, skillDir: guide.dir, bundleSha256: sha, decls: approved });
+    if (approved.length) {
+      result.push({ skill: guide.id, skillDir: guide.dir, bundleSha256: sha, decls: approved, ...(writingGuide !== undefined ? { writingGuide } : {}) });
+    }
   }
   return result;
 }
@@ -290,7 +321,7 @@ export async function sealBundle(
     }
     const parsed = await readJobDecls(skill, dir);
     if (!parsed) throw new BundleError("bundle_invalid", "jobs.json is missing or malformed.");
-    decls = parsed;
+    decls = parsed.decls;
   } catch (err) {
     await dispose();
     throw err;

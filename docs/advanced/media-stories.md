@@ -72,9 +72,9 @@ Skills are found as for portable skills (`SPORTSCLAW_SKILL_GUIDES_DIR`).
 | `media_job_start` | `{ skill, kind, input, sourceArtifactId? }` | an approved kind that is not a renderer (`renderer_only`); artifact ids in `input` (see `x-artifact-kind`) | `jobId` (and `prep: true` for a [prep job](#prep-jobs)) |
 | `media_job_status` | `{ jobId, waitSec? }` | a job of this run, or a prep job of any run on this engine; `waitSec` is capped at 60 | state, artifact ids and facts when done |
 | `media_job_cancel` | `{ jobId }` | as `media_job_status` | state |
-| `media_find_events` | `{ indexArtifactId, text?, people?, period?, type?, limit? }` | `event-index` | rows: `eventId`, `period`, `clock`, `label`, `people`, `type`, and where the play is in the video: `videoSec` and its clip window `startSec`–`endSec` |
+| `media_find_events` | `{ indexArtifactId, text?, people?, period?, clockMinSec?, clockMaxSec?, type?, limit? }` | `event-index` | rows: `eventId`, `period`, `clock`, `label`, `people`, `type`, and where the play is in the video: `videoSec` and its clip window `startSec`–`endSec` |
 | `story_facts_collect` | `{}` | — | `facts` artifact id, fact ids with tool names |
-| `story_draft_lines` | `{ indexArtifactId, eventIds, factsArtifactId?, brief, maxLines? }` | `event-index`, `facts`, a writer role | draft lines (not an artifact) |
+| `story_draft_lines` | `{ indexArtifactId, eventIds, factsArtifactId?, brief, maxLines? }` | `event-index`, `facts`, a writer role | draft lines (not an artifact), and `writingGuide`: the skill whose [writing guide](#the-writing-guide) the writer was given, when there is one |
 | `story_check_lines` | `{ indexArtifactId, factsArtifactId?, lines }` | `event-index`; `facts` is optional (without it a line can cite only events) | verdicts, a `lines-checked` artifact of the lines that passed, `rewritesLeft`, and `checker`: the checker that ran (`<skill>/check-lines` or `built-in`) |
 | `speech_synthesize` | `{ linesArtifactId, lineIds, voice? }` | `lines-checked`; `inference.speech` | one `voice` artifact id per line |
 | `story_timeline_build` | `{ timeline }` | every artifact id it names | `timeline` artifact id |
@@ -87,7 +87,8 @@ naming them and pointing to the skill's `SKILL.md` for the recipe.
 A refused call returns `{ "error_code", "message" }` as its tool result, for example
 `artifact_wrong_kind`, `artifact_wrong_run`, `artifact_changed`, `unknown_kind`,
 `unknown_line`, `bad_index`, `rewrite_limit`, `rights_required`, `source_outside`,
-`artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`.
+`artifact_not_minted`, `renderer_only`, `clip_not_event`, `unknown_event`, `prep_busy`,
+`writing_guide_ambiguous`, `caption_not_event`, `voice_missing`.
 
 What the model sees of an error is bounded:
 
@@ -124,6 +125,24 @@ Rules the engine enforces:
   5 seconds (`clip_not_event`). An `eventId` that is not in that index is `unknown_event`; a
   clip with an `eventId` needs a `linesArtifactId` (`missing_lines_artifact`). The resolved
   timeline, and what a renderer gets, always has `startSec` and `endSec` on every clip.
+- **A caption belongs to its clip.** A clip that names an `eventId` and a `lineId` must use a
+  checked line that cites that play. If the line cites one or more plays and none is the
+  clip's, the timeline is refused with `caption_not_event`, and the message names the checked
+  line that does cite the play (or says that none does). A line that cites only facts may go
+  on any clip; a clip placed by seconds alone and a card are not checked.
+- **A voiced story has a voice.** When `inference.speech` is configured, every segment with a
+  `lineId` needs that line's `voiceArtifactId`, or `story_timeline_build` refuses the timeline
+  with `voice_missing` and names the segments and lines. A line may go without a voice only
+  if its latest `speech_synthesize` call in this run failed in the speech service
+  (`speech_failed`); a call refused for another reason (`unknown_line`, a wrong id) does not
+  count, and once a line has been spoken its voice is required. The check runs when the
+  timeline is built, so `story_render` never receives a timeline that skipped it. Without
+  `inference.speech` a captioned timeline needs no voice.
+- **A stretch of the game.** `media_find_events` takes `clockMinSec` and `clockMaxSec`: the
+  game clock in seconds, as a row's `clock` shows it (`5:00` is 300), both ends included.
+  With `period`, a clock that counts down gives "the final five minutes" as
+  `{ period: 4, clockMaxSec: 300 }`; a clock that counts up uses `clockMinSec`. The index
+  does not say which way its clock runs, so the caller picks the bound.
 - **Event index.** `media_find_events` reads a job-made `event-index` artifact and refuses
   (`bad_index`) one that is not exactly `{ version: 1, sourceSha256, events, skipped }` for
   the source, with each event exactly `{ eventId, actionId, period, clockSec, label, type,
@@ -138,7 +157,11 @@ Every call is recorded on the run trace as `mediaSteps`
 (`{ tool, artifactIds, jobId?, input }`, in call order; `input` is the call's arguments with
 every string cut to 200 characters; `story_check_lines` steps also name the `checker` that
 ran), next to `numberGrounding`, so a run shows the agent ran
-each step and which ids each step took. A refused call is a step too, with `refused: "<error_code>"`
+each step and which ids each step took. A `story_draft_lines` step shows what the writer was
+told and what it wrote: its `input.brief` is kept whole (the tool takes up to 2000 characters),
+and it has an `output`, `{ lines, writingGuide? }`: the lines the writer returned (each text
+cut at 1000 characters) and, when a skill's writing guide was given to the writer,
+`{ skill, sha256 }` of that guide. A refused call is a step too, with `refused: "<error_code>"`
 (for example `job_budget`, `bundle_changed`, `prep_busy`) and no artifact ids, so a run where the
 model claims it started a job that was refused shows the refusal; the tool metrics count it as a
 failed call. The receipts of the tools' model calls (the writer,
@@ -187,6 +210,30 @@ A skill declares job kinds in `jobs.json` beside `SKILL.md`:
   ]
 }
 ```
+
+### The writing guide
+
+A skill's rules for the story writer (how many lines, how long, what not to say) do not depend
+on the agent copying them into `brief`. Put them in a text file under `scripts/` and name it
+at the top of `jobs.json`:
+
+```json
+{ "writingGuide": "writing-guide.md", "jobs": [ ... ] }
+```
+
+- `story_draft_lines` puts the file's text into the writer prompt word for word, after the
+  brief and before the plays and facts, whatever the brief says. `brief` is then only the
+  story's angle, and the tool's description tells the agent so.
+- The file is under `scripts/`, so the bundle hash covers it: editing the guide needs a new
+  approval, like editing a script. It may be at most 4000 characters.
+- Whose guide is used is chosen as the [line checker](#line-checks) is: the skill whose job
+  made the index in this run; for an index prepared in an earlier run, the one approved skill
+  that declares a guide (if several do, the call is refused with `writing_guide_ambiguous`).
+  The model cannot choose it. The call's result names the skill as `writingGuide`.
+- A declared guide that cannot be used (not a plain path under `scripts/`, missing, blank or
+  too long) makes `jobs.json` unusable: the skill has no job kinds until it is fixed.
+- With no guide declared, the writer prompt is unchanged. The engine has no writing rules of
+  its own. Engine 0.31.0 ignores the key.
 
 ### Approval: a bundle hash
 

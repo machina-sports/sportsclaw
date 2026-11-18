@@ -244,6 +244,37 @@ describe("draftLines", () => {
     });
   });
 
+  it("with no guide the prompt is exactly the 0.31.0 prompt", async () => {
+    await withModel(JSON.stringify(LINES), async (baseUrl, prompts) => {
+      await draftLines({ inference: writerAt(baseUrl), brief: "A Nuggets recap.", events: EVENTS, facts: FACTS, maxLines: 4 });
+      assert.equal(prompts[0], [
+        "Write the spoken lines of a sports story.",
+        "Brief: A Nuggets recap.",
+        "",
+        "Events from the official play-by-play (eventId | period | clock | label | people):",
+        "- ev_1 | period 1 | 5:12 | Jokic 3PT jump shot | Nikola Jokic",
+        "- ev_2 | period 4 | 0:15 | Murray driving layup | Jamal Murray",
+        "",
+        "Facts from data tools (factId: output):",
+        '- fact_1: {"player":"Nikola Jokic","pts":38}',
+        "",
+        "Write at most 4 lines. Every line must cite the eventIds and factIds that back it, and say nothing they do not.",
+        'Reply with only a JSON array of {"text": string, "cites": string[]} and nothing else.',
+      ].join("\n"));
+    });
+  });
+
+  it("a guide reaches the writer word for word, after the brief and before the events, whatever the brief says", async () => {
+    const guide = "One line per play; each line cites exactly one eventId.\n  At most 14 words a line.\nNo \"as\" or \"while\".";
+    await withModel(JSON.stringify(LINES), async (baseUrl, prompts) => {
+      await draftLines({ inference: writerAt(baseUrl), brief: "A Nuggets recap.", guide, events: EVENTS, facts: FACTS, maxLines: 4 });
+      const at = (text) => prompts[0].indexOf(text);
+      assert.ok(at(guide) > at("Brief: A Nuggets recap."), "the guide follows the brief");
+      assert.ok(at(guide) < at("Events from the official play-by-play"), "the guide comes before the events");
+      assert.ok(prompts[0].endsWith('Reply with only a JSON array of {"text": string, "cites": string[]} and nothing else.'), "the reply format stays last");
+    });
+  });
+
   it("accepts a single ```json fence and keeps only the first maxLines", async () => {
     await withModel("```json\n" + JSON.stringify(LINES) + "\n```", async (baseUrl) => {
       const lines = await draftLines({ inference: writerAt(baseUrl), brief: "b", events: EVENTS, facts: FACTS, maxLines: 1 });

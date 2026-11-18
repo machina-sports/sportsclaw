@@ -83,10 +83,13 @@ const WRITER_LINES = [
 ];
 const RESULTS = [{ toolName: "stats_get_player", toolCallId: "c1", input: {}, output: '{"player":"Ann Smith","pts":38}', isError: false }];
 
-// The writer role: a chat server answering every request with WRITER_LINES.
+// The writer role: a chat server answering every request with WRITER_LINES. writerPrompts keeps what it was sent.
+const writerPrompts = [];
 const writer = http.createServer((req, res) => {
-  req.resume();
+  let body = "";
+  req.on("data", (c) => (body += c));
   req.on("end", () => {
+    writerPrompts.push(JSON.parse(body).messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({
       id: "c1", object: "chat.completion", created: 1, model: "writer",
@@ -125,11 +128,11 @@ async function make(over = {}) {
   const runId = over.runId ?? `run_${n++}`;
   const media = await createMediaTools({
     config: { workspaceDir, clearances: CLEARED, ...over.config },
-    guides: GUIDES,
+    guides: over.guides ?? GUIDES,
     inference: "inference" in over ? over.inference : INFERENCE,
     runId,
     getToolResults: () => over.results ?? RESULTS,
-    env: { ...process.env, ...allow(over.kinds ?? APPROVED) },
+    env: { ...process.env, ...(over.allowlist ? { [JOB_ALLOWLIST_ENV]: JSON.stringify(over.allowlist) } : allow(over.kinds ?? APPROVED)) },
     isDataTool: over.isDataTool ?? ((name) => name === "stats_get_player"),
     ...(over.pythonPath ? { pythonPath: over.pythonPath } : {}),
     ...(over.onReceipt ? { onReceipt: over.onReceipt } : {}),
@@ -152,10 +155,10 @@ function refused(result, code) {
 }
 
 /** Open the source, run make-index, wait for it. */
-async function openAndIndex(call, mode) {
+async function openAndIndex(call, mode, skill = SKILL) {
   const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
   const job = ok(await call("media_job_start", {
-    skill: SKILL, kind: "make-index", input: { events: EVENTS, ...(mode ? { mode } : {}) }, sourceArtifactId: src.sourceArtifactId,
+    skill, kind: "make-index", input: { events: EVENTS, ...(mode ? { mode } : {}) }, sourceArtifactId: src.sourceArtifactId,
   }));
   const st = ok(await call("media_job_status", { jobId: job.jobId, waitSec: 30 }));
   assert.equal(st.state, "succeeded", st.error);
@@ -227,7 +230,7 @@ describe("media story tools: the whole chain", () => {
       { tool: "media_job_status", artifactIds: [indexId], jobId: job.jobId },
       { tool: "media_find_events", artifactIds: [] },
       { tool: "story_facts_collect", artifactIds: [facts.factsArtifactId] },
-      { tool: "story_draft_lines", artifactIds: [] },
+      { tool: "story_draft_lines", artifactIds: [], output: { lines: WRITER_LINES } },
       { tool: "story_check_lines", artifactIds: [checked.linesArtifactId], checker: `${SKILL}/check-lines` },
       { tool: "speech_synthesize", artifactIds: voices },
       { tool: "story_timeline_build", artifactIds: [built.timelineArtifactId] },
@@ -263,6 +266,62 @@ describe("media story tools: the whole chain", () => {
     ]);
   });
 
+  const manifestOf = (media) => buildRunManifest({
+    sportsclawVersion: "test", provider: "openai", model: "m", sampling: {}, maxOutputTokens: 1, maxTurns: 1, thinkingBudget: 0,
+    env: {},
+    trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps },
+  });
+
+  it("a story_draft_lines step keeps the whole brief and the lines the writer returned, in the manifest too", async () => {
+    const { media, call } = await make();
+    const { indexId } = await openAndIndex(call);
+    const brief = `Smith's night. ${"Rule. ".repeat(300)}`.slice(0, 2000);
+    ok(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1", "ev_2"], brief }));
+    const step = media.steps.at(-1);
+    assert.equal(step.input.brief, brief, "all 2000 characters of the brief, not the first 200");
+    assert.deepEqual(step.output, { lines: WRITER_LINES });
+    const recorded = manifestOf(media).run.media_steps.at(-1);
+    assert.equal(recorded.input.brief, brief);
+    assert.deepEqual(recorded.output, { lines: WRITER_LINES });
+    assert.equal(media.steps.filter((s) => "output" in s).length, 1, "only story_draft_lines records an output");
+  });
+
+  it("a refused story_draft_lines keeps the brief up to the tool's 2000-character limit; its other strings stay at 200", async () => {
+    const { media, call } = await make();
+    const { indexId } = await openAndIndex(call);
+    refused(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["e".repeat(300)], brief: "b".repeat(2500) }), "invalid_input");
+    const step = media.steps.at(-1);
+    assert.equal(step.input.brief, "b".repeat(2000));
+    assert.deepEqual(step.input.eventIds, ["e".repeat(200)]);
+    assert.equal("output" in step, false);
+    // A brief is kept whole only on story_draft_lines.
+    refused(await call("media_find_events", { indexArtifactId: "nope", brief: "b".repeat(2500) }), "artifact_unknown");
+    assert.equal(media.steps.at(-1).input.brief, "b".repeat(200));
+  });
+
+  it("a recorded line is cut at 1000 characters", async () => {
+    const long = [{ text: "x".repeat(1500), cites: ["ev_1"] }];
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({
+          id: "c1", object: "chat.completion", created: 1, model: "writer",
+          choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(long) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    disposers.push(() => new Promise((resolve) => server.close(resolve)));
+    const roles = { ...INFERENCE.roles, writer: { route: "nim", model: "writer", baseUrl: `http://127.0.0.1:${server.address().port}/v1` } };
+    const { media, call } = await make({ inference: { ...INFERENCE, roles } });
+    const { indexId } = await openAndIndex(call);
+    const out = ok(await call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1"], brief: "b" }));
+    assert.equal(out.lines[0].text.length, 1500, "the agent gets the whole line");
+    assert.deepEqual(media.steps.at(-1).output, { lines: [{ text: "x".repeat(1000), cites: ["ev_1"] }] });
+  });
+
   it("a refused call is a step with its refusal code and no artifacts, in the manifest too", async () => {
     const { media, call } = await make({ config: { maxJobsPerRun: 1 } });
     const src = ok(await call("media_source_open", { path: "media/game.mp4" }));
@@ -285,6 +344,71 @@ describe("media story tools: the whole chain", () => {
       trace: { offeredTools: [], toolSurfaceSha256: "x", providerWarnings: [], parallelAgents: false, mediaSteps: media.steps },
     });
     assert.deepEqual(manifest.run.media_steps.map((s) => s.refused ?? null), [null, "unknown_kind", "invalid_input", null, "job_budget"]);
+  });
+});
+
+describe("media story tools: the writer gets the skill's writing rules from the engine", () => {
+  const RULES = "One line per play; each line cites exactly one eventId.\nAt most 14 words a line.\n";
+  /** A copy of the story pack under `id` whose jobs.json names a writing guide: its guide entry and allowlist. */
+  async function packWithGuide(id, text = RULES) {
+    const dir = join(tmp, "packs", id);
+    cpSync(join(repoRoot, "test/fixtures/media/pack-story"), dir, { recursive: true });
+    writeFileSync(join(dir, "scripts", "writing-guide.md"), text);
+    const jobs = JSON.parse(readFileSync(join(dir, "jobs.json"), "utf8"));
+    writeFileSync(join(dir, "jobs.json"), JSON.stringify({ ...jobs, writingGuide: "writing-guide.md" }));
+    const sha = await bundleSha256(dir);
+    return {
+      guide: { id, name: id, description: "", body: "", dir },
+      allowlist: APPROVED.map((kind) => ({ skill: id, kind, bundleSha256: sha })),
+    };
+  }
+  const draft = (call, indexId) => call("story_draft_lines", { indexArtifactId: indexId, eventIds: ["ev_1", "ev_2"], brief: "Smith's night." });
+
+  it("a declared guide reaches the writer word for word though the brief holds no rules, and the result names the skill", async () => {
+    const guided = await packWithGuide("pack-guided");
+    const { call, media } = await make({ guides: [guided.guide], allowlist: guided.allowlist });
+    const { indexId } = await openAndIndex(call, undefined, "pack-guided");
+    const out = ok(await draft(call, indexId));
+    assert.deepEqual(out.lines, WRITER_LINES);
+    assert.equal(out.writingGuide, "pack-guided");
+    const prompt = writerPrompts.at(-1);
+    assert.ok(prompt.includes("Brief: Smith's night."), prompt);
+    assert.ok(prompt.includes(RULES), "the writer got the rules as the skill wrote them");
+    assert.match(media.tools.story_draft_lines.description, /writing rules/);
+    // The record shows whose rules the writer was given, and exactly which text.
+    assert.deepEqual(media.steps.at(-1).output, {
+      lines: WRITER_LINES,
+      writingGuide: { skill: "pack-guided", sha256: createHash("sha256").update(RULES).digest("hex") },
+    });
+  });
+
+  it("a skill that declares no guide: the prompt has no rules section and the result names none", async () => {
+    const { call, media } = await make();
+    const { indexId } = await openAndIndex(call);
+    const out = ok(await draft(call, indexId));
+    assert.equal("writingGuide" in out, false);
+    assert.ok(!writerPrompts.at(-1).includes("Writing rules"), writerPrompts.at(-1));
+    assert.doesNotMatch(media.tools.story_draft_lines.description, /writing rules/);
+  });
+
+  it("an index prepared in an earlier run takes the one approved skill's guide; with two such skills -> writing_guide_ambiguous", async () => {
+    const guided = await packWithGuide("pack-guided-b");
+    const other = await packWithGuide("pack-guided-c", "Other rules.");
+    const first = await make({ guides: [guided.guide], allowlist: guided.allowlist });
+    await openAndIndex(first.call, undefined, "pack-guided-b");
+
+    // A later run finds the index shared: no job of this run made it.
+    const later = await make({ workspaceDir: first.workspaceDir, guides: [guided.guide], allowlist: guided.allowlist });
+    const src = ok(await later.call("media_source_open", { path: "media/game.mp4" }));
+    const indexId = src.shared.find((a) => a.kind === "event-index").artifactId;
+    assert.equal(ok(await draft(later.call, indexId)).writingGuide, "pack-guided-b");
+    assert.ok(writerPrompts.at(-1).includes(RULES));
+
+    const both = await make({ workspaceDir: first.workspaceDir, guides: [guided.guide, other.guide], allowlist: [...guided.allowlist, ...other.allowlist] });
+    ok(await both.call("media_source_open", { path: "media/game.mp4" }));
+    const sent = writerPrompts.length;
+    refused(await draft(both.call, indexId), "writing_guide_ambiguous");
+    assert.equal(writerPrompts.length, sent, "no writer call without knowing whose rules apply");
   });
 });
 
@@ -600,19 +724,48 @@ describe("media story tools: timelines", () => {
     }]);
   });
 
+  it("media_find_events filters by game clock (clockMinSec, clockMaxSec), and its description says how to ask for the end of a period", async () => {
+    const { call, media } = await make();
+    const { indexId } = await openAndIndex(call); // ev_1 at 0:30, ev_2 at 0:50, both in period 1
+    const found = async (q) => ok(await call("media_find_events", { indexArtifactId: indexId, ...q })).events.map((e) => e.eventId);
+    assert.deepEqual(await found({ period: 1, clockMaxSec: 40 }), ["ev_1"]);
+    assert.deepEqual(await found({ clockMinSec: 40 }), ["ev_2"]);
+    assert.deepEqual(await found({ clockMinSec: 30, clockMaxSec: 50 }), ["ev_1", "ev_2"]);
+    for (const bad of [{ clockMaxSec: "5:00" }, { clockMinSec: -1 }, { clockMaxSec: Infinity }]) {
+      refused(await call("media_find_events", { indexArtifactId: indexId, ...bad }), "invalid_input");
+    }
+    const tool = media.tools.media_find_events;
+    assert.equal(tool.inputSchema.properties.clockMinSec.type, "number");
+    assert.equal(tool.inputSchema.properties.clockMaxSec.type, "number");
+    assert.match(tool.description, /clockMaxSec/);
+    assert.match(tool.description, /final five minutes/);
+  });
+
   it("a clip may name only its eventId: the window comes from the index its lines were checked against, and the renderer gets it", { skip: NO_FFMPEG }, async () => {
     const { call, workspaceDir } = await make();
     const p = await prepared(call);
     const t = {
       version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
-      segments: [{ kind: "clip", eventId: "ev_2", lineId: "line_1" }, { kind: "clip", eventId: "ev_1", startSec: 0, endSec: 4 }],
+      segments: [{ kind: "clip", eventId: "ev_1", lineId: "line_1", voiceArtifactId: p.voices[0] }, { kind: "clip", eventId: "ev_2", startSec: 5, endSec: 9 }],
     };
     const built = ok(await call("story_timeline_build", { timeline: t }));
     const doc = JSON.parse(readFileSync(JSON.parse(readFileSync(join(workspaceDir, "artifacts", `${built.timelineArtifactId}.json`), "utf8")).artifact.path, "utf8"));
-    assert.deepEqual(doc.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+    assert.deepEqual(doc.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_1", 1, 5], ["ev_2", 5, 9]]);
     const video = ok(await call("story_render", { timelineArtifactId: built.timelineArtifactId, renderer: `${SKILL}/render-video` }));
     const st = ok(await call("media_job_status", { jobId: video.jobId }));
-    assert.deepEqual(st.facts.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_2", 6, 10], ["ev_1", 0, 4]]);
+    assert.deepEqual(st.facts.segments.map((s) => [s.eventId, s.startSec, s.endSec]), [["ev_1", 1, 5], ["ev_2", 5, 9]]);
+  });
+
+  it("a clip's caption must be a checked line that cites its play (caption_not_event); a line citing only facts may go on any clip", { skip: NO_FFMPEG }, async () => {
+    const { call, media } = await make();
+    const p = await prepared(call); // line_1 cites ev_1, line_2 cites fact_1
+    const t = (seg) => ({ version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId, segments: [seg] });
+    const wrong = await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_2", lineId: "line_1", voiceArtifactId: p.voices[0] }) });
+    refused(wrong, "caption_not_event");
+    assert.match(wrong.message, /line_1 cites ev_1, not this clip's ev_2/);
+    assert.equal(media.steps.at(-1).refused, "caption_not_event");
+    ok(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_1", lineId: "line_1", voiceArtifactId: p.voices[0] }) }));
+    ok(await call("story_timeline_build", { timeline: t({ kind: "clip", eventId: "ev_2", lineId: "line_2", voiceArtifactId: p.voices[1] }) }));
   });
 
   it("a clip window away from its event -> clip_not_event; an event not in the index -> unknown_event", { skip: NO_FFMPEG }, async () => {
@@ -640,6 +793,111 @@ describe("media story tools: timelines", () => {
     assert.equal(src.durationSec, null);
     const t = { version: 1, sourceArtifactId: src.sourceArtifactId, segments: [{ kind: "card", cardSeconds: 2 }] };
     refused(await call("story_timeline_build", { timeline: t }), "source_duration_unknown");
+  });
+});
+
+describe("media story tools: a voiced story has a voice", { skip: NO_FFMPEG }, () => {
+  /** Index and checked lines (line_1 cites ev_1, line_2 cites fact_1); nothing spoken yet. */
+  async function checkedOnly(call) {
+    const { src, indexId } = await openAndIndex(call);
+    const facts = ok(await call("story_facts_collect"));
+    const checked = ok(await call("story_check_lines", { indexArtifactId: indexId, factsArtifactId: facts.factsArtifactId, lines: WRITER_LINES }));
+    return { src, checked };
+  }
+  /** Two captioned segments (voiced when a voice id is given) and a clip with no caption. */
+  const story = (p, voices = []) => ({
+    timeline: {
+      version: 1, sourceArtifactId: p.src.sourceArtifactId, linesArtifactId: p.checked.linesArtifactId,
+      segments: [
+        { kind: "clip", eventId: "ev_1", lineId: "line_1", ...(voices[0] ? { voiceArtifactId: voices[0] } : {}) },
+        { kind: "card", cardSeconds: 2, lineId: "line_2", ...(voices[1] ? { voiceArtifactId: voices[1] } : {}) },
+        { kind: "clip", startSec: 6, endSec: 9 },
+      ],
+    },
+  });
+  const speak = (call, p, lineIds) => call("speech_synthesize", { linesArtifactId: p.checked.linesArtifactId, lineIds });
+
+  /** A speech service (openai format) that fails with 503 while `down` is true, else answers a short WAV. */
+  async function speechService() {
+    const wav = Buffer.alloc(44 + 1600);
+    wav.write("RIFF", 0); wav.writeUInt32LE(36 + 1600, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16);
+    wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28);
+    wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(1600, 40);
+    const service = { down: true };
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (service.down) {
+          res.statusCode = 503;
+          res.end("unavailable");
+        } else {
+          res.setHeader("content-type", "audio/wav");
+          res.end(wav);
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    disposers.push(() => new Promise((resolve) => server.close(resolve)));
+    service.inference = { ...INFERENCE, speech: { route: "nim", format: "openai", model: "tts", voice: "v", baseUrl: `http://127.0.0.1:${server.address().port}/v1` } };
+    return service;
+  }
+
+  it("with speech configured, a captioned segment with no voiceArtifactId -> voice_missing, naming the segments and their lines", async () => {
+    const { call, media } = await make();
+    const p = await checkedOnly(call);
+
+    // The agent never called speech_synthesize.
+    const silent = await call("story_timeline_build", story(p));
+    refused(silent, "voice_missing");
+    assert.match(silent.message, /segment 0 \(line_1\), segment 1 \(line_2\)/);
+    assert.match(silent.message, /speech_synthesize/);
+    assert.equal(media.steps.at(-1).refused, "voice_missing");
+
+    // A refused speech call (the agent's mistake, not the service's) excuses nothing.
+    refused(await speak(call, p, ["line_9"]), "unknown_line");
+    refused(await call("story_timeline_build", story(p)), "voice_missing");
+
+    const one = ok(await speak(call, p, ["line_1"])).voices[0].voiceArtifactId;
+    const half = await call("story_timeline_build", story(p, [one]));
+    refused(half, "voice_missing");
+    assert.match(half.message, /segment 1 \(line_2\)/);
+    assert.doesNotMatch(half.message, /line_1/);
+
+    const two = ok(await speak(call, p, ["line_2"])).voices[0].voiceArtifactId;
+    ok(await call("story_timeline_build", story(p, [one, two])));
+  });
+
+  it("without inference.speech a captioned timeline needs no voice, as before", async () => {
+    const { call } = await make({ inference: { roles: INFERENCE.roles } });
+    const p = await checkedOnly(call);
+    ok(await call("story_timeline_build", story(p)));
+  });
+
+  it("a line whose speech_synthesize call failed in this run may go without a voice; a line never tried may not", async () => {
+    const service = await speechService();
+    const { call } = await make({ inference: service.inference });
+    const p = await checkedOnly(call);
+
+    refused(await speak(call, p, ["line_1"]), "speech_failed");
+    const untried = await call("story_timeline_build", story(p));
+    refused(untried, "voice_missing");
+    assert.match(untried.message, /segment 1 \(line_2\)/);
+    assert.doesNotMatch(untried.message, /line_1/);
+
+    refused(await speak(call, p, ["line_1", "line_2"]), "speech_failed");
+    ok(await call("story_timeline_build", story(p)));
+  });
+
+  it("once speech works for a line, its voice is required again", async () => {
+    const service = await speechService();
+    const { call } = await make({ inference: service.inference });
+    const p = await checkedOnly(call);
+    refused(await speak(call, p, ["line_1", "line_2"]), "speech_failed");
+
+    service.down = false;
+    const voices = ok(await speak(call, p, ["line_1", "line_2"])).voices.map((v) => v.voiceArtifactId);
+    refused(await call("story_timeline_build", story(p)), "voice_missing");
+    ok(await call("story_timeline_build", story(p, voices)));
   });
 });
 

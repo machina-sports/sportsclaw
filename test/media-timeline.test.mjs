@@ -163,6 +163,54 @@ describe("resolveTimeline", () => {
     });
   });
 
+  describe("a caption belongs to its clip", () => {
+    const EVENTS = [{ eventId: "ev_1", startSec: 4, endSec: 10 }, { eventId: "ev_2", startSec: 8, endSec: 14 }, { eventId: "ev_3", startSec: 12, endSec: 18 }];
+    const CITING = [
+      { lineId: "line_1", text: "Smith scores.", cites: ["ev_1"] },
+      { lineId: "line_2", text: "Jones answers.", cites: ["ev_2", "fact_1"] },
+      { lineId: "line_3", text: "Smith and Jones trade baskets.", cites: ["ev_1", "ev_2"] },
+      { lineId: "line_4", text: "Smith finished with 38.", cites: ["fact_1"] },
+    ];
+    const withCites = { ...ctx, lines: CITING, events: EVENTS };
+    const eventClip = (eventId, lineId) => ({ kind: "clip", eventId, lineId });
+
+    it("a clip whose caption line cites other plays but not the clip's -> caption_not_event, naming the line that does", async () => {
+      // Lines paired to clips by position after one line took two plays: the caption of ev_2's clip cites ev_1.
+      await assert.rejects(resolveTimeline(timeline([eventClip("ev_1", "line_3"), eventClip("ev_2", "line_1")]), withCites), (err) => {
+        assert.ok(err instanceof TimelineError, String(err));
+        assert.equal(err.code, "caption_not_event");
+        assert.equal(err.segmentIndex, 1);
+        assert.match(err.message, /line_1 cites ev_1/);
+        assert.match(err.message, /line_2 or line_3/, "it names the checked lines that cite ev_2");
+        return true;
+      });
+    });
+
+    it("says so when no checked line cites the clip's play", async () => {
+      await assert.rejects(resolveTimeline(timeline([eventClip("ev_3", "line_1")]), withCites), (err) => {
+        assert.equal(err.code, "caption_not_event");
+        assert.match(err.message, /No checked line cites ev_3/);
+        return true;
+      });
+    });
+
+    it("a line citing the clip's play (alone, with a fact, or with another play) is its caption", async () => {
+      const out = await resolveTimeline(
+        timeline([eventClip("ev_1", "line_1"), eventClip("ev_2", "line_2"), eventClip("ev_1", "line_3"), eventClip("ev_2", "line_3")]),
+        withCites,
+      );
+      assert.deepEqual(out.captions, ["Smith scores.", "Jones answers.", "Smith and Jones trade baskets.", "Smith and Jones trade baskets."]);
+    });
+
+    it("a line that cites only facts, a clip placed by seconds, and a card are not affected", async () => {
+      const out = await resolveTimeline(
+        timeline([eventClip("ev_2", "line_4"), clip({ lineId: "line_1" }), { kind: "card", cardSeconds: 2, lineId: "line_2" }]),
+        withCites,
+      );
+      assert.deepEqual(out.captions, ["Smith finished with 38.", "Smith scores.", "Jones answers."]);
+    });
+  });
+
   it("accepts 40 segments", async () => {
     const out = await resolveTimeline(timeline(Array.from({ length: 40 }, () => clip())), ctx);
     assert.equal(out.captions.length, 40);

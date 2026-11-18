@@ -17,7 +17,8 @@
  *
  * The manifest never contains prompt text, credentials, or tool payloads —
  * only hashes and names. The one exception is `run.media_steps`: the inputs of
- * media story tool calls (artifact ids, line ids, a brief), strings capped at 200 characters.
+ * media story tool calls (artifact ids, line ids), strings capped at 200 characters, and for
+ * story_draft_lines the whole brief (up to 2000 characters) and the lines the writer returned.
  */
 
 import { createHash } from "node:crypto";
@@ -162,8 +163,9 @@ export interface RunTrace {
   dataAnswer?: { tools: string[]; facts: string; draft?: string; unsupported?: string[] };
   /**
    * Media story tool calls in call order (sportsclawConfig.media): the tool, its input (strings capped at
-   * 200 characters), the artifact ids it produced, and the job it started or read. A refused call has
-   * `refused` (its error_code) and no artifact ids. Absent when the run had no media tools; empty when none
+   * 200 characters; story_draft_lines' brief is kept whole), the artifact ids it produced, and the job it
+   * started or read. A story_draft_lines step also has `output`: the lines the writer returned and whose
+   * writing guide it was given. A refused call has `refused` (its error_code) and no artifact ids. Absent when the run had no media tools; empty when none
    * was called.
    */
   mediaSteps?: MediaStepRecord[];
@@ -180,6 +182,8 @@ export interface MediaStepRecord {
   checker?: string;
   /** The error_code of a refused call; absent when it succeeded. */
   refused?: string;
+  /** story_draft_lines: `{ lines, writingGuide? }`, what the writer returned and the guide it was given. */
+  output?: unknown;
   input: unknown;
 }
 
@@ -338,6 +342,7 @@ export function buildRunManifest(input: BuildRunManifestInput): RunManifest {
                 ...(s.jobId !== undefined ? { jobId: s.jobId } : {}),
                 ...(s.checker !== undefined ? { checker: s.checker } : {}),
                 ...(s.refused !== undefined ? { refused: s.refused } : {}),
+                ...(s.output !== undefined ? { output: structuredClone(s.output) } : {}),
                 input: structuredClone(s.input),
               }))
             : null,

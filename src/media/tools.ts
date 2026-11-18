@@ -9,7 +9,10 @@
  * Every input that names an artifact is checked with ArtifactStore.require: known, of the kind the step
  * needs, made in this run (or shared for a source opened in this run), and its file unchanged. A refused
  * call returns `{ error_code, message }` as its tool result; it never throws into the run. Each successful
- * call appends `{ tool, artifactIds, jobId?, checker? }` to `steps`, in call order.
+ * call appends `{ tool, artifactIds, jobId?, checker?, output?, input }` to `steps`, in call order. A step's
+ * input has every string cut to STEP_INPUT_STRING_CHARS, except story_draft_lines' `brief`, kept whole (up to
+ * MAX_BRIEF_CHARS); that step's `output` holds the lines the writer returned and whose writing guide it was
+ * given, so a run shows what the writer was told and what it wrote.
  *
  * Errors the model sees: the engine's own refusals, with absolute paths replaced by "<path>"; a failed
  * writer or speech call as `model_call_failed` / `speech_failed` with the router's error code (`code`) and
@@ -29,6 +32,15 @@
  *     kind (several -> checker_ambiguous). Otherwise only the built-in checks. The model cannot pick it.
  *     A run gets MAX_CHECK_ROUNDS checks (the first plus two rewrites); the next is `rewrite_limit`. The
  *     result and its step name the checker that ran ("<skill>/check-lines" or "built-in").
+ *   - Writing rules: a skill's writing guide (jobs.json "writingGuide", part of its approved bundle) goes into
+ *     story_draft_lines' writer prompt word for word, whatever the brief says. Whose guide: chosen as the line
+ *     checker is (the skill whose job made the index in this run; for an earlier run's index, the one approved
+ *     skill with a guide; several -> writing_guide_ambiguous). The result names that skill (`writingGuide`).
+ *   - Voice: with inference.speech configured, story_timeline_build refuses (`voice_missing`) a segment that has
+ *     a caption (lineId) and no voiceArtifactId, unless the latest speech_synthesize call for that line in this
+ *     run failed in the speech service (`speech_failed`). Checked when the timeline is built, not at render: a
+ *     timeline artifact is only ever made here, in this run, so none reaches a renderer unchecked, and the
+ *     agent learns of it one cheap call earlier than a render.
  *   - Renderers: a kind whose produces includes "video" runs only through story_render; media_job_start
  *     refuses it (`renderer_only`), so a renderer never gets a timeline the engine did not resolve.
  *     story_render's optional `input` (never `timeline`) is merged as { timeline, ...input }, validated
@@ -49,7 +61,7 @@
  *     own MediaPrep and dispose closes it.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { probeVideo } from "../highlights/ffmpeg.js";
@@ -98,18 +110,36 @@ export interface MediaStep {
   checker?: string;
   /** The error_code the call returned (e.g. job_budget, bundle_changed); absent when the call succeeded. */
   refused?: string;
-  /** The call's input, every string capped at STEP_INPUT_STRING_CHARS. */
+  /**
+   * story_draft_lines: `{ lines, writingGuide? }`, the lines the writer returned (each text cut to
+   * STEP_OUTPUT_LINE_CHARS) and, when a skill's writing guide was given to it, `{ skill, sha256 }` of that guide.
+   */
+  output?: unknown;
+  /** The call's input, every string capped at STEP_INPUT_STRING_CHARS; story_draft_lines' brief at MAX_BRIEF_CHARS. */
   input: unknown;
 }
 
 export const STEP_INPUT_STRING_CHARS = 200;
+/** The longest brief story_draft_lines takes. Its step keeps all of it: it is what the writer was told. */
+export const MAX_BRIEF_CHARS = 2000;
+/** Longest line text kept in a story_draft_lines step's output. */
+export const STEP_OUTPUT_LINE_CHARS = 1000;
 
-/** A JSON copy of `v` with every string cut to STEP_INPUT_STRING_CHARS. */
-function capStrings(v: unknown): unknown {
-  if (typeof v === "string") return v.slice(0, STEP_INPUT_STRING_CHARS);
-  if (Array.isArray(v)) return v.map(capStrings);
-  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x)]));
+/** A JSON copy of `v` with every string cut to `max` characters. */
+function capStrings(v: unknown, max = STEP_INPUT_STRING_CHARS): unknown {
+  if (typeof v === "string") return v.slice(0, max);
+  if (Array.isArray(v)) return v.map((x) => capStrings(x, max));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capStrings(x, max)]));
   return typeof v === "number" && !Number.isFinite(v) ? null : v;
+}
+
+/** A step's record of a call's input. */
+function stepInput(tool: MediaToolName, input: unknown): unknown {
+  const capped = capStrings(input);
+  if (tool === "story_draft_lines" && isPlainObject(input) && typeof input.brief === "string") {
+    return { ...(capped as Record<string, unknown>), brief: input.brief.slice(0, MAX_BRIEF_CHARS) };
+  }
+  return capped;
 }
 
 export interface MediaToolsContext {
@@ -234,6 +264,14 @@ function optInt(a: Record<string, unknown>, key: string, min: number, max: numbe
   const v = a[key];
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) refuse("invalid_input", `"${key}" must be an integer from ${min} to ${max}.`);
+  return v;
+}
+
+/** A game clock in seconds: a finite number, zero or more. */
+function optClockSec(a: Record<string, unknown>, key: string): number | undefined {
+  const v = a[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) refuse("invalid_input", `"${key}" must be a number of seconds, 0 or more.`);
   return v;
 }
 
@@ -362,6 +400,8 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
       text: { type: "string", description: "Words that must all appear in the play's label." },
       people: { ...IDS, description: "People who must all be in the play." },
       period: { type: "integer" },
+      clockMinSec: { type: "number", description: "Keep plays whose game clock, in seconds, is this or more." },
+      clockMaxSec: { type: "number", description: "Keep plays whose game clock, in seconds, is this or less." },
       type: { type: "string" },
       limit: { type: "integer" },
     },
@@ -406,7 +446,8 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
           "voiceArtifactId?, subjectTracksArtifactId?, overlay? } | { kind: 'card', cardSeconds, lineId?, voiceArtifactId?, overlay? }] }. " +
           "A clip names its play by eventId (its window comes from the event index the lines were checked against) or gives " +
           `startSec and endSec; with both, the window must be within ${EVENT_SLACK_SEC}s of the event's. ` +
-          "Captions are named by lineId, never written.",
+          "Captions are named by lineId, never written. A clip's lineId is the checked line that cites its eventId, never just the " +
+          "next line in order (caption_not_event).",
       },
     },
     required: ["timeline"],
@@ -422,7 +463,7 @@ const SCHEMAS: Record<MediaToolName, Record<string, unknown>> = {
   },
 };
 
-function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
+function descriptionsFor(kinds: JobKindDecl[], guideSkills: string[]): Record<MediaToolName, string> {
   const list = kinds.length
     ? kinds
         .map((d) => {
@@ -443,12 +484,21 @@ function descriptionsFor(kinds: JobKindDecl[]): Record<MediaToolName, string> {
     media_job_cancel: "Cancel a running job.",
     media_find_events:
       "Search an event-index artifact for plays. Returns eventId, period, clock, label, people, type, and where the play is in the " +
-      "video: videoSec and its clip window startSec-endSec.",
+      "video: videoSec and its clip window startSec-endSec. For a stretch of the game, filter by clock instead of reading clocks " +
+      "off the rows: clockMinSec and clockMaxSec bound the game clock in seconds, as the clock column shows it (5:00 is 300), " +
+      "within the period you give. On a clock that counts down, the final five minutes of a period are that period with " +
+      "clockMaxSec 300; on a clock that counts up, use clockMinSec.",
     story_facts_collect: "Store this run's data-tool results as a facts artifact. Returns fact ids with their tool names.",
-    story_draft_lines: "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked.",
+    story_draft_lines:
+      "Draft the story's lines from chosen plays and facts (one writer call). Lines are drafts until checked." +
+      (guideSkills.length
+        ? ` The writer is also given the writing rules of the index's skill (${guideSkills.join(", ")}), so brief is only the story's angle: do not copy rules into it.`
+        : ""),
     story_check_lines: `Check lines against the plays and facts they cite. Returns verdicts and a lines-checked artifact of the lines that passed. ${MAX_CHECK_ROUNDS} checks per run.`,
     speech_synthesize: "Speak checked lines. One voice artifact per line.",
-    story_timeline_build: "Validate a story timeline and store it as a timeline artifact.",
+    story_timeline_build:
+      "Validate a story timeline and store it as a timeline artifact. When speech is configured, every segment with a lineId " +
+      "needs that line's voiceArtifactId (voice_missing), unless speech_synthesize failed for the line in this run.",
     story_render: "Render a timeline artifact to a video artifact.",
   };
 }
@@ -467,7 +517,7 @@ interface Approved {
   decl: JobKindDecl;
 }
 
-type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string; checker?: string };
+type StepResult = { result: Record<string, unknown>; artifactIds: string[]; jobId?: string; checker?: string; output?: unknown };
 
 export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   tools: Record<MediaToolName, HostToolDef>;
@@ -523,6 +573,11 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
   /** artifact id -> skill whose job made it (this run). */
   const producers = new Map<string, string>();
   let checkRounds = 0;
+  /**
+   * "<linesArtifactId>/<lineId>" of each line whose latest speech_synthesize call in this run failed in the
+   * speech service (speech_failed): the lines story_timeline_build lets go without a voice.
+   */
+  const speechFailed = new Set<string>();
 
   const openedShas = () => [...new Set([...sources.values()].map((s) => s.artifact.sha256))];
 
@@ -690,20 +745,42 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     return rec;
   }
 
-  /** The line checker for an index and its name ("<skill>/check-lines", or "built-in" when there is none). */
-  function checkerFor(index: Artifact): { checker?: LineChecker; name: string } {
-    const withChecker = bundles.filter((b) => b.decls.some((d) => d.kind === CHECK_KIND));
+  /**
+   * The approved skill an index belongs to, among those that `has` picks: the skill whose job made the index
+   * in this run, else (an index from an earlier run) the only such skill; with several, `ambiguous` refuses.
+   */
+  function skillFor(index: Artifact, has: (b: ApprovedBundle) => boolean, ambiguous: () => never): ApprovedBundle | undefined {
+    const having = bundles.filter(has);
     let skill = producers.get(index.id);
     if (skill === undefined) {
-      if (withChecker.length > 1) refuse("checker_ambiguous", "Several skills declare a line checker and none made this index in this run.");
-      skill = withChecker[0]?.skill;
+      if (having.length > 1) ambiguous();
+      skill = having[0]?.skill;
     }
-    const b = withChecker.find((x) => x.skill === skill);
+    return having.find((x) => x.skill === skill);
+  }
+
+  /** The line checker for an index and its name ("<skill>/check-lines", or "built-in" when there is none). */
+  function checkerFor(index: Artifact): { checker?: LineChecker; name: string } {
+    const b = skillFor(
+      index,
+      (x) => x.decls.some((d) => d.kind === CHECK_KIND),
+      () => refuse("checker_ambiguous", "Several skills declare a line checker and none made this index in this run."),
+    );
     if (!b) return { name: "built-in" };
     return {
       checker: jobLineChecker({ runner, skill: { skillDir: b.skillDir, bundleSha256: b.bundleSha256, decls: b.decls } }),
       name: `${b.skill}/${CHECK_KIND}`,
     };
+  }
+
+  /** The writing guide for an index: its skill's (chosen as the line checker is), or none. The model cannot pick it. */
+  function guideFor(index: Artifact): { skill: string; text: string } | undefined {
+    const b = skillFor(
+      index,
+      (x) => x.writingGuide !== undefined,
+      () => refuse("writing_guide_ambiguous", "Several skills declare a writing guide and none made this index in this run."),
+    );
+    return b?.writingGuide === undefined ? undefined : { skill: b.skill, text: b.writingGuide };
   }
 
   /** A timeline only ever comes out of resolveTimeline, with lines from the exact artifact it names. */
@@ -858,6 +935,8 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
         text: optStr(a, "text"),
         people,
         period: optInt(a, "period", 1, 100),
+        clockMinSec: optClockSec(a, "clockMinSec"),
+        clockMaxSec: optClockSec(a, "clockMaxSec"),
         type: optStr(a, "type", 100),
         limit: optInt(a, "limit", 1, 1000),
       }).map((e) => ({
@@ -881,17 +960,27 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     },
 
     async story_draft_lines(a, abortSignal) {
-      const { index } = await loadIndex(a.indexArtifactId);
+      const { artifact: indexArtifact, index } = await loadIndex(a.indexArtifactId);
       const eventIds = strList(a, "eventIds", 40);
-      const brief = str(a, "brief", 2000);
+      const brief = str(a, "brief", MAX_BRIEF_CHARS);
       const maxLines = optInt(a, "maxLines", 1, MAX_LINES) ?? DEFAULT_MAX_LINES;
       const facts = await loadFacts(a.factsArtifactId);
       const byId = new Map(index.events.map((e) => [e.eventId, e]));
       const events = eventIds.map((id) => byId.get(id) ?? refuse("unknown_event", `No event ${id.slice(0, 60)} in the index.`));
       if (!ctx.inference?.roles?.writer) refuse("no_writer", "No writer role is configured (inference.roles.writer).");
       const inference = ctx.inference;
-      const lines = await routed("model_call_failed", (onReceipt) => draftLines({ inference, brief, events, facts, maxLines, abortSignal, onReceipt }));
-      return { result: { lines }, artifactIds: [] };
+      const guide = guideFor(indexArtifact);
+      const lines = await routed("model_call_failed", (onReceipt) =>
+        draftLines({ inference, brief, ...(guide ? { guide: guide.text } : {}), events, facts, maxLines, abortSignal, onReceipt }),
+      );
+      return {
+        result: { lines, ...(guide ? { writingGuide: guide.skill } : {}) },
+        artifactIds: [],
+        output: {
+          lines: capStrings(lines, STEP_OUTPUT_LINE_CHARS),
+          ...(guide ? { writingGuide: { skill: guide.skill, sha256: createHash("sha256").update(guide.text).digest("hex") } } : {}),
+        },
+      };
     },
 
     async story_check_lines(a) {
@@ -928,20 +1017,45 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
       if (!ctx.inference?.speech) refuse("no_speech", "No speech route is configured (inference.speech).");
       const voices: { lineId: string; voiceArtifactId: string; durationMs: number }[] = [];
       const inference = ctx.inference;
-      for (const line of chosen) {
-        const said = await routed("speech_failed", (onReceipt) =>
-          synthesizeSpeech({ text: line.text, config: inference, ...(voice ? { voice } : {}), abortSignal, onReceipt, env }),
-        );
-        const file = `${await storyFile("voice")}.wav`;
-        await fs.writeFile(file, said.audio, { mode: 0o600 });
-        const artifact = await mint({ kind: "voice", path: file });
-        voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
+      const keys = chosen.map((line) => `${a.linesArtifactId}/${line.lineId}`);
+      try {
+        for (const line of chosen) {
+          const said = await routed("speech_failed", (onReceipt) =>
+            synthesizeSpeech({ text: line.text, config: inference, ...(voice ? { voice } : {}), abortSignal, onReceipt, env }),
+          );
+          const file = `${await storyFile("voice")}.wav`;
+          await fs.writeFile(file, said.audio, { mode: 0o600 });
+          const artifact = await mint({ kind: "voice", path: file });
+          voices.push({ lineId: line.lineId, voiceArtifactId: artifact.id, durationMs: said.durationMs });
+        }
+      } catch (err) {
+        // A failed call returns no voice id for any of its lines, also those spoken before the failing one.
+        if (err instanceof Refusal && err.code === "speech_failed") for (const key of keys) speechFailed.add(key);
+        throw err;
       }
+      for (const key of keys) speechFailed.delete(key);
       return { result: { voices }, artifactIds: voices.map((v) => v.voiceArtifactId) };
     },
 
     async story_timeline_build(a) {
       const { resolved } = await resolveForStory(a.timeline);
+      // A voiced story has a voice: with speech configured, every captioned segment carries its line's voice,
+      // unless speaking that line failed in this run.
+      if (ctx.inference?.speech) {
+        const unvoiced = resolved.segments.flatMap((s, i) =>
+          s.lineId !== undefined && s.voiceArtifactId === undefined && !speechFailed.has(`${resolved.linesArtifactId}/${s.lineId}`)
+            ? [`segment ${i} (${s.lineId})`]
+            : [],
+        );
+        if (unvoiced.length > 0) {
+          refuse(
+            "voice_missing",
+            `Speech is configured, but ${unvoiced.join(", ")} ${unvoiced.length > 1 ? "have" : "has"} a caption and no voiceArtifactId. ` +
+              "Call speech_synthesize for those lineIds and put each line's voiceArtifactId on its segment. " +
+              "A line may go without a voice only when speech_synthesize failed for it (speech_failed) in this run.",
+          );
+        }
+      }
       const { captions: _captions, ...timeline } = resolved;
       const file = await storyFile("timeline");
       await fs.writeFile(file, JSON.stringify(timeline), { mode: 0o600 });
@@ -1018,7 +1132,10 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
     },
   };
 
-  const descriptions = descriptionsFor([...kinds.values()].map((k) => k.decl));
+  const descriptions = descriptionsFor(
+    [...kinds.values()].map((k) => k.decl),
+    bundles.filter((b) => b.writingGuide !== undefined).map((b) => b.skill),
+  );
   const tools = {} as Record<MediaToolName, HostToolDef>;
   for (const name of MEDIA_TOOL_NAMES) {
     tools[name] = {
@@ -1032,13 +1149,14 @@ export async function createMediaTools(ctx: MediaToolsContext): Promise<{
             artifactIds: out.artifactIds,
             ...(out.jobId ? { jobId: out.jobId } : {}),
             ...(out.checker ? { checker: out.checker } : {}),
-            input: capStrings(input ?? {}),
+            ...(out.output !== undefined ? { output: out.output } : {}),
+            input: stepInput(name, input ?? {}),
           });
           return out.result;
         } catch (err) {
           const out = refusalResult(name, err);
           // A refused call is a step too: the trace must not read as if it never happened (or as if it ran).
-          steps.push({ tool: name, artifactIds: [], refused: String(out.error_code), input: capStrings(input ?? {}) });
+          steps.push({ tool: name, artifactIds: [], refused: String(out.error_code), input: stepInput(name, input ?? {}) });
           return out;
         }
       },

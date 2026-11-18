@@ -61,10 +61,12 @@ function clock(sec: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function draftPrompt(brief: string, events: IndexedEvent[], facts: Fact[], maxLines: number): string {
+function draftPrompt(brief: string, guide: string | undefined, events: IndexedEvent[], facts: Fact[], maxLines: number): string {
   return [
     "Write the spoken lines of a sports story.",
     `Brief: ${brief}`,
+    // The skill's writing rules, as written: the writer gets them whether or not the brief repeats them.
+    ...(guide === undefined ? [] : ["", "Writing rules (follow every one):", guide]),
     "",
     "Events from the official play-by-play (eventId | period | clock | label | people):",
     ...events.map((e) => `- ${e.eventId} | period ${e.period} | ${clock(e.clockSec)} | ${e.label} | ${e.people.join(", ")}`),
@@ -103,10 +105,14 @@ function parseDraft(reply: unknown): DraftLine[] {
   return doc.map((l) => ({ text: l.text, cites: [...l.cites] }));
 }
 
-/** One writer-role call; its reply must be a JSON array of { text, cites } (optionally in one ```json fence). */
+/**
+ * One writer-role call; its reply must be a JSON array of { text, cites } (optionally in one ```json fence).
+ * `guide` (a skill's writing rules) goes into the prompt word for word, after the brief.
+ */
 export async function draftLines(args: {
   inference: ModelRoleRouterConfig;
   brief: string;
+  guide?: string;
   events: IndexedEvent[];
   facts: Fact[];
   maxLines: number;
@@ -115,7 +121,7 @@ export async function draftLines(args: {
 }): Promise<DraftLine[]> {
   const result = await invokeModelRole({
     role: "writer",
-    input: draftPrompt(args.brief, args.events, args.facts, args.maxLines),
+    input: draftPrompt(args.brief, args.guide, args.events, args.facts, args.maxLines),
     source: "sportsclaw-operator",
     config: args.inference,
     abortSignal: args.abortSignal,
