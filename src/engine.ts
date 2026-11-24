@@ -6300,7 +6300,15 @@ export class sportsclawEngine {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         const isTokenOverflow = /token.*(exceeds|limit|maximum)/i.test(msg);
-        const isServerError = /5\d{2}|internal server error/i.test(msg);
+        // The real HTTP status when the error has one (the SDK's RetryError keeps it on lastError);
+        // otherwise a whole 500-599 number in the text, not any digits that start with 5.
+        const errObj = err as { statusCode?: unknown; lastError?: { statusCode?: unknown } } | undefined;
+        const status = typeof errObj?.statusCode === "number" ? errObj.statusCode
+          : typeof errObj?.lastError?.statusCode === "number" ? errObj.lastError.statusCode
+          : undefined;
+        const isServerError = status !== undefined
+          ? status >= 500 && status <= 599
+          : /\b5\d{2}\b|internal server error/i.test(msg);
 
         // Token overflow: trim old history (keep last user message) and retry once
         if (isTokenOverflow && attempt === 0) {

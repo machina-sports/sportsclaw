@@ -94,6 +94,49 @@ describe("the engine's chat model as the brain role", () => {
     }
   });
 
+  it("retries the main call on a real 5xx status only, not on any number that starts with 5", async () => {
+    const answering = async (status, message, fn, extra = {}) => {
+      let requests = 0;
+      const server = http.createServer((req, res) => {
+        requests++;
+        req.resume();
+        req.on("end", () => {
+          res.statusCode = status;
+          res.setHeader("content-type", "application/json");
+          res.setHeader("retry-after-ms", "0");
+          res.end(JSON.stringify({ error: { message, type: "invalid_request_error" } }));
+        });
+      });
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const engine = withBrain({ route: "nim", model: "brain-model", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, ...extra });
+        await assert.rejects(engine.run("Say hello."), fn);
+        return requests;
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    };
+    // A 400 whose text holds 512: one request, no retry.
+    assert.equal(await answering(400, "top_k 512 is out of range", /512/), 1);
+    // A 503 whose text holds no number: the SDK's 3 attempts, then the engine's 2 retries.
+    assert.equal(await answering(503, "upstream overloaded", /overloaded/), 9);
+  });
+
+  it("does not retry a timeout whose limit merely contains 500", async () => {
+    let requests = 0;
+    const server = http.createServer(() => { requests++; /* never answers */ });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+      const engine = withBrain({ route: "nim", model: "brain-model", baseUrl, timeoutMs: 1500 });
+      await assert.rejects(engine.run("Say hello."), /timed out after 1500 ms/);
+      assert.equal(requests, 1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("refuses a brain role that cannot chat or is not valid", () => {
     assert.throws(() => withBrain({ route: "mock", model: "m" }), /brain.*mock/);
     assert.throws(() => withBrain({ route: "nim", baseUrl: "http://127.0.0.1:1/v1" }), /model/);
