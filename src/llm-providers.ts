@@ -170,10 +170,20 @@ const isolatedFetch: typeof fetch = async (input, init) => {
   return t.fetch(input, { ...init, dispatcher: t.dispatcher } as RequestInit);
 };
 
-/** Add a per-request timeout to `base` (default: the ambient global fetch). */
-function withTimeout(timeoutMs: number, base?: typeof fetch): typeof fetch {
+/**
+ * Add a per-request timeout to `base` (default: the ambient global fetch). The abort
+ * reason is an error named "TimeoutError" (so the AI SDK treats it as an abort and does
+ * not retry it) whose message names the caller (`label`) and the limit.
+ */
+function withTimeout(timeoutMs: number, base?: typeof fetch, label?: string): typeof fetch {
   return (input, init) => {
-    const timeout = AbortSignal.timeout(timeoutMs);
+    const reason = new Error(
+      `${label ? `${label}: ` : ""}model call timed out after ${timeoutMs} ms (raise the role's timeoutMs to wait longer)`,
+    );
+    reason.name = "TimeoutError";
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(reason), timeoutMs).unref();
+    const timeout = controller.signal;
     const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
     return (base ?? fetch)(input, { ...init, signal });
   };
@@ -201,7 +211,7 @@ function withRequestBody(extra: Record<string, unknown> | undefined, base: typeo
 
 function nativeTransport(native: NativeEndpoint): typeof fetch | undefined {
   const base = native.isolated ? isolatedFetch : undefined;
-  if (native.timeoutMs !== undefined) return withTimeout(native.timeoutMs, base);
+  if (native.timeoutMs !== undefined) return withTimeout(native.timeoutMs, base, native.timeoutLabel);
   return base;
 }
 

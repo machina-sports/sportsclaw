@@ -1311,7 +1311,7 @@ export class sportsclawEngine {
       if (!check.ok) throw new Error(`Invalid inference.roles.brain: ${check.error}`);
       if (brain.route === "mock") throw new Error('inference.roles.brain cannot chat on route "mock": use nim, api or openshell.');
       this.config.model = brain.model;
-      this.mainModel = resolveModel("openai", brain.model, resolveNativeRoleEndpoint(brain));
+      this.mainModel = resolveModel("openai", brain.model, resolveNativeRoleEndpoint(brain, process.env, "brain"));
     } else {
       this.mainModel = resolveModel(
         this.config.provider,

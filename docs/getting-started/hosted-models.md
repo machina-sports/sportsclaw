@@ -72,6 +72,11 @@ endpoint is on loopback, fails before any request when the variable is unset, an
 to another key. A `nim` or `api` route can also carry `requestBody`: extra request fields for
 server options a model needs, such as vLLM's `top_k` or `chat_template_kwargs`.
 
+`timeoutMs` bounds each request. An `api` or `openshell` route waits at most 300,000 ms (5 minutes)
+when the role sets none; a `nim` route has no timeout unless it sets one. A call that times out
+fails once, without a retry, with an error such as `Role "brain": model call timed out after
+300000 ms`.
+
 ## The chat model as the `brain` role
 
 An embedded engine can take its chat model from the same block. When `inference.roles.brain` is set in the engine config, that route replaces `provider` and `model` for every model call the engine makes:

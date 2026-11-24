@@ -77,6 +77,23 @@ describe("the engine's chat model as the brain role", () => {
     });
   });
 
+  it("stops a hung brain call at its timeout, naming the role and the limit", async () => {
+    let requests = 0;
+    const server = http.createServer(() => { requests++; /* never answers */ });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    process.env.BRAIN_ROLE_TEST_KEY = "test-key";
+    try {
+      const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+      const engine = withBrain({ route: "api", model: "brain-model", baseUrl, credentialEnv: "BRAIN_ROLE_TEST_KEY", timeoutMs: 200 });
+      await assert.rejects(engine.run("Say hello."), /Role "brain": model call timed out after 200 ms/);
+      assert.equal(requests, 1, "a timeout is not retried");
+    } finally {
+      delete process.env.BRAIN_ROLE_TEST_KEY;
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("refuses a brain role that cannot chat or is not valid", () => {
     assert.throws(() => withBrain({ route: "mock", model: "m" }), /brain.*mock/);
     assert.throws(() => withBrain({ route: "nim", baseUrl: "http://127.0.0.1:1/v1" }), /model/);
