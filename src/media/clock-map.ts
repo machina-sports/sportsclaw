@@ -100,22 +100,44 @@ export function parseClockMap(value: unknown): ClockMap {
   return { version: 1, semantics, stretches };
 }
 
-/** Video second of (period, clockSec), or null when no running stretch contains it. */
-export function clockToVideoSec(map: ClockMap, period: number, clockSec: number): number | null {
+/**
+ * Video second of (period, clockSec), or null when no running stretch contains it. When several
+ * stretches contain it (clips that overlap in game time), the earliest in video time wins, unless
+ * `window` (a segment's video span, both ends included) is given: then a stretch that places the clock
+ * inside the window wins, then one that overlaps the window, then the earliest; the earliest wins
+ * each tie.
+ */
+export function clockToVideoSec(
+  map: ClockMap,
+  period: number,
+  clockSec: number,
+  window?: { startSec: number; endSec: number },
+): number | null {
   const ascending = map.semantics === "elapsed-ascending";
+  const place = (s: ClockStretch) =>
+    ascending ? s.videoStartSec + (clockSec - s.clockStartSec) : s.videoStartSec + (s.clockStartSec - clockSec);
+  // 2: placed inside the window, 1: overlaps it, 0: neither (every stretch without a window).
+  const rank = (s: ClockStretch) => {
+    if (!window) return 0;
+    const at = place(s);
+    if (at >= window.startSec && at <= window.endSec) return 2;
+    return s.videoStartSec <= window.endSec && s.videoEndSec >= window.startSec ? 1 : 0;
+  };
   let best: ClockStretch | null = null;
+  let bestRank = -1;
   for (const s of map.stretches) {
     if (!s.running) continue;
     if (!ascending && s.period !== period) continue;
     const lo = Math.min(s.clockStartSec, s.clockEndSec);
     const hi = Math.max(s.clockStartSec, s.clockEndSec);
     if (clockSec < lo || clockSec > hi) continue;
-    if (best === null || s.videoStartSec < best.videoStartSec) best = s;
+    const r = rank(s);
+    if (best === null || r > bestRank || (r === bestRank && s.videoStartSec < best.videoStartSec)) {
+      best = s;
+      bestRank = r;
+    }
   }
-  if (best === null) return null;
-  return ascending
-    ? best.videoStartSec + (clockSec - best.clockStartSec)
-    : best.videoStartSec + (best.clockStartSec - clockSec);
+  return best === null ? null : place(best);
 }
 
 /**

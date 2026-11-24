@@ -50,6 +50,29 @@ describe("clockToVideoSec", () => {
     assert.equal(clockToVideoSec(map, 2, 700), 120);
   });
 
+  it("with a video window, prefers the stretch that places the clock inside it", () => {
+    // Two clips overlap in game time: clock 700 is at 120 s in the first and at 320 s in the second.
+    const map = countdown([
+      stretch({ videoStartSec: 100, videoEndSec: 160 }),
+      stretch({ videoStartSec: 300, videoEndSec: 360 }),
+    ]);
+    assert.equal(clockToVideoSec(map, 2, 700, { startSec: 305, endSec: 335 }), 320);
+    assert.equal(clockToVideoSec(map, 2, 700, { startSec: 110, endSec: 130 }), 120);
+  });
+
+  it("with a window that holds no placement, prefers a stretch that overlaps it, then the earliest", () => {
+    const map = countdown([
+      stretch({ videoStartSec: 100, videoEndSec: 160 }),
+      stretch({ videoStartSec: 300, videoEndSec: 360 }),
+    ]);
+    // Overlaps the second stretch only (its clock 700 sits at 320 s, outside the window).
+    assert.equal(clockToVideoSec(map, 2, 700, { startSec: 340, endSec: 350 }), 320);
+    // Overlaps neither: the earliest, as without a window.
+    assert.equal(clockToVideoSec(map, 2, 700, { startSec: 200, endSec: 250 }), 120);
+    // A window never invents a placement.
+    assert.equal(clockToVideoSec(map, 2, 650, { startSec: 100, endSec: 360 }), null);
+  });
+
   it("ignores period for elapsed-ascending maps", () => {
     const map = clockMapFromSyncAnchor({ videoSec: 30, clockSec: 10 });
     assert.equal(clockToVideoSec(map, 1, 25), 45);
