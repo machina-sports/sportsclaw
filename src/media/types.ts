@@ -60,6 +60,12 @@ export interface MediaConfig {
   interpreters?: Record<string, string[]>;
   maxJobsPerRun?: number;
   /**
+   * Names of environment variables passed to every job besides PASSTHROUGH_ENV, when set in the
+   * engine's environment (e.g. HOME, LD_LIBRARY_PATH, CUDA_VISIBLE_DEVICES, HF_HOME). Default: none.
+   * A job sees whatever is named here: never name a key or token.
+   */
+  jobEnv?: string[];
+  /**
    * Tool names whose results count as facts for story_facts_collect, besides the Sports Skills
    * data tools. Host and MCP tools are not facts unless listed here. Default: none.
    */

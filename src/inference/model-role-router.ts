@@ -36,7 +36,7 @@ import { randomUUID } from "node:crypto";
 import { resolveModel } from "../llm-providers.js";
 import { openShellEndpointIssues, resolveOpenShellEndpoint } from "../openshell-native.js";
 import { registerMedia, releaseMedia, validateMedia } from "../media-input.js";
-import type { MediaAttachment, NativeApiMode, NativeEndpoint } from "../types.js";
+import { DEFAULT_NATIVE_TIMEOUT_MS, type MediaAttachment, type NativeApiMode, type NativeEndpoint } from "../types.js";
 import type { ValidationResult } from "../schema/tv.js";
 import { isModelRole, MODEL_ROLES, type ModelRole } from "./model-roles.js";
 import { judgeConfigIssue, type JudgeConfig } from "./judge.js";
@@ -96,7 +96,10 @@ export interface ModelRoleRouteConfig {
   credentialless?: boolean;
   /** Request shape for openshell/nim/api routes. Default `"chat"`. */
   apiMode?: NativeApiMode;
-  /** Per-request timeout for openshell/nim/api routes. */
+  /**
+   * Per-request timeout for openshell/nim/api routes. Default: none for nim, 300 s
+   * (DEFAULT_NATIVE_TIMEOUT_MS) for openshell and api.
+   */
   timeoutMs?: number;
   /**
    * nim and api only: extra fields added to each chat request body, for server options the
@@ -308,14 +311,17 @@ export interface InvokeModelRoleArgs<TInput = unknown> {
  *     credential from the workload env only, isolated transport);
  *   - nim: explicit `baseUrl`, else NIM_BASE_URL / OPENAI_BASE_URL from `env`.
  * Throws (never falls back to a cloud client) when a route cannot be resolved.
- * `env` is explicit; it defaults to `process.env`.
+ * `env` is explicit; it defaults to `process.env`. `role`, when given, is named in a
+ * timeout error.
  */
 export function resolveNativeRoleEndpoint(
   routeConfig: ModelRoleRouteConfig,
   env: NodeJS.ProcessEnv = process.env,
+  role?: ModelRole,
 ): NativeEndpoint {
+  const label = role ? { timeoutLabel: `Role "${role}"` } : {};
   if (routeConfig.route === "openshell") {
-    return resolveOpenShellEndpoint(
+    return { ...label, ...resolveOpenShellEndpoint(
       "openai",
       {
         baseUrl: routeConfig.baseUrl,
@@ -325,7 +331,7 @@ export function resolveNativeRoleEndpoint(
         timeoutMs: routeConfig.timeoutMs,
       },
       env,
-    ) as NativeEndpoint;
+    ) as NativeEndpoint };
   }
   if (routeConfig.route === "nim") {
     const baseUrl = routeConfig.baseUrl ?? env.NIM_BASE_URL ?? env.OPENAI_BASE_URL;
@@ -336,7 +342,7 @@ export function resolveNativeRoleEndpoint(
     }
     // NIM endpoints are keyless here; the client just needs a non-empty key.
     return {
-      baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs,
+      baseUrl, apiKey: "unused", apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs, ...label,
       ...(routeConfig.requestBody ? { requestBody: routeConfig.requestBody } : {}),
     };
   }
@@ -346,8 +352,11 @@ export function resolveNativeRoleEndpoint(
     const key = env[name];
     if (!key) throw new Error(`${name} is not set — export the key for this route's service; there is no fallback.`);
     if (!USABLE_KEY.test(key)) throw new Error(`${name} does not hold a usable key (printable characters, no spaces).`);
+    // A hosted call that hangs would hang the run: api routes always have a timeout,
+    // the same 300 s an openshell route gets by default, unless the role sets its own.
     return {
-      baseUrl: routeConfig.baseUrl as string, apiKey: key, apiMode: routeConfig.apiMode, timeoutMs: routeConfig.timeoutMs,
+      baseUrl: routeConfig.baseUrl as string, apiKey: key, apiMode: routeConfig.apiMode,
+      timeoutMs: routeConfig.timeoutMs ?? DEFAULT_NATIVE_TIMEOUT_MS, ...label,
       ...(routeConfig.requestBody ? { requestBody: routeConfig.requestBody } : {}),
     };
   }

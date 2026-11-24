@@ -304,6 +304,41 @@ describe("sealBundle", () => {
       await sealed.dispose();
     }
   });
+  it("ignores Python caches and .DS_Store in the hash, and never copies them into the sealed bundle", async () => {
+    const dir = copyPack();
+    const sha = await bundleSha256(dir);
+    mkdirSync(join(dir, "scripts/__pycache__"));
+    writeFileSync(join(dir, "scripts/__pycache__/helper.cpython-311.pyc"), "compiled");
+    mkdirSync(join(dir, "scripts/lib/__pycache__"), { recursive: true });
+    writeFileSync(join(dir, "scripts/lib/__pycache__/x.cpython-311.pyc"), "compiled");
+    writeFileSync(join(dir, "scripts/helper.pyc"), "sourceless module: never run unreviewed");
+    writeFileSync(join(dir, "scripts/.DS_Store"), "finder");
+    writeFileSync(join(dir, "scripts/lib/.DS_Store"), "finder");
+    symlinkSync("/etc/hosts", join(dir, "scripts/lib/stray.pyc"));
+    assert.equal(await bundleSha256(dir), sha);
+    const sealed = await sealBundle(dir, sha);
+    try {
+      const copied = [];
+      const walk = (d, rel) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const r = rel ? `${rel}/${e.name}` : e.name;
+          if (e.isDirectory()) walk(join(d, e.name), r);
+          else copied.push(r);
+        }
+      };
+      walk(join(sealed.dir, "scripts"), "");
+      assert.deepEqual(copied.sort(), readdirSync(join(FIXTURE, "scripts")).sort());
+    } finally {
+      await sealed.dispose();
+    }
+  });
+  it("still counts any other new file, such as a .py next to the caches", async () => {
+    const dir = copyPack();
+    const sha = await bundleSha256(dir);
+    mkdirSync(join(dir, "scripts/__pycache__"));
+    writeFileSync(join(dir, "scripts/pycache.py"), "print('new')\n");
+    assert.notEqual(await bundleSha256(dir), sha);
+  });
   it("refuses a symlink and leaves no copy behind", async () => {
     const dir = copyPack();
     const sha = await bundleSha256(dir);

@@ -262,6 +262,27 @@ describe("LocalJobRunner", () => {
     assert.deepEqual(secrets, ["SPORTSCLAW_ROLE_PROXY_TOKEN"]);
   });
 
+  it("media.jobEnv passes the named variables (when set) and nothing else", async () => {
+    const env = {
+      PATH: process.env.PATH,
+      HOME: "/home/x",
+      CUDA_VISIBLE_DEVICES: "1",
+      LD_LIBRARY_PATH: "/usr/local/cuda/lib64",
+      OPENAI_API_KEY: "sk-1",
+    };
+    const { runner } = setup({ jobEnv: ["HOME", "CUDA_VISIBLE_DEVICES", "HF_HOME"] }, { env });
+    const rec = await run(runner, "env-job");
+    assert.equal(rec.state, "succeeded", rec.error);
+    assert.ok(rec.facts.env.includes("HOME"));
+    assert.ok(rec.facts.env.includes("CUDA_VISIBLE_DEVICES"));
+    for (const name of ["HF_HOME", "LD_LIBRARY_PATH", "OPENAI_API_KEY"]) assert.ok(!rec.facts.env.includes(name), name);
+  });
+
+  it("a malformed media.jobEnv refuses the job", async () => {
+    const { runner } = setup({ jobEnv: ["lower_case"] });
+    await rejects(runner.start({ decl: A.decl("env-job"), skillDir: pack, bundleSha256: A.sha, input: {} }), "invalid_job_env");
+  });
+
   it("the 13th job with maxJobsPerRun unset -> job_budget", async () => {
     const { runner } = setup();
     const recs = [];
