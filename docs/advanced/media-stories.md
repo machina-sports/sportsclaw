@@ -246,7 +246,10 @@ at the top of `jobs.json`:
 
 A kind runs only if `(skill, kind, bundleSha256)` is in `SPORTSCLAW_MEDIA_JOB_ALLOWLIST`. The
 hash covers every file under the skill's `scripts/` and its `jobs.json`, so any edit to
-either needs a new approval. Compute it with:
+either needs a new approval. `__pycache__` folders, `*.pyc` files and `.DS_Store` are left
+out of the hash and are never copied into the sealed bundle a job runs from, so importing a
+script or opening the folder does not undo an approval, and no unreviewed bytecode runs.
+Compute it with:
 
 ```bash
 sportsclaw media bundle-hash /opt/sportsclaw/skills/my-pack

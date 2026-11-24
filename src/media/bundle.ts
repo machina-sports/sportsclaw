@@ -4,7 +4,8 @@
  * A job kind runs only if the operator listed (skill, kind, bundleSha256) in
  * SPORTSCLAW_MEDIA_JOB_ALLOWLIST. The hash covers every file under scripts/ AND
  * the skill's jobs.json (entry, limits, produces, schema), so approval never
- * survives an edit to either.
+ * survives an edit to either. __pycache__ directories, *.pyc and .DS_Store are
+ * left out of both the hash and the sealed copy (ignoredInBundle).
  *
  * Sealed layout: sealBundle copies to <sealed>/scripts/... and <sealed>/jobs.json
  * (the same shape as a skill dir). `entry` resolves as <sealed>/scripts/<entry>,
@@ -66,7 +67,21 @@ export class BundleError extends Error {
   }
 }
 
-/** Regular files under `root` (relative, "/"-separated); throws on any other entry type. */
+/**
+ * Names left out of a bundle everywhere: Python's bytecode caches and Finder's .DS_Store, which appear
+ * when a script is imported or a folder opened and would otherwise change the approved hash. Leaving
+ * them out is safe because the hash and the sealed copy share this one listing: what is not hashed is
+ * never copied, so a job (run only from the sealed copy) can never load a .pyc nobody reviewed; Python
+ * compiles the reviewed .py sources afresh instead.
+ */
+function ignoredInBundle(name: string): boolean {
+  return name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
+}
+
+/**
+ * Regular files under `root` (relative, "/"-separated), without ignoredInBundle entries; throws on any
+ * other entry type.
+ */
 async function listRegularFiles(root: string): Promise<string[]> {
   const out: string[] = [];
   async function walk(abs: string, rel: string): Promise<void> {
@@ -77,6 +92,7 @@ async function listRegularFiles(root: string): Promise<string[]> {
       throw new BundleError("bundle_invalid", `Cannot read bundle directory "${rel || "."}".`);
     }
     for (const e of entries) {
+      if (ignoredInBundle(e.name)) continue;
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) await walk(join(abs, e.name), childRel);
       else if (e.isFile()) out.push(childRel);
