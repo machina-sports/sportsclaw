@@ -712,6 +712,13 @@ describe("media story tools: footage clearance comes from the operator or the ap
     await assert.rejects(make({ clearances: [{ ...RIGHTS, sourceSha256: SOURCE_SHA, extra: 1 }] }), /unknown field/);
     assert.throws(() => new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace(), clearances: [{ sourceSha256: SOURCE_SHA }] } }), /rightsHolder/);
   });
+
+  it("a malformed media.jobEnv is a configuration error at construction", () => {
+    for (const jobEnv of ["HOME", ["home"], ["HOME", 1], ["A B"]]) {
+      assert.throws(() => new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace(), jobEnv } }), /media\.jobEnv/);
+    }
+    new sportsclawEngine({ thinkingBudget: 0, media: { workspaceDir: newWorkspace(), jobEnv: ["HOME", "CUDA_VISIBLE_DEVICES"] } });
+  });
 });
 
 describe("media story tools: timelines", () => {

@@ -5,8 +5,9 @@
  *   - The skill's bundle is sealed (copied and re-hashed) per job; the declaration, entry, limits, schema and
  *     `produces` all come from the sealed copy, never from the caller or the live skill dir.
  *   - Command: `<interpreter argv> <sealed dir>/scripts/<entry> --input <input.json> --out <out dir>`, cwd the
- *     sealed dir, own process group, environment = PASSTHROUGH_ENV (skill-runtime) plus
- *     SPORTSCLAW_ROLE_PROXY_URL / SPORTSCLAW_ROLE_PROXY_TOKEN when a role proxy is configured. Nothing else.
+ *     sealed dir, own process group, environment = PASSTHROUGH_ENV (skill-runtime), the variables the operator
+ *     names in `config.jobEnv` (when set), and SPORTSCLAW_ROLE_PROXY_URL / SPORTSCLAW_ROLE_PROXY_TOKEN when a
+ *     role proxy is configured. Nothing else.
  *     The interpreter is `config.interpreters["<skill>/<kind>"] ?? config.interpreters.default ?? ["python3"]`.
  *   - input.json is `{ "input": <validated input>, "source"?: { "path", "sha256" }, "artifacts": { "<id>":
  *     { "kind", "path", "sha256" } } }` (source only for `readsSource` kinds; artifacts is the map the caller
@@ -34,6 +35,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { DEFAULT_MAX_JOB_OUTPUT_BYTES } from "../highlights/run.js";
 import type { HighlightsJobState, RightsAuthorization } from "../highlights/types.js";
+import { ENV_NAME } from "../inference/endpoint-rules.js";
 import { PASSTHROUGH_ENV } from "../skill-runtime.js";
 import { hashFile, type ArtifactStore } from "./artifacts.js";
 import { BundleError, sealBundle, type JobKindDecl } from "./bundle.js";
@@ -124,6 +126,7 @@ export class JobError extends Error {
       | "bundle_invalid"
       | "invalid_entry"
       | "invalid_interpreter"
+      | "invalid_job_env"
       | "invalid_input"
       | "source_required"
       | "source_outside"
@@ -260,6 +263,15 @@ async function readManifest(outDir: string, decl: JobKindDecl, hasSource: boolea
   return { ok: true, facts: (doc.facts as Record<string, unknown> | undefined) ?? {}, items };
 }
 
+/** media.jobEnv as a list of variable names ([] when unset); throws when it is not a list of names. */
+export function parseJobEnv(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((name) => typeof name === "string" && ENV_NAME.test(name))) {
+    throw new Error("media.jobEnv must be a list of environment variable names (for example [\"HOME\", \"CUDA_VISIBLE_DEVICES\"]).");
+  }
+  return value as string[];
+}
+
 /** Ties the caller's source path to its sha256: returns the realpath of a regular file inside the workspace. */
 async function bindSource(workspaceDir: string, path: string, sha256: string): Promise<string> {
   const realWs = await fs.realpath(workspaceDir).catch(() => undefined);
@@ -336,6 +348,12 @@ export class LocalJobRunner implements JobRunner {
     if (!Array.isArray(interp) || interp.length === 0 || !interp.every((s) => typeof s === "string" && s !== "")) {
       throw new JobError("invalid_interpreter", `The interpreter configured for ${decl.skill}/${decl.kind} is not a list of strings.`);
     }
+    let jobEnv: string[];
+    try {
+      jobEnv = parseJobEnv(this.config.jobEnv);
+    } catch (err) {
+      throw new JobError("invalid_job_env", (err as Error).message);
+    }
 
     const problem = inputErrors(decl.inputSchema, req.input);
     if (problem) throw new JobError("invalid_input", `Input does not match the job's inputSchema: ${problem}.`);
@@ -374,7 +392,7 @@ export class LocalJobRunner implements JobRunner {
     await fs.writeFile(inputFile, inputText, { mode: 0o600 });
 
     const env: Record<string, string> = {};
-    for (const key of PASSTHROUGH_ENV) {
+    for (const key of [...PASSTHROUGH_ENV, ...jobEnv]) {
       const value = this.env[key];
       if (value !== undefined) env[key] = value;
     }

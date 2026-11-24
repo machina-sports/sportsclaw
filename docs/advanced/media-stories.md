@@ -27,6 +27,7 @@ const engine = new sportsclawEngine({
       "my-pack/render-follow": ["/opt/gpu-venv/bin/python"],
     },
     maxJobsPerRun: 12,
+    jobEnv: ["HOME", "CUDA_VISIBLE_DEVICES"], // extra variables jobs may see; default none
     factTools: ["host_box_score"],         // extra tools whose results count as facts
     clearances: [                          // footage cleared for clipping, one entry per exact file
       { sourceSha256: "<sha256 of game.mp4>", rightsHolder: "League", licenseRef: "L-2026-114", clearedForClipping: true },
@@ -44,6 +45,12 @@ const engine = new sportsclawEngine({
   `<workspaceDir>/jobs/<jobId>/`, and the tools' own files under `<workspaceDir>/story/`.
 - `interpreters` — when there is no `default`, the engine's `pythonPath` is the default,
   then `python3`. A pack never names its interpreter.
+- `jobEnv` — a job's environment is `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`,
+  `SYSTEMROOT`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and the role proxy's two variables, nothing
+  else. `jobEnv` names more variables to pass when they are set in the engine's environment,
+  for example `HOME`, `LD_LIBRARY_PATH`, `CUDA_VISIBLE_DEVICES` or `HF_HOME` for a GPU job.
+  Default: none. Every job sees what is named here, so never name a key or token. Names that
+  are not upper-case variable names are a configuration error.
 - `factTools` — by default only Sports Skills data tools count as facts. Host tools and MCP
   tools count only when listed here.
 - `inference.roles.writer` is needed by `story_draft_lines`, `inference.speech` by
@@ -53,7 +60,7 @@ const engine = new sportsclawEngine({
 - `clearances` — see [Rights](#rights).
 
 None of these is a tool input: the model cannot change the workspace, the rights switch, the
-clearances, the interpreters or the allowlist.
+clearances, the interpreters, the job environment or the allowlist.
 
 ### Environment variables
 

@@ -171,6 +171,7 @@ import { randomUUID } from "node:crypto";
 import { createMediaTools, MEDIA_TOOL_NAMES } from "./media/tools.js";
 import { MediaPrep } from "./media/prep.js";
 import { parseClearances } from "./media/rights.js";
+import { parseJobEnv } from "./media/jobs.js";
 import type { InferenceReceipt } from "./inference/receipt.js";
 import {
   buildResultOverview,
@@ -1323,6 +1324,7 @@ export class sportsclawEngine {
     this.mainModelId = readModelId(this.mainModel);
     // A malformed operator clearance is a configuration error: fail at construction, not mid-run.
     if (this.config.media) parseClearances(this.config.media.clearances, "media.clearances");
+    if (this.config.media) parseJobEnv(this.config.media.jobEnv);
     this.registry = new ToolRegistry();
     this.registry.configureCaching({
       enabled: this.config.cacheEnabled,
