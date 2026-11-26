@@ -58,7 +58,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   best_bets: {
-    hint: "Answer with the requested number of picks, normally one for a short follow-up. Keep the venue, market and candidate board established by the conversation; use that venue's current quote as the recommendation's primary price. Other venues may appear only as explicitly requested comparisons, not substitute selections. Give a qualified lean with its factual basis and relevant uncertainty. Do not claim a pricing edge without supporting evidence: a cheap contract, team record or point cushion alone does not establish mispricing. If the evidence cannot justify a pick, state the specific limitation without asking the user to repeat the known board.",
+    hint: "Answer with the requested number of picks, normally one for a short follow-up. Keep the venue, market and candidate board established by the conversation; use that venue's current quote as the recommendation's primary price. Other venues may appear only as explicitly requested comparisons, not substitute selections. Give a qualified lean with its factual basis and relevant uncertainty. Do not claim a pricing edge without supporting evidence: a cheap contract, team record or point cushion alone does not establish mispricing. If the evidence cannot justify a pick, state the specific limitation without asking the user to repeat the known board. For every pick, state its reason, the supporting data point with its source, a confidence level (low/medium/high), and the single key risk that would break it; if the data point is missing, say so instead of guessing.",
     expectedToolPatterns: ["odds", "bet", "stat", "form"],
     requiredKeywords: [],
   },
@@ -88,7 +88,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   prediction: {
-    hint: "Give a clear pick with supporting data. State confidence (high/medium/low). Don't hedge — commit to a take and explain why.",
+    hint: "Give a clear pick with the supporting data point and its source. State confidence (high/medium/low) and name the key risk that could make it wrong. If the supporting data is missing, say \"no data\" instead of guessing. Don't hedge — commit to a take and explain why.",
     expectedToolPatterns: [],
     requiredKeywords: [],
   },
