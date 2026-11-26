@@ -36,6 +36,9 @@ interface ResponseTemplate {
 // Templates
 // ---------------------------------------------------------------------------
 
+const PICK_EVIDENCE =
+  "For each pick, explain the reason, cite a supporting data point with its source, and name the key risk. Use low, medium or high confidence to describe the strength of the evidence, not a win probability. If the evidence does not support a pick, state the limitation and do not make a pick.";
+
 const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
   live_scores: {
     hint: "Start with one useful observation from the returned scores, like a friend catching the user up, not a generic feed introduction. Then give one compact score-and-status line per game in the requested scope; never let a length cap silently omit games. Show actual points/goals and clock or final status, not win-loss records. State which sports/leagues are covered and any missing scores. Include odds only if the user asked for betting information in the current task; do not copy betting or standings metadata merely because the source returned it.",
@@ -58,7 +61,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   best_bets: {
-    hint: "Answer with the requested number of picks, normally one for a short follow-up. Keep the venue, market and candidate board established by the conversation; use that venue's current quote as the recommendation's primary price. Other venues may appear only as explicitly requested comparisons, not substitute selections. Give a qualified lean with its factual basis and relevant uncertainty. Do not claim a pricing edge without supporting evidence: a cheap contract, team record or point cushion alone does not establish mispricing. If the evidence cannot justify a pick, state the specific limitation without asking the user to repeat the known board. For every pick, state its reason, the supporting data point with its source, a confidence level (low/medium/high), and the single key risk that would break it; if the data point is missing, say so instead of guessing.",
+    hint: `Give a qualified lean for each supported pick, up to the requested number and normally one for a short follow-up. Keep the venue, market and candidate board established by the conversation; use that venue's current quote as the recommendation's primary price. Other venues may appear only as explicitly requested comparisons, not substitute selections. Do not claim a pricing edge without supporting evidence: a cheap contract, team record or point cushion alone does not establish mispricing. Do not ask the user to repeat the known board. ${PICK_EVIDENCE}`,
     expectedToolPatterns: ["odds", "bet", "stat", "form"],
     requiredKeywords: [],
   },
@@ -88,7 +91,7 @@ const TEMPLATES: Record<QueryIntent, ResponseTemplate> = {
     requiredKeywords: [],
   },
   prediction: {
-    hint: "Give a clear pick with the supporting data point and its source. State confidence (high/medium/low) and name the key risk that could make it wrong. If the supporting data is missing, say \"no data\" instead of guessing. Don't hedge — commit to a take and explain why.",
+    hint: PICK_EVIDENCE,
     expectedToolPatterns: [],
     requiredKeywords: [],
   },
