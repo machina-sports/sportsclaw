@@ -2,7 +2,8 @@
  * Market cards — `market-turn-v1` on the engine's real path.
  *
  *   - the wire: exact market-card-v1 / turn / result validation (keys, bounds,
- *     controls, surrogates, nonce binding, unique ids, cards XOR reason);
+ *     controls, surrogates, nonce binding, unique ids, cards XOR reason,
+ *     `checkedAt` required with cards and `none_found`, refused with `denied`);
  *   - reading tool results: complete sports-skills Polymarket markets become
  *     cards (alone, nested in an event, in lists); a market missing a price,
  *     an error result and non-JSON yield none; the source's 0.0 for a missing
@@ -11,6 +12,9 @@
  *     selects by id among markets really read in this run, an unknown id is
  *     refused, a later call replaces the choice, reset() forgets the choice
  *     but not what was read, and the read time is the one handed in;
+ *   - "none found": `checkedAt` is the latest successful polymarket receipt
+ *     time; `none_found` needs an empty listing and is blocked by any market
+ *     seen (even an incomplete one), any unrecognised result and any error;
  *   - `ToolRegistry.dispatchToolCall` stamps `fetchedAt` once, so a cache hit
  *     reports the original time;
  *   - `sportsclawEngine.run(prompt, {market, onMarketResult})` with a scripted
@@ -125,7 +129,10 @@ const CARD = Object.freeze({
   gameStartTime: "2026-11-22 00:30:00+00",
   readAt: READ_AT,
 });
-const RESULT = Object.freeze({ contract: "market-turn-v1", nonce: NONCE, markets: [CARD], reasonCode: null });
+const RESULT = Object.freeze({ contract: "market-turn-v1", nonce: NONCE, markets: [CARD], reasonCode: null, checkedAt: READ_AT });
+const EMPTY = Object.freeze({ ...RESULT, markets: [], checkedAt: null });
+const NONE_FOUND = Object.freeze({ ...RESULT, markets: [], reasonCode: "none_found" });
+const DENIED = Object.freeze({ ...EMPTY, reasonCode: "denied" });
 
 // ---------------------------------------------------------------------------
 // The wire
@@ -189,13 +196,29 @@ describe("market-turn-v1 wire", () => {
 
   it("binds the result to its input and keeps cards and a reason apart", () => {
     assert.deepEqual(wire.parseMarketTurnResult(clone(RESULT), TURN), RESULT);
-    assert.deepEqual(wire.parseMarketTurnResult({ ...RESULT, markets: [] }, TURN), { ...RESULT, markets: [] });
-    assert.deepEqual(wire.parseMarketTurnResult({ ...RESULT, markets: [], reasonCode: "denied" }, TURN), { ...RESULT, markets: [], reasonCode: "denied" });
+    for (const valid of [EMPTY, { ...EMPTY, checkedAt: READ_AT }, DENIED, NONE_FOUND]) {
+      assert.deepEqual(wire.parseMarketTurnResult(clone(valid), TURN), valid);
+    }
+    assert.deepEqual(Object.keys(wire.parseMarketTurnResult(clone(RESULT), TURN)), ["contract", "nonce", "markets", "reasonCode", "checkedAt"]);
     const second = { ...CARD, id: "540124" };
     const cases = {
       "another nonce": { ...RESULT, nonce: "nonce_fedcba9876543210" },
       "cards with a reason": { ...RESULT, reasonCode: "denied" },
-      "unknown reason": { ...RESULT, markets: [], reasonCode: "invalid" },
+      "unknown reason": { ...EMPTY, reasonCode: "invalid" },
+      "missing checkedAt": (({ checkedAt, ...rest }) => rest)(RESULT),
+      "missing checkedAt without cards": (({ checkedAt, ...rest }) => rest)(EMPTY),
+      "missing reasonCode": (({ reasonCode, ...rest }) => rest)(RESULT),
+      "cards with a null checkedAt": { ...RESULT, checkedAt: null },
+      "cards with none_found": { ...RESULT, reasonCode: "none_found" },
+      "none_found with a null checkedAt": { ...NONE_FOUND, checkedAt: null },
+      "denied with a checkedAt": { ...DENIED, checkedAt: READ_AT },
+      "checkedAt without milliseconds": { ...EMPTY, checkedAt: "2026-11-21T23:49:12Z" },
+      "checkedAt with an offset": { ...EMPTY, checkedAt: "2026-11-21T20:49:12.345-03:00" },
+      "checkedAt with a trailing newline": { ...EMPTY, checkedAt: `${READ_AT}\n` },
+      "checkedAt as a number": { ...EMPTY, checkedAt: READ_MS },
+      "checkedAt empty": { ...EMPTY, checkedAt: "" },
+      "none_found with a bad checkedAt": { ...NONE_FOUND, checkedAt: "today" },
+      "cards with a bad checkedAt": { ...RESULT, checkedAt: "today" },
       "four cards": { ...RESULT, markets: [CARD, second, { ...CARD, id: "3" }, { ...CARD, id: "4" }] },
       "the same market twice": { ...RESULT, markets: [CARD, clone(CARD)] },
       "an invalid card": { ...RESULT, markets: [{ ...CARD, venue: "kalshi" }] },
@@ -249,6 +272,61 @@ describe("reading Polymarket tool results", () => {
     assert.deepEqual(wire.harvestPolymarketMarkets(ok(skillMarket()), Number.NaN), [], "no read time, no card");
     // An odd slug is dropped, not the market: the slug only builds a link.
     assert.equal(wire.harvestPolymarketMarkets(ok(skillMarket({ slug: "Bad Slug" })), READ_MS)[0].slug, "");
+  });
+});
+
+describe("what a Polymarket result says about whether a market exists", () => {
+  const kind = (content) => wire.readPolymarketResult(typeof content === "string" ? content : ok(content), READ_MS).kind;
+
+  it("recognises an empty listing only in the exact shapes", () => {
+    const empty = {
+      "a bare empty array": "[]",
+      "an enveloped empty array": [],
+      "an empty markets list": { markets: [], count: 0 },
+      "an empty events list": { events: [], count: 0, offset: 0 },
+      "both lists empty": { markets: [], events: [] },
+      "an event with no markets": { id: "9911", title: "Trail Blazers vs. Knicks", slug: "nba-por-nyk-2026-11-21", markets: [] },
+      "a bare object with an empty markets list": JSON.stringify({ markets: [] }),
+    };
+    for (const [name, content] of Object.entries(empty)) assert.equal(kind(content), "empty_listing", name);
+  });
+
+  it("counts any market-shaped entry as a market seen, complete or not", () => {
+    const seen = {
+      "a complete market": skillMarket(),
+      "a listed market": { markets: [skillMarket()], count: 1 },
+      "a market nested in a listed event": { events: [{ slug: "e", markets: [skillMarket()] }], count: 1 },
+      "an outcome without a price": skillMarket({ outcomes: [{ name: "Over" }, { name: "Under", price: 0.5 }] }),
+      "an unknown status": skillMarket({ status: "resolved" }),
+      "a compact row without outcomes": [{ id: "1", question: "compact row", slug: "x", status: "active" }],
+      "outcomes without a question": { markets: [{ id: "1", outcomes: [] }] },
+    };
+    for (const [name, content] of Object.entries(seen)) assert.equal(kind(content), "markets", name);
+    assert.deepEqual(wire.readPolymarketResult(ok(skillMarket({ status: "resolved" })), READ_MS).cards, [], "seen, but not a card");
+    assert.deepEqual(wire.readPolymarketResult(ok(skillMarket()), READ_MS).cards, [CARD]);
+  });
+
+  it("treats everything else as saying nothing", () => {
+    const unclear = {
+      "a price": { token_id: "111", price: 0.5, side: "buy" },
+      "a list of prices": { prices: [], count: 0 },
+      "an order book": { bids: [], asks: [], market: "0xabc" },
+      "an empty series list": { series: [], count: 0 },
+      "a sports config": { sports: [{ sport: "nba" }], count: 1 },
+      "a price history": { history: [], count: 0, token_id: "111" },
+      "an event list whose events show no market": { events: [{ id: "1", slug: "e", markets: [] }], count: 1 },
+      "a list of things that are not markets": [{ id: "1" }],
+      "one empty list beside a full one": { markets: [], events: [{ id: "1" }] },
+      "markets that is not a list": { markets: null },
+      "an empty object": {},
+      "null data": null,
+      "a number": 3,
+      "non-JSON": "not json",
+      "a bare string": JSON.stringify("[]"),
+    };
+    for (const [name, content] of Object.entries(unclear)) assert.equal(kind(content), "unrecognised", name);
+    assert.equal(kind(JSON.stringify({ status: false, data: { markets: [] }, message: "API error (500)" })), "error");
+    assert.equal(wire.readPolymarketResult(ok({ markets: [] }), Number.NaN).kind, "error", "no receipt time, no check");
   });
 });
 
@@ -309,6 +387,98 @@ describe("market card collector", () => {
     collector.reset();
     restore();
     assert.deepEqual(collector.finish(), [CARD]);
+  });
+});
+
+describe("checkedAt and none_found", () => {
+  const EMPTY_LISTING = ok({ markets: [], count: 0 });
+  const PRICE = ok({ token_id: "111", price: 0.5 });
+  const FAILED = JSON.stringify({ status: false, data: null, message: "API error (500)" });
+  const LATER_AT = "2026-11-21T23:50:12.345Z";
+  const collect = (...records) => {
+    const collector = wire.createMarketCardCollector();
+    for (const [name, content, ms] of records) collector.record(name, content, ms ?? READ_MS);
+    return collector;
+  };
+  const turn = (collector, denied = false) => wire.marketTurnResult(TURN, collector, denied);
+  /** Every result the engine can build must pass its own parser. */
+  const valid = (result) => {
+    assert.deepEqual(wire.parseMarketTurnResult(clone(result), TURN), result);
+    return result;
+  };
+
+  it("has no check time when no polymarket result was recorded", () => {
+    assert.deepEqual(valid(turn(collect())), EMPTY);
+    assert.deepEqual(valid(turn(collect(["kalshi_get_markets", EMPTY_LISTING], ["nba_get_scores", "[]"]))), EMPTY, "other tools are not checks");
+    assert.deepEqual(valid(turn(collect(["polymarket_search_markets", FAILED]))), EMPTY, "an error result is not a check");
+    assert.deepEqual(valid(turn(collect(["polymarket_search_markets", EMPTY_LISTING, Number.NaN]))), EMPTY, "no receipt time, no check");
+  });
+
+  it("reports none_found for an empty listing and nothing else in doubt", () => {
+    assert.deepEqual(valid(turn(collect(["polymarket_search_markets", EMPTY_LISTING]))), NONE_FOUND);
+    assert.deepEqual(valid(turn(collect(["polymarket_get_sports_events", ok({ events: [], count: 0 })], ["polymarket_search_markets", "[]", READ_MS + 60_000]))),
+      { ...NONE_FOUND, checkedAt: LATER_AT }, "two empty listings; the later receipt time");
+  });
+
+  it("uses the latest receipt time, whatever the order recorded", () => {
+    // A cache hit recorded later still carries its original, earlier time.
+    const collector = collect(["polymarket_search_markets", EMPTY_LISTING, READ_MS + 60_000], ["polymarket_get_sports_markets", EMPTY_LISTING, READ_MS]);
+    assert.equal(turn(collector).checkedAt, LATER_AT);
+  });
+
+  it("is blocked by any market seen, even one that could not become a card", () => {
+    const incomplete = ok({ markets: [skillMarket({ status: "resolved" })], count: 1 });
+    for (const [name, records] of Object.entries({
+      "a complete market after": [["polymarket_search_markets", EMPTY_LISTING], ["polymarket_get_market_details", ok(skillMarket())]],
+      "a complete market before": [["polymarket_get_market_details", ok(skillMarket())], ["polymarket_search_markets", EMPTY_LISTING]],
+      "an incomplete market": [["polymarket_search_markets", EMPTY_LISTING], ["polymarket_get_sports_markets", incomplete]],
+      "a compact row": [["polymarket_search_markets", ok([{ id: "1", question: "compact row" }])], ["polymarket_search_markets", EMPTY_LISTING]],
+    })) {
+      assert.deepEqual(valid(turn(collect(...records))), { ...EMPTY, checkedAt: READ_AT }, name);
+    }
+  });
+
+  it("is blocked by any result that says nothing about markets", () => {
+    for (const [name, other] of Object.entries({
+      "a price": PRICE,
+      "an order book": ok({ bids: [], asks: [] }),
+      "an empty series list": ok({ series: [], count: 0 }),
+      "events without markets": ok({ events: [{ id: "1", slug: "e", markets: [] }], count: 1 }),
+      "non-JSON": "rate limited, try later",
+      "an error result": FAILED,
+    })) {
+      assert.deepEqual(valid(turn(collect(["polymarket_search_markets", EMPTY_LISTING], ["polymarket_other", other]))), { ...EMPTY, checkedAt: READ_AT }, `${name} after`);
+      assert.deepEqual(valid(turn(collect(["polymarket_other", other], ["polymarket_search_markets", EMPTY_LISTING]))), { ...EMPTY, checkedAt: READ_AT }, `${name} before`);
+    }
+    assert.deepEqual(valid(turn(collect(["polymarket_get_market_prices", PRICE]))), { ...EMPTY, checkedAt: READ_AT }, "a price alone is a check, not an answer");
+    // A result from another venue's tool is not read at all, so it cannot block either.
+    assert.deepEqual(valid(turn(collect(["polymarket_search_markets", EMPTY_LISTING], ["kalshi_get_market", ok(skillMarket())]))), NONE_FOUND);
+  });
+
+  it("gives cards a check time no earlier than their reads, and never a reason", async () => {
+    const collector = collect(["polymarket_get_market_details", ok(skillMarket())], ["polymarket_get_market_prices", PRICE, READ_MS + 60_000]);
+    await collector.tool.execute({ market_ids: ["540123"] }, { toolCallId: "c", messages: [] });
+    assert.deepEqual(valid(turn(collector)), { ...RESULT, checkedAt: LATER_AT });
+    assert.equal(turn(collector).markets[0].readAt, READ_AT, "the card keeps its own read time");
+  });
+
+  it("reports nothing it read when denied", async () => {
+    const collector = collect(["polymarket_get_market_details", ok(skillMarket())]);
+    await collector.tool.execute({ market_ids: ["540123"] }, { toolCallId: "c", messages: [] });
+    assert.deepEqual(valid(turn(collector, true)), DENIED);
+    assert.deepEqual(valid(turn(collect(["polymarket_search_markets", EMPTY_LISTING]), true)), DENIED);
+  });
+
+  it("keeps what was read across reset and checkpoint, like the markets themselves", () => {
+    const collector = collect(["polymarket_search_markets", EMPTY_LISTING]);
+    const restore = collector.checkpoint();
+    collector.reset();
+    assert.deepEqual(collector.checked(), { checkedAt: READ_AT, noneFound: true }, "a retried model call does not unread a result");
+    collector.record("polymarket_get_market_prices", PRICE, READ_MS + 60_000);
+    restore();
+    assert.deepEqual(collector.checked(), { checkedAt: LATER_AT, noneFound: false }, "restoring a choice does not unread one either");
+    collector.reset();
+    assert.deepEqual(valid(turn(collector)), { ...EMPTY, checkedAt: LATER_AT });
   });
 });
 
@@ -412,9 +582,25 @@ describe("engine.run with market", () => {
 
   it("returns no cards when the model cites nothing, or cites before reading", async () => {
     const quiet = scripted([[toolCall("polymarket_get_market_details", { market_id: "540123" })], [say(FINAL)]]);
-    assert.deepEqual((await runMarket(newEngine(quiet.model))).results, [{ ...RESULT, markets: [] }]);
+    assert.deepEqual((await runMarket(newEngine(quiet.model))).results, [{ ...EMPTY, checkedAt: READ_AT }], "a market was read, so this is not none_found");
     const early = scripted([[toolCall("cite_markets", { market_ids: ["540123"] })], [say(FINAL)]]);
-    assert.deepEqual((await runMarket(newEngine(early.model))).results, [{ ...RESULT, markets: [] }]);
+    assert.deepEqual((await runMarket(newEngine(early.model))).results, [EMPTY], "no polymarket call, no check time");
+  });
+
+  it("reports none_found when the only polymarket result is an empty listing, and not when another result blocks it", async () => {
+    const steps = () => [[toolCall("polymarket_get_market_details", { market_id: "540123" })], [toolCall("polymarket_get_market_details", { market_id: "540124" })], [say(FINAL)]];
+    const engineReturning = (model, contents) => {
+      const engine = newEngine(model);
+      let call = 0;
+      engine.registry.dispatchToolCall = async () => ({ content: contents[Math.min(call, contents.length - 1)], fetchedAt: READ_MS + 60_000 * call++ });
+      return engine;
+    };
+    const emptyListing = ok({ markets: [], count: 0 });
+    const none = await runMarket(engineReturning(scripted(steps()).model, [emptyListing, emptyListing]));
+    assert.deepEqual(none.results, [{ ...NONE_FOUND, checkedAt: "2026-11-21T23:50:12.345Z" }]);
+    assert.deepEqual(wire.parseMarketTurnResult(none.results[0], TURN), none.results[0]);
+    const blocked = await runMarket(engineReturning(scripted(steps()).model, [emptyListing, ok({ token_id: "111", price: 0.5 })]));
+    assert.deepEqual(blocked.results, [{ ...EMPTY, checkedAt: "2026-11-21T23:50:12.345Z" }]);
   });
 
   it("is denied by an allowlist that omits it", async () => {
@@ -422,7 +608,7 @@ describe("engine.run with market", () => {
     const { results } = await runMarket(newEngine(model, { toolAllowlist: ["polymarket_get_market_details"] }));
     assert.equal(offeredNames(chat[0]).includes("cite_markets"), false);
     assert.doesNotMatch(JSON.stringify(chat[0].prompt), /## Market cards/);
-    assert.deepEqual(results, [{ ...RESULT, markets: [], reasonCode: "denied" }]);
+    assert.deepEqual(results, [DENIED], "denied reports no check time, though a polymarket result was read");
   });
 
   it("leaves a run without the envelope unchanged", async () => {

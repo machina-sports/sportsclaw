@@ -6,10 +6,14 @@ aiohttp import, like artifact_contract.py, so it is testable without the web
 stack.
 
     MarketTurnInput  {contract, nonce}
-    MarketTurnResult {contract, nonce, markets: [market-card-v1] (0..3), reasonCode | None}
+    MarketTurnResult {contract, nonce, markets: [market-card-v1] (0..3),
+                      reasonCode: "denied" | "none_found" | None, checkedAt | None}
     market-card-v1   {contract, venue: "polymarket", id, question, slug, eventSlug,
                       status, outcomes: [{name, price}] (2..4), volume, liquidity,
                       gameStartTime, readAt}
+
+`checkedAt` has the format of a card's `readAt`. Cards and `none_found` need
+one; `denied` never has one. Cards and a reason never coexist.
 
 Parsers return a fresh copy or None and never raise. The gate comes from the
 server environment only: a request body can never enable market cards.
@@ -31,7 +35,7 @@ MAX_OUTCOMES = 4
 MAX_OUTCOME_NAME_CHARS = 80
 MAX_GAME_START_CHARS = 40
 
-_REASONS = {"denied"}
+_REASONS = {"denied", "none_found"}
 _STATUSES = {"active", "closed", "inactive"}
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -139,19 +143,31 @@ def parse_market_turn_input(value):
 
 
 def parse_market_turn_result(value, turn_input):
-    """The result for this exact input, or None. Market cards and a reason never coexist."""
+    """The result for this exact input, or None.
+
+    Market cards and a reason never coexist; cards and none_found need a
+    checkedAt; denied never has one.
+    """
     turn = parse_market_turn_input(turn_input)
-    raw = _exact(value, ("contract", "nonce", "markets", "reasonCode"))
+    raw = _exact(value, ("contract", "nonce", "markets", "reasonCode", "checkedAt"))
     if turn is None or raw is None or raw["contract"] != MARKET_TURN_CONTRACT or raw["nonce"] != turn["nonce"]:
         return None
     reason = raw["reasonCode"]
     if reason is not None and (type(reason) is not str or reason not in _REASONS):
+        return None
+    checked_at = raw["checkedAt"]
+    if checked_at is not None and (type(checked_at) is not str or not _READ_AT.fullmatch(checked_at)):
         return None
     if type(raw["markets"]) is not list or len(raw["markets"]) > MAX_MARKETS:
         return None
     markets = [parse_market_card(card) for card in raw["markets"]]
     if any(card is None for card in markets) or len({card["id"] for card in markets}) != len(markets):
         return None
-    if markets and reason is not None:
+    if markets and (reason is not None or checked_at is None):
         return None
-    return {"contract": MARKET_TURN_CONTRACT, "nonce": turn["nonce"], "markets": markets, "reasonCode": reason}
+    if reason == "denied" and checked_at is not None:
+        return None
+    if reason == "none_found" and checked_at is None:
+        return None
+    return {"contract": MARKET_TURN_CONTRACT, "nonce": turn["nonce"], "markets": markets, "reasonCode": reason,
+            "checkedAt": checked_at}

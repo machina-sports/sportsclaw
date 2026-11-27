@@ -6,7 +6,8 @@ capabilities:
 
   - strict MarketTurnInput / MarketTurnResult / market-card-v1 validation,
     including exact keys, UTF-16 lengths, control characters, lone
-    surrogates and booleans never passing as numbers;
+    surrogates and booleans never passing as numbers; `checkedAt` is
+    required with cards and with `none_found`, and refused with `denied`;
   - the server gate and caller-history requirement are checked before any
     subprocess is spawned; streams refuse market requests;
   - the market input rides on the child's stdin, never argv or the
@@ -95,9 +96,16 @@ def outcomes(*replacement):
     return [*replacement, {"name": "No", "price": 0.38}]
 
 
-def result(markets=(), reason=None, nonce=NONCE, **extra):
-    return dict({"contract": "market-turn-v1", "nonce": nonce, "markets": copy(list(markets)), "reasonCode": reason},
-                **extra)
+CHECKED_AT = "2026-11-27T14:03:25.007Z"
+_DEFAULT = object()
+
+
+def result(markets=(), reason=None, nonce=NONCE, checked=_DEFAULT, **extra):
+    """A result; by default checkedAt is set exactly when the shape requires one (cards or none_found)."""
+    if checked is _DEFAULT:
+        checked = CHECKED_AT if markets or reason == "none_found" else None
+    return dict({"contract": "market-turn-v1", "nonce": nonce, "markets": copy(list(markets)), "reasonCode": reason,
+                 "checkedAt": checked}, **extra)
 
 
 def body(market_input=None, **extra):
@@ -369,7 +377,26 @@ class MarketContractWire(RelayCase):
         self.assertEqual(parse(result([CARD, SPARSE, card(id="3")]), TURN)["markets"], [CARD, SPARSE, card(id="3")])
         self.assertEqual(parse(result(), TURN), result())
         self.assertEqual(parse(result(reason="denied"), TURN), result(reason="denied"))
+        self.assertEqual(parse(result(reason="none_found"), TURN), result(reason="none_found"))
+        self.assertEqual(parse(result(checked=CHECKED_AT), TURN), result(checked=CHECKED_AT),
+                         "no cards and no reason, after a polymarket call")
+        self.assertEqual(set(parse(result(), TURN)), {"contract", "nonce", "markets", "reasonCode", "checkedAt"})
         for label, value in {
+            "missing checkedAt": without(result([CARD]), "checkedAt"),
+            "missing checkedAt without cards": without(result(), "checkedAt"),
+            "cards with null checkedAt": result([CARD], checked=None),
+            "cards with none_found": result([CARD], reason="none_found"),
+            "none_found with null checkedAt": result(reason="none_found", checked=None),
+            "denied with checkedAt": result(reason="denied", checked=CHECKED_AT),
+            "checkedAt without millis": result(checked="2026-11-27T14:03:25Z"),
+            "checkedAt with offset": result(checked="2026-11-27T14:03:25.007+00:00"),
+            "checkedAt with trailing newline": result(checked=CHECKED_AT + "\n"),
+            "checkedAt with non-ASCII digits": result(checked="２０２６-11-27T14:03:25.007Z"),
+            "checkedAt empty": result(checked=""),
+            "checkedAt epoch": result(checked=1795789405007),
+            "checkedAt false": result(checked=False),
+            "none_found with bad checkedAt": result(reason="none_found", checked="today"),
+            "cards with bad checkedAt": result([CARD], checked="today"),
             "other nonce": result([CARD], nonce="nonce_other12345678"),
             "wrong contract": result([CARD], contract="artifact-turn-v1"),
             "markets with reason": result([CARD], reason="denied"),
@@ -469,12 +496,17 @@ class MarketSync(RelayCase):
 
     def test_no_markets_and_refusals_pass_through(self):
         self.enable()
-        for reason in (None, "denied"):
-            with self.subTest(reason):
-                self.child_prints({"type": "result", "text": PROSE, "market": result(reason=reason)})
+        for label, market in {
+            "nothing cited, no polymarket call": result(),
+            "nothing cited, after a polymarket call": result(checked=CHECKED_AT),
+            "denied": result(reason="denied"),
+            "none found": result(reason="none_found"),
+        }.items():
+            with self.subTest(label):
+                self.child_prints({"type": "result", "text": PROSE, "market": market})
                 response = self.query(body())
                 self.assertEqual(response.status, 200)
-                self.assertEqual(response.data["market"], result(reason=reason))
+                self.assertEqual(response.data["market"], market)
 
     def test_missing_or_bad_acknowledgements_fail_closed(self):
         self.enable()
@@ -487,6 +519,13 @@ class MarketSync(RelayCase):
                                "market": result([card(outcomes=outcomes({"name": "Yes", "price": True}))])}],
             "duplicate ids": [{"type": "result", "text": PROSE, "market": result([CARD, CARD])}],
             "markets with reason": [{"type": "result", "text": PROSE, "market": result([CARD], reason="denied")}],
+            "old shape without checkedAt": [{"type": "result", "text": PROSE,
+                                             "market": without(result([CARD]), "checkedAt")}],
+            "cards with null checkedAt": [{"type": "result", "text": PROSE, "market": result([CARD], checked=None)}],
+            "none_found with null checkedAt": [{"type": "result", "text": PROSE,
+                                                "market": result(reason="none_found", checked=None)}],
+            "denied with checkedAt": [{"type": "result", "text": PROSE,
+                                       "market": result(reason="denied", checked=CHECKED_AT)}],
             "duplicate results": [{"type": "result", "text": PROSE, "market": result([CARD])},
                                   {"type": "result", "text": PROSE, "market": result([CARD])}],
         }.items():

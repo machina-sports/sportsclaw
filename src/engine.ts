@@ -162,9 +162,9 @@ import {
 } from "./artifact-output.js";
 import {
   MARKET_OUTPUT_TOOL_NAME,
-  MARKET_TURN_CONTRACT,
   createMarketCardCollector,
   marketPromptSection,
+  marketTurnResult,
   parseMarketTurnInput,
   type MarketCardCollector,
   type MarketTurnInput,
@@ -5205,12 +5205,7 @@ export class sportsclawEngine {
 
     if (market) {
       // Cards are copies of this run's own tool results: nothing here is model-written data.
-      const result: MarketTurnResult = {
-        contract: MARKET_TURN_CONTRACT,
-        nonce: market.input.nonce,
-        markets: market.denied ? [] : market.collector.finish(),
-        reasonCode: market.denied ? "denied" : null,
-      };
+      const result: MarketTurnResult = marketTurnResult(market.input, market.collector, market.denied);
       try {
         options.onMarketResult!(result);
       } catch {
