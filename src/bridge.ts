@@ -24,6 +24,8 @@ export interface ToolCallInput {
 export interface ToolCallResult {
   content: string;
   isError?: boolean;
+  /** When this result was really produced (epoch ms). Kept on a cached result, so a cache hit reports its original time. */
+  fetchedAt?: number;
 }
 
 export type BridgeErrorCode =

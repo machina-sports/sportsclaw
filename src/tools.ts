@@ -539,6 +539,9 @@ export class ToolRegistry {
       }
     }
 
+    // Stamped before caching: a later cache hit hands back this same time, never "now".
+    if (!result.isError && result.fetchedAt === undefined) result = { ...result, fetchedAt: Date.now() };
+
     // Store successful results in cache
     if (this.cacheEnabled && !this.shouldSkipCache(toolName) && !result.isError) {
       const cacheKey = this.generateCacheKey(toolName, input);
