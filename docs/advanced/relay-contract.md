@@ -36,3 +36,11 @@ configured policy, not a claim that every downstream server is healthy. Discover
 failure returns 503. Tokens, headers, URLs and other credentials are excluded.
 Container builds should set `SPORTSCLAW_BUILD_REVISION`; release CI supplies its
 commit automatically.
+
+`POST /api/query/sync` accepts an opt-in `steps: {"contract": "run-steps-v1"}`, advertised in
+capabilities as `steps_contract`. A successful response then carries
+`steps: {contract, steps: [{toolName, skillName, durationMs, success}]}`: one entry per finished
+tool call, in the order they finished, at most 50. The relay builds it from the engine's
+`tool_finish` progress events and never copies a tool's input, output or error text. An empty
+list means the run called no tool. A request without `steps` gets the same response keys as
+before. `/api/query` refuses it, because the stream already carries every progress event.
