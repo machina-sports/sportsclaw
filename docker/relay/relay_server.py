@@ -256,6 +256,9 @@ def query_guard(handler):
                     raise ValueError("market requires history_mode caller with history")
                 if parse_market_turn_input(body["market"]) is None:
                     raise ValueError("invalid market")
+            if "steps" in body and body["steps"] != {"contract": RUN_STEPS_CONTRACT}:
+                # Opt-in run-steps-v1: the relay lists the run's finished tool calls itself.
+                raise ValueError("invalid steps")
         except (ValueError, TypeError) as error:
             return web.json_response({"status": False, "error": str(error)}, status=400)
         # Server environment only: a request body can never enable slips, artifacts or market cards.
@@ -315,6 +318,7 @@ async def capabilities(request):
             **({"slip_contract": SLIP_TURN_CONTRACT} if slip_enabled() else {}),
             **({"artifact_contract": ARTIFACT_TURN_CONTRACT} if artifacts_enabled() else {}),
             **({"market_contract": MARKET_TURN_CONTRACT} if market_cards_enabled() else {}),
+            "steps_contract": RUN_STEPS_CONTRACT,
         })
     except Exception:
         return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
@@ -555,6 +559,10 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
         # Same rule for market cards: no per-response acknowledgement on a stream.
         return web.json_response(
             {"status": False, "error": "market is only supported on /api/query/sync"}, status=400)
+    if "steps" in body:
+        # The stream already carries every progress event; the summary is a sync acknowledgement.
+        return web.json_response(
+            {"status": False, "error": "steps is only supported on /api/query/sync"}, status=400)
     if "history" in body:
         # A stream has no per-response contract ack, so a caller could not tell
         # whether this replica honored the history. Refuse rather than drop it.
@@ -694,6 +702,7 @@ async def query_sync(request: web.Request) -> web.Response:
         result_text = None
         result_events = []
         manifest_events = []
+        steps = [] if "steps" in body else None
         error_text = None
         images = []
         videos = []
@@ -718,6 +727,10 @@ async def query_sync(request: web.Request) -> web.Response:
                     error_text = event.get("error", "Unknown error")
                 elif etype == "manifest":
                     manifest_events.append(event)
+                elif etype == "tool_finish" and steps is not None and len(steps) < MAX_RUN_STEPS:
+                    step = _run_step(event)
+                    if step is not None:
+                        steps.append(step)
                 elif etype == "image":
                     images.append({
                         "data": event.get("data", ""),
@@ -846,6 +859,9 @@ async def query_sync(request: web.Request) -> web.Response:
                     resp["report_verification"] = verification
             if market_result is not None:
                 resp["market"] = market_result
+            if "steps" in body:
+                resp["steps"] = {"contract": RUN_STEPS_CONTRACT, "steps": steps}
+                log(f"sync: {len(resp['steps']['steps'])} step(s)")
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -1059,6 +1075,29 @@ def _report_verification(manifest_events: list) -> dict | None:
     if not isinstance(claims, list):
         return None
     return {"outcome": outcome, "flagged_claim_count": len(claims)}
+
+
+RUN_STEPS_CONTRACT = "run-steps-v1"
+_STEP_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+MAX_RUN_STEPS = 50
+MAX_STEP_MS = 24 * 60 * 60 * 1000
+
+
+def _run_step(event: dict) -> dict | None:
+    """Keep only display metadata from a valid tool finish event."""
+    name, skill = event.get("toolName"), event.get("skillName")
+    duration, success = event.get("durationMs"), event.get("success")
+    if not isinstance(name, str) or not _STEP_NAME.fullmatch(name) or type(success) is not bool:
+        return None
+    # Booleans are never numbers; NaN and infinity fail the range check.
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 0 <= duration <= MAX_STEP_MS:
+        return None
+    return {
+        "toolName": name,
+        "skillName": skill if isinstance(skill, str) and _STEP_NAME.fullmatch(skill) else None,
+        "durationMs": int(round(duration)),
+        "success": success,
+    }
 
 
 def _build_stdin(body: dict) -> bytes | None:

@@ -36,6 +36,7 @@ CATALOG = json.dumps({key: [] for key in (
     "defaultSports", "optionalSports", "defaultSupport", "optionalSupport", "unknown")}).encode()
 RESULT = b'{"type": "result", "text": "ok"}\n'
 ENGINE_ERROR = b'{"type": "error", "error": "model failed"}\n'
+STEPS = {"contract": "run-steps-v1"}
 
 
 class _Lines:
@@ -131,6 +132,60 @@ class HostedHistoryRelayTest(unittest.IsolatedAsyncioTestCase):
         for entry in PRIOR:
             self.assertNotIn(entry["content"], argv)
             self.assertNotIn(entry["content"], env_text)
+
+    # -- run steps -------------------------------------------------------
+
+    async def test_sync_returns_each_finished_tool_call_without_inputs_outputs_or_errors(self):
+        def line(event):
+            return (json.dumps(event) + "\n").encode()
+        self.engine_stdout = b"".join([
+            line({"type": "start", "timestamp": "2026-11-27T22:00:00.000Z"}),
+            line({"type": "tool_start", "toolName": "polymarket_search", "toolCallId": "c1", "skillName": "polymarket", "category": "progress"}),
+            line({"type": "tool_finish", "toolName": "polymarket_search", "toolCallId": "c1", "durationMs": 812.6, "success": True,
+                  "skillName": "polymarket", "input": {"query": "SECRET-INPUT"}, "outputChars": 4000, "truncated": False, "category": "progress"}),
+            line({"type": "tool_finish", "toolName": "nba_scoreboard", "toolCallId": "c2", "durationMs": 95, "success": False,
+                  "error": "SECRET-ERROR", "category": "progress"}),
+            line({"type": "tool_finish", "toolName": "bad name; rm -rf", "toolCallId": "c3", "durationMs": 1, "success": True}),
+            line({"type": "tool_finish", "toolName": "ok_tool", "toolCallId": "c4", "durationMs": True, "success": True}),
+            line({"type": "tool_finish", "toolName": "ok_tool", "toolCallId": "c5", "durationMs": 5, "success": "yes"}),
+            line({"type": "tool_finish", "toolName": "ok_tool", "toolCallId": "c6", "durationMs": 5, "success": True, "skillName": "bad skill"}),
+            RESULT,
+        ])
+        status, body = await self._sync({"prompt": FOLLOW_UP, "steps": STEPS})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["steps"], {"contract": "run-steps-v1", "steps": [
+            {"toolName": "polymarket_search", "skillName": "polymarket", "durationMs": 813, "success": True},
+            {"toolName": "nba_scoreboard", "skillName": None, "durationMs": 95, "success": False},
+            {"toolName": "ok_tool", "skillName": None, "durationMs": 5, "success": True},
+        ]})
+        self.assertNotIn("SECRET", json.dumps(body))
+        # Not requested: the response keeps its legacy keys.
+        status, body = await self._sync({"prompt": FOLLOW_UP})
+        self.assertEqual(set(body), {"status", "text", "user_id", "elapsed_ms"})
+
+    async def test_sync_steps_are_empty_without_tool_calls_and_capped(self):
+        status, body = await self._sync({"prompt": FOLLOW_UP, "steps": STEPS})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["steps"], {"contract": "run-steps-v1", "steps": []})
+        finish = {"type": "tool_finish", "toolName": "t", "toolCallId": "c", "durationMs": 1, "success": True}
+        self.engine_stdout = (json.dumps(finish) + "\n").encode() * (relay_server.MAX_RUN_STEPS + 5) + RESULT
+        status, body = await self._sync({"prompt": FOLLOW_UP, "steps": STEPS})
+        self.assertEqual(len(body["steps"]["steps"]), relay_server.MAX_RUN_STEPS)
+        self.engine_stdout = (json.dumps(finish) + "\n").encode() + ENGINE_ERROR
+        status, body = await self._sync({"prompt": FOLLOW_UP, "steps": STEPS})
+        self.assertNotEqual(status, 200)
+        self.assertNotIn("steps", body)
+
+    async def test_steps_request_is_exact_sync_only_and_advertised(self):
+        launches = len(self.launches)
+        for bad in ({"contract": "run-steps-v2"}, {"contract": "run-steps-v1", "extra": 1}, "run-steps-v1", None):
+            status, body = await self._sync({"prompt": FOLLOW_UP, "steps": bad})
+            self.assertEqual((status, body.get("error")), (400, "invalid steps"))
+        response = await self.client.post("/api/query", json={"prompt": FOLLOW_UP, "steps": STEPS}, headers=AUTH)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(len(self.launches), launches, "no subprocess may start for a refused request")
+        caps = await (await self.client.get("/api/capabilities", headers=AUTH)).json()
+        self.assertEqual(caps.get("steps_contract"), "run-steps-v1")
 
     # -- forwarding --------------------------------------------------------
 
