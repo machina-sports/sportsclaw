@@ -1,0 +1,55 @@
+/* Shared stylesheet for the review-draft legal pages (/privacy/, /terms/). Dark, like the homepage default. */
+@font-face{font-family:"Geist";src:url(/assets/fonts/geist-400-800.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Geist Mono";src:url(/assets/fonts/geist-mono-400-600.woff2) format("woff2");font-weight:400 600;font-style:normal;font-display:swap}
+:root{
+  color-scheme:dark;
+  --bg:#050706;
+  --bg-2:#080b09;
+  --surface:#0b0f0d;
+  --text:#eef3f0;
+  --muted:#a7b1ab;
+  --line:rgba(255,255,255,.07);
+  --line-strong:rgba(255,255,255,.13);
+  --accent:#2bee4b;
+  --accent-text:#4cf06a;
+  --on-accent:#04140a;
+  --font-body:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  --font-mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font-family:var(--font-body);font-size:1.0625rem;line-height:1.6;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
+svg{display:block}
+h1,h2{margin:0;text-wrap:balance}
+a{color:var(--accent-text);text-underline-offset:4px}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:3px;border-radius:8px}
+code{font-family:var(--font-mono);font-size:.9375em}
+.skip{position:absolute;left:1rem;top:-4rem;z-index:3;padding:.6rem 1rem;border-radius:10px;background:var(--accent);color:var(--on-accent);font-weight:600;text-decoration:none}
+.skip:focus{top:1rem}
+.wrap{width:min(760px,100% - 2.5rem);margin-inline:auto}
+
+.site-header{border-bottom:1px solid var(--line)}
+.site-header .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0 1rem;min-height:68px}
+.identity{display:flex;align-items:center;gap:.55rem;min-height:44px;color:var(--text);text-decoration:none}
+.identity svg{width:28px;height:28px}
+.identity strong{font-size:1.125rem;font-weight:700;letter-spacing:-.02em}
+.site-header nav,.site-footer nav{display:flex;flex-wrap:wrap;gap:0 1.25rem}
+.site-header nav a,.site-footer nav a{display:inline-flex;align-items:center;min-height:44px;color:var(--muted);font-size:.9375rem;text-decoration:none}
+.site-header nav a:hover,.site-footer nav a:hover,nav a[aria-current="page"]{color:var(--text)}
+
+main{padding:3rem 0 4.5rem}
+.eyebrow{margin:0;font-family:var(--font-mono);font-size:.8125rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text)}
+h1{margin-top:.8rem;font-size:clamp(2.1rem,5vw,3rem);line-height:1.05;font-weight:700;letter-spacing:-.035em}
+.draft{margin:1.75rem 0 0;padding:1rem 1.15rem;border:1px solid var(--line-strong);border-left:3px solid var(--accent-text);border-radius:12px;background:var(--surface);color:var(--muted)}
+.draft strong{display:block;color:var(--text)}
+h2{margin-top:2.75rem;padding-top:1.5rem;border-top:1px solid var(--line-strong);font-size:1.375rem;line-height:1.2;letter-spacing:-.02em}
+p,ul{margin:.9rem 0 0}
+main p,main li{color:var(--muted)}
+main strong{color:var(--text)}
+ul{padding-left:1.25rem}
+li+li{margin-top:.45rem}
+
+.site-footer{padding:1.75rem 0 2.25rem;border-top:1px solid var(--line-strong);background:var(--bg-2);font-size:.9375rem;color:var(--muted)}
+.site-footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem 2rem}
+.site-footer p{margin:0;align-self:center}
+@media (max-width:420px){.wrap{width:min(760px,100% - 2rem)}}

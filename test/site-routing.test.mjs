@@ -1,6 +1,8 @@
 // Migration contract for the static site image (see site/README.md):
 //   /             personal-agent homepage, served from site/landing/
 //   /creators/    informational creators page, site/landing/creators/
+//   /privacy/     review-draft privacy page, site/landing/privacy/
+//   /terms/       review-draft terms page, site/landing/terms/
 //   /opensource/  VitePress developer site
 // Source checks always run. HTTP checks run only against a loopback URL passed
 // explicitly as SPORTSCLAW_SITE_URL (for example a disposable local container).
@@ -14,6 +16,13 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const landingDir = join(root, "site", "landing");
 const landingHtmlPath = join(landingDir, "index.html");
 const creatorsHtmlPath = join(landingDir, "creators", "index.html");
+const legalCssPath = join(landingDir, "assets", "legal.css");
+
+// Static pages served at an exact directory URL, with an exact slash redirect.
+const STATIC_PAGES = ["creators", "privacy", "terms"];
+const LEGAL_PAGES = ["privacy", "terms"];
+const pageHtmlPath = (page) => join(landingDir, page, "index.html");
+const SITE_FOOTER_LINKS = ["/privacy/", "/terms/"];
 
 const read = (...parts) => readFileSync(join(root, ...parts), "utf8");
 
@@ -138,6 +147,17 @@ test("Docker image copies the homepage locally and the docs below /opensource/",
       copies.some((c) => normalizeDockerPath(c.dest) === `${webRoot}/creators` && c.sources.map(normalizeDockerPath).includes("landing/creators")),
     `expected site/landing/creators to reach ${webRoot}/creators/, got ${JSON.stringify(copies)}`,
   );
+  for (const page of LEGAL_PAGES) {
+    assert.ok(
+      rootSources.includes("landing") || rootSources.includes(`landing/${page}`) ||
+        copies.some((c) => normalizeDockerPath(c.dest) === `${webRoot}/${page}` && c.sources.map(normalizeDockerPath).includes(`landing/${page}`)),
+      `expected site/landing/${page} to reach ${webRoot}/${page}/, got ${JSON.stringify(copies)}`,
+    );
+  }
+  assert.ok(
+    rootSources.includes("landing") || rootSources.includes("landing/assets"),
+    `expected site/landing/assets (with legal.css) to reach ${webRoot}/assets/, got ${JSON.stringify(copies)}`,
+  );
   assert.doesNotMatch(dockerfile, /open-source/);
   assert.doesNotMatch(dockerfile, /^\s*ADD\s+\S*https?:/im, "the image must not download content at build time");
   assert.doesNotMatch(dockerfile, /^\s*RUN\b.*\b(?:curl|wget)\b/im, "the image must not download content at build time");
@@ -153,11 +173,14 @@ test("nginx serves static files only, with no backend proxy", () => {
   assert.match(conf, /\blocation\s+=\s*\/\s*\{/, "expected an exact location for the homepage");
   assert.match(conf, /\blocation\s+(?:\^~\s+)?\/assets\/\s*\{/, "expected a location for the homepage assets");
   assert.match(conf, /\blocation\s+(?:\^~\s+)?\/opensource\/\s*\{/, "expected a location for the developer site");
-  const creators = conf.match(/\blocation\s+=\s*\/creators\/\s*\{([^}]*\{[^}]*\}[^}]*|[^}]*)\}/);
-  assert.ok(creators, "expected an exact location for the creators page");
-  assert.match(creators[1], /\blimit_except\s+GET\s*\{\s*deny\s+all\s*;\s*\}/, "/creators/ must restrict methods like /");
-  assert.match(creators[1], /\btry_files\s+\/creators\/index\.html\s+=404\s*;/);
-  assert.doesNotMatch(conf, /\blocation\s+(?:\^~\s+)?\/creators\/\s*\{/, "no prefix catch-all below /creators/");
+  for (const page of STATIC_PAGES) {
+    const block = conf.match(new RegExp(`\\blocation\\s+=\\s*/${page}/\\s*\\{([^}]*\\{[^}]*\\}[^}]*|[^}]*)\\}`));
+    assert.ok(block, `expected an exact location for /${page}/`);
+    assert.match(block[1], /\blimit_except\s+GET\s*\{\s*deny\s+all\s*;\s*\}/, `/${page}/ must restrict methods like /`);
+    assert.match(block[1], new RegExp(`\\btry_files\\s+/${page}/index\\.html\\s+=404\\s*;`));
+    assert.doesNotMatch(conf, new RegExp(`\\blocation\\s+(?:\\^~\\s+)?/${page}/?\\s*\\{`), `no prefix match for /${page} or below /${page}/`);
+    assert.doesNotMatch(conf, new RegExp(`\\blocation\\s+~\\*?\\s+[^{]*${page}`), `no regex location matching ${page}`);
+  }
   assert.doesNotMatch(conf, /\bautoindex\s+on\b/, "directory listings are not allowed");
 
   // No SPA or homepage fallback: every try_files chain ends in a real 404.
@@ -169,16 +192,20 @@ test("nginx serves static files only, with no backend proxy", () => {
 });
 
 // Routing itself is proven by the runtime checks against the real image.
-test("nginx redirects are permanent, local to /opensource/ (or /creators/) and keep the query", () => {
+test("nginx redirects are permanent, local to /opensource/ (or a static page's slash URL) and keep the query", () => {
   const conf = nginxConf();
   const targets = redirectTargets(conf);
   assert.ok(targets.length > 0, "expected legacy redirects");
-  const creatorsSlash = conf.match(/\blocation\s+=\s*\/creators\s*\{([^}]*)\}/);
-  assert.ok(creatorsSlash, "expected an exact /creators slash redirect");
-  assert.deepEqual(redirectTargets(creatorsSlash[1]).map((t) => t.target), ["/creators/$is_args$args"]);
+  for (const page of STATIC_PAGES) {
+    const slash = conf.match(new RegExp(`\\blocation\\s+=\\s*/${page}\\s*\\{([^}]*)\\}`));
+    assert.ok(slash, `expected an exact /${page} slash redirect`);
+    assert.match(slash[1], /\breturn\s+301\b/, `/${page} must redirect permanently`);
+    assert.deepEqual(redirectTargets(slash[1]).map((t) => t.target), [`/${page}/$is_args$args`]);
+  }
   for (const { kind, target, flag } of targets) {
-    if (target.startsWith("/creators/")) {
-      assert.equal(target, "/creators/$is_args$args", "the only /creators/ redirect is the exact slash redirect");
+    const page = STATIC_PAGES.find((p) => target.startsWith(`/${p}/`));
+    if (page) {
+      assert.equal(target, `/${page}/$is_args$args`, `the only /${page}/ redirect is the exact slash redirect`);
       continue;
     }
     assert.ok(target.startsWith("/opensource/"), `redirect to ${target}, expected /opensource/…`);
@@ -206,7 +233,12 @@ test("installer stays at /install.sh with the same bytes as /opensource/install.
   assert.match(install[1], /\b(?:alias|try_files)\s+\/usr\/share\/nginx\/html\/opensource\/install\.sh\b|\btry_files\s+\/opensource\/install\.sh\b/);
 });
 
-test("homepage links point at /opensource/ and /creators/", () => {
+function footerLinks(html) {
+  const footer = stripHtmlComments(html).match(/<footer\b[\s\S]*?<\/footer>/i)?.[0] ?? "";
+  return [...footer.matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
+}
+
+test("homepage links point at /opensource/, /creators/ and the legal drafts", () => {
   const html = readFileSync(landingHtmlPath, "utf8");
   assert.doesNotMatch(html, /href\s*[~^$*|]?=\s*["']?\/open-source/, "stale /open-source link or selector");
 
@@ -214,8 +246,13 @@ test("homepage links point at /opensource/ and /creators/", () => {
   assert.ok(internal.includes("/opensource/"), "expected developer links to /opensource/");
   assert.ok(internal.includes("/creators/"), "expected links to /creators/");
   for (const href of internal) {
-    assert.ok(href.startsWith("/opensource/") || href === "/creators/", `unexpected internal link ${href}`);
+    assert.ok(
+      href.startsWith("/opensource/") || ["/creators/", ...SITE_FOOTER_LINKS].includes(href),
+      `unexpected internal link ${href}`,
+    );
   }
+  const footer = footerLinks(html);
+  for (const href of SITE_FOOTER_LINKS) assert.ok(footer.includes(href), `homepage footer must link to ${href}`);
 });
 
 test("creators page links and assets stay on the static site", () => {
@@ -223,10 +260,12 @@ test("creators page links and assets stay on the static site", () => {
   const internal = [...stripHtmlComments(html).matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
   for (const href of internal) {
     assert.ok(
-      ["/", "/#start-chat", "/opensource/", "#main"].includes(href),
+      ["/", "/#start-chat", "/opensource/", "#main", ...SITE_FOOTER_LINKS].includes(href),
       `unexpected creators link ${href}`,
     );
   }
+  const footer = footerLinks(html);
+  for (const href of SITE_FOOTER_LINKS) assert.ok(footer.includes(href), `creators footer must link to ${href}`);
   const refs = landingAssetRefs(html);
   assert.deepEqual(refs.filter((ref) => /^(?:[a-z]+:)?\/\//i.test(ref)), [], "creators assets must be served from the image");
   for (const ref of refs) {
@@ -314,6 +353,116 @@ test("homepage links to an informational creators page", () => {
   assert.match(visibleText(creators), /applications (?:are not|aren’t|aren't) open/i);
   assert.match(creators, /href="\/#start-chat"/);
   assert.doesNotMatch(creators, /<form\b|<input\b|<script\b|mailto:/i);
+});
+
+test("legal drafts are static, noindex, marked not in effect and linked to each other", () => {
+  for (const page of LEGAL_PAGES) {
+    const raw = readFileSync(pageHtmlPath(page), "utf8");
+    const html = stripHtmlComments(raw);
+    const text = visibleText(html);
+    const other = page === "privacy" ? "terms" : "privacy";
+
+    assert.match(html, /<meta\s+name="robots"\s+content="[^"]*\bnoindex\b[^"]*"\s*\/?>/i, `/${page}/ must be noindex`);
+    assert.doesNotMatch(html, /rel="canonical"|property="og:/i, `/${page}/ draft must not advertise itself`);
+    assert.match(text, /Draft for review\. Not yet in effect\./, `/${page}/ needs the draft notice`);
+    assert.match(text, /has no effective date/i);
+    assert.doesNotMatch(text, /\beffective (?:as of|on|from)\b|\blast updated\b/i, `/${page}/ must not state an effective date`);
+
+    assert.deepEqual(
+      [...html.matchAll(/<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"/gi)].map((m) => m[1]),
+      ["/assets/legal.css"],
+      `/${page}/ uses the shared stylesheet only`,
+    );
+    assert.doesNotMatch(html, /<style\b|<script\b|<form\b|<input\b|<iframe\b|<img\b|\bstyle=/i, `/${page}/ must be plain static HTML`);
+    assert.doesNotMatch(html, /\b(?:src|href)\s*=\s*["'](?:https?:)?\/\//i, `/${page}/ must not load or link off-site resources`);
+
+    const links = [...html.matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
+    for (const href of links) {
+      assert.ok(["/", "/privacy/", "/terms/", "#main", "mailto:support@machina.gg"].includes(href), `unexpected /${page}/ link ${href}`);
+    }
+    assert.ok(links.includes("/"), `/${page}/ links home`);
+    assert.ok(links.includes(`/${other}/`), `/${page}/ links to /${other}/`);
+    const footer = footerLinks(html);
+    for (const href of ["/", "/privacy/", "/terms/"]) assert.ok(footer.includes(href), `/${page}/ footer links to ${href}`);
+
+    for (const fact of [/Machina Sports/, /GeniusTech Corporation, a Delaware corporation/, /support@machina\.gg/, /Telegram/, /WhatsApp/]) {
+      assert.match(text, fact, `/${page}/ is missing ${fact}`);
+    }
+    assert.match(text, /open-source agent that you or (?:anyone else|others) host/i, `/${page}/ excludes self-hosted copies`);
+    assert.match(text, /future native app/i, `/${page}/ excludes a future native app`);
+
+    // Nothing unverified: no fixed periods, named jurisdictions of processing or provider inventory.
+    assert.doesNotMatch(text, /\b\d+\s*(?:hours?|days?|weeks?|months?|years?)\b/i, `/${page}/ states a fixed period`);
+    assert.doesNotMatch(text, /\b(?:United States|U\.S\.|European|EU|EEA|GDPR|CCPA|California)\b/, `/${page}/ names a jurisdiction`);
+    assert.doesNotMatch(text, /\b(?:OpenAI|Anthropic|Gemini|Google|AWS|Amazon|Azure|Microsoft|Twilio|Meta|Vercel|Cloudflare)\b/, `/${page}/ names an unverified provider`);
+  }
+});
+
+test("privacy draft discloses the hosted service's data flows without unverified promises", () => {
+  const text = visibleText(stripHtmlComments(readFileSync(pageHtmlPath("privacy"), "utf8")));
+  for (const disclosure of [
+    /IP address/,
+    /local storage/,
+    /Telegram user and chat IDs/,
+    /WhatsApp phone number/,
+    /supported uploads/,
+    /Chat context and preferences/,
+    /Usage and diagnostic information/,
+    /Infrastructure providers/,
+    /AI model providers/,
+    /Stripe hosts the checkout/,
+    /status of your payments and subscription, with the related Stripe identifiers/,
+    /copy of your data, a correction or deletion/,
+    /confirm the request comes from you/,
+    /doesn't cancel a subscription/,
+    /managed in those apps/,
+    /doesn't set fixed retention periods/,
+  ]) {
+    assert.match(text, disclosure, `privacy draft is missing ${disclosure}`);
+  }
+  assert.doesNotMatch(text, /\bsell\b|\bsold\b|\brent\b|\b(?:never|not|don't|do not|won't|will not)\s+share\b/i, "no unverified sale/share claims");
+  assert.doesNotMatch(text, /\btrain(?:s|ed|ing)?\b/i, "no unverified training claims");
+  assert.doesNotMatch(text, /\bwithin\b|\bpromptly\b|\bbusiness days?\b/i, "no promised response time");
+});
+
+test("terms draft separates AI limits, read-only markets, billing and undecided terms", () => {
+  const text = visibleText(stripHtmlComments(readFileSync(pageHtmlPath("terms"), "utf8")));
+  for (const clause of [
+    /answers can be wrong, incomplete or out of date/i,
+    /not professional, financial, legal or betting advice/,
+    /doesn't place bets or trades, take deposits/,
+    /have their own terms/,
+    /Please don't/,
+    /isn't a trial/,
+    /recurring paid subscription/,
+    /shows the price and how often you're billed before you agree to pay/,
+    /renews each billing period until you cancel/,
+    /\/billing/,
+    /\/upgrade/,
+    /doesn't set a refund policy/,
+    /no SportsClaw creator program/,
+    /doesn't yet set a minimum age, the law that governs these terms or how disputes are resolved/,
+    /consumer protection law that can't be waived/,
+  ]) {
+    assert.match(text, clause, `terms draft is missing ${clause}`);
+  }
+  assert.doesNotMatch(text, /arbitrat|class action|jury|\bcourts?\b|governed by the laws? of|\bvenue\b/i, "no invented dispute terms");
+  assert.doesNotMatch(text, /\b\d{2}\s*(?:\+|or older|years)|\bage of (?:majority|\d)/i, "no invented age cutoff");
+  assert.doesNotMatch(text, /\b(?:full|partial|pro-?rat(?:ed|a))\s+refunds?\b|\brefunds? (?:within|are|will)\b|\bnon-?refundable\b/i, "no invented refund terms");
+  assert.doesNotMatch(text, /\$\d|\bfree trial\b/i, "price and cadence come from checkout");
+});
+
+test("legal stylesheet is small, local and only references local fonts", () => {
+  const css = readFileSync(legalCssPath, "utf8");
+  assert.ok(css.length > 0 && css.length < 8_000, "legal.css should stay small");
+  assert.doesNotMatch(css, /@import\b/i);
+  const refs = [...css.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi)].map((m) => m[2]);
+  assert.ok(refs.length > 0, "expected the self-hosted fonts");
+  for (const ref of refs) {
+    assert.ok(ref.startsWith("/assets/fonts/"), `${ref} must be an absolute /assets/fonts/ path`);
+    const file = resolveLandingAsset(ref);
+    assert.ok(file && existsSync(file) && statSync(file).size > 0, `${ref} is missing`);
+  }
 });
 
 // ---------- optional runtime checks (loopback only) ----------
@@ -409,6 +558,49 @@ test("runtime: /creators/ serves the static creators page, GET only", { skip: ru
     assert.equal(response.status, 404, `${path} → ${response.status}`);
     const body = await bytes(response);
     assert.ok(!body.equals(creatorsBytes) && !body.equals(landingBytes()), `${path} must not fall back to a page`);
+  }
+});
+
+test("runtime: /privacy/ and /terms/ serve the static drafts, GET only, exact URLs", { skip: runtimeSkip }, async () => {
+  const css = await request("/assets/legal.css");
+  assert.equal(css.status, 200, "/assets/legal.css");
+  assert.match(css.headers.get("content-type") ?? "", /text\/css/);
+  assert.ok((await bytes(css)).equals(readFileSync(legalCssPath)), "/assets/legal.css differs from site/landing/assets/legal.css");
+
+  for (const page of LEGAL_PAGES) {
+    const pageBytes = readFileSync(pageHtmlPath(page));
+    const fallbacks = [pageBytes, landingBytes(), readFileSync(creatorsHtmlPath)];
+
+    const response = await request(`/${page}/`);
+    assert.equal(response.status, 200, `/${page}/`);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+    assert.ok((await bytes(response)).equals(pageBytes), `/${page}/ must be site/landing/${page}/index.html`);
+
+    for (const [path, expected] of [
+      [`/${page}`, `/${page}/`],
+      [`/${page}?ref=test`, `/${page}/?ref=test`],
+      [`/${page}?ref=test&utm_source=x`, `/${page}/?ref=test&utm_source=x`],
+    ]) {
+      const redirect = await request(path);
+      await redirect.body?.cancel();
+      assert.ok([301, 308].includes(redirect.status), `${path} → ${redirect.status}, expected a permanent redirect`);
+      const location = new URL(redirect.headers.get("location") ?? "", `${site.origin}${path}`);
+      assert.equal(location.origin, site.origin, `${path} redirects off-site to ${location.href}`);
+      assert.equal(location.pathname + location.search, expected, `${path} redirect target`);
+    }
+
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const denied = await request(`/${page}/`, { method, body: method === "DELETE" ? undefined : "probe=1" });
+      assert.ok(denied.status >= 400, `${method} /${page}/ → ${denied.status}`);
+      assert.ok(!(await bytes(denied)).equals(pageBytes), `${method} /${page}/ served the page`);
+    }
+
+    for (const path of [`/${page}/index.html`, `/${page}/no-such-page-site-routing-test`, `/${page}x`, `/${page}.html`]) {
+      const missing = await request(path);
+      assert.equal(missing.status, 404, `${path} → ${missing.status}`);
+      const body = await bytes(missing);
+      assert.ok(!fallbacks.some((b) => body.equals(b)), `${path} must not fall back to a page`);
+    }
   }
 });
 
