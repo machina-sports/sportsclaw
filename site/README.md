@@ -29,7 +29,13 @@
 - `/docs` and `/docs/*`: permanent redirects into the developer site.
 - Existing root documentation prefixes and standalone documentation pages: permanent redirects to their matching `/opensource/` paths.
 - `/install.sh`: same installer bytes as `/opensource/install.sh`.
-- `/llms.txt`: redirect to `/opensource/llms.txt`.
+- `/how-it-works/`: public, indexable consumer guide from `site/landing/how-it-works/index.html` (canonical `https://sportsclaw.gg/how-it-works/`). Exact URL only, GET/HEAD only, no script or form. `/how-it-works` permanently redirects to the slash URL with its query; other paths below it and look-alikes are 404s. It carries an editorial **historical example** (NBA, Knicks vs. Pacers Game 6, May 31, 2025, Pacers 125–108; points off turnovers 34–13, fast-break points 25–10) sourced from NBA.com's Nightly Pulse recap. It is not a captured chat or a live demo; no captured demo exists. Don't add times, causal claims or figures not in the source.
+- `/llms.txt`: first-party site summary and navigation from `site/landing/llms.txt`, exact URL, GET/HEAD only. It links the developer index, which stays at `/opensource/llms.txt`.
+- `/sitemap.xml`: from `site/landing/sitemap.xml`; lists only `/`, `/how-it-works/` and `/creators/`. Never the noindex legal drafts. `robots.txt` is unchanged (none is served).
+
+### Homepage first question
+
+The hero offers three starter questions. Without JavaScript, the default question is shown as selectable text and pre-drafted in every Telegram/WhatsApp link (hero, pricing, final). With JavaScript, the starter buttons rewrite only the `text` draft of every `a[data-chat]` link, keeping the exact recipients, and "Copy question" uses the Clipboard API, reporting a failure honestly and pointing to the visible text. The page makes no network requests and has no telemetry. The creators page links to the guide's public example; it adds no sharing, form or payout terms, and no creator clip has been produced.
 - `/favicon.svg`: retain the existing site icon.
 - Unknown pages and backend routes: 404, not a catch-all homepage.
 
