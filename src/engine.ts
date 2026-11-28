@@ -161,6 +161,16 @@ import {
   type ArtifactTurnResult,
 } from "./artifact-output.js";
 import {
+  MARKET_OUTPUT_TOOL_NAME,
+  createMarketCardCollector,
+  marketPromptSection,
+  marketTurnResult,
+  parseMarketTurnInput,
+  type MarketCardCollector,
+  type MarketTurnInput,
+  type MarketTurnResult,
+} from "./market-cards.js";
+import {
   SLIP_DECISION_CONTRACT,
   runSlipDecision,
   slipDecisionsEnabled,
@@ -1107,6 +1117,14 @@ interface ArtifactRun {
   checkedSha256?: string;
   /** Code-rendered report of the corrected prose, set only when the one recheck passed this exact document. */
   repaired?: ArtifactOutput;
+}
+
+/** Request-local market-card state for one run(); never stored on the engine. */
+interface MarketRun {
+  input: MarketTurnInput;
+  collector: MarketCardCollector;
+  /** The capability was refused by an explicit tool allowlist. */
+  denied: boolean;
 }
 
 /** A real submit_artifact call happened (accepted or refused); merely offering or denying the tool is not one. */
@@ -2458,6 +2476,8 @@ export class sportsclawEngine {
     runChatId?: string,
     succeededToolResultsThisTurn?: Map<string, string>,
     queryProvenanceThisTurn?: Map<string, QueryProvenance>,
+    /** Sees each successful registry result whole, with the time it was really fetched. A pure observer. */
+    observeToolResult?: (toolName: string, content: string, fetchedAtMs: number) => void,
   ): ToolSet {
     const toolMap: ToolSet = {};
     const config = this.config;
@@ -2565,6 +2585,13 @@ export class sportsclawEngine {
                 ? result.content.slice(0, 200) + "..."
                 : result.content;
             console.error(`[sportsclaw] tool_result: ${preview}`);
+          }
+
+          // Before any capping: the observer reads the result the tool really returned.
+          try {
+            observeToolResult?.(spec.name, result.content, result.fetchedAt ?? Date.now());
+          } catch {
+            // An observer can never fail a tool call.
           }
 
           // Cap tool output to prevent context window overflow on follow-ups.
@@ -5139,7 +5166,16 @@ export class sportsclawEngine {
   }
 
   private async runExclusiveTurn(userPrompt: string, options?: RunOptions): Promise<string> {
-    if (!options || (options.slip === undefined && options.artifact === undefined)) return this.runTurn(userPrompt, options);
+    if (!options || (options.slip === undefined && options.artifact === undefined && options.market === undefined)) return this.runTurn(userPrompt, options);
+
+    // Explicit market-card mode: validate before any model, tool or credential work.
+    let market: MarketRun | undefined;
+    if (options.market !== undefined) {
+      if (typeof options.onMarketResult !== "function") throw new Error("market mode requires an onMarketResult observer");
+      const input = parseMarketTurnInput(options.market);
+      if (!input) throw new Error("invalid market turn input");
+      market = { input, collector: createMarketCardCollector(), denied: false };
+    }
 
     // Explicit artifact mode: validate before any model, tool or credential work.
     let artifact: ArtifactRun | undefined;
@@ -5165,7 +5201,17 @@ export class sportsclawEngine {
     }
 
     // The slip decision and the artifact result are made inside runTurn, before persistence.
-    const text = await this.runTurn(userPrompt, options, slip, artifact);
+    const text = await this.runTurn(userPrompt, options, slip, artifact, market);
+
+    if (market) {
+      // Cards are copies of this run's own tool results: nothing here is model-written data.
+      const result: MarketTurnResult = marketTurnResult(market.input, market.collector, market.denied);
+      try {
+        options.onMarketResult!(result);
+      } catch {
+        throw new Error("market result observer failed");
+      }
+    }
 
     if (slip && inputHash !== undefined) {
       const decision: SlipDecisionResult | null = slip.denied
@@ -5231,7 +5277,7 @@ export class sportsclawEngine {
     artifact.result = { ...base, artifact: captured, reasonCode: null };
   }
 
-  private async runTurn(userPrompt: string, options?: RunOptions, slip?: SlipRun, artifact?: ArtifactRun): Promise<string> {
+  private async runTurn(userPrompt: string, options?: RunOptions, slip?: SlipRun, artifact?: ArtifactRun, market?: MarketRun): Promise<string> {
     if (options?.history !== undefined && options.historyMode !== "caller") {
       throw new Error("history is only accepted with historyMode caller");
     }
@@ -5636,6 +5682,7 @@ export class sportsclawEngine {
       options?.chatId,
       succeededToolResultsThisTurn,
       queryProvenanceThisTurn,
+      market ? (toolName, content, fetchedAtMs) => market.collector.record(toolName, content, fetchedAtMs) : undefined,
     );
     if ((options?.delegationDepth ?? 0) > 0) {
       delete tools.spawn_subagent;
@@ -5659,6 +5706,15 @@ export class sportsclawEngine {
         artifact.denied = true;
       } else {
         tools[ARTIFACT_OUTPUT_TOOL_NAME] = artifact.collector.tool;
+      }
+    }
+    // Same rule for the market-card selector: opted-in runs only, and an
+    // explicit allowlist that omits it denies it.
+    if (market) {
+      if (this.config.toolAllowlist && !this.config.toolAllowlist.includes(MARKET_OUTPUT_TOOL_NAME)) {
+        market.denied = true;
+      } else {
+        tools[MARKET_OUTPUT_TOOL_NAME] = market.collector.tool;
       }
     }
     emitProgress?.({ type: "phase", label: "Routing to skills" });
@@ -5833,6 +5889,7 @@ export class sportsclawEngine {
 
     const slipSection = slip && !slip.denied ? slipPromptSection(slip.input.context) : "";
     const artifactSection = !artifact || artifact.denied ? "" : artifactPromptSection();
+    const marketSection = !market || market.denied ? "" : marketPromptSection();
 
     if (this.config.verbose && routing.decision) {
       const d = routing.decision;
@@ -5949,7 +6006,7 @@ export class sportsclawEngine {
         );
       }
       // Lanes are partial drafts that get synthesized: none offers the artifact tool.
-      const laneTools = Object.fromEntries(Object.entries(tools).filter(([name]) => name !== ARTIFACT_OUTPUT_TOOL_NAME));
+      const laneTools = Object.fromEntries(Object.entries(tools).filter(([name]) => name !== ARTIFACT_OUTPUT_TOOL_NAME && name !== MARKET_OUTPUT_TOOL_NAME));
       const allToolNames = Object.keys(laneTools);
       const parallelMaxTurns = Math.max(5, Math.floor(this.config.maxTurns / 2));
       const providerOpts = buildProviderOptions(this.config.provider, this.config.thinkingBudget);
@@ -5967,7 +6024,7 @@ export class sportsclawEngine {
           ? (agentRoutedTools ?? routedTools)?.filter((name) => routedTools?.includes(name))
           : agentRoutedTools);
         const agentActiveTools = finalizeActiveTools({
-          routedActiveTools: laneRoutedTools?.filter((name) => name !== ARTIFACT_OUTPUT_TOOL_NAME),
+          routedActiveTools: laneRoutedTools?.filter((name) => name !== ARTIFACT_OUTPUT_TOOL_NAME && name !== MARKET_OUTPUT_TOOL_NAME),
           isFollowUp,
           lowConfidence: !advisory && Boolean(
             routing.decision && routing.decision.confidence < this.config.clarifyThreshold
@@ -6211,8 +6268,9 @@ export class sportsclawEngine {
 
       // The artifact output tool echoes the model's own document and a skill
       // guide read is instructions: neither is evidence.
+      // The market selector only names markets already fetched: not evidence either.
       const dataSource = !toolCall.toolName.startsWith("update_") &&
-        toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
+        toolCall.toolName !== ARTIFACT_OUTPUT_TOOL_NAME && toolCall.toolName !== MARKET_OUTPUT_TOOL_NAME && toolCall.toolName !== SKILL_READ_TOOL;
       if (dataSource && toolCall.input && typeof toolCall.input === "object") {
         externalCallSignatures.set(toolCall.toolCallId, buildToolCallSignature(toolCall.toolName, toolCall.input as Record<string, unknown>));
       }
@@ -6247,7 +6305,7 @@ export class sportsclawEngine {
           mediaToolNames: this._runMediaTools
             ? (activeTools ?? Object.keys(tools)).filter((name) => (MEDIA_TOOL_NAMES as readonly string[]).includes(name))
             : [],
-        }) + slipSection + artifactSection),
+        }) + slipSection + artifactSection + marketSection),
         messages: withBrief(messagesOverride ?? this.messages),
         tools: callTools,
         ...(activeTools ? { activeTools } : {}),
@@ -6297,6 +6355,7 @@ export class sportsclawEngine {
       try {
         // A retried call regenerates the answer: nothing from a failed attempt is kept.
         artifact?.collector.reset();
+        market?.collector.reset();
         result = await callLLM();
         break;
       } catch (err: unknown) {
@@ -6564,7 +6623,7 @@ export class sportsclawEngine {
       const publicReads = this.publicDataMode()
         ? approvedPool.filter((name) =>
             mayRun(name) && !name.startsWith("mcp__") && this.registry.getSkillName(name) !== undefined &&
-            name !== ARTIFACT_OUTPUT_TOOL_NAME && name !== SLIP_OUTPUT_TOOL_NAME && name !== SKILL_READ_TOOL)
+            name !== ARTIFACT_OUTPUT_TOOL_NAME && name !== MARKET_OUTPUT_TOOL_NAME && name !== SLIP_OUTPUT_TOOL_NAME && name !== SKILL_READ_TOOL)
         : [];
       if (publicReads.length > 0 && mayRun(QUERY_TOOL_RESULT_TOOL)) publicReads.push(QUERY_TOOL_RESULT_TOOL);
       const mainSteps = result.steps;

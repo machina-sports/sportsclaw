@@ -7,6 +7,7 @@
 import type { ModelMessage } from "ai";
 import type { SlipTurnInput, SlipTurnResult } from "./slip-output.js";
 import type { ArtifactTurnInput, ArtifactTurnResult } from "./artifact-output.js";
+import type { MarketTurnInput, MarketTurnResult } from "./market-cards.js";
 import type { RunTrace } from "./run-manifest.js";
 
 // ---------------------------------------------------------------------------
@@ -980,6 +981,13 @@ export interface RunOptions {
   artifact?: ArtifactTurnInput;
   /** Receives exactly one typed artifact result per successful run with `artifact`. */
   onArtifactResult?: (result: ArtifactTurnResult) => void;
+  /**
+   * Opt-in `market-turn-v1` request: offers `cite_markets` for this run and
+   * copies the cited markets from this run's own tool results. Requires `onMarketResult`.
+   */
+  market?: MarketTurnInput;
+  /** Receives exactly one typed market result per successful run with `market`. */
+  onMarketResult?: (result: MarketTurnResult) => void;
   /**
    * Footage clearances for this run only (sportsclawConfig.media), added to media.clearances. Each is
    * tied to one source file's sha256. Set by the app starting the run; the model cannot supply one.

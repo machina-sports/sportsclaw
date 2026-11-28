@@ -72,6 +72,12 @@ from artifact_contract import (
     parse_artifact_turn_input,
     parse_artifact_turn_result,
 )
+from market_contract import (
+    MARKET_TURN_CONTRACT,
+    market_cards_enabled,
+    parse_market_turn_input,
+    parse_market_turn_result,
+)
 from slip_contract import (
     TURN_CONTRACT as SLIP_TURN_CONTRACT,
     parse_slip_turn_input,
@@ -244,13 +250,21 @@ def query_guard(handler):
                     raise ValueError("artifact requires history_mode caller with history")
                 if parse_artifact_turn_input(body["artifact"]) is None:
                     raise ValueError("invalid artifact")
+            if "market" in body:
+                # Opt-in market-turn-v1: caller history only, independent of slip and artifact.
+                if body.get("history_mode") != "caller" or "history" not in body:
+                    raise ValueError("market requires history_mode caller with history")
+                if parse_market_turn_input(body["market"]) is None:
+                    raise ValueError("invalid market")
         except (ValueError, TypeError) as error:
             return web.json_response({"status": False, "error": str(error)}, status=400)
-        # Server environment only: a request body can never enable slips or artifacts.
+        # Server environment only: a request body can never enable slips, artifacts or market cards.
         if "slip" in body and not slip_enabled():
             return web.json_response({"status": False, "error": "slip contract unavailable"}, status=503)
         if "artifact" in body and not artifacts_enabled():
             return web.json_response({"status": False, "error": "artifact contract unavailable"}, status=503)
+        if "market" in body and not market_cards_enabled():
+            return web.json_response({"status": False, "error": "market contract unavailable"}, status=503)
         app = request.app
         # No await between inspection and increment: admission is atomic on the event loop.
         if app.get("active_queries", 0) >= MAX_QUERY_CONCURRENCY:
@@ -300,6 +314,7 @@ async def capabilities(request):
             # response is still acknowledged per request by its input hash.
             **({"slip_contract": SLIP_TURN_CONTRACT} if slip_enabled() else {}),
             **({"artifact_contract": ARTIFACT_TURN_CONTRACT} if artifacts_enabled() else {}),
+            **({"market_contract": MARKET_TURN_CONTRACT} if market_cards_enabled() else {}),
         })
     except Exception:
         return web.json_response({"status": False, "error": "capability discovery unavailable"}, status=503)
@@ -536,6 +551,10 @@ async def query_stream(request: web.Request) -> web.StreamResponse:
         # Same rule for artifacts: no per-response acknowledgement on a stream.
         return web.json_response(
             {"status": False, "error": "artifact is only supported on /api/query/sync"}, status=400)
+    if "market" in body:
+        # Same rule for market cards: no per-response acknowledgement on a stream.
+        return web.json_response(
+            {"status": False, "error": "market is only supported on /api/query/sync"}, status=400)
     if "history" in body:
         # A stream has no per-response contract ack, so a caller could not tell
         # whether this replica honored the history. Refuse rather than drop it.
@@ -652,6 +671,8 @@ async def query_sync(request: web.Request) -> web.Response:
     slip_input = body.get("slip")
     # Validated by query_guard. Artifact titles and HTML never reach the logs.
     artifact_input = body.get("artifact")
+    # Validated by query_guard. Market questions and prices never reach the logs.
+    market_input = body.get("market")
 
     if slip_input is None:
         log(f"sync: user={user_id} prompt={prompt[:80]}")
@@ -779,6 +800,31 @@ async def query_sync(request: web.Request) -> web.Response:
                 "elapsed_ms": elapsed_ms,
             }, status=502)
 
+        # A requested market turn needs exactly one native result echoing this
+        # request's nonce; unrequested market cards are never passed through.
+        market_result = None
+        if result_text is not None and market_input is not None:
+            if len(result_events) == 1:
+                market_result = parse_market_turn_result(result_events[0].get("market"), market_input)
+            if market_result is None:
+                log("sync: market acknowledgement missing or invalid")
+                return web.json_response({
+                    "status": False,
+                    "error": "market acknowledgement missing or invalid",
+                    "user_id": user_id,
+                    "elapsed_ms": elapsed_ms,
+                }, status=502)
+            outcome = f"cards={len(market_result['markets'])}" if market_result["markets"] else (market_result["reasonCode"] or "none")
+            log(f"sync: market {outcome}")
+        elif any("market" in event for event in result_events):
+            log("sync: unrequested market result refused")
+            return web.json_response({
+                "status": False,
+                "error": "unrequested market result",
+                "user_id": user_id,
+                "elapsed_ms": elapsed_ms,
+            }, status=502)
+
         if result_text is not None:
             resp = {
                 "status": True,
@@ -798,6 +844,8 @@ async def query_sync(request: web.Request) -> web.Response:
                 verification = _report_verification(manifest_events)
                 if verification is not None:
                     resp["report_verification"] = verification
+            if market_result is not None:
+                resp["market"] = market_result
             if images:
                 resp["images"] = images
                 log(f"sync: returning {len(images)} image(s)")
@@ -1014,7 +1062,7 @@ def _report_verification(manifest_events: list) -> dict | None:
 
 
 def _build_stdin(body: dict) -> bytes | None:
-    """Caller history (with its images and opt-in slip/artifact) rides on the child's stdin, never argv, the environment or logs."""
+    """Caller history (with its images and opt-in slip/artifact/market) rides on the child's stdin, never argv, the environment or logs."""
     if body.get("history") is None:
         return None
     payload = {"history": body["history"]}
@@ -1024,6 +1072,8 @@ def _build_stdin(body: dict) -> bytes | None:
         payload["slip"] = body["slip"]
     if body.get("artifact") is not None:
         payload["artifact"] = body["artifact"]
+    if body.get("market") is not None:
+        payload["market"] = body["market"]
     return json.dumps(payload).encode()
 
 
