@@ -702,7 +702,7 @@ async def query_sync(request: web.Request) -> web.Response:
         result_text = None
         result_events = []
         manifest_events = []
-        tool_events = []
+        steps = [] if "steps" in body else None
         error_text = None
         images = []
         videos = []
@@ -727,8 +727,10 @@ async def query_sync(request: web.Request) -> web.Response:
                     error_text = event.get("error", "Unknown error")
                 elif etype == "manifest":
                     manifest_events.append(event)
-                elif etype == "tool_finish":
-                    tool_events.append(event)
+                elif etype == "tool_finish" and steps is not None and len(steps) < MAX_RUN_STEPS:
+                    step = _run_step(event)
+                    if step is not None:
+                        steps.append(step)
                 elif etype == "image":
                     images.append({
                         "data": event.get("data", ""),
@@ -858,8 +860,7 @@ async def query_sync(request: web.Request) -> web.Response:
             if market_result is not None:
                 resp["market"] = market_result
             if "steps" in body:
-                # Requested only: legacy responses keep their exact keys. An empty list means no tool was called.
-                resp["steps"] = {"contract": RUN_STEPS_CONTRACT, "steps": _run_steps(tool_events)}
+                resp["steps"] = {"contract": RUN_STEPS_CONTRACT, "steps": steps}
                 log(f"sync: {len(resp['steps']['steps'])} step(s)")
             if images:
                 resp["images"] = images
@@ -1082,29 +1083,21 @@ MAX_RUN_STEPS = 50
 MAX_STEP_MS = 24 * 60 * 60 * 1000
 
 
-def _run_steps(tool_events: list) -> list:
-    """Name, skill, duration and outcome of each finished tool call, in the order they finished.
-
-    Never copies the tool's input, output or error text; a malformed event is skipped. First MAX_RUN_STEPS only.
-    """
-    steps = []
-    for event in tool_events:
-        name, skill = event.get("toolName"), event.get("skillName")
-        duration, success = event.get("durationMs"), event.get("success")
-        if not isinstance(name, str) or not _STEP_NAME.fullmatch(name) or type(success) is not bool:
-            continue
-        # Booleans are never numbers; NaN and infinity fail the range check.
-        if type(duration) not in (int, float) or not 0 <= duration <= MAX_STEP_MS:
-            continue
-        steps.append({
-            "toolName": name,
-            "skillName": skill if isinstance(skill, str) and _STEP_NAME.fullmatch(skill) else None,
-            "durationMs": int(round(duration)),
-            "success": success,
-        })
-        if len(steps) == MAX_RUN_STEPS:
-            break
-    return steps
+def _run_step(event: dict) -> dict | None:
+    """Keep only display metadata from a valid tool finish event."""
+    name, skill = event.get("toolName"), event.get("skillName")
+    duration, success = event.get("durationMs"), event.get("success")
+    if not isinstance(name, str) or not _STEP_NAME.fullmatch(name) or type(success) is not bool:
+        return None
+    # Booleans are never numbers; NaN and infinity fail the range check.
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 0 <= duration <= MAX_STEP_MS:
+        return None
+    return {
+        "toolName": name,
+        "skillName": skill if isinstance(skill, str) and _STEP_NAME.fullmatch(skill) else None,
+        "durationMs": int(round(duration)),
+        "success": success,
+    }
 
 
 def _build_stdin(body: dict) -> bytes | None:

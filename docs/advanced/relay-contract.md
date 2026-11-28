@@ -42,5 +42,5 @@ capabilities as `steps_contract`. A successful response then carries
 `steps: {contract, steps: [{toolName, skillName, durationMs, success}]}`: one entry per finished
 tool call, in the order they finished, at most 50. The relay builds it from the engine's
 `tool_finish` progress events and never copies a tool's input, output or error text. An empty
-list means the run called no tool. A request without `steps` gets the same response keys as
+list means no valid completion event was observed. A request without `steps` gets the same response keys as
 before. `/api/query` refuses it, because the stream already carries every progress event.
