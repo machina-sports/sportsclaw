@@ -4,17 +4,17 @@
 <meta charset="utf-8">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SportsClaw · Your personal sports agent in Telegram and WhatsApp</title>
-<meta name="description" content="Your teams, your lineup, the market you can't stop checking. SportsClaw connects the dots and keeps up with the conversation in Telegram or WhatsApp. Start free.">
+<title>SportsClaw · Your personal sports AI agent in Telegram and WhatsApp</title>
+<meta name="description" content="Tell SportsClaw your favorite teams, then ask about games, lineups and news and keep the follow-ups going in the same Telegram or WhatsApp chat. Start free.">
 <link rel="canonical" href="https://sportsclaw.gg/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SportsClaw">
 <meta property="og:url" content="https://sportsclaw.gg/">
-<meta property="og:title" content="SportsClaw · Your personal sports agent">
-<meta property="og:description" content="Your teams, your lineup, the market you can't stop checking. SportsClaw connects the dots and keeps up with the conversation in Telegram or WhatsApp. Start free.">
+<meta property="og:title" content="SportsClaw · Your personal sports AI agent">
+<meta property="og:description" content="Tell SportsClaw your favorite teams, then ask about games, lineups and news and keep the follow-ups going in the same Telegram or WhatsApp chat. Start free.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="SportsClaw · Your personal sports agent">
-<meta name="twitter:description" content="Your teams, your lineup, the market you can't stop checking. SportsClaw connects the dots and keeps up with the conversation in Telegram or WhatsApp. Start free.">
+<meta name="twitter:title" content="SportsClaw · Your personal sports AI agent">
+<meta name="twitter:description" content="Tell SportsClaw your favorite teams, then ask about games, lineups and news and keep the follow-ups going in the same Telegram or WhatsApp chat. Start free.">
 <script>
 // Theme before first paint. Shares the VitePress key with /opensource/: "light", "dark" or "auto". Dark when unset.
 (function(){
@@ -120,8 +120,8 @@ p{margin:0;text-wrap:pretty}
 .ex{position:relative;width:fit-content;margin:.8rem auto 0;padding:.15rem .4rem;background:var(--bg);font-family:var(--font-mono);font-size:.75rem;color:var(--muted);text-align:center}
 
 /* ---------- Sections: containerless, hairline separated ---------- */
-.uses,.memory,.coverage,.pricing,.faq,.final{padding-bottom:5.5rem}
-:is(.uses,.memory,.coverage,.pricing,.faq)>.wrap{padding-top:4.5rem;border-top:1px solid var(--line-strong)}
+.uses,.memory,.coverage,.markets,.pricing,.faq,.final{padding-bottom:5.5rem}
+:is(.uses,.memory,.coverage,.markets,.pricing,.faq)>.wrap{padding-top:4.5rem;border-top:1px solid var(--line-strong)}
 
 /* ---------- Header ---------- */
 .site-header{position:relative;z-index:2;border-bottom:1px solid var(--line)}
@@ -185,7 +185,6 @@ p{margin:0;text-wrap:pretty}
 .day{align-self:center;padding:.15rem .65rem;border-radius:999px;background:var(--chat-bar);color:var(--chat-muted);font-size:.75rem;font-weight:600}
 
 /* ---------- Market coverage strip ---------- */
-.markets{padding:0 0 5rem}
 .markets .wrap{display:grid;gap:1.25rem 3rem;align-items:center}
 .markets h2{font-family:var(--font-mono);font-size:.8125rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text);max-width:none}
 .markets h2::before{display:none}
@@ -257,18 +256,6 @@ p{margin:0;text-wrap:pretty}
 .compare div{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;font-size:.9375rem}
 .compare dt{flex:none;color:var(--muted)}
 .compare dd{font-weight:600;text-align:right}
-.plan-details{border-top:1px solid var(--line-strong)}
-.plan-details summary{display:flex;align-items:center;justify-content:space-between;gap:1rem;min-height:48px;font-weight:600;cursor:pointer;list-style:none}
-.plan-details summary::-webkit-details-marker{display:none}
-.plan-details summary::after{content:"+";flex:none;display:grid;place-items:center;width:28px;height:28px;border:1px solid var(--line-strong);border-radius:8px;font-family:var(--font-mono);font-weight:400;line-height:1;color:var(--accent-text)}
-.plan-details[open] summary::after{content:"\2212"}
-.plan-details summary:hover{color:var(--accent-text)}
-.plan-body{display:grid;gap:.6rem;padding:.2rem 0 .4rem}
-.modes{display:grid;gap:.4rem;padding:0;list-style:none;font-size:.9375rem}
-.modes li{display:flex;align-items:center;gap:.6rem}
-.modes li::before{content:"";flex:none;width:.45rem;height:.8rem;margin:0 .2rem 0 .15rem;border:solid var(--accent-text);border-width:0 2px 2px 0;transform:translateY(-.1rem) rotate(45deg)}
-.modes .off{color:var(--muted)}
-.modes .off::before{width:.7rem;height:0;margin:0 .1rem;border-width:2px 0 0;border-color:var(--line-strong);transform:none}
 .cta{padding-top:.2rem}
 .how-to{font-size:.9375rem;color:var(--muted)}
 .plan-link{display:flex;align-items:center;justify-content:center;gap:.5rem;min-height:46px;margin-top:.6rem;border-radius:10px;box-shadow:inset 0 0 0 1px var(--line-strong);font-size:1rem;font-weight:600;color:var(--text);text-decoration:none;transition:background-color .2s var(--ease)}
@@ -282,7 +269,6 @@ p{margin:0;text-wrap:pretty}
 .plan.pick .plan-link:hover{background:var(--accent-hover)}
 .self-host{display:flex;flex-wrap:wrap;align-items:center;gap:0 .4rem;margin-top:1rem;font-size:.9375rem;color:var(--muted)}
 .self-host a{display:inline-flex;align-items:center;gap:.3rem;min-height:44px;font-weight:600;color:var(--accent-text);text-underline-offset:4px}
-.modes-key{margin-top:1.5rem;max-width:52rem;font-size:.9375rem;color:var(--muted)}
 code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background:var(--surface-3);box-shadow:inset 0 0 0 1px var(--line);padding:.05rem .35rem;border-radius:6px;white-space:nowrap}
 .plans-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:1.25rem 2rem;margin-top:2rem}
 .plans-foot div:first-child{max-width:44rem;color:var(--muted)}
@@ -342,9 +328,8 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
   .faq .wrap{grid-template-columns:minmax(0,.8fr) minmax(0,1.4fr);align-items:start}
   .markets .wrap{grid-template-columns:minmax(0,.7fr) minmax(0,2fr)}
 }
-@media (min-width:1000px){
-  /* Same collapsed anatomy per plan; align-items:start keeps an opened plan from stretching its siblings. */
-  .plans{grid-template-columns:repeat(3,minmax(0,1fr));gap:1.25rem;align-items:start}
+@media (min-width:760px){
+  .plans{grid-template-columns:repeat(2,minmax(0,1fr));gap:1.25rem;max-width:52rem}
 }
 @media (min-width:1120px){
   .hero .wrap{grid-template-columns:minmax(0,1fr) auto}
@@ -354,21 +339,21 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
   .hero{padding:2.5rem 0 3.5rem}
   .hero h1{font-size:clamp(2.5rem,11vw,3.4rem)}
   .lede{margin-top:1.1rem}
-  .markets{padding-bottom:3.5rem}
-  .uses,.memory,.coverage,.pricing,.faq,.final{padding-bottom:3.5rem}
-  :is(.uses,.memory,.coverage,.pricing,.faq)>.wrap{padding-top:3rem}
+  .uses,.memory,.coverage,.markets,.pricing,.faq,.final{padding-bottom:3.5rem}
+  :is(.uses,.memory,.coverage,.markets,.pricing,.faq)>.wrap{padding-top:3rem}
   .final{padding-top:3rem}
   .scenes{gap:3.5rem;margin-top:2.25rem}
 }
 @media (max-width:620px){
   .site-header .wrap{row-gap:0;padding-top:.5rem}
-  .site-nav{order:3;flex-basis:100%;justify-content:space-between;margin:0 0 .25rem}
+  .site-nav{order:3;flex-basis:100%;flex-wrap:wrap;justify-content:space-between;margin:0 0 .25rem}
   .site-nav a[href="/opensource/"],.header-link{display:none}
   .header-actions{margin-left:auto}
   .recall{width:var(--pw)}
 }
 @media (max-width:420px){
   .site-nav a{padding:0 .5rem;font-size:.875rem}
+  .site-nav a[href="#memory"]{display:none}
   .signal{flex-wrap:wrap;row-gap:.3rem;border-radius:14px;font-size:.8125rem}
   .pair dd{font-size:.875rem}
 }
@@ -409,11 +394,12 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
       <svg aria-hidden="true"><use href="#claw"/></svg>
       <strong>sportsclaw</strong>
     </a>
-    <nav class="site-nav" aria-label="On this page">
+    <nav class="site-nav" aria-label="Site">
       <a href="#use-cases">Use cases</a>
       <a href="#memory">Memory</a>
       <a href="#pricing">Pricing</a>
       <a href="#faq">FAQ</a>
+      <a href="/creators/">For Creators</a>
       <a href="/opensource/">Open source</a>
     </nav>
     <div class="header-actions">
@@ -440,9 +426,9 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
     </div>
     <div class="wrap">
       <div class="hero-copy">
-        <p class="signal"><b>Personal sports agent</b><span><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Telegram <span aria-hidden="true">·</span> <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>WhatsApp</span></p>
-        <h1 id="hero-title">Your sports.<br><em>Your own agent.</em></h1>
-        <p class="lede">Your teams, your lineup, the market you can't stop checking. SportsClaw connects the dots and keeps up with the conversation, right in Telegram or WhatsApp.</p>
+        <p class="signal"><b>In your chat app</b><span><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Telegram <span aria-hidden="true">·</span> <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>WhatsApp</span></p>
+        <h1 id="hero-title">Your personal<br><em>sports AI agent</em></h1>
+        <p class="lede">Tell it your favorite teams and how you like your answers. Then ask about a game, a lineup or the news, and keep the follow-ups going in the same Telegram or WhatsApp chat.</p>
         <div class="entry" id="start-chat" role="group" aria-label="Start a free chat">
           <a class="btn" href="https://t.me/sportsclaw_machina_bot?text=hi%2C%20what%20can%20you%20do%3F"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Chat on Telegram</a>
           <a class="btn" href="https://wa.me/19207777712?text=hi%2C%20what%20can%20you%20do%3F"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>Chat on WhatsApp</a>
@@ -463,7 +449,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
           <div class="phone"><div class="screen">
             <p class="chat-head"><svg aria-hidden="true"><use href="#claw"/></svg><span>sportsclaw<small>your sports agent</small></span></p>
             <div class="thread">
-              <p class="b you"><span class="visually-hidden">You: </span>Knicks fan. Keep it short, and don't let me blame every loss on the refs.</p>
+              <p class="b you"><span class="visually-hidden">You: </span>My team is the Knicks. Keep it short, and don't let me blame every loss on the refs.</p>
               <p class="b bot"><span class="visually-hidden">SportsClaw: </span>Knicks. Short answers. Refs get a fair trial.</p>
               <p class="b you"><span class="visually-hidden">You: </span>If Brunson keeps getting doubled, what's the play?</p>
               <p class="b bot"><span class="visually-hidden">SportsClaw: </span>Get the ball out early and make the weak side rotate. The open shot might come from the next pass, not the first.</p>
@@ -473,21 +459,6 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
           <figcaption class="ex">NBA · Your team, your context</figcaption>
         </figure>
       </div>
-    </div>
-  </section>
-
-  <section class="markets" id="markets" aria-labelledby="markets-title">
-    <div class="wrap">
-      <div class="markets-head">
-        <h2 id="markets-title">Market coverage</h2>
-        <p>Four markets. One conversation. Ask about a price, compare the available lines, or talk through your take.</p>
-      </div>
-      <ul class="market-logos" role="list">
-        <li data-mark="novig"><img src="/assets/markets/novig-wordmark.svg" alt="Novig" decoding="async"></li>
-        <li data-mark="prophetx"><img src="/assets/markets/prophetx-wordmark.svg" alt="ProphetX" decoding="async"></li>
-        <li data-mark="kalshi"><img src="/assets/markets/kalshi-wordmark.svg" alt="Kalshi" decoding="async"></li>
-        <li data-mark="polymarket"><img src="/assets/markets/polymarket-wordmark.svg" alt="Polymarket" decoding="async"></li>
-      </ul>
     </div>
   </section>
 
@@ -602,111 +573,54 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
     </div>
   </section>
 
+  <section class="markets" id="markets" aria-labelledby="markets-title">
+    <div class="wrap">
+      <div class="markets-head">
+        <h2 id="markets-title">Market coverage</h2>
+        <p>Four markets. One conversation. Ask about a price, compare the available lines, or talk through your take.</p>
+      </div>
+      <ul class="market-logos" role="list">
+        <li data-mark="novig"><img src="/assets/markets/novig-wordmark.svg" alt="Novig" decoding="async"></li>
+        <li data-mark="prophetx"><img src="/assets/markets/prophetx-wordmark.svg" alt="ProphetX" decoding="async"></li>
+        <li data-mark="kalshi"><img src="/assets/markets/kalshi-wordmark.svg" alt="Kalshi" decoding="async"></li>
+        <li data-mark="polymarket"><img src="/assets/markets/polymarket-wordmark.svg" alt="Polymarket" decoding="async"></li>
+      </ul>
+    </div>
+  </section>
+
   <section class="pricing" id="pricing" aria-labelledby="pricing-title">
     <div class="wrap">
       <h2 id="pricing-title">Start free. Upgrade when it's part of game day.</h2>
-      <p class="section-lede">Find your rhythm. Pick the depth that fits.</p>
+      <p class="section-lede">Both plans are the same agent in the same chat. Pro gives you more room to use it.</p>
 
-      <!-- PROPOSED PRICING — not backend-enforced. Plan benefits, including Max Unlimited, require entitlement alignment before production release. See site/README.md. -->
+      <!-- Only the existing Free and Pro plans, with qualitative usage. Verify entitlements and the /upgrade checkout before release. See site/README.md. -->
       <ol class="plans" role="list">
         <li class="plan" data-plan="free">
           <div class="plan-head"><h3>Free</h3></div>
           <p class="price"><b>$0</b> <span>per month</span></p>
-          <p class="allow">Daily allowance</p>
-          <p class="fit">For checking in on a game or two.</p>
+          <p class="allow">A daily usage allowance</p>
+          <p class="fit">For checking in on your teams and a game or two.</p>
           <div class="cta">
             <p class="how-to">Open the chat and say hi.</p>
             <a class="plan-link" href="#pricing-chat">Choose a chat <span aria-hidden="true">↓</span></a>
           </div>
-          <details class="plan-details">
-            <summary>What's included</summary>
-            <div class="plan-body">
-              <dl class="compare">
-                <div><dt>Answer depth</dt><dd>Quick</dd></div>
-                <div><dt>Agent help</dt><dd>Focused answer</dd></div>
-              </dl>
-              <ul class="modes" role="list" aria-label="Answer modes">
-                <li class="on">Quick read<span class="visually-hidden">, included</span></li>
-                <li class="off">Deep dive<span class="visually-hidden">, not included</span></li>
-                <li class="off">Full picture<span class="visually-hidden">, not included</span></li>
-              </ul>
-              <ul class="perks" role="list">
-                <li>Quick takes on games, scores and team news</li>
-                <li>A straight read on a matchup or a player</li>
-                <li>Market contract rules in plain English</li>
-              </ul>
-            </div>
-          </details>
         </li>
         <li class="plan pick" data-plan="pro">
-          <div class="plan-head"><h3>Pro</h3><p class="tag">Recommended</p></div>
+          <div class="plan-head"><h3>Pro</h3><p class="tag">For most days</p></div>
           <p class="price"><b>$12</b> <span>per month</span></p>
-          <p class="allow">Higher daily allowance</p>
+          <p class="allow">More daily usage than Free</p>
           <p class="fit">For the fan who's in the chat most days.</p>
           <div class="cta">
             <p class="how-to">In the chat, send <code>/upgrade</code></p>
             <a class="plan-link" href="#pricing-chat">Choose a chat <span aria-hidden="true">↓</span></a>
           </div>
-          <details class="plan-details">
-            <summary>What's included</summary>
-            <div class="plan-body">
-              <dl class="compare">
-                <div><dt>Answer depth</dt><dd>Deep</dd></div>
-                <div><dt>Agent help</dt><dd>Matchup and player context</dd></div>
-              </dl>
-              <ul class="modes" role="list" aria-label="Answer modes">
-                <li class="on">Quick read<span class="visually-hidden">, included</span></li>
-                <li class="on">Deep dive<span class="visually-hidden">, included</span></li>
-                <li class="off">Full picture<span class="visually-hidden">, not included</span></li>
-              </ul>
-              <p class="plus">Everything in Free, plus</p>
-              <ul class="perks" role="list">
-                <li>Deeper reads that pull form, schedule, injuries and news together</li>
-                <li>Saved takes, reviewed after the game when you ask</li>
-                <li>Lineup comparisons built on your notes and league scoring</li>
-                <li>Follow-ups that keep the thread of your take</li>
-              </ul>
-            </div>
-          </details>
-        </li>
-        <li class="plan" data-plan="max">
-          <div class="plan-head"><h3>Max</h3></div>
-          <p class="price"><b>$99</b> <span>per month</span></p>
-          <p class="allow">Unlimited</p>
-          <p class="fit">For the full slate, every day.</p>
-          <div class="cta">
-            <p class="how-to">In the chat, send <code>/upgrade max</code></p>
-            <a class="plan-link" href="#pricing-chat">Choose a chat <span aria-hidden="true">↓</span></a>
-          </div>
-          <details class="plan-details">
-            <summary>What's included</summary>
-            <div class="plan-body">
-              <dl class="compare">
-                <div><dt>Answer depth</dt><dd>Full picture</dd></div>
-                <div><dt>Agent help</dt><dd>Several specialist perspectives</dd></div>
-              </dl>
-              <ul class="modes" role="list" aria-label="Answer modes">
-                <li class="on">Quick read<span class="visually-hidden">, included</span></li>
-                <li class="on">Deep dive<span class="visually-hidden">, included</span></li>
-                <li class="on">Full picture<span class="visually-hidden">, included</span></li>
-              </ul>
-              <p class="plus">Everything in Pro, plus</p>
-              <ul class="perks" role="list">
-                <li>Separate looks at the sport, the market and the other side, in one answer</li>
-                <li>Comparisons across several games and markets at once</li>
-                <li>Reviews that look across all your saved takes</li>
-                <li>Answers shaped by your teams, your sports and how much detail you like</li>
-              </ul>
-            </div>
-          </details>
         </li>
       </ol>
       <p class="self-host">Rather run it yourself? <a href="/opensource/">Host the open-source agent with your own LLM <span aria-hidden="true">→</span></a></p>
-      <p class="modes-key">Quick read answers the question directly. Deep dive adds matchup and player context. Full picture brings separate looks at the sport, the market and the other side into one answer.</p>
 
       <div class="plans-foot">
         <div>
-          <p>Start free in chat. For Pro or Max, send the upgrade command to see available options.</p>
+          <p>Start free in chat. For Pro, send <code>/upgrade</code> to see the available options.</p>
           <p>Prices in USD, billed monthly. Manage your subscription with <code>/billing</code>.</p>
         </div>
         <div class="entry" id="pricing-chat" role="group" aria-label="Choose a chat channel">
@@ -735,7 +649,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
         </details>
         <details>
           <summary>Where does the information come from?</summary>
-          <p>Its sports-data tools look up scores, schedules, stats and news, and it reads public market information when it's available. It keeps what it found apart from its own take, and tells you when something couldn't be confirmed or may be out of date.</p>
+          <p>Its sports-data tools look up scores, schedules, stats and news, and it reads public market information when it's available. It aims to keep what it found apart from its own take and to say when something couldn't be confirmed. Data can lag, so check anything time-sensitive.</p>
         </details>
         <details>
           <summary>Can it help with fantasy?</summary>
@@ -747,11 +661,11 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
         </details>
         <details>
           <summary>Is it free?</summary>
-          <p>Yes. Open Telegram or WhatsApp and start chatting. See the <a href="#pricing">plan cards</a> for what's included.</p>
+          <p>Yes, to start. Open Telegram or WhatsApp and start chatting. Free includes a daily usage allowance; see the <a href="#pricing">plans</a> for Pro.</p>
         </details>
         <details>
           <summary>How do plans, upgrades and cancelling work?</summary>
-          <p>Everyone starts on Free. Send <code>/upgrade</code> for Pro or <code>/upgrade max</code> for Max to see available upgrade options. If you're subscribed, send <code>/billing</code> to manage or cancel your subscription.</p>
+          <p>Everyone starts on Free. Send <code>/upgrade</code> to see the options for Pro. If you're subscribed, send <code>/billing</code> to manage or cancel your subscription.</p>
         </details>
         <details>
           <summary>Can I host it myself?</summary>
@@ -776,9 +690,10 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
 </main>
 <footer class="site-footer">
   <div class="wrap">
-    <p>Your personal sports agent, from the first question to the postgame conversation. Market access is read-only.</p>
+    <p>Your personal sports AI agent, in Telegram and WhatsApp. Market access is read-only.</p>
     <nav aria-label="Footer">
       <a href="#faq">FAQ</a>
+      <a href="/creators/">For Creators</a>
       <a href="/opensource/">Open source</a>
     </nav>
   </div>

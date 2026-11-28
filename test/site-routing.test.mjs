@@ -1,5 +1,6 @@
 // Migration contract for the static site image (see site/README.md):
 //   /             personal-agent homepage, served from site/landing/
+//   /creators/    informational creators page, site/landing/creators/
 //   /opensource/  VitePress developer site
 // Source checks always run. HTTP checks run only against a loopback URL passed
 // explicitly as SPORTSCLAW_SITE_URL (for example a disposable local container).
@@ -12,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const landingDir = join(root, "site", "landing");
 const landingHtmlPath = join(landingDir, "index.html");
+const creatorsHtmlPath = join(landingDir, "creators", "index.html");
 
 const read = (...parts) => readFileSync(join(root, ...parts), "utf8");
 
@@ -131,6 +133,11 @@ test("Docker image copies the homepage locally and the docs below /opensource/",
     ),
     `expected html/ to be copied to ${webRoot}/opensource/, got ${JSON.stringify(copies)}`,
   );
+  assert.ok(
+    rootSources.includes("landing") || rootSources.includes("landing/creators") ||
+      copies.some((c) => normalizeDockerPath(c.dest) === `${webRoot}/creators` && c.sources.map(normalizeDockerPath).includes("landing/creators")),
+    `expected site/landing/creators to reach ${webRoot}/creators/, got ${JSON.stringify(copies)}`,
+  );
   assert.doesNotMatch(dockerfile, /open-source/);
   assert.doesNotMatch(dockerfile, /^\s*ADD\s+\S*https?:/im, "the image must not download content at build time");
   assert.doesNotMatch(dockerfile, /^\s*RUN\b.*\b(?:curl|wget)\b/im, "the image must not download content at build time");
@@ -146,6 +153,11 @@ test("nginx serves static files only, with no backend proxy", () => {
   assert.match(conf, /\blocation\s+=\s*\/\s*\{/, "expected an exact location for the homepage");
   assert.match(conf, /\blocation\s+(?:\^~\s+)?\/assets\/\s*\{/, "expected a location for the homepage assets");
   assert.match(conf, /\blocation\s+(?:\^~\s+)?\/opensource\/\s*\{/, "expected a location for the developer site");
+  const creators = conf.match(/\blocation\s+=\s*\/creators\/\s*\{([^}]*\{[^}]*\}[^}]*|[^}]*)\}/);
+  assert.ok(creators, "expected an exact location for the creators page");
+  assert.match(creators[1], /\blimit_except\s+GET\s*\{\s*deny\s+all\s*;\s*\}/, "/creators/ must restrict methods like /");
+  assert.match(creators[1], /\btry_files\s+\/creators\/index\.html\s+=404\s*;/);
+  assert.doesNotMatch(conf, /\blocation\s+(?:\^~\s+)?\/creators\/\s*\{/, "no prefix catch-all below /creators/");
   assert.doesNotMatch(conf, /\bautoindex\s+on\b/, "directory listings are not allowed");
 
   // No SPA or homepage fallback: every try_files chain ends in a real 404.
@@ -157,10 +169,18 @@ test("nginx serves static files only, with no backend proxy", () => {
 });
 
 // Routing itself is proven by the runtime checks against the real image.
-test("nginx redirects are permanent, local to /opensource/ and keep the query", () => {
-  const targets = redirectTargets(nginxConf());
+test("nginx redirects are permanent, local to /opensource/ (or /creators/) and keep the query", () => {
+  const conf = nginxConf();
+  const targets = redirectTargets(conf);
   assert.ok(targets.length > 0, "expected legacy redirects");
+  const creatorsSlash = conf.match(/\blocation\s+=\s*\/creators\s*\{([^}]*)\}/);
+  assert.ok(creatorsSlash, "expected an exact /creators slash redirect");
+  assert.deepEqual(redirectTargets(creatorsSlash[1]).map((t) => t.target), ["/creators/$is_args$args"]);
   for (const { kind, target, flag } of targets) {
+    if (target.startsWith("/creators/")) {
+      assert.equal(target, "/creators/$is_args$args", "the only /creators/ redirect is the exact slash redirect");
+      continue;
+    }
     assert.ok(target.startsWith("/opensource/"), `redirect to ${target}, expected /opensource/…`);
     if (kind === "return") {
       assert.match(target, /\$(?:is_args\$args|\?\$args|\?\$query_string)$/, `return ${target} drops the query string`);
@@ -186,15 +206,35 @@ test("installer stays at /install.sh with the same bytes as /opensource/install.
   assert.match(install[1], /\b(?:alias|try_files)\s+\/usr\/share\/nginx\/html\/opensource\/install\.sh\b|\btry_files\s+\/opensource\/install\.sh\b/);
 });
 
-test("homepage links point at /opensource/", () => {
+test("homepage links point at /opensource/ and /creators/", () => {
   const html = readFileSync(landingHtmlPath, "utf8");
   assert.doesNotMatch(html, /href\s*[~^$*|]?=\s*["']?\/open-source/, "stale /open-source link or selector");
 
   const internal = [...stripHtmlComments(html).matchAll(/<a\b[^>]*?\shref\s*=\s*["'](\/[^"']*)["']/gi)].map((m) => m[1]);
   assert.ok(internal.includes("/opensource/"), "expected developer links to /opensource/");
+  assert.ok(internal.includes("/creators/"), "expected links to /creators/");
   for (const href of internal) {
-    assert.ok(href.startsWith("/opensource/"), `unexpected internal link ${href}`);
+    assert.ok(href.startsWith("/opensource/") || href === "/creators/", `unexpected internal link ${href}`);
   }
+});
+
+test("creators page links and assets stay on the static site", () => {
+  const html = readFileSync(creatorsHtmlPath, "utf8");
+  const internal = [...stripHtmlComments(html).matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
+  for (const href of internal) {
+    assert.ok(
+      ["/", "/#start-chat", "/opensource/", "#main"].includes(href),
+      `unexpected creators link ${href}`,
+    );
+  }
+  const refs = landingAssetRefs(html);
+  assert.deepEqual(refs.filter((ref) => /^(?:[a-z]+:)?\/\//i.test(ref)), [], "creators assets must be served from the image");
+  for (const ref of refs) {
+    assert.ok(ref.startsWith("/assets/"), `${ref} must be an absolute /assets/ path from /creators/`);
+    const file = resolveLandingAsset(ref);
+    assert.ok(file && existsSync(file) && statSync(file).size > 0, `${ref} is missing`);
+  }
+  assert.doesNotMatch(visibleText(html), /\billustrat(?:ive|ion|ed)\b|\bpayouts? (?:of|up to)\b|\$\d/i);
 });
 
 test("every homepage asset reference exists locally", () => {
@@ -255,10 +295,9 @@ test("homepage carries the approved copy", () => {
     assert.match(text, pattern, `expected ${label} on the homepage`);
   }
 
-  const max = html.match(/data-plan\s*=\s*["']max["']([\s\S]*?)(?:data-plan\s*=|<\/ol>)/);
-  assert.ok(max, "expected a Max plan card");
-  assert.match(visibleText(max[1]), /\bUnlimited\b/, "Max is presented as Unlimited");
-
+  assert.match(visibleText(html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? ""), /your personal sports AI agent/i);
+  assert.deepEqual([...html.matchAll(/data-plan="([^"]+)"/g)].map(([, plan]) => plan), ["free", "pro"]);
+  assert.doesNotMatch(text, /\bUnlimited\b|\/upgrade max/i);
   assert.doesNotMatch(
     text,
     /\b\d[\d,]*\s*(?:questions?|messages?|queries|prompts|asks|answers|replies|requests)\b/i,
@@ -266,6 +305,15 @@ test("homepage carries the approved copy", () => {
   );
   assert.doesNotMatch(text, /\b\d[\d,]*\s*(?:\/|per|a|each)\s*day\b/i, "no numeric daily caps");
   assert.doesNotMatch(text, /\billustrat(?:ive|ion|ed)\b/i, "no illustrative captions");
+});
+
+test("homepage links to an informational creators page", () => {
+  const home = readFileSync(landingHtmlPath, "utf8");
+  assert.equal([...home.matchAll(/href="\/creators\/"/g)].length, 2);
+  const creators = readFileSync(new URL("../site/landing/creators/index.html", import.meta.url), "utf8");
+  assert.match(visibleText(creators), /applications (?:are not|aren’t|aren't) open/i);
+  assert.match(creators, /href="\/#start-chat"/);
+  assert.doesNotMatch(creators, /<form\b|<input\b|<script\b|mailto:/i);
 });
 
 // ---------- optional runtime checks (loopback only) ----------
@@ -327,6 +375,41 @@ test("runtime: / serves the local homepage and /opensource/ the developer site",
   const quickstartHtml = await quickstart.text();
   assert.match(quickstartHtml, /quickstart/i);
   assert.match(quickstartHtml, /\/opensource\/assets\//);
+});
+
+test("runtime: /creators/ serves the static creators page, GET only", { skip: runtimeSkip }, async () => {
+  const creatorsBytes = readFileSync(creatorsHtmlPath);
+
+  const page = await request("/creators/");
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /text\/html/);
+  assert.ok((await bytes(page)).equals(creatorsBytes), "/creators/ must be site/landing/creators/index.html");
+
+  for (const [path, expected] of [
+    ["/creators", "/creators/"],
+    ["/creators?ref=test", "/creators/?ref=test"],
+    ["/creators?ref=test&utm_source=x", "/creators/?ref=test&utm_source=x"],
+  ]) {
+    const response = await request(path);
+    await response.body?.cancel();
+    assert.ok([301, 308].includes(response.status), `${path} → ${response.status}, expected a permanent redirect`);
+    const location = new URL(response.headers.get("location") ?? "", `${site.origin}${path}`);
+    assert.equal(location.origin, site.origin, `${path} redirects off-site to ${location.href}`);
+    assert.equal(location.pathname + location.search, expected, `${path} redirect target`);
+  }
+
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const response = await request("/creators/", { method, body: method === "DELETE" ? undefined : "probe=1" });
+    assert.ok(response.status >= 400, `${method} /creators/ → ${response.status}`);
+    assert.ok(!(await bytes(response)).equals(creatorsBytes), `${method} /creators/ served the page`);
+  }
+
+  for (const path of ["/creators/index.html", "/creators/apply", "/creators/no-such-page-site-routing-test", "/creatorsx"]) {
+    const response = await request(path);
+    assert.equal(response.status, 404, `${path} → ${response.status}`);
+    const body = await bytes(response);
+    assert.ok(!body.equals(creatorsBytes) && !body.equals(landingBytes()), `${path} must not fall back to a page`);
+  }
 });
 
 test("runtime: homepage fonts and wordmarks are served from the image", { skip: runtimeSkip }, async () => {
