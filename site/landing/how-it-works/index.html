@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How SportsClaw works · Your first question in Telegram or WhatsApp</title>
+<meta name="description" content="What to ask SportsClaw first, a historical NBA example with its named source, what the chat remembers, and why there's no account to sync.">
+<link rel="canonical" href="https://sportsclaw.gg/how-it-works/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SportsClaw">
+<meta property="og:url" content="https://sportsclaw.gg/how-it-works/">
+<meta property="og:title" content="How SportsClaw works">
+<meta property="og:description" content="What to ask first, a historical NBA example with its named source, and what the chat remembers.">
+<meta name="twitter:card" content="summary">
+<style>
+@font-face{font-family:"Geist";src:url(/assets/fonts/geist-400-800.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Geist Mono";src:url(/assets/fonts/geist-mono-400-600.woff2) format("woff2");font-weight:400 600;font-style:normal;font-display:swap}
+:root{
+  color-scheme:dark;
+  --bg:#050706;
+  --bg-2:#080b09;
+  --surface:#0b0f0d;
+  --text:#eef3f0;
+  --muted:#a7b1ab;
+  --line:rgba(255,255,255,.07);
+  --line-strong:rgba(255,255,255,.13);
+  --accent:#2bee4b;
+  --accent-hover:#4af265;
+  --accent-text:#4cf06a;
+  --on-accent:#04140a;
+  --accent-wash:rgba(43,238,75,.11);
+  --glow:rgba(43,238,75,.13);
+  --font-body:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  --font-mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font-family:var(--font-body);font-size:1.0625rem;line-height:1.55;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
+svg{display:block}
+h1,h2,h3{margin:0;text-wrap:balance}
+p,ul,ol,dl,dd{margin:0}
+a{color:var(--accent-text);text-underline-offset:4px}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:3px;border-radius:8px}
+.skip{position:absolute;left:1rem;top:-4rem;z-index:3;padding:.6rem 1rem;border-radius:10px;background:var(--accent);color:var(--on-accent);font-weight:600;text-decoration:none}
+.skip:focus{top:1rem}
+.wrap{width:min(1080px,100% - 2.5rem);margin-inline:auto}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:.65rem 1.15rem;border-radius:10px;font-size:1rem;font-weight:600;text-decoration:none;color:var(--on-accent);background:var(--accent)}
+.btn:hover{background:var(--accent-hover)}
+
+.site-header{border-bottom:1px solid var(--line)}
+.site-header .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;min-height:68px}
+.identity{display:flex;align-items:center;gap:.55rem;min-height:44px;color:var(--text);text-decoration:none}
+.identity svg{width:28px;height:28px}
+.identity strong{font-size:1.125rem;font-weight:700;letter-spacing:-.02em}
+.header-actions{display:flex;align-items:center;gap:.25rem 1rem}
+.header-actions a:not(.btn){display:inline-flex;align-items:center;min-height:44px;color:var(--muted);font-size:.9375rem;font-weight:500;text-decoration:none}
+.header-actions a:not(.btn):hover{color:var(--text)}
+
+.hero{padding:4.5rem 0 4rem;background:radial-gradient(70% 90% at 50% 0%,var(--glow),transparent 70%)}
+.eyebrow{font-family:var(--font-mono);font-size:.8125rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text)}
+h1{margin-top:1rem;max-width:16ch;font-size:clamp(2.4rem,6vw,4.25rem);line-height:1;font-weight:700;letter-spacing:-.04em}
+.lede{margin-top:1.3rem;max-width:38rem;font-size:clamp(1.0625rem,1.4vw,1.25rem);color:var(--muted)}
+
+section{padding:4rem 0;scroll-margin-top:1rem}
+section+section{border-top:1px solid var(--line-strong)}
+h2{max-width:22ch;font-size:clamp(1.7rem,3.4vw,2.5rem);line-height:1.05;font-weight:700;letter-spacing:-.035em}
+h2::before{content:"";display:block;width:20px;height:2px;margin-bottom:1rem;background:var(--accent-text)}
+.section-lede{margin-top:.9rem;max-width:38rem;color:var(--muted)}
+
+.prompts{display:grid;gap:1rem;margin-top:2rem;padding:0;list-style:none}
+.prompts li{padding:1.1rem 1.2rem;border:1px solid var(--line-strong);border-radius:14px;background:var(--surface)}
+.prompts span{display:block;font-family:var(--font-mono);font-size:.75rem;color:var(--muted)}
+.prompts q{display:block;margin-top:.35rem;font-weight:600;quotes:none;user-select:all}
+
+.example{max-width:42rem;margin-top:2rem;border:1px solid var(--line-strong);border-left:3px solid var(--accent-text);border-radius:14px;background:var(--surface)}
+.example>*{padding:1rem 1.2rem}
+.example>*+*{border-top:1px solid var(--line)}
+.label{font-family:var(--font-mono);font-size:.75rem;color:var(--accent-text)}
+.example dt{font-family:var(--font-mono);font-size:.75rem;color:var(--muted)}
+.example dd{margin-top:.25rem}
+.example dd+dt{margin-top:.9rem}
+.source{font-size:.9375rem;color:var(--muted);background:var(--bg-2);border-radius:0 0 13px 13px}
+.source strong{color:var(--text)}
+.entry{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:.6rem;width:100%;max-width:26rem}
+
+.faq{margin-top:2rem;max-width:44rem;border-top:1px solid var(--line-strong)}
+.faq div{padding:1rem 0;border-bottom:1px solid var(--line-strong)}
+.faq dt{font-size:1.125rem;font-weight:600}
+.faq dd{margin-top:.4rem;color:var(--muted)}
+
+.final{background:radial-gradient(60% 120% at 25% 100%,var(--glow),transparent 70%)}
+.final .wrap{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:1.5rem 2rem}
+.final p{margin-top:.8rem;max-width:32rem;color:var(--muted)}
+
+.site-footer{padding:1.75rem 0 2.25rem;border-top:1px solid var(--line-strong);background:var(--bg-2);font-size:.9375rem;color:var(--muted)}
+.site-footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem 2rem}
+.site-footer nav{display:flex;flex-wrap:wrap;gap:0 1.25rem}
+.site-footer nav a{display:inline-flex;align-items:center;min-height:44px;color:var(--muted)}
+.site-footer nav a:hover{color:var(--text)}
+
+@media (min-width:800px){
+  .prompts{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media (max-width:640px){
+  .hero{padding:2.75rem 0 3rem}
+  section{padding:3rem 0}
+}
+@media (max-width:420px){
+  .wrap{width:min(1080px,100% - 2rem)}
+  .header-actions .btn{padding-inline:.8rem;font-size:.9375rem}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap">
+    <a class="identity" href="/" aria-label="SportsClaw home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect width="32" height="32" rx="8" fill="#0b0f0d"/>
+        <rect x=".5" y=".5" width="31" height="31" rx="7.5" fill="none" stroke="#fff" stroke-opacity=".1"/>
+        <g fill="#2bee4b"><path d="M7.2 25.6 Q9.4 14.6 16.4 6.1 Q12.5 16.2 7.2 25.6 Z"/><path d="M12.9 26.6 Q15.1 15.6 22.1 7.1 Q18.2 17.2 12.9 26.6 Z"/><path d="M18.6 27.3 Q20.6 17.6 26.6 10.2 Q23.3 19 18.6 27.3 Z"/></g>
+      </svg>
+      <strong>sportsclaw</strong>
+    </a>
+    <nav class="header-actions" aria-label="Site">
+      <a href="/">Home</a>
+      <a class="btn" href="/#start-chat">Chat for free</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <div class="hero">
+    <div class="wrap">
+      <p class="eyebrow">How it works</p>
+      <h1>Ask about your team. Then ask what changed.</h1>
+      <p class="lede">SportsClaw is a personal sports AI agent in Telegram and WhatsApp. Open a chat, ask a real question about a game, a lineup or the news, and keep following up in the same chat.</p>
+    </div>
+  </div>
+
+  <section id="first-question" aria-labelledby="first-question-title">
+    <div class="wrap">
+      <h2 id="first-question-title">A good first question</h2>
+      <p class="section-lede">Start with a game you care about. Any of these works as a first message; copy one into your chat.</p>
+      <ul class="prompts" role="list">
+        <li><span>After a game</span><q>What changed in my team's last game? Ask me which team first.</q></li>
+        <li><span>Before a game</span><q>What's the key matchup in my team's next game, and what would change it?</q></li>
+        <li><span>Set it up</span><q>Remember my teams and keep your answers short. Ask me who I follow.</q></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="historical-example" aria-labelledby="historical-example-title">
+    <div class="wrap">
+      <h2 id="historical-example-title">A historical example</h2>
+      <p class="section-lede">This is an editorial example written from a published game recap. It isn't a captured SportsClaw chat, and it isn't a live demo. It shows the shape of the conversation: the result first, then a follow-up about what changed.</p>
+      <article class="example" aria-label="Historical example, NBA, May 31, 2025">
+        <p class="label">Historical example · editorial, not an actual chat</p>
+        <dl>
+          <dt>Game</dt>
+          <dd>NBA, Knicks vs. Pacers, Game 6 · <time datetime="2025-05-31">May 31, 2025</time></dd>
+          <dt>First question: who won?</dt>
+          <dd>Pacers 125, Knicks 108.</dd>
+          <dt>Follow-up: what changed?</dt>
+          <dd>Two gaps stand out in the recap: points off turnovers, Pacers 34–13, and fast-break points, Pacers 25–10. The recap numbers alone don't say why; that's the next question to ask.</dd>
+        </dl>
+        <p class="source"><strong>Source:</strong> NBA.com,<a href="https://www.nba.com/news/nightly-pulse-knicks-vs-pacers-game-6" rel="noopener noreferrer">Nightly Pulse: Knicks vs. Pacers Game 6</a>. Figures as published there; check the source for full context.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="ask-your-team" aria-labelledby="ask-your-team-title">
+    <div class="wrap">
+      <h2 id="ask-your-team-title">Ask the same about your own team</h2>
+      <p class="section-lede">Swap in your team and its most recent game: ask who won, then ask what changed. SportsClaw looks up scores, stats and news with its sports-data tools, tries to keep what it found apart from its own take, and says when something couldn't be confirmed. Data can lag and answers can be wrong, so check anything time-sensitive.</p>
+    </div>
+  </section>
+
+  <section id="questions" aria-labelledby="questions-title">
+    <div class="wrap">
+      <h2 id="questions-title">Straight answers</h2>
+      <dl class="faq">
+        <div>
+          <dt>Does it remember what I said earlier?</dt>
+          <dd>Yes, within the same chat. It keeps the conversation, the details you share (teams, leagues, how much detail you like) and notes you ask it to save. Telegram and WhatsApp are separate chats, so what you tell it in one stays there.</dd>
+        </div>
+        <div>
+          <dt>Do I need to create or sync an account?</dt>
+          <dd>No. You start in the Telegram or WhatsApp app you already use. There's nothing to install and no account, fantasy league or wallet to connect or sync.</dd>
+        </div>
+        <div>
+          <dt>Does it place bets?</dt>
+          <dd>No. It can read and explain public market information if you ask, but it never places bets or trades and no answer comes with a guaranteed result.</dd>
+        </div>
+        <div>
+          <dt>Is it free?</dt>
+          <dd>Free to start, with a daily usage allowance. Pro gives you more room; see the plans on the <a href="/">homepage</a>.</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="final" aria-labelledby="final-title">
+    <div class="wrap">
+      <div>
+        <h2 id="final-title">Bring your first question.</h2>
+        <p>Free to start. Your question opens as a draft; edit it before you send.</p>
+      </div>
+      <div class="entry" role="group" aria-label="Start a free chat">
+        <a class="btn" href="https://t.me/sportsclaw_machina_bot?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first.">Chat on Telegram</a>
+        <a class="btn" href="https://wa.me/19207777712?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first.">Chat on WhatsApp</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>Your personal sports AI agent, in Telegram and WhatsApp. Market access is read-only.</p>
+    <nav aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/creators/">For Creators</a>
+      <a href="/opensource/">Open source</a>
+      <a href="/privacy/">Privacy</a>
+      <a href="/terms/">Terms</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

@@ -3,6 +3,8 @@
 //   /creators/    informational creators page, site/landing/creators/
 //   /privacy/     review-draft privacy page, site/landing/privacy/
 //   /terms/       review-draft terms page, site/landing/terms/
+//   /how-it-works/ public consumer guide, site/landing/how-it-works/
+//   /llms.txt, /sitemap.xml  first-party discovery files, site/landing/
 //   /opensource/  VitePress developer site
 // Source checks always run. HTTP checks run only against a loopback URL passed
 // explicitly as SPORTSCLAW_SITE_URL (for example a disposable local container).
@@ -19,12 +21,123 @@ const creatorsHtmlPath = join(landingDir, "creators", "index.html");
 const legalCssPath = join(landingDir, "assets", "legal.css");
 
 // Static pages served at an exact directory URL, with an exact slash redirect.
-const STATIC_PAGES = ["creators", "privacy", "terms"];
+const STATIC_PAGES = ["creators", "privacy", "terms", "how-it-works"];
+const GUIDE_LINKS = ["/how-it-works/", "/how-it-works/#historical-example", "/how-it-works/#ask-your-team"];
+const NBA_SOURCE = "https://www.nba.com/news/nightly-pulse-knicks-vs-pacers-game-6";
+// Exact chat recipients; only the drafted text may change.
+const CHAT_BASES = ["https://t.me/sportsclaw_machina_bot", "https://wa.me/19207777712"];
+const DEFAULT_PROMPT = "What changed in my team's last game? Ask me which team first.";
 const LEGAL_PAGES = ["privacy", "terms"];
 const pageHtmlPath = (page) => join(landingDir, page, "index.html");
 const SITE_FOOTER_LINKS = ["/privacy/", "/terms/"];
 
 const read = (...parts) => readFileSync(join(root, ...parts), "utf8");
+
+test("consumer guide, question starters, and discovery are linked", () => {
+  const home = readFileSync(landingHtmlPath, "utf8");
+  assert.match(home, /href="\/how-it-works\/"/);
+  assert.match(home, /Copy question/);
+  assert.doesNotMatch(home, /hi%2C%20what%20can%20you%20do/i);
+  const guide = readFileSync(pageHtmlPath("how-it-works"), "utf8");
+  assert.match(guide, /rel="canonical" href="https:\/\/sportsclaw\.gg\/how-it-works\/"/);
+  assert.match(guide, /historical example/i);
+  assert.match(guide, /nba\.com/);
+  assert.match(readFileSync(creatorsHtmlPath, "utf8"), /href="\/how-it-works\/#/);
+  assert.match(read("site", "landing", "llms.txt"), /\/opensource\/llms\.txt/);
+  assert.match(read("site", "landing", "sitemap.xml"), /https:\/\/sportsclaw\.gg\/how-it-works\//);
+});
+
+test("homepage hero is a labeled historical example, not a chat mock", () => {
+  const html = stripHtmlComments(readFileSync(landingHtmlPath, "utf8"));
+  const hero = html.match(/<section class="hero"[\s\S]*?<\/section>/)?.[0] ?? "";
+  const text = visibleText(hero);
+  assert.match(text, /Historical example · editorial, not an actual chat/);
+  assert.match(text, /May 31, 2025/);
+  assert.match(text, /Pacers 125, Knicks 108/);
+  assert.match(text, /34–13/);
+  assert.match(text, /25–10/);
+  assert.match(text, /NBA\.com/);
+  assert.match(hero, /href="\/how-it-works\/#historical-example"/);
+  assert.doesNotMatch(hero, /class="(?:phone|b you|b bot)"/, "no chat mock in the hero");
+  assert.doesNotMatch(visibleText(html), /\blive demo\b|\bcaptured\b/i);
+});
+
+test("starter prompts draft the same question in every Telegram/WhatsApp pair", () => {
+  const html = stripHtmlComments(readFileSync(landingHtmlPath, "utf8"));
+  const chats = [...html.matchAll(/<a\b[^>]*\shref="(https:\/\/(?:t\.me|wa\.me)\/[^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+  assert.equal(chats.length, 6, "three Telegram/WhatsApp pairs");
+  for (const href of chats) {
+    const url = new URL(href);
+    assert.ok(CHAT_BASES.includes(url.origin + url.pathname), `unexpected recipient ${href}`);
+    assert.deepEqual([...url.searchParams.keys()], ["text"]);
+    assert.equal(url.searchParams.get("text"), DEFAULT_PROMPT, "no-JS default draft");
+  }
+  assert.equal([...html.matchAll(/<a\b[^>]*\bdata-chat\b[^>]*\shref="https:/g)].length, 6, "every chat link is updated by the picker");
+
+  const prompts = [...html.matchAll(/<button\b[^>]*\bdata-prompt="([^"]+)"/g)].map((m) => m[1]);
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts[0], DEFAULT_PROMPT);
+  assert.match(html, /<div class="starter-picks"[^>]*\bhidden\b/, "picker only appears with JS");
+  assert.match(html, /<button class="copy-btn" type="button" data-copy hidden>Copy question<\/button>/);
+  assert.match(visibleText(html.match(/<p class="starter-q"[^>]*>[\s\S]*?<\/p>/)?.[0] ?? ""), new RegExp(DEFAULT_PROMPT.replace(/[?.]/g, "\\$&")));
+  assert.match(html, /Couldn't copy\. Select the question above/);
+
+  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+  assert.doesNotMatch(scripts, /\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket|new Image\(|analytics|gtag/i, "no network or telemetry");
+  assert.doesNotMatch(html, /<script\b[^>]*\bsrc=/i);
+});
+
+test("how-it-works guide is static, sourced and links only where expected", () => {
+  const html = stripHtmlComments(readFileSync(pageHtmlPath("how-it-works"), "utf8"));
+  const text = visibleText(html);
+  assert.doesNotMatch(html, /<script\b|<form\b|<input\b|<iframe\b|<img\b|noindex/i);
+  for (const id of ["first-question", "historical-example", "ask-your-team"]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(text, /May 31, 2025/);
+  assert.match(text, /Pacers 125, Knicks 108/);
+  assert.match(text, /isn't a captured SportsClaw chat/);
+  assert.match(text, /within the same chat/i);
+  assert.match(text, /no account, fantasy league or wallet to connect or sync/);
+  assert.match(text, /never places bets or trades/);
+  assert.doesNotMatch(text, /\billustrat(?:ive|ion|ed)\b|\$\d/i);
+
+  const links = [...html.matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
+  const homeChatLinks = [...readFileSync(landingHtmlPath, "utf8").matchAll(/<a\b[^>]*\bdata-chat\s+href="([^"]+)"/g)].map(([, href]) => href);
+  const guideChatLinks = links.filter((href) => /^https:\/\/(?:t\.me|wa\.me)\//.test(href));
+  assert.deepEqual(guideChatLinks, [...new Set(homeChatLinks)], "guide uses both approved chat destinations and matching drafts");
+  for (const href of links) {
+    assert.ok(["/", "/#start-chat", "/creators/", "/opensource/", "#main", NBA_SOURCE, ...SITE_FOOTER_LINKS, ...homeChatLinks].includes(href), `unexpected guide link ${href}`);
+  }
+  assert.ok(links.includes(NBA_SOURCE), "names and links the NBA.com source");
+  const footer = footerLinks(html);
+  for (const href of SITE_FOOTER_LINKS) assert.ok(footer.includes(href), `guide footer must link to ${href}`);
+  for (const ref of landingAssetRefs(html)) {
+    assert.ok(ref.startsWith("/assets/"), `${ref} must be a local /assets/ path`);
+    const file = resolveLandingAsset(ref);
+    assert.ok(file && existsSync(file) && statSync(file).size > 0, `${ref} is missing`);
+  }
+});
+
+test("root llms.txt and sitemap.xml are first-party and narrow", () => {
+  const llms = read("site", "landing", "llms.txt");
+  assert.match(llms, /^# SportsClaw\n/);
+  for (const url of ["https://sportsclaw.gg/", "https://sportsclaw.gg/how-it-works/", "https://sportsclaw.gg/creators/", "https://sportsclaw.gg/opensource/llms.txt"]) {
+    assert.ok(llms.includes(`(${url})`), `llms.txt links ${url}`);
+  }
+  for (const url of llms.matchAll(/\]\((https?:[^)]+)\)/g)) assert.match(url[1], /^https:\/\/sportsclaw\.gg\//);
+
+  const locs = [...read("site", "landing", "sitemap.xml").matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1]);
+  assert.deepEqual(locs.sort(), ["https://sportsclaw.gg/", "https://sportsclaw.gg/creators/", "https://sportsclaw.gg/how-it-works/"]);
+
+  const conf = nginxConf();
+  for (const file of ["llms.txt", "sitemap.xml"]) {
+    const block = conf.match(new RegExp(`\\blocation\\s+=\\s*/${file.replace(".", "\\.")}\\s*\\{([^}]*\\{[^}]*\\}[^}]*)\\}`));
+    assert.ok(block, `expected an exact location for /${file}`);
+    assert.match(block[1], /\blimit_except\s+GET\s*\{\s*deny\s+all\s*;\s*\}/);
+    assert.match(block[1], new RegExp(`\\btry_files\\s+/${file.replace(".", "\\.")}\\s+=404\\s*;`));
+    assert.deepEqual(redirectTargets(block[1]), []);
+  }
+  assert.ok(!existsSync(join(landingDir, "robots.txt")), "robots.txt is out of scope");
+});
 
 const WORDMARKS = ["novig", "prophetx", "kalshi", "polymarket"];
 
@@ -247,7 +360,7 @@ test("homepage links point at /opensource/, /creators/ and the legal drafts", ()
   assert.ok(internal.includes("/creators/"), "expected links to /creators/");
   for (const href of internal) {
     assert.ok(
-      href.startsWith("/opensource/") || ["/creators/", ...SITE_FOOTER_LINKS].includes(href),
+      href.startsWith("/opensource/") || ["/creators/", ...GUIDE_LINKS, ...SITE_FOOTER_LINKS].includes(href),
       `unexpected internal link ${href}`,
     );
   }
@@ -260,7 +373,7 @@ test("creators page links and assets stay on the static site", () => {
   const internal = [...stripHtmlComments(html).matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
   for (const href of internal) {
     assert.ok(
-      ["/", "/#start-chat", "/opensource/", "#main", ...SITE_FOOTER_LINKS].includes(href),
+      ["/", "/#start-chat", "/opensource/", "#main", ...GUIDE_LINKS, ...SITE_FOOTER_LINKS].includes(href),
       `unexpected creators link ${href}`,
     );
   }
@@ -604,6 +717,60 @@ test("runtime: /privacy/ and /terms/ serve the static drafts, GET only, exact UR
   }
 });
 
+test("runtime: /how-it-works/, /llms.txt and /sitemap.xml are exact, GET/HEAD only", { skip: runtimeSkip }, async () => {
+  const guideBytes = readFileSync(pageHtmlPath("how-it-works"));
+  const fallbacks = [guideBytes, landingBytes(), readFileSync(creatorsHtmlPath)];
+
+  for (const [path, file, type] of [
+    ["/how-it-works/", pageHtmlPath("how-it-works"), /text\/html/],
+    ["/llms.txt", join(landingDir, "llms.txt"), /text\/plain/],
+    ["/sitemap.xml", join(landingDir, "sitemap.xml"), /xml/],
+  ]) {
+    const expected = readFileSync(file);
+    const response = await request(path);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get("content-type") ?? "", type, `${path} content type`);
+    assert.ok((await bytes(response)).equals(expected), `${path} must be ${relative(root, file)}`);
+
+    const head = await request(path, { method: "HEAD" });
+    assert.equal(head.status, 200, `HEAD ${path}`);
+    await head.body?.cancel();
+
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const denied = await request(path, { method, body: method === "DELETE" ? undefined : "probe=1" });
+      assert.ok(denied.status >= 400, `${method} ${path} → ${denied.status}`);
+      assert.ok(!(await bytes(denied)).equals(expected), `${method} ${path} served the file`);
+    }
+  }
+
+  for (const [path, expected] of [
+    ["/how-it-works", "/how-it-works/"],
+    ["/how-it-works?ref=test", "/how-it-works/?ref=test"],
+  ]) {
+    const redirect = await request(path);
+    await redirect.body?.cancel();
+    assert.ok([301, 308].includes(redirect.status), `${path} → ${redirect.status}, expected a permanent redirect`);
+    const location = new URL(redirect.headers.get("location") ?? "", `${site.origin}${path}`);
+    assert.equal(location.origin, site.origin);
+    assert.equal(location.pathname + location.search, expected, `${path} redirect target`);
+  }
+
+  for (const path of ["/how-it-works/index.html", "/how-it-works/no-such-page-site-routing-test", "/how-it-worksx", "/how-it-works.html"]) {
+    const missing = await request(path);
+    assert.equal(missing.status, 404, `${path} → ${missing.status}`);
+    const body = await bytes(missing);
+    assert.ok(!fallbacks.some((b) => body.equals(b)), `${path} must not fall back to a page`);
+  }
+
+  const docsLlms = await request("/opensource/llms.txt");
+  assert.equal(docsLlms.status, 200, "/opensource/llms.txt stays served directly");
+  assert.ok(!(await bytes(docsLlms)).equals(readFileSync(join(landingDir, "llms.txt"))), "developer llms.txt is separate");
+
+  const robots = await request("/robots.txt");
+  await robots.body?.cancel();
+  assert.equal(robots.status, 404, "robots.txt unchanged (absent)");
+});
+
 test("runtime: homepage fonts and wordmarks are served from the image", { skip: runtimeSkip }, async () => {
   const refs = landingAssetRefs(readFileSync(landingHtmlPath, "utf8"));
   assert.ok(refs.length > 0);
@@ -644,7 +811,6 @@ test("runtime: slash and legacy redirects are permanent, local and keep the quer
     ["/cli-reference", "/opensource/cli-reference"],
     ["/machina?ref=test", "/opensource/machina?ref=test"],
     ["/getting-started?ref=test", "/opensource/getting-started?ref=test"],
-    ["/llms.txt?ref=test", "/opensource/llms.txt?ref=test"],
   ];
   for (const [path, expected] of cases) {
     const response = await request(path);
