@@ -153,6 +153,12 @@ p{margin:0;text-wrap:pretty}
 .signal b{flex:none;padding:.15rem .55rem;border-radius:999px;background:var(--accent-wash);color:var(--accent-text);font-family:var(--font-mono);font-size:.75rem;font-weight:500}
 .signal span{display:inline-flex;align-items:center;gap:.35rem;min-width:0}
 .signal .ico{width:16px;height:16px}
+.skip{position:absolute;z-index:10;left:1rem;top:-100px;padding:.6rem 1rem;border-radius:10px;background:var(--accent);color:var(--on-accent);font-weight:600;text-decoration:none}
+.skip:focus{top:1rem}
+.benefit{margin-top:1.25rem;font-size:clamp(1.25rem,1.9vw,1.5rem);font-weight:600;line-height:1.3;letter-spacing:-.015em;color:var(--text)}
+.benefit+.lede{margin-top:.6rem}
+.hero-copy{display:flex;flex-direction:column;align-items:flex-start}
+.hero-copy>.signal{align-self:flex-start}
 .lede{margin-top:1.4rem;max-width:33rem;font-size:clamp(1.125rem,1.4vw,1.25rem);line-height:1.5;color:var(--muted)}
 
 /* First question: three starters update every chat draft; the chosen question stays visible and selectable. */
@@ -177,7 +183,8 @@ p{margin:0;text-wrap:pretty}
 .case dd{margin-top:.2rem;font-size:.9375rem}
 .case dd+dt{margin-top:.8rem}
 .case .score{font-size:1.375rem;font-weight:700;letter-spacing:-.02em}
-.case-source{font-size:.8125rem;color:var(--muted)}
+.case-source{font-size:.875rem;color:var(--muted);background:var(--surface-2);border-radius:0 0 13px 13px}
+.case-source strong{font-family:var(--font-mono);font-size:.75rem;font-weight:500;color:var(--accent-text)}
 .case-source a{display:inline-flex;align-items:center;min-height:44px;font-weight:600}
 
 /* ---------- Phone mockups: one shell, one size, every scene ---------- */
@@ -205,6 +212,7 @@ p{margin:0;text-wrap:pretty}
 .markets h2{font-family:var(--font-mono);font-size:.8125rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text);max-width:none}
 .markets h2::before{display:none}
 .markets-head p{margin-top:.5rem;max-width:22rem;font-size:.9375rem;color:var(--muted)}
+.markets-head .markets-note{margin-top:.6rem;font-family:var(--font-mono);font-size:.75rem;color:var(--accent-text)}
 .market-logos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:0;list-style:none;border-top:1px solid var(--line-strong);border-left:1px solid var(--line-strong)}
 .market-logos li{display:grid;place-items:center;min-height:104px;padding:1.25rem 1.5rem;border-right:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}
 /* Per-mark heights balance optical weight across differently shaped wordmarks. */
@@ -351,6 +359,8 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
   .hero{padding:2.5rem 0 3.5rem}
   .hero h1{font-size:clamp(2.5rem,11vw,3.4rem)}
   .lede{margin-top:1.1rem}
+  /* Mobile: the chat pair comes before the optional starters. */
+  .hero-copy>.entry,.hero-copy>.starter{margin-top:1.5rem}
   .uses,.memory,.coverage,.markets,.pricing,.faq,.final{padding-bottom:3.5rem}
   :is(.uses,.memory,.coverage,.markets,.pricing,.faq)>.wrap{padding-top:3rem}
   .final{padding-top:3rem}
@@ -383,6 +393,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
 </style>
 </head>
 <body>
+<a class="skip" href="#top">Skip to content</a>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
   <symbol id="claw" viewBox="0 0 32 32">
     <rect width="32" height="32" rx="8" fill="#0b0f0d"/>
@@ -439,7 +450,13 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
       <div class="hero-copy">
         <p class="signal"><b>In your chat app</b><span><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Telegram <span aria-hidden="true">·</span> <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>WhatsApp</span></p>
         <h1 id="hero-title">Your personal<br><em>sports AI agent</em></h1>
-        <p class="lede">Tell it your favorite teams and how you like your answers. Then ask about a game, a lineup or the news, and keep the follow-ups going in the same Telegram or WhatsApp chat.</p>
+        <p class="benefit">Ask about your team. Then ask what changed.</p>
+        <p class="lede">Tell it who you follow, then keep the follow-ups going in the same Telegram or WhatsApp chat.</p>
+        <div class="entry" id="start-chat" role="group" aria-label="Start a free chat">
+          <a class="btn" data-chat href="https://t.me/sportsclaw_machina_bot?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first."><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Chat on Telegram</a>
+          <a class="btn" data-chat href="https://wa.me/19207777712?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first."><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>Chat on WhatsApp</a>
+        </div>
+        <p class="entry-note"><strong>Free to start.</strong> Opens as a draft; edit before you send.</p>
         <div class="starter" id="first-question">
           <p class="starter-label" id="starter-label">Your first question</p>
           <div class="starter-picks" role="group" aria-label="Pick a first question" data-starters hidden>
@@ -450,11 +467,6 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
           <p class="starter-q" id="starter-q" aria-live="polite">What changed in my team's last game? Ask me which team first.</p>
           <p class="starter-tools"><button class="copy-btn" type="button" data-copy hidden>Copy question</button><span data-copy-status role="status"></span><a href="/how-it-works/">How it works</a></p>
         </div>
-        <div class="entry" id="start-chat" role="group" aria-label="Start a free chat">
-          <a class="btn" data-chat href="https://t.me/sportsclaw_machina_bot?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first."><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-telegram"/></svg>Chat on Telegram</a>
-          <a class="btn" data-chat href="https://wa.me/19207777712?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first."><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-whatsapp"/></svg>Chat on WhatsApp</a>
-        </div>
-        <p class="entry-note"><strong>Free to start.</strong> The question is a draft in your chat app; edit it before you send.</p>
       </div>
 
       <div class="stage">
@@ -466,7 +478,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
             <dt>Follow-up: what changed?</dt>
             <dd>Points off turnovers: Pacers 34–13. Fast-break points: Pacers 25–10. The numbers don't say why on their own, so that's the next question.</dd>
           </dl>
-          <p class="case-source">Figures from NBA.com's Nightly Pulse recap. <a href="/how-it-works/#historical-example">Source and context <span aria-hidden="true">→</span></a></p>
+          <p class="case-source"><strong>Source:</strong> NBA.com Nightly Pulse recap. <a href="/how-it-works/#historical-example">Source and context <span aria-hidden="true">→</span></a></p>
         </article>
       </div>
     </div>
@@ -506,7 +518,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
                 <p class="b bot"><span class="visually-hidden">SportsClaw: </span>I'd lean WR for the volume. Goal-line looks give your TE a touchdown path, not a floor. I'd flip it if his routes and targets are climbing too.</p>
               </div>
             </div>
-            <figcaption class="ex">NFL · The flex call</figcaption>
+            <figcaption class="ex">Example · NFL · The flex call</figcaption>
           </figure>
         </li>
         <li class="scene flip">
@@ -525,7 +537,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
               </div>
               <div class="composer" aria-hidden="true"><span>Message</span><i></i></div>
             </div></div>
-            <figcaption class="ex">F1 · Beyond the grid</figcaption>
+            <figcaption class="ex">Example · F1 · Beyond the grid</figcaption>
           </figure>
         </li>
       </ul>
@@ -546,7 +558,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
           </div>
           <div class="composer" aria-hidden="true"><span>Message</span><i></i></div>
         </div></div>
-        <figcaption class="ex">Soccer · Pick up your take</figcaption>
+        <figcaption class="ex">Example · Soccer · Pick up your take</figcaption>
       </figure>
       <div>
         <h2 id="memory-title">It remembers your take.</h2>
@@ -588,6 +600,7 @@ code{font-family:var(--font-mono);font-size:.9375em;color:var(--text);background
       <div class="markets-head">
         <h2 id="markets-title">Market coverage</h2>
         <p>Four markets. One conversation. Ask about a price, compare the available lines, or talk through your take.</p>
+        <p class="markets-note">Read-only: it never places bets or trades.</p>
       </div>
       <ul class="market-logos" role="list">
         <li data-mark="novig"><img src="/assets/markets/novig-wordmark.svg" alt="Novig" decoding="async"></li>

@@ -80,7 +80,9 @@ h2::before{content:"";display:block;width:20px;height:2px;margin-bottom:1rem;bac
 .example dt{font-family:var(--font-mono);font-size:.75rem;color:var(--muted)}
 .example dd{margin-top:.25rem}
 .example dd+dt{margin-top:.9rem}
-.source{font-size:.9375rem;color:var(--muted)}
+.source{font-size:.9375rem;color:var(--muted);background:var(--bg-2);border-radius:0 0 13px 13px}
+.source strong{color:var(--text)}
+.entry{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:.6rem;width:100%;max-width:26rem}
 
 .faq{margin-top:2rem;max-width:44rem;border-top:1px solid var(--line-strong)}
 .faq div{padding:1rem 0;border-bottom:1px solid var(--line-strong)}
@@ -164,7 +166,7 @@ h2::before{content:"";display:block;width:20px;height:2px;margin-bottom:1rem;bac
           <dt>Follow-up: what changed?</dt>
           <dd>Two gaps stand out in the recap: points off turnovers, Pacers 34–13, and fast-break points, Pacers 25–10. The recap numbers alone don't say why; that's the next question to ask.</dd>
         </dl>
-        <p class="source">Source: NBA.com, <a href="https://www.nba.com/news/nightly-pulse-knicks-vs-pacers-game-6" rel="noopener noreferrer">Nightly Pulse: Knicks vs. Pacers Game 6</a>. Figures as published there; check the source for full context.</p>
+        <p class="source"><strong>Source:</strong> NBA.com,<a href="https://www.nba.com/news/nightly-pulse-knicks-vs-pacers-game-6" rel="noopener noreferrer">Nightly Pulse: Knicks vs. Pacers Game 6</a>. Figures as published there; check the source for full context.</p>
       </article>
     </div>
   </section>
@@ -204,9 +206,12 @@ h2::before{content:"";display:block;width:20px;height:2px;margin-bottom:1rem;bac
     <div class="wrap">
       <div>
         <h2 id="final-title">Bring your first question.</h2>
-        <p>Pick a chat app on the homepage and ask about your team.</p>
+        <p>Free to start. Your question opens as a draft; edit it before you send.</p>
       </div>
-      <a class="btn" href="/#start-chat">Chat for free</a>
+      <div class="entry" role="group" aria-label="Start a free chat">
+        <a class="btn" href="https://t.me/sportsclaw_machina_bot?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first.">Chat on Telegram</a>
+        <a class="btn" href="https://wa.me/19207777712?text=What%20changed%20in%20my%20team%27s%20last%20game%3F%20Ask%20me%20which%20team%20first.">Chat on WhatsApp</a>
+      </div>
     </div>
   </section>
 </main>

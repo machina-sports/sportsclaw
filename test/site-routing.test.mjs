@@ -101,8 +101,11 @@ test("how-it-works guide is static, sourced and links only where expected", () =
   assert.doesNotMatch(text, /\billustrat(?:ive|ion|ed)\b|\$\d/i);
 
   const links = [...html.matchAll(/<a\b[^>]*?\shref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]);
+  const homeChatLinks = [...readFileSync(landingHtmlPath, "utf8").matchAll(/<a\b[^>]*\bdata-chat\s+href="([^"]+)"/g)].map(([, href]) => href);
+  const guideChatLinks = links.filter((href) => /^https:\/\/(?:t\.me|wa\.me)\//.test(href));
+  assert.deepEqual(guideChatLinks, [...new Set(homeChatLinks)], "guide uses both approved chat destinations and matching drafts");
   for (const href of links) {
-    assert.ok(["/", "/#start-chat", "/creators/", "/opensource/", "#main", NBA_SOURCE, ...SITE_FOOTER_LINKS].includes(href), `unexpected guide link ${href}`);
+    assert.ok(["/", "/#start-chat", "/creators/", "/opensource/", "#main", NBA_SOURCE, ...SITE_FOOTER_LINKS, ...homeChatLinks].includes(href), `unexpected guide link ${href}`);
   }
   assert.ok(links.includes(NBA_SOURCE), "names and links the NBA.com source");
   const footer = footerLinks(html);
