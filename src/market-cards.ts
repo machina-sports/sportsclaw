@@ -146,7 +146,7 @@ export function parseMarketCard(value: unknown): MarketCard | null {
     outcomes.push({ name: o.name, price: o.price });
   }
   if (!amountOrNull(raw.volume) || !amountOrNull(raw.liquidity)) return null;
-  if (raw.gameStartTime !== null && (typeof raw.gameStartTime !== "string" || raw.gameStartTime.length === 0 || raw.gameStartTime.length > 40 || CONTROL.test(raw.gameStartTime))) return null;
+  if (raw.gameStartTime !== null && (typeof raw.gameStartTime !== "string" || raw.gameStartTime.length === 0 || raw.gameStartTime.length > 40 || CONTROL.test(raw.gameStartTime) || UNPAIRED.test(raw.gameStartTime))) return null;
   if (typeof raw.readAt !== "string" || !READ_AT.test(raw.readAt)) return null;
   return {
     contract: MARKET_CARD_CONTRACT,
@@ -231,7 +231,7 @@ function cardFrom(node: Record<string, unknown>, eventSlug: string | null, readA
     outcomes,
     volume: amount(node.volume),
     liquidity: amount(node.liquidity),
-    gameStartTime: typeof node.game_start_time === "string" && node.game_start_time.length > 0 && node.game_start_time.length <= 40 && !CONTROL.test(node.game_start_time)
+    gameStartTime: typeof node.game_start_time === "string" && node.game_start_time.length > 0 && node.game_start_time.length <= 40 && !CONTROL.test(node.game_start_time) && !UNPAIRED.test(node.game_start_time)
       ? node.game_start_time
       : null,
     readAt,

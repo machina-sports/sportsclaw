@@ -122,7 +122,7 @@ def parse_market_card(value):
         return None
     start = raw["gameStartTime"]
     if start is not None and (type(start) is not str or not start or _js_len(start) > MAX_GAME_START_CHARS
-                              or _CONTROL.search(start)):
+                              or _CONTROL.search(start) or not _well_formed(start)):
         return None
     if type(raw["readAt"]) is not str or not _READ_AT.fullmatch(raw["readAt"]):
         return None
