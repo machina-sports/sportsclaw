@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SportsClaw for Creators · Give fans a better game-day conversation</title>
+<meta name="description" content="How game-day creators can show SportsClaw, a personal sports AI agent in Telegram and WhatsApp, in pregame, fantasy and postgame content. Applications aren't open.">
+<link rel="canonical" href="https://sportsclaw.gg/creators/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SportsClaw">
+<meta property="og:url" content="https://sportsclaw.gg/creators/">
+<meta property="og:title" content="SportsClaw for Creators">
+<meta property="og:description" content="Give fans a better game-day conversation: pregame, fantasy and postgame formats, shown with the real product and clear disclosure.">
+<meta name="twitter:card" content="summary">
+<style>
+@font-face{font-family:"Geist";src:url(/assets/fonts/geist-400-800.woff2) format("woff2");font-weight:400 800;font-style:normal;font-display:swap}
+@font-face{font-family:"Geist Mono";src:url(/assets/fonts/geist-mono-400-600.woff2) format("woff2");font-weight:400 600;font-style:normal;font-display:swap}
+:root{
+  color-scheme:dark;
+  --bg:#050706;
+  --bg-2:#080b09;
+  --surface:#0b0f0d;
+  --text:#eef3f0;
+  --muted:#a7b1ab;
+  --line:rgba(255,255,255,.07);
+  --line-strong:rgba(255,255,255,.13);
+  --accent:#2bee4b;
+  --accent-hover:#4af265;
+  --accent-text:#4cf06a;
+  --on-accent:#04140a;
+  --accent-wash:rgba(43,238,75,.11);
+  --glow:rgba(43,238,75,.13);
+  --font-body:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  --font-mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font-family:var(--font-body);font-size:1.0625rem;line-height:1.55;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
+svg{display:block}
+h1,h2,h3{margin:0;text-wrap:balance}
+p,ul,ol{margin:0}
+a{color:var(--accent-text);text-underline-offset:4px}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:3px;border-radius:8px}
+.skip{position:absolute;left:1rem;top:-4rem;z-index:3;padding:.6rem 1rem;border-radius:10px;background:var(--accent);color:var(--on-accent);font-weight:600;text-decoration:none}
+.skip:focus{top:1rem}
+.wrap{width:min(1080px,100% - 2.5rem);margin-inline:auto}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:.65rem 1.15rem;border-radius:10px;font-size:1rem;font-weight:600;text-decoration:none;color:var(--on-accent);background:var(--accent)}
+.btn:hover{background:var(--accent-hover)}
+
+.site-header{border-bottom:1px solid var(--line)}
+.site-header .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;min-height:68px}
+.identity{display:flex;align-items:center;gap:.55rem;min-height:44px;color:var(--text);text-decoration:none}
+.identity svg{width:28px;height:28px}
+.identity strong{font-size:1.125rem;font-weight:700;letter-spacing:-.02em}
+.header-actions{display:flex;align-items:center;gap:.25rem 1rem}
+.header-actions a:not(.btn){display:inline-flex;align-items:center;min-height:44px;color:var(--muted);font-size:.9375rem;font-weight:500;text-decoration:none}
+.header-actions a:not(.btn):hover{color:var(--text)}
+
+.hero{padding:4.5rem 0 4rem;background:radial-gradient(70% 90% at 50% 0%,var(--glow),transparent 70%)}
+.eyebrow{font-family:var(--font-mono);font-size:.8125rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text)}
+h1{margin-top:1rem;max-width:16ch;font-size:clamp(2.4rem,6vw,4.25rem);line-height:1;font-weight:700;letter-spacing:-.04em}
+.lede{margin-top:1.3rem;max-width:38rem;font-size:clamp(1.0625rem,1.4vw,1.25rem);color:var(--muted)}
+.notice{display:flex;gap:.8rem;max-width:42rem;margin-top:2rem;padding:1rem 1.15rem;border:1px solid var(--line-strong);border-left:3px solid var(--accent-text);border-radius:12px;background:var(--surface)}
+.notice strong{display:block;font-size:1.0625rem}
+.notice p{color:var(--muted)}
+
+section{padding:4rem 0}
+section+section{border-top:1px solid var(--line-strong)}
+h2{max-width:22ch;font-size:clamp(1.7rem,3.4vw,2.5rem);line-height:1.05;font-weight:700;letter-spacing:-.035em}
+h2::before{content:"";display:block;width:20px;height:2px;margin-bottom:1rem;background:var(--accent-text)}
+.section-lede{margin-top:.9rem;max-width:38rem;color:var(--muted)}
+
+.formats{display:grid;gap:1rem;margin-top:2.25rem;padding:0;list-style:none}
+.format{display:flex;flex-direction:column;gap:.7rem;padding:1.4rem 1.4rem 1.5rem;border:1px solid var(--line-strong);border-radius:14px;background:var(--surface)}
+.format .when{align-self:flex-start;padding:.2rem .6rem;border-radius:6px;background:var(--accent-wash);color:var(--accent-text);font-family:var(--font-mono);font-size:.75rem}
+.format h3{font-size:1.3rem;font-weight:700;letter-spacing:-.02em}
+.format p{color:var(--muted)}
+.format .ask{margin-top:auto;padding-top:.8rem;border-top:1px solid var(--line);font-size:.9375rem;color:var(--text)}
+.format .ask span{display:block;font-family:var(--font-mono);font-size:.75rem;color:var(--muted)}
+
+.guides{display:grid;gap:2.5rem 3rem;margin-top:2.25rem}
+.guide h3{font-family:var(--font-mono);font-size:.8125rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text)}
+.checks{margin-top:.9rem;padding:0;list-style:none;border-top:1px solid var(--line-strong)}
+.checks li{display:flex;gap:.8rem;padding:.8rem 0;border-bottom:1px solid var(--line-strong);color:var(--muted)}
+.checks li::before{content:"";flex:none;width:.7rem;height:2px;margin-top:.75em;background:var(--accent-text)}
+
+.final{background:radial-gradient(60% 120% at 25% 100%,var(--glow),transparent 70%)}
+.final .wrap{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:1.5rem 2rem}
+.final p{margin-top:.8rem;max-width:32rem;color:var(--muted)}
+
+.site-footer{padding:1.75rem 0 2.25rem;border-top:1px solid var(--line-strong);background:var(--bg-2);font-size:.9375rem;color:var(--muted)}
+.site-footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem 2rem}
+.site-footer nav{display:flex;flex-wrap:wrap;gap:0 1.25rem}
+.site-footer nav a{display:inline-flex;align-items:center;min-height:44px;color:var(--muted)}
+.site-footer nav a:hover{color:var(--text)}
+
+@media (min-width:800px){
+  .formats{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .guides{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:640px){
+  .hero{padding:2.75rem 0 3rem}
+  section{padding:3rem 0}
+}
+@media (max-width:420px){
+  .wrap{width:min(1080px,100% - 2rem)}
+  .header-actions .btn{padding-inline:.8rem;font-size:.9375rem}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap">
+    <a class="identity" href="/" aria-label="SportsClaw home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect width="32" height="32" rx="8" fill="#0b0f0d"/>
+        <rect x=".5" y=".5" width="31" height="31" rx="7.5" fill="none" stroke="#fff" stroke-opacity=".1"/>
+        <g fill="#2bee4b"><path d="M7.2 25.6 Q9.4 14.6 16.4 6.1 Q12.5 16.2 7.2 25.6 Z"/><path d="M12.9 26.6 Q15.1 15.6 22.1 7.1 Q18.2 17.2 12.9 26.6 Z"/><path d="M18.6 27.3 Q20.6 17.6 26.6 10.2 Q23.3 19 18.6 27.3 Z"/></g>
+      </svg>
+      <strong>sportsclaw</strong>
+    </a>
+    <nav class="header-actions" aria-label="Site">
+      <a href="/">Home</a>
+      <a class="btn" href="/#start-chat">Try SportsClaw</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <div class="hero">
+    <div class="wrap">
+      <p class="eyebrow">For Creators</p>
+      <h1>Give fans a better game-day conversation</h1>
+      <p class="lede">SportsClaw is a personal sports AI agent in Telegram and WhatsApp. Fans tell it their teams, then ask about games, lineups and news and follow up in the same chat. If you make game-day content, here is how to show it to your audience honestly.</p>
+      <div class="notice" role="note">
+        <div>
+          <strong>Applications aren’t open.</strong>
+          <p>There is no creator program to join yet, and nothing on this page is an offer. It's guidance for creators who already want to show SportsClaw in their own content.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section aria-labelledby="formats-title">
+    <div class="wrap">
+      <h2 id="formats-title">Three game-day formats</h2>
+      <p class="section-lede">Each one starts with a real question your audience would ask, and the follow-up is where the conversation gets interesting.</p>
+      <ul class="formats" role="list">
+        <li class="format">
+          <p class="when">Before the game</p>
+          <h3>Pregame</h3>
+          <p>Pick the matchup your audience cares about. Ask what decides it, then follow up on the part your fans argue about most.</p>
+          <p class="ask"><span>Try asking</span>What's the key matchup for my team, and what would change it?</p>
+        </li>
+        <li class="format">
+          <p class="when">Lineup lock</p>
+          <h3>Fantasy</h3>
+          <p>Share your league's scoring and the two players you're stuck between. Show the call, the reasoning and what would flip it.</p>
+          <p class="ask"><span>Try asking</span>Half-PPR, one flex spot. Which of these two, and why?</p>
+        </li>
+        <li class="format">
+          <p class="when">After the whistle</p>
+          <h3>Postgame</h3>
+          <p>Talk through what happened with your audience's takes in mind. Ask what held up, what didn't and what to watch next time.</p>
+          <p class="ask"><span>Try asking</span>What actually swung that game for my team?</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="example-title">
+    <div class="wrap">
+      <h2 id="example-title">Start from a public example</h2>
+      <p class="section-lede">The guide has a <a href="/how-it-works/#historical-example">curated historical example</a> from a published NBA recap: the result, then what changed. Then <a href="/how-it-works/#ask-your-team">ask the same about your own team</a> in your own chat before you show anything.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="guidance-title">
+    <div class="wrap">
+      <h2 id="guidance-title">Show the real product. Say how you're involved.</h2>
+      <div class="guides">
+        <div class="guide">
+          <h3>Real product</h3>
+          <ul class="checks" role="list">
+            <li>Use the actual Telegram or WhatsApp chat, with your own questions.</li>
+            <li>Don't rewrite answers, stitch replies together or present a scripted exchange as a live one. If you trim for length, say so.</li>
+            <li>Check scores, stats and news before you repeat them. Data can lag, and answers can be wrong.</li>
+            <li>Don't describe features you haven't seen work in your own chat.</li>
+          </ul>
+        </div>
+        <div class="guide">
+          <h3>Disclosure</h3>
+          <ul class="checks" role="list">
+            <li>If you have any connection to SportsClaw, say so clearly in the content itself, not only in a profile or link.</li>
+            <li>Follow the disclosure rules of your platform and where you publish.</li>
+            <li>SportsClaw explains market information; it doesn't place bets or promise winners. Don't present an answer as a guaranteed pick.</li>
+            <li>Keep betting and market talk within your platform's rules and away from audiences it isn't meant for.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final" aria-labelledby="final-title">
+    <div class="wrap">
+      <div>
+        <h2 id="final-title">See it before you show it.</h2>
+        <p>Start a free chat in Telegram or WhatsApp, tell it your teams and run your next segment through it first.</p>
+      </div>
+      <a class="btn" href="/#start-chat">Try SportsClaw</a>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>Your personal sports AI agent, in Telegram and WhatsApp.</p>
+    <nav aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/how-it-works/">How it works</a>
+      <a href="/opensource/">Open source</a>
+      <a href="/privacy/">Privacy</a>
+      <a href="/terms/">Terms</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

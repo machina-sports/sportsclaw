@@ -319,6 +319,7 @@ class MarketContractWire(RelayCase):
             "negative liquidity": card(liquidity=-0.01),
             "liquidity as list": card(liquidity=[1]),
             "empty game start": card(gameStartTime=""),
+            "invalid Unicode game start": card(gameStartTime="\ud800"),
             "game start over 40": card(gameStartTime="x" * 41),
             "game start with control": card(gameStartTime="2026-11-29\t21:30"),
             "game start not a string": card(gameStartTime=1795987800),

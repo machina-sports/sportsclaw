@@ -176,6 +176,7 @@ describe("market-card-v1 wire", () => {
       "volume as true": { ...CARD, volume: true },
       "infinite liquidity": { ...CARD, liquidity: Number.POSITIVE_INFINITY },
       "empty game start": { ...CARD, gameStartTime: "" },
+      "invalid Unicode game start": { ...CARD, gameStartTime: "\ud800" },
       "game start over 40": { ...CARD, gameStartTime: "2".repeat(41) },
       "readAt without milliseconds": { ...CARD, readAt: "2026-11-21T23:49:12Z" },
       "readAt with an offset": { ...CARD, readAt: "2026-11-21T20:49:12.345-03:00" },

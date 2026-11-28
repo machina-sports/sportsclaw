@@ -1,0 +1,19 @@
+# SportsClaw
+
+> SportsClaw is a personal sports AI agent in Telegram and WhatsApp, built by Machina Sports. People tell it their teams and how they like answers, then ask about games, lineups and news and follow up in the same chat. It's free to start, with a paid Pro plan. Market access is read-only: it explains public prediction-market information and never places bets or trades.
+
+## Pages
+
+- [Home](https://sportsclaw.gg/): what SportsClaw is, sports covered, plans and how to start a chat
+- [How it works](https://sportsclaw.gg/how-it-works/): a first question to ask, a historical example with its named source, what the chat remembers and what you don't need to set up
+- [For Creators](https://sportsclaw.gg/creators/): guidance for creators who want to show SportsClaw honestly; applications aren't open
+
+## Developers
+
+- [Open-source agent](https://sportsclaw.gg/opensource/): host the agent yourself with your own LLM
+- [Developer llms.txt](https://sportsclaw.gg/opensource/llms.txt): documentation index for the open-source agent
+
+## Notes
+
+- Answers can be wrong or out of date; check anything time-sensitive.
+- Telegram and WhatsApp are separate chats; context stays in the chat where it was shared.
