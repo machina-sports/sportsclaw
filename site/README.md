@@ -57,21 +57,24 @@ The creators page is informational: it says applications aren't open and links o
 
 ### Legal drafts release checklist
 
-`/privacy/` and `/terms/` are review drafts. They state they're not in effect, carry no effective date and are `noindex`. They cover the hosted site and the official Telegram/WhatsApp chats only, not self-hosted copies or a future native app. The only operator facts they state are that SportsClaw is built by Machina Sports and operated by GeniusTech Corporation (Delaware), with policy inquiries to support@machina.gg (as on https://machina.gg/privacy-policy). Before either page takes effect:
+`/privacy/` and `/terms/` are review drafts. They state they're not in effect, carry no effective date and are `noindex`. They cover the hosted site and the official Telegram/WhatsApp chats only, not self-hosted copies or a future native app. Each also carries a separate section headed "If an iPhone app is released (proposed, not active)": proposals for review that take no effect until a verified iOS release and approval. The privacy draft adds a short AI processing section limited to the data the hosted draft already discloses (messages, supported uploads, relevant chat context/preferences), with no new provider-use commitments; the terms draft states 18 as the proposed minimum age. The only operator facts they state are that SportsClaw is built by Machina Sports and operated by GeniusTech Corporation (Delaware), with policy inquiries to support@machina.gg (as on https://machina.gg/privacy-policy). Before either page takes effect:
 
 - [ ] Counsel approves the final text of both pages and sets the effective date. Then remove the draft notice and `noindex` and update the tests.
 - [ ] Verify the production data flows match the privacy page: web request logs, the theme preference in local storage, messaging identifiers (Telegram IDs, WhatsApp numbers), messages and uploads, stored chat context and preferences, usage/diagnostics, and Stripe plan/transaction status and IDs.
 - [ ] Verify which AI providers are used and how: what each receives, whether inputs are used for model training, and their retention. Add retention periods, training and sale/share statements, processing locations or a provider list only once verified.
 - [ ] Confirm whether analytics or other tracking exist anywhere on the hosted service, and disclose them, along with the rights available in the regions served and how requests (access, correction, deletion, verification) are actually handled.
-- [ ] Set the actual minimum age and any region restrictions, and the governing law and dispute terms. The drafts deliberately leave these open.
-- [ ] Confirm the Stripe checkout shows the price and billing cadence before assent and links or presents these terms for assent; confirm recurring renewal, that `/billing` cancellation works, when access ends after cancelling, and the refund policy. The draft states no refund policy.
+- [ ] Counsel confirms the proposed 18+ minimum age; set any region restrictions, the governing law and dispute terms. The drafts deliberately leave the latter open.
+- [ ] Web/chat billing (Stripe), separate from any app billing: confirm the Stripe checkout shows the price and billing cadence before assent and links or presents these terms for assent; confirm recurring renewal, that `/billing` cancellation works, when access ends after cancelling, and the refund policy. The draft states no refund policy.
 
-Before any future iOS app ships (it is out of scope for these pages):
+iOS release gates. The iPhone sections stay proposed and inactive until all of these pass for the exact build being submitted:
 
-- [ ] App Store privacy disclosures (privacy labels) match the app's actual data collection.
-- [ ] Where personal data is shared with third-party AI providers, the app discloses it and obtains the user's permission as applicable.
-- [ ] If the app lets users create accounts, it offers in-app account deletion.
-- [ ] Billing for digital subscriptions in the app follows the actual store billing rules (in-app purchase where required), and the terms describe that billing.
+- [ ] Data and labels: inventory what that exact iOS build collects and sends; App Store privacy labels and the privacy page match it.
+- [ ] AI recipients: name each third-party AI recipient of personal data, what it receives, and confirm it provides equivalent protection for that data.
+- [ ] Consent: verify in the build that explicit permission is asked before any personal data is sent to a third-party AI provider, that refusing sends nothing, and that withdrawal works and stops further sending.
+- [ ] Deletion: if accounts can be created, in-app account deletion works end to end, with only legally required records kept.
+- [ ] Purchases (only if a subscription is offered): StoreKit products and prices come from the store, the paywall shows price/period and links the live privacy and terms URLs, restore purchases works, and manage/cancel opens Apple's subscription settings. Confirm the terms text matches; no fixed iOS price in the drafts.
+- [ ] Review: complete Apple's age-rating questionnaire based on the actual build, separately from the proposed 18+ service rule. App Review notes explain the read-only market behavior and how to test. Use Apple's standard EULA unless a custom one is approved.
+- [ ] Approvals: counsel and product approve the final iPhone text, the drafts take effect, and the live `/privacy/` and `/terms/` URLs are in App Store Connect and the app. Do not describe the app as approved or available before then.
 
 The existing `.github/workflows/build-site.yml` supports a site-only `workflow_dispatch`; an engine/npm release is not required. Dispatch and deployment are outside this change's authorization. Before an eventual deployment, record the current image digest. After deployment, verify the exact running image and the URL contract above; retain the previous digest for rollback.
 
