@@ -119,7 +119,7 @@ evidence check.
 - **Relay:** send `market` in the body of `POST /api/query/sync` with `history_mode: "caller"`. The
   server must have `SPORTSCLAW_MARKET_CARDS_ENABLED=true`; a request body can never enable it.
   `GET /api/capabilities` advertises `market_contract` only when it is on. See
-  [`docker/relay/market_contract.py`](../../docker/relay/market_contract.py) for the validation the
+  [`docker/relay/market_contract.py`](https://github.com/machina-sports/sportsclaw/blob/main/docker/relay/market_contract.py) for the validation the
   relay applies in both directions.
 
 ## Not covered

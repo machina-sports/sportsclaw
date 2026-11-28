@@ -554,15 +554,66 @@ test("terms draft separates AI limits, read-only markets, billing and undecided 
     /\/upgrade/,
     /doesn't set a refund policy/,
     /no SportsClaw creator program/,
-    /doesn't yet set a minimum age, the law that governs these terms or how disputes are resolved/,
+    /doesn't yet set any region restrictions, the law that governs these terms or how disputes are resolved/,
     /consumer protection law that can't be waived/,
+    /at least 18 and allowed to use SportsClaw under the law where you live/,
   ]) {
     assert.match(text, clause, `terms draft is missing ${clause}`);
   }
   assert.doesNotMatch(text, /arbitrat|class action|jury|\bcourts?\b|governed by the laws? of|\bvenue\b/i, "no invented dispute terms");
-  assert.doesNotMatch(text, /\b\d{2}\s*(?:\+|or older|years)|\bage of (?:majority|\d)/i, "no invented age cutoff");
+  assert.deepEqual([...text.matchAll(/\b(\d{2})\b/g)].map((m) => m[1]), ["18"], "only the agreed proposed age of 18");
+  assert.doesNotMatch(text, /\bage of (?:majority|\d)/i, "no other age cutoff");
   assert.doesNotMatch(text, /\b(?:full|partial|pro-?rat(?:ed|a))\s+refunds?\b|\brefunds? (?:within|are|will)\b|\bnon-?refundable\b/i, "no invented refund terms");
   assert.doesNotMatch(text, /\$\d|\bfree trial\b/i, "price and cadence come from checkout");
+});
+
+// iPhone provisions are proposals only: never active, approved or shipped.
+const IOS_SECTION = /<h2>If an iPhone app is released \(proposed, not active\)<\/h2>([\s\S]*?)(?=<h2>)/;
+const IOS_OVERCLAIMS = /\b(?:approved by Apple|Apple (?:has )?approved|available (?:on|in) the App Store|download (?:it|the app)|now available|is live)\b/i;
+
+test("privacy draft separates AI processing and keeps iPhone provisions proposed", () => {
+  const html = stripHtmlComments(readFileSync(pageHtmlPath("privacy"), "utf8"));
+  const text = visibleText(html);
+  for (const clause of [
+    /AI processing/,
+    /may process your message, supported uploads and relevant chat context/,
+    /records the law requires us to keep/,
+  ]) {
+    assert.match(text, clause, `privacy draft is missing ${clause}`);
+  }
+  const ios = visibleText(html.match(IOS_SECTION)?.[1] ?? "");
+  assert.ok(ios, "privacy draft needs the proposed iPhone section");
+  for (const clause of [
+    /doesn't cover native app operations/,
+    /App Store privacy details/,
+    /explicit permission before sending that data/,
+    /withdraw that permission/,
+    /start deleting it in the app/,
+  ]) {
+    assert.match(ios, clause, `privacy iPhone section is missing ${clause}`);
+  }
+  assert.doesNotMatch(text, IOS_OVERCLAIMS, "no claim the app is approved or shipped");
+});
+
+test("terms draft keeps Stripe billing separate from proposed Apple billing", () => {
+  const html = stripHtmlComments(readFileSync(pageHtmlPath("terms"), "utf8"));
+  const text = visibleText(html);
+  assert.match(text, /subscriptions started from the website or the official chats, which are paid through Stripe/);
+  const ios = visibleText(html.match(IOS_SECTION)?.[1] ?? "");
+  assert.ok(ios, "terms draft needs the proposed iPhone section");
+  for (const clause of [
+    /don't cover native app operations/,
+    /only if the iPhone app offers a subscription through Apple/,
+    /purchased through Apple/,
+    /renew automatically until you cancel/,
+    /manage or cancel it in your Apple account's subscription settings/,
+    /Refund requests for Apple purchases would go to Apple/,
+    /Apple's standard end user license agreement/,
+    /read-only market limits above would also apply/,
+  ]) {
+    assert.match(ios, clause, `terms iPhone section is missing ${clause}`);
+  }
+  assert.doesNotMatch(text, IOS_OVERCLAIMS, "no claim the app is approved or shipped");
 });
 
 test("legal stylesheet is small, local and only references local fonts", () => {
